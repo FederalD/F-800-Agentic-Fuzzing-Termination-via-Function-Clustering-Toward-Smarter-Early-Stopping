@@ -1,0 +1,1897 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static char *\nfbsd_pid_to_exec_file (struct target_ops *self, int pid)\n{\n  ssize_t len;\n  static char buf[PATH_MAX];\n  char name[PATH_MAX];\n\n#ifdef KERN_PROC_PATHNAME\n  size_t buflen;\n  int mib[4];\n\n  mib[0] = CTL_KERN;\n  mib[1] = KERN_PROC;\n  mib[2] = KERN_PROC_PATHNAME;\n  mib[3] = pid;\n  buflen = sizeof buf;\n  if (sysctl (mib, 4, buf, &buflen, NULL, 0) == 0)\n    return buf;\n#endif\n\n  xsnprintf (name, PATH_MAX, \"/proc/%d/exe\", pid);\n  len = readlink (name, buf, PATH_MAX - 1);\n  if (len != -1)\n    {\n      buf[len] = '\\0';\n      return buf;\n    }\n\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          42,
+          0
+        ],
+        [
+          71,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_pid_to_exec_file",
+        "parameters": {
+          "self": "struct target_ops",
+          "pid": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_find_memory_regions (struct target_ops *self,\n\t\t\t  find_memory_region_ftype func, void *obfd)\n{\n  pid_t pid = ptid_get_pid (inferior_ptid);\n  struct kinfo_vmentry *vmentl, *kve;\n  uint64_t size;\n  struct cleanup *cleanup;\n  int i, nitems;\n\n  vmentl = kinfo_getvmmap (pid, &nitems);\n  if (vmentl == NULL)\n    perror_with_name (_(\"Couldn't fetch VM map entries.\"));\n  cleanup = make_cleanup (free, vmentl);\n\n  for (i = 0; i < nitems; i++)\n    {\n      kve = &vmentl[i];\n\n      /* Skip unreadable segments and those where MAP_NOCORE has been set.  */\n      if (!(kve->kve_protection & KVME_PROT_READ)\n\t  || kve->kve_flags & KVME_FLAG_NOCOREDUMP)\n\tcontinue;\n\n      /* Skip segments with an invalid type.  */\n      if (kve->kve_type != KVME_TYPE_DEFAULT\n\t  && kve->kve_type != KVME_TYPE_VNODE\n\t  && kve->kve_type != KVME_TYPE_SWAP\n\t  && kve->kve_type != KVME_TYPE_PHYS)\n\tcontinue;\n\n      size = kve->kve_end - kve->kve_start;\n      if (info_verbose)\n\t{\n\t  fprintf_filtered (gdb_stdout, \n\t\t\t    \"Save segment, %ld bytes at %s (%c%c%c)\\n\",\n\t\t\t    (long) size,\n\t\t\t    paddress (target_gdbarch (), kve->kve_start),\n\t\t\t    kve->kve_protection & KVME_PROT_READ ? 'r' : '-',\n\t\t\t    kve->kve_protection & KVME_PROT_WRITE ? 'w' : '-',\n\t\t\t    kve->kve_protection & KVME_PROT_EXEC ? 'x' : '-');\n\t}\n\n      /* Invoke the callback function to create the corefile segment.\n\t Pass MODIFIED as true, we do not know the real modification state.  */\n      func (kve->kve_start, size, kve->kve_protection & KVME_PROT_READ,\n\t    kve->kve_protection & KVME_PROT_WRITE,\n\t    kve->kve_protection & KVME_PROT_EXEC, 1, obfd);\n    }\n  do_cleanups (cleanup);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          78,
+          0
+        ],
+        [
+          129,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_find_memory_regions",
+        "parameters": {
+          "self": "struct target_ops",
+          "func": "find_memory_region_ftype",
+          "obfd": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_read_mapping (FILE *mapfile, unsigned long *start, unsigned long *end,\n\t\t   char *protection)\n{\n  /* FreeBSD 5.1-RELEASE uses a 256-byte buffer.  */\n  char buf[256];\n  int resident, privateresident;\n  unsigned long obj;\n  int ret = EOF;\n\n  /* As of FreeBSD 5.0-RELEASE, the layout is described in\n     /usr/src/sys/fs/procfs/procfs_map.c.  Somewhere in 5.1-CURRENT a\n     new column was added to the procfs map.  Therefore we can't use\n     fscanf since we need to support older releases too.  */\n  if (fgets (buf, sizeof buf, mapfile) != NULL)\n    ret = sscanf (buf, \"%lx %lx %d %d %lx %s\", start, end,\n\t\t  &resident, &privateresident, &obj, protection);\n\n  return (ret != 0 && ret != EOF);\n}",
+      "fn_code_pos": [
+        [
+          131,
+          0
+        ],
+        [
+          150,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_read_mapping",
+        "parameters": {
+          "mapfile": "FILE",
+          "start": "unsigned long",
+          "end": "unsigned long",
+          "protection": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_find_memory_regions (struct target_ops *self,\n\t\t\t  find_memory_region_ftype func, void *obfd)\n{\n  pid_t pid = ptid_get_pid (inferior_ptid);\n  char *mapfilename;\n  FILE *mapfile;\n  unsigned long start, end, size;\n  char protection[4];\n  int read, write, exec;\n  struct cleanup *cleanup;\n\n  mapfilename = xstrprintf (\"/proc/%ld/map\", (long) pid);\n  cleanup = make_cleanup (xfree, mapfilename);\n  mapfile = fopen (mapfilename, \"r\");\n  if (mapfile == NULL)\n    error (_(\"Couldn't open %s.\"), mapfilename);\n  make_cleanup_fclose (mapfile);\n\n  if (info_verbose)\n    fprintf_filtered (gdb_stdout, \n\t\t      \"Reading memory regions from %s\\n\", mapfilename);\n\n  /* Now iterate until end-of-file.  */\n  while (fbsd_read_mapping (mapfile, &start, &end, &protection[0]))\n    {\n      size = end - start;\n\n      read = (strchr (protection, 'r') != 0);\n      write = (strchr (protection, 'w') != 0);\n      exec = (strchr (protection, 'x') != 0);\n\n      if (info_verbose)\n\t{\n\t  fprintf_filtered (gdb_stdout, \n\t\t\t    \"Save segment, %ld bytes at %s (%c%c%c)\\n\",\n\t\t\t    size, paddress (target_gdbarch (), start),\n\t\t\t    read ? 'r' : '-',\n\t\t\t    write ? 'w' : '-',\n\t\t\t    exec ? 'x' : '-');\n\t}\n\n      /* Invoke the callback function to create the corefile segment.\n\t Pass MODIFIED as true, we do not know the real modification state.  */\n      func (start, size, read, write, exec, 1, obfd);\n    }\n\n  do_cleanups (cleanup);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          156,
+          0
+        ],
+        [
+          205,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_find_memory_regions",
+        "parameters": {
+          "self": "struct target_ops",
+          "func": "find_memory_region_ftype",
+          "obfd": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static enum target_xfer_status\nfbsd_xfer_partial (struct target_ops *ops, enum target_object object,\n\t\t   const char *annex, gdb_byte *readbuf,\n\t\t   const gdb_byte *writebuf,\n\t\t   ULONGEST offset, ULONGEST len, ULONGEST *xfered_len)\n{\n  pid_t pid = ptid_get_pid (inferior_ptid);\n\n  switch (object)\n    {\n    case TARGET_OBJECT_AUXV:\n      {\n\tstruct cleanup *cleanup = make_cleanup (null_cleanup, NULL);\n\tunsigned char *buf;\n\tsize_t buflen;\n\tint mib[4];\n\n\tif (writebuf != NULL)\n\t  return TARGET_XFER_E_IO;\n\tmib[0] = CTL_KERN;\n\tmib[1] = KERN_PROC;\n\tmib[2] = KERN_PROC_AUXV;\n\tmib[3] = pid;\n\tif (offset == 0)\n\t  {\n\t    buf = readbuf;\n\t    buflen = len;\n\t  }\n\telse\n\t  {\n\t    buflen = offset + len;\n\t    buf = XCNEWVEC (unsigned char, buflen);\n\t    cleanup = make_cleanup (xfree, buf);\n\t  }\n\tif (sysctl (mib, 4, buf, &buflen, NULL, 0) == 0)\n\t  {\n\t    if (offset != 0)\n\t      {\n\t\tif (buflen > offset)\n\t\t  {\n\t\t    buflen -= offset;\n\t\t    memcpy (readbuf, buf + offset, buflen);\n\t\t  }\n\t\telse\n\t\t  buflen = 0;\n\t      }\n\t    do_cleanups (cleanup);\n\t    *xfered_len = buflen;\n\t    return (buflen == 0) ? TARGET_XFER_EOF : TARGET_XFER_OK;\n\t  }\n\tdo_cleanups (cleanup);\n\treturn TARGET_XFER_E_IO;\n      }\n    default:\n      return super_xfer_partial (ops, object, annex, readbuf, writebuf, offset,\n\t\t\t\t len, xfered_len);\n    }\n}",
+      "fn_code_pos": [
+        [
+          220,
+          0
+        ],
+        [
+          277,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_xfer_partial",
+        "parameters": {
+          "ops": "struct target_ops",
+          "object": "enum target_object",
+          "annex": "char",
+          "readbuf": "gdb_byte",
+          "writebuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST",
+          "xfered_len": "ULONGEST"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nshow_fbsd_lwp_debug (struct ui_file *file, int from_tty,\n\t\t     struct cmd_list_element *c, const char *value)\n{\n  fprintf_filtered (file, _(\"Debugging of FreeBSD lwp module is %s.\\n\"), value);\n}",
+      "fn_code_pos": [
+        [
+          292,
+          0
+        ],
+        [
+          297,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "show_fbsd_lwp_debug",
+        "parameters": {
+          "file": "struct ui_file",
+          "from_tty": "int",
+          "c": "struct cmd_list_element",
+          "value": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_fetch_kinfo_proc (pid_t pid, struct kinfo_proc *kp)\n{\n  size_t len;\n  int mib[4];\n\n  len = sizeof *kp;\n  mib[0] = CTL_KERN;\n  mib[1] = KERN_PROC;\n  mib[2] = KERN_PROC_PID;\n  mib[3] = pid;\n  if (sysctl (mib, 4, kp, &len, NULL, 0) == -1)\n    perror_with_name ((\"sysctl\"));\n}",
+      "fn_code_pos": [
+        [
+          303,
+          0
+        ],
+        [
+          316,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_fetch_kinfo_proc",
+        "parameters": {
+          "pid": "pid_t",
+          "kp": "struct kinfo_proc"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_thread_alive (struct target_ops *ops, ptid_t ptid)\n{\n  if (ptid_lwp_p (ptid))\n    {\n      struct ptrace_lwpinfo pl;\n\n      if (ptrace (PT_LWPINFO, ptid_get_lwp (ptid), (caddr_t) &pl, sizeof pl)\n\t  == -1)\n\treturn 0;\n#ifdef PL_FLAG_EXITED\n      if (pl.pl_flags & PL_FLAG_EXITED)\n\treturn 0;\n#endif\n    }\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          348,
+          0
+        ],
+        [
+          365,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_thread_alive",
+        "parameters": {
+          "ops": "struct target_ops",
+          "ptid": "ptid_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static const char *\nfbsd_pid_to_str (struct target_ops *ops, ptid_t ptid)\n{\n  lwpid_t lwp;\n\n  lwp = ptid_get_lwp (ptid);\n  if (lwp != 0)\n    {\n      static char buf[64];\n      int pid = ptid_get_pid (ptid);\n\n      xsnprintf (buf, sizeof buf, \"LWP %d of process %d\", lwp, pid);\n      return buf;\n    }\n\n  return normal_pid_to_str (ptid);\n}",
+      "fn_code_pos": [
+        [
+          370,
+          0
+        ],
+        [
+          386,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_pid_to_str",
+        "parameters": {
+          "ops": "struct target_ops",
+          "ptid": "ptid_t"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static const char *\nfbsd_thread_name (struct target_ops *self, struct thread_info *thr)\n{\n  struct ptrace_lwpinfo pl;\n  struct kinfo_proc kp;\n  int pid = ptid_get_pid (thr->ptid);\n  long lwp = ptid_get_lwp (thr->ptid);\n  static char buf[sizeof pl.pl_tdname + 1];\n\n  /* Note that ptrace_lwpinfo returns the process command in pl_tdname\n     if a name has not been set explicitly.  Return a NULL name in\n     that case.  */\n  fbsd_fetch_kinfo_proc (pid, &kp);\n  if (ptrace (PT_LWPINFO, lwp, (caddr_t) &pl, sizeof pl) == -1)\n    perror_with_name ((\"ptrace\"));\n  if (strcmp (kp.ki_comm, pl.pl_tdname) == 0)\n    return NULL;\n  xsnprintf (buf, sizeof buf, \"%s\", pl.pl_tdname);\n  return buf;\n}",
+      "fn_code_pos": [
+        [
+          392,
+          0
+        ],
+        [
+          411,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_thread_name",
+        "parameters": {
+          "self": "struct target_ops",
+          "thr": "struct thread_info"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_enable_proc_events (pid_t pid)\n{\n#ifdef PT_GET_EVENT_MASK\n  int events;\n\n  if (ptrace (PT_GET_EVENT_MASK, pid, (PTRACE_TYPE_ARG3)&events,\n\t      sizeof (events)) == -1)\n    perror_with_name ((\"ptrace\"));\n  events |= PTRACE_FORK | PTRACE_LWP;\n#ifdef PTRACE_VFORK\n  events |= PTRACE_VFORK;\n#endif\n  if (ptrace (PT_SET_EVENT_MASK, pid, (PTRACE_TYPE_ARG3)&events,\n\t      sizeof (events)) == -1)\n    perror_with_name ((\"ptrace\"));\n#else\n#ifdef TDP_RFPPWAIT\n  if (ptrace (PT_FOLLOW_FORK, pid, (PTRACE_TYPE_ARG3)0, 1) == -1)\n    perror_with_name ((\"ptrace\"));\n#endif\n#ifdef PT_LWP_EVENTS\n  if (ptrace (PT_LWP_EVENTS, pid, (PTRACE_TYPE_ARG3)0, 1) == -1)\n    perror_with_name ((\"ptrace\"));\n#endif\n#endif\n}",
+      "fn_code_pos": [
+        [
+          427,
+          0
+        ],
+        [
+          453,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_enable_proc_events",
+        "parameters": {
+          "pid": "pid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_add_threads (pid_t pid)\n{\n  struct cleanup *cleanup;\n  lwpid_t *lwps;\n  int i, nlwps;\n\n  gdb_assert (!in_thread_list (pid_to_ptid (pid)));\n  nlwps = ptrace (PT_GETNUMLWPS, pid, NULL, 0);\n  if (nlwps == -1)\n    perror_with_name ((\"ptrace\"));\n\n  lwps = XCNEWVEC (lwpid_t, nlwps);\n  cleanup = make_cleanup (xfree, lwps);\n\n  nlwps = ptrace (PT_GETLWPLIST, pid, (caddr_t) lwps, nlwps);\n  if (nlwps == -1)\n    perror_with_name ((\"ptrace\"));\n\n  for (i = 0; i < nlwps; i++)\n    {\n      ptid_t ptid = ptid_build (pid, lwps[i], 0);\n\n      if (!in_thread_list (ptid))\n\t{\n#ifdef PT_LWP_EVENTS\n\t  struct ptrace_lwpinfo pl;\n\n\t  /* Don't add exited threads.  Note that this is only called\n\t     when attaching to a multi-threaded process.  */\n\t  if (ptrace (PT_LWPINFO, lwps[i], (caddr_t) &pl, sizeof pl) == -1)\n\t    perror_with_name ((\"ptrace\"));\n\t  if (pl.pl_flags & PL_FLAG_EXITED)\n\t    continue;\n#endif\n\t  if (debug_fbsd_lwp)\n\t    fprintf_unfiltered (gdb_stdlog,\n\t\t\t\t\"FLWP: adding thread for LWP %u\\n\",\n\t\t\t\tlwps[i]);\n\t  add_thread (ptid);\n\t}\n    }\n  do_cleanups (cleanup);\n}",
+      "fn_code_pos": [
+        [
+          461,
+          0
+        ],
+        [
+          504,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_add_threads",
+        "parameters": {
+          "pid": "pid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_update_thread_list (struct target_ops *ops)\n{\n#ifdef PT_LWP_EVENTS\n  /* With support for thread events, threads are added/deleted from the\n     list as events are reported, so just try deleting exited threads.  */\n  delete_exited_threads ();\n#else\n  prune_threads ();\n\n  fbsd_add_threads (ptid_get_pid (inferior_ptid));\n#endif\n}",
+      "fn_code_pos": [
+        [
+          508,
+          0
+        ],
+        [
+          520,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_update_thread_list",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_remember_child (ptid_t pid)\n{\n  struct fbsd_fork_info *info = XCNEW (struct fbsd_fork_info);\n\n  info->ptid = pid;\n  info->next = fbsd_pending_children;\n  fbsd_pending_children = info;\n}",
+      "fn_code_pos": [
+        [
+          567,
+          0
+        ],
+        [
+          575,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_remember_child",
+        "parameters": {
+          "pid": "ptid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static ptid_t\nfbsd_is_child_pending (pid_t pid)\n{\n  struct fbsd_fork_info *info, *prev;\n  ptid_t ptid;\n\n  prev = NULL;\n  for (info = fbsd_pending_children; info; prev = info, info = info->next)\n    {\n      if (ptid_get_pid (info->ptid) == pid)\n\t{\n\t  if (prev == NULL)\n\t    fbsd_pending_children = info->next;\n\t  else\n\t    prev->next = info->next;\n\t  ptid = info->ptid;\n\t  xfree (info);\n\t  return ptid;\n\t}\n    }\n  return null_ptid;\n}",
+      "fn_code_pos": [
+        [
+          580,
+          0
+        ],
+        [
+          601,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_is_child_pending",
+        "parameters": {
+          "pid": "pid_t"
+        },
+        "return_type": "ptid_t"
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_add_vfork_done (ptid_t pid)\n{\n  struct fbsd_fork_info *info = XCNEW (struct fbsd_fork_info);\n\n  info->ptid = pid;\n  info->next = fbsd_pending_vfork_done;\n  fbsd_pending_vfork_done = info;\n}",
+      "fn_code_pos": [
+        [
+          608,
+          0
+        ],
+        [
+          616,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_add_vfork_done",
+        "parameters": {
+          "pid": "ptid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_is_vfork_done_pending (pid_t pid)\n{\n  struct fbsd_fork_info *info;\n\n  for (info = fbsd_pending_vfork_done; info != NULL; info = info->next)\n    {\n      if (ptid_get_pid (info->ptid) == pid)\n\treturn 1;\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          620,
+          0
+        ],
+        [
+          631,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_is_vfork_done_pending",
+        "parameters": {
+          "pid": "pid_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static ptid_t\nfbsd_next_vfork_done (void)\n{\n  struct fbsd_fork_info *info;\n  ptid_t ptid;\n\n  if (fbsd_pending_vfork_done != NULL)\n    {\n      info = fbsd_pending_vfork_done;\n      fbsd_pending_vfork_done = info->next;\n      ptid = info->ptid;\n      xfree (info);\n      return ptid;\n    }\n  return null_ptid;\n}",
+      "fn_code_pos": [
+        [
+          636,
+          0
+        ],
+        [
+          651,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_next_vfork_done",
+        "parameters": {},
+        "return_type": "ptid_t"
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_resume (struct target_ops *ops,\n\t     ptid_t ptid, int step, enum gdb_signal signo)\n{\n#if defined(TDP_RFPPWAIT) && !defined(PTRACE_VFORK)\n  pid_t pid;\n\n  /* Don't PT_CONTINUE a process which has a pending vfork done event.  */\n  if (ptid_equal (minus_one_ptid, ptid))\n    pid = ptid_get_pid (inferior_ptid);\n  else\n    pid = ptid_get_pid (ptid);\n  if (fbsd_is_vfork_done_pending (pid))\n    return;\n#endif\n\n  if (debug_fbsd_lwp)\n    fprintf_unfiltered (gdb_stdlog,\n\t\t\t\"FLWP: fbsd_resume for ptid (%d, %ld, %ld)\\n\",\n\t\t\tptid_get_pid (ptid), ptid_get_lwp (ptid),\n\t\t\tptid_get_tid (ptid));\n  if (ptid_lwp_p (ptid))\n    {\n      /* If ptid is a specific LWP, suspend all other LWPs in the process.  */\n      struct thread_info *tp;\n      int request;\n\n      ALL_NON_EXITED_THREADS (tp)\n        {\n\t  if (ptid_get_pid (tp->ptid) != ptid_get_pid (ptid))\n\t    continue;\n\n\t  if (ptid_get_lwp (tp->ptid) == ptid_get_lwp (ptid))\n\t    request = PT_RESUME;\n\t  else\n\t    request = PT_SUSPEND;\n\n\t  if (ptrace (request, ptid_get_lwp (tp->ptid), NULL, 0) == -1)\n\t    perror_with_name ((\"ptrace\"));\n\t}\n    }\n  else\n    {\n      /* If ptid is a wildcard, resume all matching threads (they won't run\n\t until the process is continued however).  */\n      struct thread_info *tp;\n\n      ALL_NON_EXITED_THREADS (tp)\n        {\n\t  if (!ptid_match (tp->ptid, ptid))\n\t    continue;\n\n\t  if (ptrace (PT_RESUME, ptid_get_lwp (tp->ptid), NULL, 0) == -1)\n\t    perror_with_name ((\"ptrace\"));\n\t}\n      ptid = inferior_ptid;\n    }\n  super_resume (ops, ptid, step, signo);\n}",
+      "fn_code_pos": [
+        [
+          657,
+          0
+        ],
+        [
+          715,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_resume",
+        "parameters": {
+          "ops": "struct target_ops",
+          "ptid": "ptid_t",
+          "step": "int",
+          "signo": "enum gdb_signal"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "ALL_NON_EXITED_THREADS (tp)\n        {\n\t  if (ptid_get_pid (tp->ptid) != ptid_get_pid (ptid))\n\t    continue;\n\n\t  if (ptid_get_lwp (tp->ptid) == ptid_get_lwp (ptid))\n\t    request = PT_RESUME;\n\t  else\n\t    request = PT_SUSPEND;\n\n\t  if (ptrace (request, ptid_get_lwp (tp->ptid), NULL, 0) == -1)\n\t    perror_with_name ((\"ptrace\"));\n\t}",
+      "fn_code_pos": [
+        [
+          684,
+          6
+        ],
+        [
+          696,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ALL_NON_EXITED_THREADS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "ALL_NON_EXITED_THREADS (tp)\n        {\n\t  if (!ptid_match (tp->ptid, ptid))\n\t    continue;\n\n\t  if (ptrace (PT_RESUME, ptid_get_lwp (tp->ptid), NULL, 0) == -1)\n\t    perror_with_name ((\"ptrace\"));\n\t}",
+      "fn_code_pos": [
+        [
+          704,
+          6
+        ],
+        [
+          711,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ALL_NON_EXITED_THREADS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static ptid_t\nfbsd_wait (struct target_ops *ops,\n\t   ptid_t ptid, struct target_waitstatus *ourstatus,\n\t   int target_options)\n{\n  ptid_t wptid;\n\n  while (1)\n    {\n#ifndef PTRACE_VFORK\n      wptid = fbsd_next_vfork_done ();\n      if (!ptid_equal (wptid, null_ptid))\n\t{\n\t  ourstatus->kind = TARGET_WAITKIND_VFORK_DONE;\n\t  return wptid;\n\t}\n#endif\n      wptid = super_wait (ops, ptid, ourstatus, target_options);\n      if (ourstatus->kind == TARGET_WAITKIND_STOPPED)\n\t{\n\t  struct ptrace_lwpinfo pl;\n\t  pid_t pid;\n\t  int status;\n\n\t  pid = ptid_get_pid (wptid);\n\t  if (ptrace (PT_LWPINFO, pid, (caddr_t) &pl, sizeof pl) == -1)\n\t    perror_with_name ((\"ptrace\"));\n\n\t  wptid = ptid_build (pid, pl.pl_lwpid, 0);\n\n#ifdef PT_LWP_EVENTS\n\t  if (pl.pl_flags & PL_FLAG_EXITED)\n\t    {\n\t      /* If GDB attaches to a multi-threaded process, exiting\n\t\t threads might be skipped during fbsd_post_attach that\n\t\t have not yet reported their PL_FLAG_EXITED event.\n\t\t Ignore EXITED events for an unknown LWP.  */\n\t      if (in_thread_list (wptid))\n\t\t{\n\t\t  if (debug_fbsd_lwp)\n\t\t    fprintf_unfiltered (gdb_stdlog,\n\t\t\t\t\t\"FLWP: deleting thread for LWP %u\\n\",\n\t\t\t\t\tpl.pl_lwpid);\n\t\t  if (print_thread_events)\n\t\t    printf_unfiltered (_(\"[%s exited]\\n\"), target_pid_to_str\n\t\t\t\t       (wptid));\n\t\t  delete_thread (wptid);\n\t\t}\n\t      if (ptrace (PT_CONTINUE, pid, (caddr_t) 1, 0) == -1)\n\t\tperror_with_name ((\"ptrace\"));\n\t      continue;\n\t    }\n#endif\n\n\t  /* Switch to an LWP PTID on the first stop in a new process.\n\t     This is done after handling PL_FLAG_EXITED to avoid\n\t     switching to an exited LWP.  It is done before checking\n\t     PL_FLAG_BORN in case the first stop reported after\n\t     attaching to an existing process is a PL_FLAG_BORN\n\t     event.  */\n\t  if (in_thread_list (pid_to_ptid (pid)))\n\t    {\n\t      if (debug_fbsd_lwp)\n\t\tfprintf_unfiltered (gdb_stdlog,\n\t\t\t\t    \"FLWP: using LWP %u for first thread\\n\",\n\t\t\t\t    pl.pl_lwpid);\n\t      thread_change_ptid (pid_to_ptid (pid), wptid);\n\t    }\n\n#ifdef PT_LWP_EVENTS\n\t  if (pl.pl_flags & PL_FLAG_BORN)\n\t    {\n\t      /* If GDB attaches to a multi-threaded process, newborn\n\t\t threads might be added by fbsd_add_threads that have\n\t\t not yet reported their PL_FLAG_BORN event.  Ignore\n\t\t BORN events for an already-known LWP.  */\n\t      if (!in_thread_list (wptid))\n\t\t{\n\t\t  if (debug_fbsd_lwp)\n\t\t    fprintf_unfiltered (gdb_stdlog,\n\t\t\t\t\t\"FLWP: adding thread for LWP %u\\n\",\n\t\t\t\t\tpl.pl_lwpid);\n\t\t  add_thread (wptid);\n\t\t}\n\t      ourstatus->kind = TARGET_WAITKIND_SPURIOUS;\n\t      return wptid;\n\t    }\n#endif\n\n#ifdef TDP_RFPPWAIT\n\t  if (pl.pl_flags & PL_FLAG_FORKED)\n\t    {\n#ifndef PTRACE_VFORK\n\t      struct kinfo_proc kp;\n#endif\n\t      ptid_t child_ptid;\n\t      pid_t child;\n\n\t      child = pl.pl_child_pid;\n\t      ourstatus->kind = TARGET_WAITKIND_FORKED;\n#ifdef PTRACE_VFORK\n\t      if (pl.pl_flags & PL_FLAG_VFORKED)\n\t\tourstatus->kind = TARGET_WAITKIND_VFORKED;\n#endif\n\n\t      /* Make sure the other end of the fork is stopped too.  */\n\t      child_ptid = fbsd_is_child_pending (child);\n\t      if (ptid_equal (child_ptid, null_ptid))\n\t\t{\n\t\t  pid = waitpid (child, &status, 0);\n\t\t  if (pid == -1)\n\t\t    perror_with_name ((\"waitpid\"));\n\n\t\t  gdb_assert (pid == child);\n\n\t\t  if (ptrace (PT_LWPINFO, child, (caddr_t)&pl, sizeof pl) == -1)\n\t\t    perror_with_name ((\"ptrace\"));\n\n\t\t  gdb_assert (pl.pl_flags & PL_FLAG_CHILD);\n\t\t  child_ptid = ptid_build (child, pl.pl_lwpid, 0);\n\t\t}\n\n\t      /* Enable additional events on the child process.  */\n\t      fbsd_enable_proc_events (ptid_get_pid (child_ptid));\n\n#ifndef PTRACE_VFORK\n\t      /* For vfork, the child process will have the P_PPWAIT\n\t\t flag set.  */\n\t      fbsd_fetch_kinfo_proc (child, &kp);\n\t      if (kp.ki_flag & P_PPWAIT)\n\t\tourstatus->kind = TARGET_WAITKIND_VFORKED;\n#endif\n\t      ourstatus->value.related_pid = child_ptid;\n\n\t      return wptid;\n\t    }\n\n\t  if (pl.pl_flags & PL_FLAG_CHILD)\n\t    {\n\t      /* Remember that this child forked, but do not report it\n\t\t until the parent reports its corresponding fork\n\t\t event.  */\n\t      fbsd_remember_child (wptid);\n\t      continue;\n\t    }\n\n#ifdef PTRACE_VFORK\n\t  if (pl.pl_flags & PL_FLAG_VFORK_DONE)\n\t    {\n\t      ourstatus->kind = TARGET_WAITKIND_VFORK_DONE;\n\t      return wptid;\n\t    }\n#endif\n#endif\n\n#ifdef PL_FLAG_EXEC\n\t  if (pl.pl_flags & PL_FLAG_EXEC)\n\t    {\n\t      ourstatus->kind = TARGET_WAITKIND_EXECD;\n\t      ourstatus->value.execd_pathname\n\t\t= xstrdup (fbsd_pid_to_exec_file (NULL, pid));\n\t      return wptid;\n\t    }\n#endif\n\n\t  /* Note that PL_FLAG_SCE is set for any event reported while\n\t     a thread is executing a system call in the kernel.  In\n\t     particular, signals that interrupt a sleep in a system\n\t     call will report this flag as part of their event.  Stops\n\t     explicitly for system call entry and exit always use\n\t     SIGTRAP, so only treat SIGTRAP events as system call\n\t     entry/exit events.  */\n\t  if (pl.pl_flags & (PL_FLAG_SCE | PL_FLAG_SCX)\n\t      && ourstatus->value.sig == SIGTRAP)\n\t    {\n#ifdef HAVE_STRUCT_PTRACE_LWPINFO_PL_SYSCALL_CODE\n\t      if (catch_syscall_enabled ())\n\t\t{\n\t\t  if (catching_syscall_number (pl.pl_syscall_code))\n\t\t    {\n\t\t      if (pl.pl_flags & PL_FLAG_SCE)\n\t\t\tourstatus->kind = TARGET_WAITKIND_SYSCALL_ENTRY;\n\t\t      else\n\t\t\tourstatus->kind = TARGET_WAITKIND_SYSCALL_RETURN;\n\t\t      ourstatus->value.syscall_number = pl.pl_syscall_code;\n\t\t      return wptid;\n\t\t    }\n\t\t}\n#endif\n\t      /* If the core isn't interested in this event, just\n\t\t continue the process explicitly and wait for another\n\t\t event.  Note that PT_SYSCALL is \"sticky\" on FreeBSD\n\t\t and once system call stops are enabled on a process\n\t\t it stops for all system call entries and exits.  */\n\t      if (ptrace (PT_CONTINUE, pid, (caddr_t) 1, 0) == -1)\n\t\tperror_with_name ((\"ptrace\"));\n\t      continue;\n\t    }\n\t}\n      return wptid;\n    }\n}",
+      "fn_code_pos": [
+        [
+          721,
+          0
+        ],
+        [
+          922,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_wait",
+        "parameters": {
+          "ops": "struct target_ops",
+          "ptid": "ptid_t",
+          "ourstatus": "struct target_waitstatus",
+          "target_options": "int"
+        },
+        "return_type": "ptid_t"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_follow_fork (struct target_ops *ops, int follow_child,\n\t\t\tint detach_fork)\n{\n  if (!follow_child && detach_fork)\n    {\n      struct thread_info *tp = inferior_thread ();\n      pid_t child_pid = ptid_get_pid (tp->pending_follow.value.related_pid);\n\n      /* Breakpoints have already been detached from the child by\n\t infrun.c.  */\n\n      if (ptrace (PT_DETACH, child_pid, (PTRACE_TYPE_ARG3)1, 0) == -1)\n\tperror_with_name ((\"ptrace\"));\n\n#ifndef PTRACE_VFORK\n      if (tp->pending_follow.kind == TARGET_WAITKIND_VFORKED)\n\t{\n\t  /* We can't insert breakpoints until the child process has\n\t     finished with the shared memory region.  The parent\n\t     process doesn't wait for the child process to exit or\n\t     exec until after it has been resumed from the ptrace stop\n\t     to report the fork.  Once it has been resumed it doesn't\n\t     stop again before returning to userland, so there is no\n\t     reliable way to wait on the parent.\n\n\t     We can't stay attached to the child to wait for an exec\n\t     or exit because it may invoke ptrace(PT_TRACE_ME)\n\t     (e.g. if the parent process is a debugger forking a new\n\t     child process).\n\n\t     In the end, the best we can do is to make sure it runs\n\t     for a little while.  Hopefully it will be out of range of\n\t     any breakpoints we reinsert.  Usually this is only the\n\t     single-step breakpoint at vfork's return point.  */\n\n\t  usleep (10000);\n\n\t  /* Schedule a fake VFORK_DONE event to report on the next\n\t     wait.  */\n\t  fbsd_add_vfork_done (inferior_ptid);\n\t}\n#endif\n    }\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          928,
+          0
+        ],
+        [
+          974,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_follow_fork",
+        "parameters": {
+          "ops": "struct target_ops",
+          "follow_child": "int",
+          "detach_fork": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_insert_fork_catchpoint (struct target_ops *self, int pid)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          976,
+          0
+        ],
+        [
+          980,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_insert_fork_catchpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "pid": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_remove_fork_catchpoint (struct target_ops *self, int pid)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          982,
+          0
+        ],
+        [
+          986,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_remove_fork_catchpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "pid": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_insert_vfork_catchpoint (struct target_ops *self, int pid)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          988,
+          0
+        ],
+        [
+          992,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_insert_vfork_catchpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "pid": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_remove_vfork_catchpoint (struct target_ops *self, int pid)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          994,
+          0
+        ],
+        [
+          998,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_remove_vfork_catchpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "pid": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_post_startup_inferior (struct target_ops *self, ptid_t pid)\n{\n  fbsd_enable_proc_events (ptid_get_pid (pid));\n}",
+      "fn_code_pos": [
+        [
+          1003,
+          0
+        ],
+        [
+          1007,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_post_startup_inferior",
+        "parameters": {
+          "self": "struct target_ops",
+          "pid": "ptid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_post_attach (struct target_ops *self, int pid)\n{\n  fbsd_enable_proc_events (pid);\n  fbsd_add_threads (pid);\n}",
+      "fn_code_pos": [
+        [
+          1011,
+          0
+        ],
+        [
+          1016,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_post_attach",
+        "parameters": {
+          "self": "struct target_ops",
+          "pid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_insert_exec_catchpoint (struct target_ops *self, int pid)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1022,
+          0
+        ],
+        [
+          1026,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_insert_exec_catchpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "pid": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_remove_exec_catchpoint (struct target_ops *self, int pid)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1028,
+          0
+        ],
+        [
+          1032,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_remove_exec_catchpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "pid": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nfbsd_set_syscall_catchpoint (struct target_ops *self, int pid, int needed,\n\t\t\t     int any_count, int table_size, int *table)\n{\n\n  /* Ignore the arguments.  inf-ptrace.c will use PT_SYSCALL which\n     will catch all system call entries and exits.  The system calls\n     are filtered by GDB rather than the kernel.  */\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1036,
+          0
+        ],
+        [
+          1045,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_set_syscall_catchpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "pid": "int",
+          "needed": "int",
+          "any_count": "int",
+          "table_size": "int",
+          "table": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nfbsd_nat_add_target (struct target_ops *t)\n{\n  t->to_pid_to_exec_file = fbsd_pid_to_exec_file;\n  t->to_find_memory_regions = fbsd_find_memory_regions;\n#ifdef KERN_PROC_AUXV\n  super_xfer_partial = t->to_xfer_partial;\n  t->to_xfer_partial = fbsd_xfer_partial;\n#endif\n#ifdef PT_LWPINFO\n  t->to_thread_alive = fbsd_thread_alive;\n  t->to_pid_to_str = fbsd_pid_to_str;\n#ifdef HAVE_STRUCT_PTRACE_LWPINFO_PL_TDNAME\n  t->to_thread_name = fbsd_thread_name;\n#endif\n  t->to_update_thread_list = fbsd_update_thread_list;\n  t->to_has_thread_control = tc_schedlock;\n  super_resume = t->to_resume;\n  t->to_resume = fbsd_resume;\n  super_wait = t->to_wait;\n  t->to_wait = fbsd_wait;\n  t->to_post_startup_inferior = fbsd_post_startup_inferior;\n  t->to_post_attach = fbsd_post_attach;\n#ifdef TDP_RFPPWAIT\n  t->to_follow_fork = fbsd_follow_fork;\n  t->to_insert_fork_catchpoint = fbsd_insert_fork_catchpoint;\n  t->to_remove_fork_catchpoint = fbsd_remove_fork_catchpoint;\n  t->to_insert_vfork_catchpoint = fbsd_insert_vfork_catchpoint;\n  t->to_remove_vfork_catchpoint = fbsd_remove_vfork_catchpoint;\n#endif\n#ifdef PL_FLAG_EXEC\n  t->to_insert_exec_catchpoint = fbsd_insert_exec_catchpoint;\n  t->to_remove_exec_catchpoint = fbsd_remove_exec_catchpoint;\n#endif\n#ifdef HAVE_STRUCT_PTRACE_LWPINFO_PL_SYSCALL_CODE\n  t->to_set_syscall_catchpoint = fbsd_set_syscall_catchpoint;\n#endif\n#endif\n  add_target (t);\n}",
+      "fn_code_pos": [
+        [
+          1049,
+          0
+        ],
+        [
+          1088,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_nat_add_target",
+        "parameters": {
+          "t": "struct target_ops"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_fbsd_nat (void)\n{\n#ifdef PT_LWPINFO\n  add_setshow_boolean_cmd (\"fbsd-lwp\", class_maintenance,\n\t\t\t   &debug_fbsd_lwp, _(\"\\\nSet debugging of FreeBSD lwp module.\"), _(\"\\\nShow debugging of FreeBSD lwp module.\"), _(\"\\\nEnables printf debugging output.\"),\n\t\t\t   NULL,\n\t\t\t   &show_fbsd_lwp_debug,\n\t\t\t   &setdebuglist, &showdebuglist);\n#endif\n}",
+      "fn_code_pos": [
+        [
+          1093,
+          0
+        ],
+        [
+          1106,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_fbsd_nat",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "fbsd_pid_to_exec_file (struct target_ops *self, int pid)",
+      "fn_dec_pos": [
+        [
+          43,
+          0
+        ],
+        [
+          43,
+          56
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_pid_to_exec_file",
+        "parameters": {
+          "self": "struct target_ops",
+          "pid": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*super_xfer_partial) (struct target_ops *ops,\n\t\t\t\t\t\t      enum target_object object,\n\t\t\t\t\t\t      const char *annex,\n\t\t\t\t\t\t      gdb_byte *readbuf,\n\t\t\t\t\t\t      const gdb_byte *writebuf,\n\t\t\t\t\t\t      ULONGEST offset,\n\t\t\t\t\t\t      ULONGEST len,\n\t\t\t\t\t\t      ULONGEST *xfered_len)",
+      "fn_dec_pos": [
+        [
+          209,
+          31
+        ],
+        [
+          216,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "ops": "struct target_ops",
+          "object": "enum target_object",
+          "annex": "char",
+          "readbuf": "gdb_byte",
+          "writebuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST",
+          "xfered_len": "ULONGEST"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*super_resume) (struct target_ops *,\n\t\t\t     ptid_t,\n\t\t\t     int,\n\t\t\t     enum gdb_signal)",
+      "fn_dec_pos": [
+        [
+          283,
+          12
+        ],
+        [
+          286,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "(*super_wait) (struct target_ops *,\n\t\t\t     ptid_t,\n\t\t\t     struct target_waitstatus *,\n\t\t\t     int)",
+      "fn_dec_pos": [
+        [
+          287,
+          14
+        ],
+        [
+          290,
+          12
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "ptid_t"
+      }
+    },
+    {
+      "fn_code": "fbsd_pid_to_str (struct target_ops *ops, ptid_t ptid)",
+      "fn_dec_pos": [
+        [
+          371,
+          0
+        ],
+        [
+          371,
+          53
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_pid_to_str",
+        "parameters": {
+          "ops": "struct target_ops",
+          "ptid": "ptid_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "fbsd_thread_name (struct target_ops *self, struct thread_info *thr)",
+      "fn_dec_pos": [
+        [
+          393,
+          0
+        ],
+        [
+          393,
+          67
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_thread_name",
+        "parameters": {
+          "self": "struct target_ops",
+          "thr": "struct thread_info"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct fbsd_fork_info\n{\n  struct fbsd_fork_info *next;\n  ptid_t ptid;\n}",
+      {
+        "*next": "struct fbsd_fork_info",
+        "ptid": "ptid_t"
+      },
+      "fbsd_fork_info",
+      [
+        556,
+        0
+      ],
+      [
+        560,
+        1
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        43,
+        23
+      ],
+      [
+        43,
+        40
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        79,
+        26
+      ],
+      [
+        79,
+        43
+      ]
+    ],
+    [
+      "struct kinfo_vmentry",
+      {},
+      "",
+      [
+        83,
+        2
+      ],
+      [
+        83,
+        22
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        85,
+        2
+      ],
+      [
+        85,
+        16
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        157,
+        26
+      ],
+      [
+        157,
+        43
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        166,
+        2
+      ],
+      [
+        166,
+        16
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        209,
+        54
+      ],
+      [
+        209,
+        71
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        221,
+        19
+      ],
+      [
+        221,
+        36
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        232,
+        1
+      ],
+      [
+        232,
+        15
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        283,
+        29
+      ],
+      [
+        283,
+        46
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        287,
+        29
+      ],
+      [
+        287,
+        46
+      ]
+    ],
+    [
+      "struct target_waitstatus",
+      {},
+      "",
+      [
+        289,
+        8
+      ],
+      [
+        289,
+        32
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        293,
+        21
+      ],
+      [
+        293,
+        35
+      ]
+    ],
+    [
+      "struct cmd_list_element",
+      {},
+      "",
+      [
+        294,
+        7
+      ],
+      [
+        294,
+        30
+      ]
+    ],
+    [
+      "struct kinfo_proc",
+      {},
+      "",
+      [
+        304,
+        34
+      ],
+      [
+        304,
+        51
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        349,
+        19
+      ],
+      [
+        349,
+        36
+      ]
+    ],
+    [
+      "struct ptrace_lwpinfo",
+      {},
+      "",
+      [
+        353,
+        6
+      ],
+      [
+        353,
+        27
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        371,
+        17
+      ],
+      [
+        371,
+        34
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        393,
+        18
+      ],
+      [
+        393,
+        35
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        393,
+        43
+      ],
+      [
+        393,
+        61
+      ]
+    ],
+    [
+      "struct ptrace_lwpinfo",
+      {},
+      "",
+      [
+        395,
+        2
+      ],
+      [
+        395,
+        23
+      ]
+    ],
+    [
+      "struct kinfo_proc",
+      {},
+      "",
+      [
+        396,
+        2
+      ],
+      [
+        396,
+        19
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        464,
+        2
+      ],
+      [
+        464,
+        16
+      ]
+    ],
+    [
+      "struct ptrace_lwpinfo",
+      {},
+      "",
+      [
+        487,
+        3
+      ],
+      [
+        487,
+        24
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        509,
+        25
+      ],
+      [
+        509,
+        42
+      ]
+    ],
+    [
+      "struct fbsd_fork_info\n{\n  struct fbsd_fork_info *next;\n  ptid_t ptid;\n}",
+      {
+        "*next": "struct fbsd_fork_info",
+        "ptid": "ptid_t"
+      },
+      "fbsd_fork_info",
+      [
+        556,
+        0
+      ],
+      [
+        560,
+        1
+      ]
+    ],
+    [
+      "struct fbsd_fork_info",
+      {},
+      "",
+      [
+        558,
+        2
+      ],
+      [
+        558,
+        23
+      ]
+    ],
+    [
+      "struct fbsd_fork_info",
+      {},
+      "",
+      [
+        562,
+        7
+      ],
+      [
+        562,
+        28
+      ]
+    ],
+    [
+      "struct fbsd_fork_info",
+      {},
+      "",
+      [
+        570,
+        2
+      ],
+      [
+        570,
+        23
+      ]
+    ],
+    [
+      "struct fbsd_fork_info",
+      {},
+      "",
+      [
+        583,
+        2
+      ],
+      [
+        583,
+        23
+      ]
+    ],
+    [
+      "struct fbsd_fork_info",
+      {},
+      "",
+      [
+        604,
+        7
+      ],
+      [
+        604,
+        28
+      ]
+    ],
+    [
+      "struct fbsd_fork_info",
+      {},
+      "",
+      [
+        611,
+        2
+      ],
+      [
+        611,
+        23
+      ]
+    ],
+    [
+      "struct fbsd_fork_info",
+      {},
+      "",
+      [
+        623,
+        2
+      ],
+      [
+        623,
+        23
+      ]
+    ],
+    [
+      "struct fbsd_fork_info",
+      {},
+      "",
+      [
+        639,
+        2
+      ],
+      [
+        639,
+        23
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        658,
+        13
+      ],
+      [
+        658,
+        30
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        681,
+        6
+      ],
+      [
+        681,
+        24
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        702,
+        6
+      ],
+      [
+        702,
+        24
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        722,
+        11
+      ],
+      [
+        722,
+        28
+      ]
+    ],
+    [
+      "struct target_waitstatus",
+      {},
+      "",
+      [
+        723,
+        17
+      ],
+      [
+        723,
+        41
+      ]
+    ],
+    [
+      "struct ptrace_lwpinfo",
+      {},
+      "",
+      [
+        741,
+        3
+      ],
+      [
+        741,
+        24
+      ]
+    ],
+    [
+      "struct kinfo_proc",
+      {},
+      "",
+      [
+        814,
+        7
+      ],
+      [
+        814,
+        24
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        929,
+        18
+      ],
+      [
+        929,
+        35
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        934,
+        6
+      ],
+      [
+        934,
+        24
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        977,
+        29
+      ],
+      [
+        977,
+        46
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        983,
+        29
+      ],
+      [
+        983,
+        46
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        989,
+        30
+      ],
+      [
+        989,
+        47
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        995,
+        30
+      ],
+      [
+        995,
+        47
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1004,
+        28
+      ],
+      [
+        1004,
+        45
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1012,
+        18
+      ],
+      [
+        1012,
+        35
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1023,
+        29
+      ],
+      [
+        1023,
+        46
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1029,
+        29
+      ],
+      [
+        1029,
+        46
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1037,
+        29
+      ],
+      [
+        1037,
+        46
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1050,
+        21
+      ],
+      [
+        1050,
+        38
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"regset.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcmd.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbthread.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_wait.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <sys/procfs.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ptrace.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <sys/sysctl.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <sys/user.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <libutil.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"elf-bfd.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"fbsd-nat.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum target_xfer_status",
+      {},
+      "",
+      [
+        209,
+        7
+      ],
+      [
+        209,
+        30
+      ]
+    ],
+    [
+      "enum target_object",
+      {},
+      "",
+      [
+        210,
+        12
+      ],
+      [
+        210,
+        30
+      ]
+    ],
+    [
+      "enum target_xfer_status",
+      {},
+      "",
+      [
+        220,
+        7
+      ],
+      [
+        220,
+        30
+      ]
+    ],
+    [
+      "enum target_object",
+      {},
+      "",
+      [
+        221,
+        43
+      ],
+      [
+        221,
+        61
+      ]
+    ],
+    [
+      "enum gdb_signal",
+      {},
+      "",
+      [
+        286,
+        8
+      ],
+      [
+        286,
+        23
+      ]
+    ],
+    [
+      "enum gdb_signal",
+      {},
+      "",
+      [
+        659,
+        29
+      ],
+      [
+        659,
+        44
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,875 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nsnf_set_datalink(pcap_t *p, int dlt)\n{\n\tp->linktype = dlt;\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          42,
+          0
+        ],
+        [
+          47,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_set_datalink",
+        "parameters": {
+          "p": "pcap_t",
+          "dlt": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nsnf_pcap_stats(pcap_t *p, struct pcap_stat *ps)\n{\n\tstruct snf_ring_stats stats;\n\tstruct pcap_snf *snfps = p->priv;\n\tint rc;\n\n\tif ((rc = snf_ring_getstats(snfps->snf_ring, &stats))) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    rc, \"snf_get_stats\");\n\t\treturn -1;\n\t}\n\tps->ps_recv = stats.ring_pkt_recv + stats.ring_pkt_overflow;\n\tps->ps_drop = stats.ring_pkt_overflow;\n\tps->ps_ifdrop = stats.nic_pkt_overflow + stats.nic_pkt_bad;\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          49,
+          0
+        ],
+        [
+          65,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_pcap_stats",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nsnf_platform_cleanup(pcap_t *p)\n{\n\tstruct pcap_snf *ps = p->priv;\n\n#ifdef SNF_HAVE_INJECT_API\n\tif (ps->snf_inj)\n\t\tsnf_inject_close(ps->snf_inj);\n#endif\n\tsnf_ring_close(ps->snf_ring);\n\tsnf_close(ps->snf_handle);\n\tpcap_cleanup_live_common(p);\n}",
+      "fn_code_pos": [
+        [
+          67,
+          0
+        ],
+        [
+          79,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_platform_cleanup",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nsnf_getnonblock(pcap_t *p)\n{\n\tstruct pcap_snf *ps = p->priv;\n\n\treturn (ps->snf_timeout == 0);\n}",
+      "fn_code_pos": [
+        [
+          81,
+          0
+        ],
+        [
+          87,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_getnonblock",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nsnf_setnonblock(pcap_t *p, int nonblock)\n{\n\tstruct pcap_snf *ps = p->priv;\n\n\tif (nonblock)\n\t\tps->snf_timeout = 0;\n\telse {\n\t\tif (p->opt.timeout <= 0)\n\t\t\tps->snf_timeout = -1; /* forever */\n\t\telse\n\t\t\tps->snf_timeout = p->opt.timeout;\n\t}\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          89,
+          0
+        ],
+        [
+          103,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_setnonblock",
+        "parameters": {
+          "p": "pcap_t",
+          "nonblock": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static inline\nstruct timeval\nsnf_timestamp_to_timeval(const int64_t ts_nanosec, const int tstamp_precision)\n{\n\tstruct timeval tv;\n\tlong tv_nsec;\n        const static struct timeval zero_timeval;\n\n        if (ts_nanosec == 0)\n                return zero_timeval;\n\n\ttv.tv_sec = ts_nanosec / _NSEC_PER_SEC;\n\ttv_nsec = (ts_nanosec % _NSEC_PER_SEC);\n\n\t/* libpcap expects tv_usec to be nanos if using nanosecond precision. */\n\tif (tstamp_precision == PCAP_TSTAMP_PRECISION_NANO)\n\t\ttv.tv_usec = tv_nsec;\n\telse\n\t\ttv.tv_usec = tv_nsec / 1000;\n\n\treturn tv;\n}",
+      "fn_code_pos": [
+        [
+          107,
+          0
+        ],
+        [
+          128,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_timestamp_to_timeval",
+        "parameters": {
+          "ts_nanosec": "int64_t",
+          "tstamp_precision": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nsnf_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user)\n{\n\tstruct pcap_snf *ps = p->priv;\n\tstruct pcap_pkthdr hdr;\n\tint i, flags, err, caplen, n;\n\tstruct snf_recv_req req;\n\tint nonblock, timeout;\n\n\tif (!p)\n\t\treturn -1;\n\n\tn = 0;\n\ttimeout = ps->snf_timeout;\n\twhile (n < cnt || PACKET_COUNT_IS_UNLIMITED(cnt)) {\n\t\t/*\n\t\t * Has \"pcap_breakloop()\" been called?\n\t\t */\n\t\tif (p->break_loop) {\n\t\t\tif (n == 0) {\n\t\t\t\tp->break_loop = 0;\n\t\t\t\treturn (-2);\n\t\t\t} else {\n\t\t\t\treturn (n);\n\t\t\t}\n\t\t}\n\n\t\terr = snf_ring_recv(ps->snf_ring, timeout, &req);\n\n\t\tif (err) {\n\t\t\tif (err == EBUSY || err == EAGAIN) {\n\t\t\t\treturn (n);\n\t\t\t}\n\t\t\telse if (err == EINTR) {\n\t\t\t\ttimeout = 0;\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\telse {\n\t\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, err, \"snf_read\");\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t}\n\n\t\tcaplen = req.length;\n\t\tif (caplen > p->snapshot)\n\t\t\tcaplen = p->snapshot;\n\n\t\tif ((p->fcode.bf_insns == NULL) ||\n\t\t     bpf_filter(p->fcode.bf_insns, req.pkt_addr, req.length, caplen)) {\n\t\t\thdr.ts = snf_timestamp_to_timeval(req.timestamp, p->opt.tstamp_precision);\n\t\t\thdr.caplen = caplen;\n\t\t\thdr.len = req.length;\n\t\t\tcallback(user, &hdr, req.pkt_addr);\n\t\t}\n\t\tn++;\n\n\t\t/* After one successful packet is received, we won't block\n\t\t* again for that timeout. */\n\t\tif (timeout != 0)\n\t\t\ttimeout = 0;\n\t}\n\treturn (n);\n}",
+      "fn_code_pos": [
+        [
+          130,
+          0
+        ],
+        [
+          193,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_read",
+        "parameters": {
+          "p": "pcap_t",
+          "cnt": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nsnf_setfilter(pcap_t *p, struct bpf_program *fp)\n{\n\tif (!p)\n\t\treturn -1;\n\tif (!fp) {\n\t\tstrncpy(p->errbuf, \"setfilter: No filter specified\",\n\t\t\tsizeof(p->errbuf));\n\t\treturn -1;\n\t}\n\n\t/* Make our private copy of the filter */\n\n\tif (install_bpf_program(p, fp) < 0)\n\t\treturn -1;\n\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          195,
+          0
+        ],
+        [
+          212,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_setfilter",
+        "parameters": {
+          "p": "pcap_t",
+          "fp": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nsnf_inject(pcap_t *p, const void *buf _U_, size_t size _U_)\n{\n#ifdef SNF_HAVE_INJECT_API\n\tstruct pcap_snf *ps = p->priv;\n\tint rc;\n\tif (ps->snf_inj == NULL) {\n\t\trc = snf_inject_open(ps->snf_boardnum, 0, &ps->snf_inj);\n\t\tif (rc) {\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    rc, \"snf_inject_open\");\n\t\t\treturn (-1);\n\t\t}\n\t}\n\n\trc = snf_inject_send(ps->snf_inj, -1, 0, buf, size);\n\tif (!rc) {\n\t\treturn (size);\n\t}\n\telse {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    rc, \"snf_inject_send\");\n\t\treturn (-1);\n\t}\n#else\n\tstrlcpy(p->errbuf, \"Sending packets isn't supported with this snf version\",\n\t    PCAP_ERRBUF_SIZE);\n\treturn (-1);\n#endif\n}",
+      "fn_code_pos": [
+        [
+          214,
+          0
+        ],
+        [
+          243,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_inject",
+        "parameters": {
+          "p": "pcap_t",
+          "buf": "void",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nsnf_activate(pcap_t* p)\n{\n\tstruct pcap_snf *ps = p->priv;\n\tchar *device = p->opt.device;\n\tconst char *nr = NULL;\n\tint err;\n\tint flags = -1, ring_id = -1;\n\n\tif (device == NULL) {\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE, \"device is NULL\");\n\t\treturn -1;\n\t}\n\n\t/* In Libpcap, we set pshared by default if NUM_RINGS is set to > 1.\n\t * Since libpcap isn't thread-safe */\n\tif ((nr = getenv(\"SNF_FLAGS\")) && *nr)\n\t\tflags = strtol(nr, NULL, 0);\n\telse if ((nr = getenv(\"SNF_NUM_RINGS\")) && *nr && atoi(nr) > 1)\n\t\tflags = SNF_F_PSHARED;\n\telse\n\t\tnr = NULL;\n\n\n        /* Allow pcap_set_buffer_size() to set dataring_size.\n         * Default is zero which allows setting from env SNF_DATARING_SIZE.\n         * pcap_set_buffer_size() is in bytes while snf_open() accepts values\n         * between 0 and 1048576 in Megabytes. Values in this range are\n         * mapped to 1MB.\n         */\n\terr = snf_open(ps->snf_boardnum,\n\t\t\t0, /* let SNF API parse SNF_NUM_RINGS, if set */\n\t\t\tNULL, /* default RSS, or use SNF_RSS_FLAGS env */\n                        (p->opt.buffer_size > 0 && p->opt.buffer_size < 1048576) ? 1048576 : p->opt.buffer_size, /* default to SNF_DATARING_SIZE from env */\n\t\t\tflags, /* may want pshared */\n\t\t\t&ps->snf_handle);\n\tif (err != 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    err, \"snf_open failed\");\n\t\treturn -1;\n\t}\n\n\tif ((nr = getenv(\"SNF_PCAP_RING_ID\")) && *nr) {\n\t\tring_id = (int) strtol(nr, NULL, 0);\n\t}\n\terr = snf_ring_open_id(ps->snf_handle, ring_id, &ps->snf_ring);\n\tif (err != 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    err, \"snf_ring_open_id(ring=%d) failed\", ring_id);\n\t\treturn -1;\n\t}\n\n\t/*\n\t * Turn a negative snapshot value (invalid), a snapshot value of\n\t * 0 (unspecified), or a value bigger than the normal maximum\n\t * value, into the maximum allowed value.\n\t *\n\t * If some application really *needs* a bigger snapshot\n\t * length, we should just increase MAXIMUM_SNAPLEN.\n\t */\n\tif (p->snapshot <= 0 || p->snapshot > MAXIMUM_SNAPLEN)\n\t\tp->snapshot = MAXIMUM_SNAPLEN;\n\n\tif (p->opt.timeout <= 0)\n\t\tps->snf_timeout = -1;\n\telse\n\t\tps->snf_timeout = p->opt.timeout;\n\n\terr = snf_start(ps->snf_handle);\n\tif (err != 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    err, \"snf_start failed\");\n\t\treturn -1;\n\t}\n\n\t/*\n\t * \"select()\" and \"poll()\" don't work on snf descriptors.\n\t */\n#ifndef _WIN32\n\tp->selectable_fd = -1;\n#endif /* !_WIN32 */\n\tp->linktype = DLT_EN10MB;\n\tp->read_op = snf_read;\n\tp->inject_op = snf_inject;\n\tp->setfilter_op = snf_setfilter;\n\tp->setdirection_op = NULL; /* Not implemented.*/\n\tp->set_datalink_op = snf_set_datalink;\n\tp->getnonblock_op = snf_getnonblock;\n\tp->setnonblock_op = snf_setnonblock;\n\tp->stats_op = snf_pcap_stats;\n\tp->cleanup_op = snf_platform_cleanup;\n#ifdef SNF_HAVE_INJECT_API\n\tps->snf_inj = NULL;\n#endif\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          245,
+          0
+        ],
+        [
+          340,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_activate",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nsnf_findalldevs(pcap_if_list_t *devlistp, char *errbuf)\n{\n\tpcap_if_t *dev;\n#ifdef _WIN32\n\tstruct sockaddr_in addr;\n#endif\n\tstruct snf_ifaddrs *ifaddrs, *ifa;\n\tchar name[MAX_DESC_LENGTH];\n\tchar desc[MAX_DESC_LENGTH];\n\tint ret, allports = 0, merge = 0;\n\tconst char *nr = NULL;\n\n\tif (snf_init(SNF_VERSION_API)) {\n\t\t(void)pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"snf_getifaddrs: snf_init failed\");\n\t\treturn (-1);\n\t}\n\n\tif (snf_getifaddrs(&ifaddrs) || ifaddrs == NULL)\n\t{\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"snf_getifaddrs\");\n\t\treturn (-1);\n\t}\n\tif ((nr = getenv(\"SNF_FLAGS\")) && *nr) {\n\t\terrno = 0;\n\t\tmerge = strtol(nr, NULL, 0);\n\t\tif (errno) {\n\t\t\t(void)pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t\"snf_getifaddrs: SNF_FLAGS is not a valid number\");\n\t\t\treturn (-1);\n\t\t}\n\t\tmerge = merge & SNF_F_AGGREGATE_PORTMASK;\n\t}\n\n\tfor (ifa = ifaddrs; ifa != NULL; ifa = ifa->snf_ifa_next) {\n\t\t/*\n\t\t * Myricom SNF adapter ports may appear as regular\n\t\t * network interfaces, which would already have been\n\t\t * added to the list of adapters by pcap_platform_finddevs()\n\t\t * if this isn't an SNF-only version of libpcap.\n\t\t *\n\t\t * Our create routine intercepts pcap_create() calls for\n\t\t * those interfaces and arranges that they will be\n\t\t * opened using the SNF API instead.\n\t\t *\n\t\t * So if we already have an entry for the device, we\n\t\t * don't add an additional entry for it, we just\n\t\t * update the description for it, if any, to indicate\n\t\t * which snfN device it is.  Otherwise, we add an entry\n\t\t * for it.\n\t\t *\n\t\t * In either case, if SNF_F_AGGREGATE_PORTMASK is set\n\t\t * in SNF_FLAGS, we add this port to the bitmask\n\t\t * of ports, which we use to generate a device\n\t\t * we can use to capture on all ports.\n\t\t *\n\t\t * Generate the description string.  If port aggregation\n\t\t * is set, use 2^{port number} as the unit number,\n\t\t * rather than {port number}.\n\t\t *\n\t\t * XXX - do entries in this list have IP addresses for\n\t\t * the port?  If so, should we add them to the\n\t\t * entry for the device, if they're not already in the\n\t\t * list of IP addresses for the device?\n \t\t */\n\t\t(void)pcap_snprintf(desc,MAX_DESC_LENGTH,\"Myricom %ssnf%d\",\n\t\t\tmerge ? \"Merge Bitmask Port \" : \"\",\n\t\t\tmerge ? 1 << ifa->snf_ifa_portnum : ifa->snf_ifa_portnum);\n\t\t/*\n\t\t * Add the port to the bitmask.\n\t\t */\n\t\tif (merge)\n\t\t\tallports |= 1 << ifa->snf_ifa_portnum;\n\t\t/*\n\t\t * See if there's already an entry for the device\n\t\t * with the name ifa->snf_ifa_name.\n\t\t */\n\t\tdev = find_dev(devlistp, ifa->snf_ifa_name);\n\t\tif (dev != NULL) {\n\t\t\t/*\n\t\t\t * Yes.  Update its description.\n\t\t\t */\n\t\t\tchar *desc_str;\n\n\t\t\tdesc_str = strdup(desc);\n\t\t\tif (desc_str == NULL) {\n\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"snf_findalldevs strdup\");\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tfree(dev->description);\n\t\t\tdev->description = desc_str;\n\t\t} else {\n\t\t\t/*\n\t\t\t * No.  Add an entry for it.\n\t\t\t *\n\t\t\t * XXX - is there a notion of \"up\" or \"running\",\n\t\t\t * and can we determine whether something's\n\t\t\t * plugged into the adapter and set\n\t\t\t * PCAP_IF_CONNECTION_STATUS_CONNECTED or\n\t\t\t * PCAP_IF_CONNECTION_STATUS_DISCONNECTED?\n\t\t\t */\n\t\t\tdev = add_dev(devlistp, ifa->snf_ifa_name, 0, desc,\n\t\t\t    errbuf);\n\t\t\tif (dev == NULL)\n\t\t\t\treturn -1;\n#ifdef _WIN32\n\t\t\t/*\n\t\t\t * On Windows, fill in IP# from device name\n\t\t\t */\n                        ret = inet_pton(AF_INET, dev->name, &addr.sin_addr);\n                        if (ret == 1) {\n                        \t/*\n                        \t * Successful conversion of device name\n                        \t * to IPv4 address.\n                        \t */\n\t                        addr.sin_family = AF_INET;\n        \t                if (add_addr_to_dev(dev, &addr, sizeof(addr),\n                \t            NULL, 0, NULL, 0, NULL, 0, errbuf) == -1)\n                        \t\treturn -1;\n                        } else if (ret == -1) {\n\t\t\t\t/*\n\t\t\t\t * Error.\n\t\t\t\t */\n\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"sinf_findalldevs inet_pton\");\n                                return -1;\n                        }\n#endif _WIN32\n\t\t}\n\t}\n\tsnf_freeifaddrs(ifaddrs);\n\t/*\n\t * Create a snfX entry if port aggregation is enabled\n       \t */\n\tif (merge) {\n\t\t/*\n\t\t * Add a new entry with all ports bitmask\n\t\t */\n\t\t(void)pcap_snprintf(name,MAX_DESC_LENGTH,\"snf%d\",allports);\n\t\t(void)pcap_snprintf(desc,MAX_DESC_LENGTH,\"Myricom Merge Bitmask All Ports snf%d\",\n\t\t\tallports);\n\t\t/*\n\t\t * XXX - is there any notion of \"up\" and \"running\" that\n\t\t * would apply to this device, given that it handles\n\t\t * multiple ports?\n\t\t *\n\t\t * Presumably, there's no notion of \"connected\" vs.\n\t\t * \"disconnected\", as \"is this plugged into a network?\"\n\t\t * would be a per-port property.\n\t\t */\n\t\tif (add_dev(devlistp, name,\n\t\t    PCAP_IF_CONNECTION_STATUS_NOT_APPLICABLE, desc,\n\t\t    errbuf) == NULL)\n\t\t\treturn (-1);\n\t\t/*\n\t\t * XXX - should we give it a list of addresses with all\n\t\t * the addresses for all the ports?\n\t\t */\n\t}\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          343,
+          0
+        ],
+        [
+          509,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_findalldevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\nsnf_create(const char *device, char *ebuf, int *is_ours)\n{\n\tpcap_t *p;\n\tint boardnum = -1;\n\tstruct snf_ifaddrs *ifaddrs, *ifa;\n\tsize_t devlen;\n\tstruct pcap_snf *ps;\n\n\tif (snf_init(SNF_VERSION_API)) {\n\t\t/* Can't initialize the API, so no SNF devices */\n\t\t*is_ours = 0;\n\t\treturn NULL;\n\t}\n\n\t/*\n\t * Match a given interface name to our list of interface names, from\n\t * which we can obtain the intended board number\n\t */\n\tif (snf_getifaddrs(&ifaddrs) || ifaddrs == NULL) {\n\t\t/* Can't get SNF addresses */\n\t\t*is_ours = 0;\n\t\treturn NULL;\n\t}\n\tdevlen = strlen(device) + 1;\n\tifa = ifaddrs;\n\twhile (ifa) {\n\t\tif (strncmp(device, ifa->snf_ifa_name, devlen) == 0) {\n\t\t\tboardnum = ifa->snf_ifa_boardnum;\n\t\t\tbreak;\n\t\t}\n\t\tifa = ifa->snf_ifa_next;\n\t}\n\tsnf_freeifaddrs(ifaddrs);\n\n\tif (ifa == NULL) {\n\t\t/*\n\t\t * If we can't find the device by name, support the name \"snfX\"\n\t\t * and \"snf10gX\" where X is the board number.\n\t\t */\n\t\tif (sscanf(device, \"snf10g%d\", &boardnum) != 1 &&\n\t\t    sscanf(device, \"snf%d\", &boardnum) != 1) {\n\t\t\t/* Nope, not a supported name */\n\t\t\t*is_ours = 0;\n\t\t\treturn NULL;\n\t\t}\n\t}\n\n\t/* OK, it's probably ours. */\n\t*is_ours = 1;\n\n\tp = pcap_create_common(ebuf, sizeof (struct pcap_snf));\n\tif (p == NULL)\n\t\treturn NULL;\n\tps = p->priv;\n\n\t/*\n\t * We support microsecond and nanosecond time stamps.\n\t */\n\tp->tstamp_precision_count = 2;\n\tp->tstamp_precision_list = malloc(2 * sizeof(u_int));\n\tif (p->tstamp_precision_list == NULL) {\n\t\tpcap_fmt_errmsg_for_errno(ebuf, PCAP_ERRBUF_SIZE, errno,\n\t\t    \"malloc\");\n\t\tpcap_close(p);\n\t\treturn NULL;\n\t}\n\tp->tstamp_precision_list[0] = PCAP_TSTAMP_PRECISION_MICRO;\n\tp->tstamp_precision_list[1] = PCAP_TSTAMP_PRECISION_NANO;\n\n\tp->activate_op = snf_activate;\n\tps->snf_boardnum = boardnum;\n\treturn p;\n}",
+      "fn_code_pos": [
+        [
+          511,
+          0
+        ],
+        [
+          584,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "int\npcap_platform_finddevs(pcap_if_list_t *devlistp, char *errbuf)\n{\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          595,
+          0
+        ],
+        [
+          599,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_platform_finddevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\npcap_create_interface(const char *device, char *errbuf)\n{\n\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t    \"This version of libpcap only supports SNF cards\");\n\treturn NULL;\n}",
+      "fn_code_pos": [
+        [
+          604,
+          0
+        ],
+        [
+          610,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "errbuf": "char"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "const char *\npcap_lib_version(void)\n{\n\treturn (PCAP_VERSION_STRING \" (SNF-only)\");\n}",
+      "fn_code_pos": [
+        [
+          615,
+          0
+        ],
+        [
+          619,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "snf_create(const char *device, char *ebuf, int *is_ours)",
+      "fn_dec_pos": [
+        [
+          512,
+          0
+        ],
+        [
+          512,
+          56
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "snf_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_create_interface(const char *device, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          605,
+          0
+        ],
+        [
+          605,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "errbuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_lib_version(void)",
+      "fn_dec_pos": [
+        [
+          616,
+          0
+        ],
+        [
+          616,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_snf {\n\tsnf_handle_t snf_handle; /* opaque device handle */\n\tsnf_ring_t   snf_ring;   /* opaque device ring handle */\n#ifdef SNF_HAVE_INJECT_API\n\tsnf_inject_t snf_inj;    /* inject handle, if inject is used */\n#endif\n\tint          snf_timeout;\n\tint          snf_boardnum;\n}",
+      {
+        "snf_handle": "snf_handle_t",
+        "snf_ring": "snf_ring_t",
+        "snf_inj": "snf_inject_t",
+        "snf_timeout": "int",
+        "snf_boardnum": "int"
+      },
+      "pcap_snf",
+      [
+        32,
+        0
+      ],
+      [
+        40,
+        1
+      ]
+    ],
+    [
+      "struct pcap_snf {\n\tsnf_handle_t snf_handle; /* opaque device handle */\n\tsnf_ring_t   snf_ring;   /* opaque device ring handle */\n#ifdef SNF_HAVE_INJECT_API\n\tsnf_inject_t snf_inj;    /* inject handle, if inject is used */\n#endif\n\tint          snf_timeout;\n\tint          snf_boardnum;\n}",
+      {
+        "snf_handle": "snf_handle_t",
+        "snf_ring": "snf_ring_t",
+        "snf_inj": "snf_inject_t",
+        "snf_timeout": "int",
+        "snf_boardnum": "int"
+      },
+      "pcap_snf",
+      [
+        32,
+        0
+      ],
+      [
+        40,
+        1
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        50,
+        26
+      ],
+      [
+        50,
+        42
+      ]
+    ],
+    [
+      "struct snf_ring_stats",
+      {},
+      "",
+      [
+        52,
+        1
+      ],
+      [
+        52,
+        22
+      ]
+    ],
+    [
+      "struct pcap_snf",
+      {},
+      "",
+      [
+        53,
+        1
+      ],
+      [
+        53,
+        16
+      ]
+    ],
+    [
+      "struct pcap_snf",
+      {},
+      "",
+      [
+        70,
+        1
+      ],
+      [
+        70,
+        16
+      ]
+    ],
+    [
+      "struct pcap_snf",
+      {},
+      "",
+      [
+        84,
+        1
+      ],
+      [
+        84,
+        16
+      ]
+    ],
+    [
+      "struct pcap_snf",
+      {},
+      "",
+      [
+        92,
+        1
+      ],
+      [
+        92,
+        16
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        108,
+        0
+      ],
+      [
+        108,
+        14
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        111,
+        1
+      ],
+      [
+        111,
+        15
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        113,
+        21
+      ],
+      [
+        113,
+        35
+      ]
+    ],
+    [
+      "struct pcap_snf",
+      {},
+      "",
+      [
+        133,
+        1
+      ],
+      [
+        133,
+        16
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        134,
+        1
+      ],
+      [
+        134,
+        19
+      ]
+    ],
+    [
+      "struct snf_recv_req",
+      {},
+      "",
+      [
+        136,
+        1
+      ],
+      [
+        136,
+        20
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        196,
+        25
+      ],
+      [
+        196,
+        43
+      ]
+    ],
+    [
+      "struct pcap_snf",
+      {},
+      "",
+      [
+        218,
+        1
+      ],
+      [
+        218,
+        16
+      ]
+    ],
+    [
+      "struct pcap_snf",
+      {},
+      "",
+      [
+        248,
+        1
+      ],
+      [
+        248,
+        16
+      ]
+    ],
+    [
+      "struct sockaddr_in",
+      {},
+      "",
+      [
+        348,
+        1
+      ],
+      [
+        348,
+        19
+      ]
+    ],
+    [
+      "struct snf_ifaddrs",
+      {},
+      "",
+      [
+        350,
+        1
+      ],
+      [
+        350,
+        19
+      ]
+    ],
+    [
+      "struct snf_ifaddrs",
+      {},
+      "",
+      [
+        516,
+        1
+      ],
+      [
+        516,
+        19
+      ]
+    ],
+    [
+      "struct pcap_snf",
+      {},
+      "",
+      [
+        518,
+        1
+      ],
+      [
+        518,
+        16
+      ]
+    ],
+    [
+      "struct pcap_snf",
+      {},
+      "",
+      [
+        562,
+        38
+      ],
+      [
+        562,
+        53
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        1,
+        0
+      ],
+      [
+        2,
+        0
+      ]
+    ],
+    [
+      "#include <sys/param.h>\n",
+      [
+        5,
+        0
+      ],
+      [
+        6,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        8,
+        0
+      ],
+      [
+        9,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        9,
+        0
+      ],
+      [
+        10,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        10,
+        0
+      ],
+      [
+        11,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        12,
+        0
+      ],
+      [
+        13,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in.h>\n",
+      [
+        14,
+        0
+      ],
+      [
+        15,
+        0
+      ]
+    ],
+    [
+      "#include <sys/mman.h>\n",
+      [
+        15,
+        0
+      ],
+      [
+        16,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        16,
+        0
+      ],
+      [
+        17,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        17,
+        0
+      ],
+      [
+        18,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        18,
+        0
+      ],
+      [
+        19,
+        0
+      ]
+    ],
+    [
+      "#include <snf.h>\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-snf.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

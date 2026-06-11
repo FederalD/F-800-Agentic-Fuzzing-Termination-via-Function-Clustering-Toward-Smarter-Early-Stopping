@@ -1,0 +1,214 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "void\nsim_resume (SIM_DESC sd, int step, int siggnal)\n{\n  sim_engine *engine = STATE_ENGINE (sd);\n  jmp_buf buf;\n  int jmpval;\n\n  ASSERT (STATE_MAGIC (sd) == SIM_MAGIC_NUMBER);\n\n  /* we only want to be single stepping the simulator once */\n  if (engine->stepper != NULL)\n    {\n      sim_events_deschedule (sd, engine->stepper);\n      engine->stepper = NULL;\n    }\n  if (step)\n    engine->stepper = sim_events_schedule (sd, 1, has_stepped, sd);\n\n  sim_module_resume (sd);\n\n#if WITH_SCACHE\n  if (USING_SCACHE_P (sd))\n    scache_flush (sd);\n#endif\n\n  /* run/resume the simulator */\n\n  sim_engine_set_run_state (sd, sim_running, 0);\n\n  engine->jmpbuf = &buf;\n  jmpval = setjmp (buf);\n  if (jmpval == sim_engine_start_jmpval\n      || jmpval == sim_engine_restart_jmpval)\n    {\n      int last_cpu_nr = sim_engine_last_cpu_nr (sd);\n      int next_cpu_nr = sim_engine_next_cpu_nr (sd);\n      int nr_cpus = sim_engine_nr_cpus (sd);\n      /* ??? Setting max_insns to 0 allows pbb/jit code to run wild and is\n\t useful if all one wants to do is run a benchmark.  Need some better\n\t way to identify this case.  */\n      int max_insns = (step\n\t\t       ? 1\n\t\t       : (nr_cpus == 1\n\t\t\t  /*&& wip:no-events*/\n\t\t\t  /* Don't do this if running under gdb, need to\n\t\t\t     poll ui for events.  */\n\t\t\t  && STATE_OPEN_KIND (sd) == SIM_OPEN_STANDALONE)\n\t\t       ? 0\n\t\t       : 8); /*FIXME: magic number*/\n      int fast_p = STATE_RUN_FAST_P (sd);\n\n      sim_events_preprocess (sd, last_cpu_nr >= nr_cpus, next_cpu_nr >= nr_cpus);\n      if (next_cpu_nr >= nr_cpus)\n\tnext_cpu_nr = 0;\n      if (nr_cpus == 1)\n\tengine_run_1 (sd, max_insns, fast_p);\n      else\n\tengine_run_n (sd, next_cpu_nr, nr_cpus, max_insns, fast_p);\n    }\n#if 1 /*wip*/\n  else\n    {\n      /* Account for the last insn executed.  */\n      SIM_CPU *cpu = STATE_CPU (sd, sim_engine_last_cpu_nr (sd));\n      ++ CPU_INSN_COUNT (cpu);\n      CGEN_TRACE_INSN_FINI (cpu, NULL, 1);\n    }\n#endif\n\n  engine->jmpbuf = NULL;\n\n  {\n    int i;\n    int nr_cpus = sim_engine_nr_cpus (sd);\n\n#if 0 /*wip,ignore*/\n    /* If the loop exits, either we single-stepped or @cpu@_engine_stop\n       was called.  */\n    if (step)\n      sim_engine_set_run_state (sd, sim_stopped, SIM_SIGTRAP);\n    else\n      sim_engine_set_run_state (sd, pending_reason, pending_sigrc);\n#endif\n\n    for (i = 0; i < nr_cpus; ++i)\n      {\n\tSIM_CPU *cpu = STATE_CPU (sd, i);\n\n\tPROFILE_TOTAL_INSN_COUNT (CPU_PROFILE_DATA (cpu)) += CPU_INSN_COUNT (cpu);\n      }\n  }\n\n  sim_module_suspend (sd);\n}",
+      "fn_code_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          145,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_resume",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "step": "int",
+          "siggnal": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhas_stepped (SIM_DESC sd, void *data)\n{\n  ASSERT (STATE_MAGIC (sd) == SIM_MAGIC_NUMBER);\n  sim_engine_halt (sd, NULL, NULL, NULL_CIA, sim_stopped, SIM_SIGTRAP);\n}",
+      "fn_code_pos": [
+        [
+          149,
+          0
+        ],
+        [
+          154,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "has_stepped",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nprime_cpu (SIM_CPU *cpu, int max_insns)\n{\n  CPU_MAX_SLICE_INSNS (cpu) = max_insns;\n  CPU_INSN_COUNT (cpu) = 0;\n\n  /* Initialize the insn descriptor table.\n     This has to be done after all initialization so we just defer it to\n     here.  */\n\n  if (MACH_PREPARE_RUN (CPU_MACH (cpu)))\n    (* MACH_PREPARE_RUN (CPU_MACH (cpu))) (cpu);\n}",
+      "fn_code_pos": [
+        [
+          162,
+          0
+        ],
+        [
+          174,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "prime_cpu",
+        "parameters": {
+          "cpu": "SIM_CPU",
+          "max_insns": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nengine_run_1 (SIM_DESC sd, int max_insns, int fast_p)\n{\n  sim_cpu *cpu = STATE_CPU (sd, 0);\n  ENGINE_FN *fn = fast_p ? CPU_FAST_ENGINE_FN (cpu) : CPU_FULL_ENGINE_FN (cpu);\n\n  prime_cpu (cpu, max_insns);\n\n  while (1)\n    {\n      SIM_ENGINE_PREFIX_HOOK (sd);\n\n      (*fn) (cpu);\n\n      SIM_ENGINE_POSTFIX_HOOK (sd);\n\n      /* process any events */\n      if (sim_events_tick (sd))\n\tsim_events_process (sd);\n    }\n}",
+      "fn_code_pos": [
+        [
+          178,
+          0
+        ],
+        [
+          198,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "engine_run_1",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "max_insns": "int",
+          "fast_p": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nengine_run_n (SIM_DESC sd, int next_cpu_nr, int nr_cpus, int max_insns, int fast_p)\n{\n  int i;\n  ENGINE_FN *engine_fns[MAX_NR_PROCESSORS];\n\n  for (i = 0; i < nr_cpus; ++i)\n    {\n      SIM_CPU *cpu = STATE_CPU (sd, i);\n\n      engine_fns[i] = fast_p ? CPU_FAST_ENGINE_FN (cpu) : CPU_FULL_ENGINE_FN (cpu);\n      prime_cpu (cpu, max_insns);\n    }\n\n  while (1)\n    {\n      SIM_ENGINE_PREFIX_HOOK (sd);\n\n      /* FIXME: proper cycling of all of them, blah blah blah.  */\n      while (next_cpu_nr != nr_cpus)\n\t{\n\t  SIM_CPU *cpu = STATE_CPU (sd, next_cpu_nr);\n\n\t  (* engine_fns[next_cpu_nr]) (cpu);\n\t  ++next_cpu_nr;\n\t}\n\n      SIM_ENGINE_POSTFIX_HOOK (sd);\n\n      /* process any events */\n      if (sim_events_tick (sd))\n\tsim_events_process (sd);\n    }\n}",
+      "fn_code_pos": [
+        [
+          202,
+          0
+        ],
+        [
+          235,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "engine_run_n",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "next_cpu_nr": "int",
+          "nr_cpus": "int",
+          "max_insns": "int",
+          "fast_p": "int"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "prime_cpu (SIM_CPU *, int)",
+      "fn_dec_pos": [
+        [
+          46,
+          12
+        ],
+        [
+          46,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "prime_cpu",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "engine_run_1 (SIM_DESC, int, int)",
+      "fn_dec_pos": [
+        [
+          47,
+          12
+        ],
+        [
+          47,
+          45
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "engine_run_1",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "engine_run_n (SIM_DESC, int, int, int, int)",
+      "fn_dec_pos": [
+        [
+          48,
+          12
+        ],
+        [
+          48,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "engine_run_n",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-assert.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

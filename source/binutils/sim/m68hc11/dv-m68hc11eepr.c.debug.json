@@ -1,0 +1,568 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nm6811eepr_memory_rw (struct m68hc11eepr *controller, int mode)\n{\n  const char *name = controller->file_name;\n  int fd;\n  size_t size;\n  \n  size = controller->size;\n  fd = open (name, mode, 0644);\n  if (fd < 0)\n    {\n      if (mode == O_RDONLY)\n        {\n          memset (controller->eeprom, 0xFF, size);\n          /* Default value for CONFIG register (0xFF should be ok):\n             controller->eeprom[size - 1] = M6811_NOSEC | M6811_NOCOP\n                                            | M6811_ROMON | M6811_EEON;  */\n          return 0;\n        }\n      return -1;\n    }\n\n  if (mode == O_RDONLY)\n    {\n      if (read (fd, controller->eeprom, size) != size)\n\t{\n\t  close (fd);\n\t  return -1;\n\t}\n    }\n  else\n    {\n      if (write (fd, controller->eeprom, size) != size)\n\t{\n\t  close (fd);\n\t  return -1;\n\t}\n    }\n  close (fd);\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          134,
+          0
+        ],
+        [
+          175,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m6811eepr_memory_rw",
+        "parameters": {
+          "controller": "struct m68hc11eepr",
+          "mode": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nattach_m68hc11eepr_regs (struct hw *me,\n                         struct m68hc11eepr *controller)\n{\n  unsigned_word attach_address;\n  int attach_space;\n  unsigned attach_size;\n  reg_property_spec reg;\n\n  if (hw_find_property (me, \"reg\") == NULL)\n    hw_abort (me, \"Missing \\\"reg\\\" property\");\n\n  if (!hw_find_reg_array_property (me, \"reg\", 0, &reg))\n    hw_abort (me, \"\\\"reg\\\" property must contain one addr/size entry\");\n\n  hw_unit_address_to_attach_address (hw_parent (me),\n\t\t\t\t     &reg.address,\n\t\t\t\t     &attach_space,\n\t\t\t\t     &attach_address,\n\t\t\t\t     me);\n  hw_unit_size_to_attach_size (hw_parent (me),\n\t\t\t       &reg.size,\n\t\t\t       &attach_size, me);\n\n  /* Attach the two IO registers that control the EEPROM.\n     The EEPROM is only attached at reset time because it may\n     be enabled/disabled by the EEON bit in the CONFIG register.  */\n  hw_attach_address (hw_parent (me), M6811_IO_LEVEL,\n                     io_map, M6811_PPROG, 1, me);\n  hw_attach_address (hw_parent (me), M6811_IO_LEVEL,\n                     io_map, M6811_CONFIG, 1, me);\n\n  if (hw_find_property (me, \"file\") == NULL)\n    controller->file_name = \"m6811.eeprom\";\n  else\n    controller->file_name = hw_find_string_property (me, \"file\");\n  \n  controller->attach_space = attach_space;\n  controller->base_address = attach_address;\n  controller->eeprom = hw_malloc (me, attach_size + 1);\n  controller->eeprom_min_cycles = 10000;\n  controller->size = attach_size + 1;\n  controller->mapped = 0;\n  \n  m6811eepr_memory_rw (controller, O_RDONLY);\n}",
+      "fn_code_pos": [
+        [
+          180,
+          0
+        ],
+        [
+          225,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_m68hc11eepr_regs",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct m68hc11eepr"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11eepr_port_event (struct hw *me,\n                        int my_port,\n                        struct hw *source,\n                        int source_port,\n                        int level)\n{\n  SIM_DESC sd;\n  struct m68hc11eepr *controller;\n  sim_cpu *cpu;\n  \n  controller = hw_data (me);\n  sd         = hw_system (me);\n  cpu        = STATE_CPU (sd, 0);\n  switch (my_port)\n    {\n    case RESET_PORT:\n      {\n\tHW_TRACE ((me, \"EEPROM reset\"));\n\n        /* Re-read the EEPROM from the file.  This gives the chance\n           to users to erase this file before doing a reset and have\n           a fresh EEPROM taken into account.  */\n        m6811eepr_memory_rw (controller, O_RDONLY);\n\n        /* Reset the state of EEPROM programmer.  The CONFIG register\n           is also initialized from the EEPROM/file content.  */\n        cpu->ios[M6811_PPROG]    = 0;\n        if (cpu->cpu_use_local_config)\n          cpu->ios[M6811_CONFIG] = cpu->cpu_config;\n        else\n          cpu->ios[M6811_CONFIG]   = controller->eeprom[controller->size-1];\n        controller->eeprom_wmode = 0;\n        controller->eeprom_waddr = 0;\n        controller->eeprom_wbyte = 0;\n\n        /* Attach or detach to the bus depending on the EEPROM enable bit.\n           The EEPROM CONFIG register is still enabled and can be programmed\n           for a next configuration (taken into account only after a reset,\n           see Motorola spec).  */\n        if (!(cpu->ios[M6811_CONFIG] & M6811_EEON))\n          {\n            if (controller->mapped)\n              hw_detach_address (hw_parent (me), M6811_EEPROM_LEVEL,\n                                 controller->attach_space,\n                                 controller->base_address,\n                                 controller->size - 1,\n                                 me);\n            controller->mapped = 0;\n          }\n        else\n          {\n            if (!controller->mapped)\n              hw_attach_address (hw_parent (me), M6811_EEPROM_LEVEL,\n                                 controller->attach_space,\n                                 controller->base_address,\n                                 controller->size - 1,\n                                 me);\n            controller->mapped = 1;\n          }\n        break;\n      }\n\n    default:\n      hw_abort (me, \"Event on unknown port %d\", my_port);\n      break;\n    }\n}",
+      "fn_code_pos": [
+        [
+          230,
+          0
+        ],
+        [
+          297,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11eepr_port_event",
+        "parameters": {
+          "me": "struct hw",
+          "my_port": "int",
+          "source": "struct hw",
+          "source_port": "int",
+          "level": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11eepr_finish (struct hw *me)\n{\n  struct m68hc11eepr *controller;\n\n  controller = HW_ZALLOC (me, struct m68hc11eepr);\n  set_hw_data (me, controller);\n  set_hw_io_read_buffer (me, m68hc11eepr_io_read_buffer);\n  set_hw_io_write_buffer (me, m68hc11eepr_io_write_buffer);\n  set_hw_ports (me, m68hc11eepr_ports);\n  set_hw_port_event (me, m68hc11eepr_port_event);\n#ifdef set_hw_ioctl\n  set_hw_ioctl (me, m68hc11eepr_ioctl);\n#else\n  me->to_ioctl = m68hc11eepr_ioctl;\n#endif\n\n  attach_m68hc11eepr_regs (me, controller);\n}",
+      "fn_code_pos": [
+        [
+          300,
+          0
+        ],
+        [
+          318,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11eepr_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11eepr_info (struct hw *me)\n{\n  SIM_DESC sd;\n  uint16 base = 0;\n  sim_cpu *cpu;\n  struct m68hc11eepr *controller;\n  uint8 val;\n  \n  sd         = hw_system (me);\n  cpu        = STATE_CPU (sd, 0);\n  controller = hw_data (me);\n  base       = cpu_get_io_base (cpu);\n  \n  sim_io_printf (sd, \"M68HC11 EEprom:\\n\");\n\n  val = cpu->ios[M6811_PPROG];\n  print_io_byte (sd, \"PPROG  \", pprog_desc, val, base + M6811_PPROG);\n  sim_io_printf (sd, \"\\n\");\n\n  val = cpu->ios[M6811_CONFIG];\n  print_io_byte (sd, \"CONFIG \", config_desc, val, base + M6811_CONFIG);\n  sim_io_printf (sd, \"\\n\");\n\n  val = controller->eeprom[controller->size - 1];\n  print_io_byte (sd, \"(*NEXT*) \", config_desc, val, base + M6811_CONFIG);\n  sim_io_printf (sd, \"\\n\");\n  \n  /* Describe internal state of EEPROM.  */\n  if (controller->eeprom_wmode)\n    {\n      if (controller->eeprom_waddr == controller->size - 1)\n        sim_io_printf (sd, \"  Programming CONFIG register \");\n      else\n        sim_io_printf (sd, \"  Programming: 0x%04x \",\n                       controller->eeprom_waddr + controller->base_address);\n\n      sim_io_printf (sd, \"with 0x%02x\\n\",\n\t\t     controller->eeprom_wbyte);\n    }\n\n  sim_io_printf (sd, \"  EEProm file: %s\\n\",\n                 controller->file_name);\n}",
+      "fn_code_pos": [
+        [
+          334,
+          0
+        ],
+        [
+          377,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11eepr_info",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nm68hc11eepr_ioctl (struct hw *me,\n\t\t   hw_ioctl_request request,\n\t\t   va_list ap)\n{\n  m68hc11eepr_info (me);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          379,
+          0
+        ],
+        [
+          386,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11eepr_ioctl",
+        "parameters": {
+          "me": "struct hw",
+          "request": "hw_ioctl_request",
+          "ap": "va_list"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nm68hc11eepr_io_read_buffer (struct hw *me,\n\t\t\t    void *dest,\n\t\t\t    int space,\n\t\t\t    unsigned_word base,\n\t\t\t    unsigned nr_bytes)\n{\n  SIM_DESC sd;\n  struct m68hc11eepr *controller;\n  sim_cpu *cpu;\n  \n  HW_TRACE ((me, \"read 0x%08lx %d\", (long) base, (int) nr_bytes));\n\n  sd         = hw_system (me);\n  controller = hw_data (me);\n  cpu        = STATE_CPU (sd, 0);\n\n  if (space == io_map)\n    {\n      unsigned cnt = 0;\n      \n      while (nr_bytes != 0)\n        {\n          switch (base)\n            {\n            case M6811_PPROG:\n            case M6811_CONFIG:\n              *((uint8*) dest) = cpu->ios[base];\n              break;\n\n            default:\n              hw_abort (me, \"reading wrong register 0x%04x\", base);\n            }\n          dest = (uint8*) (dest) + 1;\n          base++;\n          nr_bytes--;\n          cnt++;\n        }\n      return cnt;\n    }\n\n  /* In theory, we can't read the EEPROM when it's being programmed.  */\n  if ((cpu->ios[M6811_PPROG] & M6811_EELAT) != 0\n      && cpu_is_running (cpu))\n    {\n      sim_memory_error (cpu, SIM_SIGBUS, base,\n\t\t\t\"EEprom not configured for reading\");\n    }\n\n  base = base - controller->base_address;\n  memcpy (dest, &controller->eeprom[base], nr_bytes);\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          390,
+          0
+        ],
+        [
+          442,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11eepr_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nm68hc11eepr_io_write_buffer (struct hw *me,\n\t\t\t     const void *source,\n\t\t\t     int space,\n\t\t\t     unsigned_word base,\n\t\t\t     unsigned nr_bytes)\n{\n  SIM_DESC sd;\n  struct m68hc11eepr *controller;\n  sim_cpu *cpu;\n  uint8 val;\n\n  HW_TRACE ((me, \"write 0x%08lx %d\", (long) base, (int) nr_bytes));\n\n  sd         = hw_system (me);\n  controller = hw_data (me);\n  cpu        = STATE_CPU (sd, 0);\n\n  /* Programming several bytes at a time is not possible.  */\n  if (space != io_map && nr_bytes != 1)\n    {\n      sim_memory_error (cpu, SIM_SIGBUS, base,\n\t\t\t\"EEprom write error (only 1 byte can be programmed)\");\n      return 0;\n    }\n  \n  if (nr_bytes != 1)\n    hw_abort (me, \"Cannot write more than 1 byte to EEPROM device at a time\");\n\n  val = *((const uint8*) source);\n\n  /* Write to the EEPROM control register.  */\n  if (space == io_map && base == M6811_PPROG)\n    {\n      uint8 wrong_bits;\n      uint16 addr;\n      \n      addr = base + cpu_get_io_base (cpu);\n\n      /* Setting EELAT and EEPGM at the same time is an error.\n         Clearing them both is ok.  */\n      wrong_bits = (cpu->ios[M6811_PPROG] ^ val) & val;\n      wrong_bits &= (M6811_EELAT | M6811_EEPGM);\n\n      if (wrong_bits == (M6811_EEPGM|M6811_EELAT))\n\t{\n\t  sim_memory_error (cpu, SIM_SIGBUS, addr,\n\t\t\t    \"Wrong eeprom programing value\");\n\t  return 0;\n\t}\n\n      if ((val & M6811_EELAT) == 0)\n\t{\n\t  val = 0;\n\t}\n      if ((val & M6811_EEPGM) && !(cpu->ios[M6811_PPROG] & M6811_EELAT))\n\t{\n\t  sim_memory_error (cpu, SIM_SIGBUS, addr,\n\t\t\t    \"EEProm high voltage applied after EELAT\");\n\t}\n      if ((val & M6811_EEPGM) && controller->eeprom_wmode == 0)\n\t{\n\t  sim_memory_error (cpu, SIM_SIGSEGV, addr,\n\t\t\t    \"EEProm high voltage applied without address\");\n\t}\n      if (val & M6811_EEPGM)\n\t{\n\t  controller->eeprom_wcycle = cpu_current_cycle (cpu);\n\t}\n      else if (cpu->ios[M6811_PPROG] & M6811_PPROG)\n\t{\n\t  int i;\n\t  unsigned long t = cpu_current_cycle (cpu);\n\n\t  t -= controller->eeprom_wcycle;\n\t  if (t < controller->eeprom_min_cycles)\n\t    {\n\t      sim_memory_error (cpu, SIM_SIGILL, addr,\n\t\t\t\t\"EEprom programmed only for %lu cycles\",\n\t\t\t\tt);\n\t    }\n\n\t  /* Program the byte by clearing some bits.  */\n\t  if (!(cpu->ios[M6811_PPROG] & M6811_ERASE))\n\t    {\n\t      controller->eeprom[controller->eeprom_waddr]\n\t\t&= controller->eeprom_wbyte;\n\t    }\n\n\t  /* Erase a byte, row or the complete eeprom.  Erased value is 0xFF.\n             Ignore row or complete eeprom erase when we are programming the\n             CONFIG register (last EEPROM byte).  */\n\t  else if ((cpu->ios[M6811_PPROG] & M6811_BYTE)\n                   || controller->eeprom_waddr == controller->size - 1)\n\t    {\n\t      controller->eeprom[controller->eeprom_waddr] = 0xff;\n\t    }\n\t  else if (cpu->ios[M6811_BYTE] & M6811_ROW)\n\t    {\n              size_t max_size;\n\n              /* Size of EEPROM (-1 because the last byte is the\n                 CONFIG register.  */\n              max_size = controller->size;\n\t      controller->eeprom_waddr &= 0xFFF0;\n\t      for (i = 0; i < 16\n                     && controller->eeprom_waddr < max_size; i++)\n\t\t{\n\t\t  controller->eeprom[controller->eeprom_waddr] = 0xff;\n\t\t  controller->eeprom_waddr ++;\n\t\t}\n\t    }\n\t  else\n\t    {\n              size_t max_size;\n\n              max_size = controller->size;\n\t      for (i = 0; i < max_size; i++)\n\t\t{\n\t\t  controller->eeprom[i] = 0xff;\n\t\t}\n\t    }\n\n\t  /* Save the eeprom in a file.  We have to save after each\n\t     change because the simulator can be stopped or crash...  */\n\t  if (m6811eepr_memory_rw (controller, O_WRONLY | O_CREAT) != 0)\n\t    {\n\t      sim_memory_error (cpu, SIM_SIGABRT, addr,\n\t\t\t\t\"EEPROM programing failed: errno=%d\", errno);\n\t    }\n\t  controller->eeprom_wmode = 0;\n\t}\n      cpu->ios[M6811_PPROG] = val;\n      return 1;\n    }\n\n  /* The CONFIG IO register is mapped at end of EEPROM.\n     It's not visible.  */\n  if (space == io_map && base == M6811_CONFIG)\n    {\n      base = controller->size - 1;\n    }\n  else\n    {\n      base = base - controller->base_address;\n    }\n\n  /* Writing the memory is allowed for the Debugger or simulator\n     (cpu not running).  */\n  if (cpu_is_running (cpu))\n    {\n      if ((cpu->ios[M6811_PPROG] & M6811_EELAT) == 0)\n\t{\n\t  sim_memory_error (cpu, SIM_SIGSEGV, base,\n\t\t\t    \"EEprom not configured for writing\");\n\t  return 0;\n\t}\n      if (controller->eeprom_wmode != 0)\n\t{\n\t  sim_memory_error (cpu, SIM_SIGSEGV, base,\n\t\t\t    \"EEprom write error\");\n\t  return 0;\n\t}\n      controller->eeprom_wmode = 1;\n      controller->eeprom_waddr = base;\n      controller->eeprom_wbyte = val;\n    }\n  else\n    {\n      controller->eeprom[base] = val;\n      m6811eepr_memory_rw (controller, O_WRONLY);\n    }\n  \n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          445,
+          0
+        ],
+        [
+          619,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11eepr_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct m68hc11eepr \n{\n  address_word  base_address; /* control register base */\n  int           attach_space;\n  unsigned      size;\n  int           mapped;\n  \n  /* Current state of the eeprom programing:\n     - eeprom_wmode indicates whether the EEPROM address and byte have\n       been latched.\n     - eeprom_waddr indicates the EEPROM address that was latched\n       and eeprom_wbyte is the byte that was latched.\n     - eeprom_wcycle indicates the CPU absolute cycle type when\n       the high voltage was applied (successfully) on the EEPROM.\n   \n     These data members are setup only when we detect good EEPROM programing\n     conditions (see Motorola EEPROM Programming and PPROG register usage).\n     When the high voltage is switched off, we look at the CPU absolute\n     cycle time to see if the EEPROM command must succeeds or not.\n     The EEPROM content is updated and saved only at that time.\n     (EEPROM command is: byte zero bits program, byte erase, row erase\n     and bulk erase).\n    \n     The CONFIG register is programmed in the same way.  It is physically\n     located at the end of the EEPROM (eeprom size + 1).  It is not mapped\n     in memory but it's saved in the EEPROM file.  */\n  unsigned long\t\teeprom_wcycle;\n  uint16\t\teeprom_waddr;\n  uint8\t\t\teeprom_wbyte;\n  uint8\t\t\teeprom_wmode;\n\n  uint8*\t\teeprom;\n  \n  /* Minimum time in CPU cycles for programming the EEPROM.  */\n  unsigned long         eeprom_min_cycles;\n\n  const char*           file_name;\n}",
+      {
+        "base_address": "address_word",
+        "attach_space": "int",
+        "size": "unsigned",
+        "mapped": "int",
+        "eeprom_wcycle": "unsigned long",
+        "eeprom_waddr": "uint16",
+        "eeprom_wbyte": "uint8",
+        "eeprom_wmode": "uint8",
+        "*\t\teeprom": "uint8",
+        "eeprom_min_cycles": "unsigned long",
+        "char": "const"
+      },
+      "m68hc11eepr",
+      [
+        84,
+        0
+      ],
+      [
+        121,
+        1
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        73,
+        13
+      ],
+      [
+        73,
+        38
+      ]
+    ],
+    [
+      "struct m68hc11eepr \n{\n  address_word  base_address; /* control register base */\n  int           attach_space;\n  unsigned      size;\n  int           mapped;\n  \n  /* Current state of the eeprom programing:\n     - eeprom_wmode indicates whether the EEPROM address and byte have\n       been latched.\n     - eeprom_waddr indicates the EEPROM address that was latched\n       and eeprom_wbyte is the byte that was latched.\n     - eeprom_wcycle indicates the CPU absolute cycle type when\n       the high voltage was applied (successfully) on the EEPROM.\n   \n     These data members are setup only when we detect good EEPROM programing\n     conditions (see Motorola EEPROM Programming and PPROG register usage).\n     When the high voltage is switched off, we look at the CPU absolute\n     cycle time to see if the EEPROM command must succeeds or not.\n     The EEPROM content is updated and saved only at that time.\n     (EEPROM command is: byte zero bits program, byte erase, row erase\n     and bulk erase).\n    \n     The CONFIG register is programmed in the same way.  It is physically\n     located at the end of the EEPROM (eeprom size + 1).  It is not mapped\n     in memory but it's saved in the EEPROM file.  */\n  unsigned long\t\teeprom_wcycle;\n  uint16\t\teeprom_waddr;\n  uint8\t\t\teeprom_wbyte;\n  uint8\t\t\teeprom_wmode;\n\n  uint8*\t\teeprom;\n  \n  /* Minimum time in CPU cycles for programming the EEPROM.  */\n  unsigned long         eeprom_min_cycles;\n\n  const char*           file_name;\n}",
+      {
+        "base_address": "address_word",
+        "attach_space": "int",
+        "size": "unsigned",
+        "mapped": "int",
+        "eeprom_wcycle": "unsigned long",
+        "eeprom_waddr": "uint16",
+        "eeprom_wbyte": "uint8",
+        "eeprom_wmode": "uint8",
+        "*\t\teeprom": "uint8",
+        "eeprom_min_cycles": "unsigned long",
+        "char": "const"
+      },
+      "m68hc11eepr",
+      [
+        84,
+        0
+      ],
+      [
+        121,
+        1
+      ]
+    ],
+    [
+      "struct m68hc11eepr",
+      {},
+      "",
+      [
+        135,
+        21
+      ],
+      [
+        135,
+        39
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        181,
+        25
+      ],
+      [
+        181,
+        34
+      ]
+    ],
+    [
+      "struct m68hc11eepr",
+      {},
+      "",
+      [
+        182,
+        25
+      ],
+      [
+        182,
+        43
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        231,
+        24
+      ],
+      [
+        231,
+        33
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        233,
+        24
+      ],
+      [
+        233,
+        33
+      ]
+    ],
+    [
+      "struct m68hc11eepr",
+      {},
+      "",
+      [
+        238,
+        2
+      ],
+      [
+        238,
+        20
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        301,
+        20
+      ],
+      [
+        301,
+        29
+      ]
+    ],
+    [
+      "struct m68hc11eepr",
+      {},
+      "",
+      [
+        303,
+        2
+      ],
+      [
+        303,
+        20
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        335,
+        18
+      ],
+      [
+        335,
+        27
+      ]
+    ],
+    [
+      "struct m68hc11eepr",
+      {},
+      "",
+      [
+        340,
+        2
+      ],
+      [
+        340,
+        20
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        380,
+        19
+      ],
+      [
+        380,
+        28
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        391,
+        28
+      ],
+      [
+        391,
+        37
+      ]
+    ],
+    [
+      "struct m68hc11eepr",
+      {},
+      "",
+      [
+        398,
+        2
+      ],
+      [
+        398,
+        20
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        446,
+        29
+      ],
+      [
+        446,
+        38
+      ]
+    ],
+    [
+      "struct m68hc11eepr",
+      {},
+      "",
+      [
+        453,
+        2
+      ],
+      [
+        453,
+        20
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        621,
+        6
+      ],
+      [
+        621,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-assert.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-events.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum\n{\n  RESET_PORT\n}",
+      {
+        "RESET_PORT": ""
+      },
+      "",
+      [
+        67,
+        0
+      ],
+      [
+        70,
+        1
+      ]
+    ]
+  ]
+}

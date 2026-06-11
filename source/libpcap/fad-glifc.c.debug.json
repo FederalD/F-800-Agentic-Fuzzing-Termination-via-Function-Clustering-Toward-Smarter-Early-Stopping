@@ -1,0 +1,503 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int\npcap_findalldevs_interfaces(pcap_if_list_t *devlistp, char *errbuf,\n    int (*check_usable)(const char *), get_if_flags_func get_flags_func)\n{\n\tregister int fd4, fd6, fd;\n\tregister struct lifreq *ifrp, *ifend;\n\tstruct lifnum ifn;\n\tstruct lifconf ifc;\n\tchar *buf = NULL;\n\tunsigned buf_size;\n#ifdef HAVE_SOLARIS\n\tchar *p, *q;\n#endif\n\tstruct lifreq ifrflags, ifrnetmask, ifrbroadaddr, ifrdstaddr;\n\tstruct sockaddr *netmask, *broadaddr, *dstaddr;\n\tint ret = 0;\n\n\t/*\n\t * Create a socket from which to fetch the list of interfaces,\n\t * and from which to fetch IPv4 information.\n\t */\n\tfd4 = socket(AF_INET, SOCK_DGRAM, 0);\n\tif (fd4 < 0) {\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"socket: AF_INET\");\n\t\treturn (-1);\n\t}\n\n\t/*\n\t * Create a socket from which to fetch IPv6 information.\n\t */\n\tfd6 = socket(AF_INET6, SOCK_DGRAM, 0);\n\tif (fd6 < 0) {\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"socket: AF_INET6\");\n\t\t(void)close(fd4);\n\t\treturn (-1);\n\t}\n\n\t/*\n\t * How many entries will SIOCGLIFCONF return?\n\t */\n\tifn.lifn_family = AF_UNSPEC;\n\tifn.lifn_flags = 0;\n\tifn.lifn_count = 0;\n\tif (ioctl(fd4, SIOCGLIFNUM, (char *)&ifn) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"SIOCGLIFNUM\");\n\t\t(void)close(fd6);\n\t\t(void)close(fd4);\n\t\treturn (-1);\n\t}\n\n\t/*\n\t * Allocate a buffer for those entries.\n\t */\n\tbuf_size = ifn.lifn_count * sizeof (struct lifreq);\n\tbuf = malloc(buf_size);\n\tif (buf == NULL) {\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"malloc\");\n\t\t(void)close(fd6);\n\t\t(void)close(fd4);\n\t\treturn (-1);\n\t}\n\n\t/*\n\t * Get the entries.\n\t */\n\tifc.lifc_len = buf_size;\n\tifc.lifc_buf = buf;\n\tifc.lifc_family = AF_UNSPEC;\n\tifc.lifc_flags = 0;\n\tmemset(buf, 0, buf_size);\n\tif (ioctl(fd4, SIOCGLIFCONF, (char *)&ifc) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"SIOCGLIFCONF\");\n\t\t(void)close(fd6);\n\t\t(void)close(fd4);\n\t\tfree(buf);\n\t\treturn (-1);\n\t}\n\n\t/*\n\t * Loop over the entries.\n\t */\n\tifrp = (struct lifreq *)buf;\n\tifend = (struct lifreq *)(buf + ifc.lifc_len);\n\n\tfor (; ifrp < ifend; ifrp++) {\n\t\t/*\n\t\t * Skip entries that begin with \"dummy\".\n\t\t * XXX - what are these?  Is this Linux-specific?\n\t\t * Are there platforms on which we shouldn't do this?\n\t\t */\n\t\tif (strncmp(ifrp->lifr_name, \"dummy\", 5) == 0)\n\t\t\tcontinue;\n\n\t\t/*\n\t\t * Can we capture on this device?\n\t\t */\n\t\tif (!(*check_usable)(ifrp->lifr_name)) {\n\t\t\t/*\n\t\t\t * No.\n\t\t\t */\n\t\t\tcontinue;\n\t\t}\n\n\t\t/*\n\t\t * IPv6 or not?\n\t\t */\n\t\tif (((struct sockaddr *)&ifrp->lifr_addr)->sa_family == AF_INET6)\n\t\t\tfd = fd6;\n\t\telse\n\t\t\tfd = fd4;\n\n\t\t/*\n\t\t * Get the flags for this interface.\n\t\t */\n\t\tstrncpy(ifrflags.lifr_name, ifrp->lifr_name,\n\t\t    sizeof(ifrflags.lifr_name));\n\t\tif (ioctl(fd, SIOCGLIFFLAGS, (char *)&ifrflags) < 0) {\n\t\t\tif (errno == ENXIO)\n\t\t\t\tcontinue;\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"SIOCGLIFFLAGS: %.*s\",\n\t\t\t    (int)sizeof(ifrflags.lifr_name),\n\t\t\t    ifrflags.lifr_name);\n\t\t\tret = -1;\n\t\t\tbreak;\n\t\t}\n\n\t\t/*\n\t\t * Get the netmask for this address on this interface.\n\t\t */\n\t\tstrncpy(ifrnetmask.lifr_name, ifrp->lifr_name,\n\t\t    sizeof(ifrnetmask.lifr_name));\n\t\tmemcpy(&ifrnetmask.lifr_addr, &ifrp->lifr_addr,\n\t\t    sizeof(ifrnetmask.lifr_addr));\n\t\tif (ioctl(fd, SIOCGLIFNETMASK, (char *)&ifrnetmask) < 0) {\n\t\t\tif (errno == EADDRNOTAVAIL) {\n\t\t\t\t/*\n\t\t\t\t * Not available.\n\t\t\t\t */\n\t\t\t\tnetmask = NULL;\n\t\t\t} else {\n\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"SIOCGLIFNETMASK: %.*s\",\n\t\t\t\t    (int)sizeof(ifrnetmask.lifr_name),\n\t\t\t\t    ifrnetmask.lifr_name);\n\t\t\t\tret = -1;\n\t\t\t\tbreak;\n\t\t\t}\n\t\t} else\n\t\t\tnetmask = (struct sockaddr *)&ifrnetmask.lifr_addr;\n\n\t\t/*\n\t\t * Get the broadcast address for this address on this\n\t\t * interface (if any).\n\t\t */\n\t\tif (ifrflags.lifr_flags & IFF_BROADCAST) {\n\t\t\tstrncpy(ifrbroadaddr.lifr_name, ifrp->lifr_name,\n\t\t\t    sizeof(ifrbroadaddr.lifr_name));\n\t\t\tmemcpy(&ifrbroadaddr.lifr_addr, &ifrp->lifr_addr,\n\t\t\t    sizeof(ifrbroadaddr.lifr_addr));\n\t\t\tif (ioctl(fd, SIOCGLIFBRDADDR,\n\t\t\t    (char *)&ifrbroadaddr) < 0) {\n\t\t\t\tif (errno == EADDRNOTAVAIL) {\n\t\t\t\t\t/*\n\t\t\t\t\t * Not available.\n\t\t\t\t\t */\n\t\t\t\t\tbroadaddr = NULL;\n\t\t\t\t} else {\n\t\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t\t    \"SIOCGLIFBRDADDR: %.*s\",\n\t\t\t\t\t    (int)sizeof(ifrbroadaddr.lifr_name),\n\t\t\t\t\t    ifrbroadaddr.lifr_name);\n\t\t\t\t\tret = -1;\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\t\t\t} else\n\t\t\t\tbroadaddr = (struct sockaddr *)&ifrbroadaddr.lifr_broadaddr;\n\t\t} else {\n\t\t\t/*\n\t\t\t * Not a broadcast interface, so no broadcast\n\t\t\t * address.\n\t\t\t */\n\t\t\tbroadaddr = NULL;\n\t\t}\n\n\t\t/*\n\t\t * Get the destination address for this address on this\n\t\t * interface (if any).\n\t\t */\n\t\tif (ifrflags.lifr_flags & IFF_POINTOPOINT) {\n\t\t\tstrncpy(ifrdstaddr.lifr_name, ifrp->lifr_name,\n\t\t\t    sizeof(ifrdstaddr.lifr_name));\n\t\t\tmemcpy(&ifrdstaddr.lifr_addr, &ifrp->lifr_addr,\n\t\t\t    sizeof(ifrdstaddr.lifr_addr));\n\t\t\tif (ioctl(fd, SIOCGLIFDSTADDR,\n\t\t\t    (char *)&ifrdstaddr) < 0) {\n\t\t\t\tif (errno == EADDRNOTAVAIL) {\n\t\t\t\t\t/*\n\t\t\t\t\t * Not available.\n\t\t\t\t\t */\n\t\t\t\t\tdstaddr = NULL;\n\t\t\t\t} else {\n\t\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t\t    \"SIOCGLIFDSTADDR: %.*s\",\n\t\t\t\t\t    (int)sizeof(ifrdstaddr.lifr_name),\n\t\t\t\t\t    ifrdstaddr.lifr_name);\n\t\t\t\t\tret = -1;\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\t\t\t} else\n\t\t\t\tdstaddr = (struct sockaddr *)&ifrdstaddr.lifr_dstaddr;\n\t\t} else\n\t\t\tdstaddr = NULL;\n\n#ifdef HAVE_SOLARIS\n\t\t/*\n\t\t * If this entry has a colon followed by a number at\n\t\t * the end, it's a logical interface.  Those are just\n\t\t * the way you assign multiple IP addresses to a real\n\t\t * interface, so an entry for a logical interface should\n\t\t * be treated like the entry for the real interface;\n\t\t * we do that by stripping off the \":\" and the number.\n\t\t */\n\t\tp = strchr(ifrp->lifr_name, ':');\n\t\tif (p != NULL) {\n\t\t\t/*\n\t\t\t * We have a \":\"; is it followed by a number?\n\t\t\t */\n\t\t\tq = p + 1;\n\t\t\twhile (isdigit((unsigned char)*q))\n\t\t\t\tq++;\n\t\t\tif (*q == '\\0') {\n\t\t\t\t/*\n\t\t\t\t * All digits after the \":\" until the end.\n\t\t\t\t * Strip off the \":\" and everything after\n\t\t\t\t * it.\n\t\t\t\t */\n\t\t\t\t*p = '\\0';\n\t\t\t}\n\t\t}\n#endif\n\n\t\t/*\n\t\t * Add information for this address to the list.\n\t\t */\n\t\tif (add_addr_to_if(devlistp, ifrp->lifr_name,\n\t\t    ifrflags.lifr_flags, get_flags_func,\n\t\t    (struct sockaddr *)&ifrp->lifr_addr,\n\t\t    sizeof (struct sockaddr_storage),\n\t\t    netmask, sizeof (struct sockaddr_storage),\n\t\t    broadaddr, sizeof (struct sockaddr_storage),\n\t\t    dstaddr, sizeof (struct sockaddr_storage), errbuf) < 0) {\n\t\t\tret = -1;\n\t\t\tbreak;\n\t\t}\n\t}\n\tfree(buf);\n\t(void)close(fd6);\n\t(void)close(fd4);\n\n\treturn (ret);\n}",
+      "fn_code_pos": [
+        [
+          76,
+          0
+        ],
+        [
+          345,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_findalldevs_interfaces",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char",
+          "check_usable": "int",
+          "get_flags_func": "get_if_flags_func"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "(*check_usable)(const char *)",
+      "fn_dec_pos": [
+        [
+          78,
+          8
+        ],
+        [
+          78,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "int"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct mbuf",
+      {},
+      "",
+      [
+        47,
+        0
+      ],
+      [
+        47,
+        11
+      ]
+    ],
+    [
+      "struct rtentry",
+      {},
+      "",
+      [
+        48,
+        0
+      ],
+      [
+        48,
+        14
+      ]
+    ],
+    [
+      "struct lifreq",
+      {},
+      "",
+      [
+        81,
+        10
+      ],
+      [
+        81,
+        23
+      ]
+    ],
+    [
+      "struct lifnum",
+      {},
+      "",
+      [
+        82,
+        1
+      ],
+      [
+        82,
+        14
+      ]
+    ],
+    [
+      "struct lifconf",
+      {},
+      "",
+      [
+        83,
+        1
+      ],
+      [
+        83,
+        15
+      ]
+    ],
+    [
+      "struct lifreq",
+      {},
+      "",
+      [
+        89,
+        1
+      ],
+      [
+        89,
+        14
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        90,
+        1
+      ],
+      [
+        90,
+        16
+      ]
+    ],
+    [
+      "struct lifreq",
+      {},
+      "",
+      [
+        132,
+        37
+      ],
+      [
+        132,
+        50
+      ]
+    ],
+    [
+      "struct lifreq",
+      {},
+      "",
+      [
+        162,
+        9
+      ],
+      [
+        162,
+        22
+      ]
+    ],
+    [
+      "struct lifreq",
+      {},
+      "",
+      [
+        163,
+        10
+      ],
+      [
+        163,
+        23
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        187,
+        8
+      ],
+      [
+        187,
+        23
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        231,
+        14
+      ],
+      [
+        231,
+        29
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        259,
+        17
+      ],
+      [
+        259,
+        32
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        294,
+        15
+      ],
+      [
+        294,
+        30
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        331,
+        7
+      ],
+      [
+        331,
+        22
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        332,
+        14
+      ],
+      [
+        332,
+        37
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        333,
+        23
+      ],
+      [
+        333,
+        46
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        334,
+        25
+      ],
+      [
+        334,
+        48
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        335,
+        23
+      ],
+      [
+        335,
+        46
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <sys/param.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <sys/file.h>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ioctl.h>\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <sys/sockio.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\t\t\t\t/* concession to AIX */\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <net/if.h>\n",
+      [
+        49,
+        0
+      ],
+      [
+        50,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in.h>\n",
+      [
+        50,
+        0
+      ],
+      [
+        51,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        52,
+        0
+      ],
+      [
+        53,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        53,
+        0
+      ],
+      [
+        54,
+        0
+      ]
+    ],
+    [
+      "#include <memory.h>\n",
+      [
+        54,
+        0
+      ],
+      [
+        55,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        55,
+        0
+      ],
+      [
+        56,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        56,
+        0
+      ],
+      [
+        57,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        57,
+        0
+      ],
+      [
+        58,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        58,
+        0
+      ],
+      [
+        59,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        60,
+        0
+      ],
+      [
+        61,
+        0
+      ]
+    ],
+    [
+      "#include \"os-proto.h\"\n",
+      [
+        63,
+        0
+      ],
+      [
+        64,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

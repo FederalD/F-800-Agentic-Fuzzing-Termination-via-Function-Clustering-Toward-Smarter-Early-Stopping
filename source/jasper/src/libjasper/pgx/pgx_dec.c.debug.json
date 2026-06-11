@@ -1,0 +1,529 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "jas_image_t *pgx_decode(jas_stream_t *in, char *optstr)\n{\n\tjas_image_t *image;\n\tpgx_hdr_t hdr;\n\tjas_image_cmptparm_t cmptparm;\n\n\t/* Avoid compiler warnings about unused parameters. */\n\toptstr = 0;\n\n\timage = 0;\n\n\tif (pgx_gethdr(in, &hdr)) {\n\t\tgoto error;\n\t}\n\n#ifdef PGX_DEBUG\n\tpgx_dumphdr(stderr, &hdr);\n#endif\n\n\tif (!(image = jas_image_create0())) {\n\t\tgoto error;\n\t}\n\tcmptparm.tlx = 0;\n\tcmptparm.tly = 0;\n\tcmptparm.hstep = 1;\n\tcmptparm.vstep = 1;\n\tcmptparm.width = hdr.width;\n\tcmptparm.height = hdr.height;\n\tcmptparm.prec = hdr.prec;\n\tcmptparm.sgnd = hdr.sgnd;\n\tif (jas_image_addcmpt(image, 0, &cmptparm)) {\n\t\tgoto error;\n\t}\n\tif (pgx_getdata(in, &hdr, image)) {\n\t\tgoto error;\n\t}\n\n\tjas_image_setclrspc(image, JAS_CLRSPC_SGRAY);\n\tjas_image_setcmpttype(image, 0,\n\t  JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_GRAY_Y));\n\n\treturn image;\n\nerror:\n\tif (image) {\n\t\tjas_image_destroy(image);\n\t}\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          94,
+          0
+        ],
+        [
+          142,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_decode",
+        "parameters": {
+          "in": "jas_stream_t",
+          "optstr": "char"
+        },
+        "return_type": "jas_image_t"
+      }
+    },
+    {
+      "fn_code": "int pgx_validate(jas_stream_t *in)\n{\n\tuchar buf[PGX_MAGICLEN];\n\tuint_fast32_t magic;\n\tint i;\n\tint n;\n\n\tassert(JAS_STREAM_MAXPUTBACK >= PGX_MAGICLEN);\n\n\t/* Read the validation data (i.e., the data used for detecting\n\t  the format). */\n\tif ((n = jas_stream_read(in, buf, PGX_MAGICLEN)) < 0) {\n\t\treturn -1;\n\t}\n\n\t/* Put the validation data back onto the stream, so that the\n\t  stream position will not be changed. */\n\tfor (i = n - 1; i >= 0; --i) {\n\t\tif (jas_stream_ungetc(in, buf[i]) == EOF) {\n\t\t\treturn -1;\n\t\t}\n\t}\n\n\t/* Did we read enough data? */\n\tif (n < PGX_MAGICLEN) {\n\t\treturn -1;\n\t}\n\n\t/* Compute the signature value. */\n\tmagic = (buf[0] << 8) | buf[1];\n\n\t/* Ensure that the signature is correct for this format. */\n\tif (magic != PGX_MAGIC) {\n\t\treturn -1;\n\t}\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          148,
+          0
+        ],
+        [
+          185,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_validate",
+        "parameters": {
+          "in": "jas_stream_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pgx_gethdr(jas_stream_t *in, pgx_hdr_t *hdr)\n{\n\tint c;\n\tuchar buf[2];\n\n\tif ((c = jas_stream_getc(in)) == EOF) {\n\t\tgoto error;\n\t}\n\tbuf[0] = c;\n\tif ((c = jas_stream_getc(in)) == EOF) {\n\t\tgoto error;\n\t}\n\tbuf[1] = c;\n\thdr->magic = buf[0] << 8 | buf[1];\n\tif (hdr->magic != PGX_MAGIC) {\n\t\tgoto error;\n\t}\n\tif ((c = pgx_getc(in)) == EOF || !isspace(c)) {\n\t\tgoto error;\n\t}\n\tif (pgx_getbyteorder(in, &hdr->bigendian)) {\n\t\tgoto error;\n\t}\n\tif (pgx_getsgnd(in, &hdr->sgnd)) {\n\t\tgoto error;\n\t}\n\tif (pgx_getuint32(in, &hdr->prec)) {\n\t\tgoto error;\n\t}\n\tif (pgx_getuint32(in, &hdr->width)) {\n\t\tgoto error;\n\t}\n\tif (pgx_getuint32(in, &hdr->height)) {\n\t\tgoto error;\n\t}\n\treturn 0;\n\nerror:\n\treturn -1;\n}",
+      "fn_code_pos": [
+        [
+          191,
+          0
+        ],
+        [
+          230,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_gethdr",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "pgx_hdr_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pgx_getdata(jas_stream_t *in, pgx_hdr_t *hdr, jas_image_t *image)\n{\n\tjas_matrix_t *data;\n\tuint_fast32_t x;\n\tuint_fast32_t y;\n\tuint_fast32_t word;\n\tint_fast32_t v;\n\n\tdata = 0;\n\n\tif (!(data = jas_matrix_create(1, hdr->width))) {\n\t\tgoto error;\n\t}\n\tfor (y = 0; y < hdr->height; ++y) {\n\t\tfor (x = 0; x < hdr->width; ++x) {\n\t\t\t/* Need to adjust signed value. */\n\t\t\tif ((v = pgx_getword(in, hdr->bigendian, hdr->prec)) < 0) {\n\t\t\t\tgoto error;\n\t\t\t}\n\t\t\tword = v;\n\t\t\tv = pgx_wordtoint(word, hdr->prec, hdr->sgnd);\n\t\t\tjas_matrix_set(data, 0, x, v);\n\t\t}\n\t\tif (jas_image_writecmpt(image, 0, 0, y, hdr->width, 1, data)) {\n\t\t\tgoto error;\n\t\t}\n\t}\n\tjas_matrix_destroy(data);\n\treturn 0;\n\nerror:\n\tif (data) {\n\t\tjas_matrix_destroy(data);\n\t}\n\treturn -1;\n}",
+      "fn_code_pos": [
+        [
+          232,
+          0
+        ],
+        [
+          267,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getdata",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "pgx_hdr_t",
+          "image": "jas_image_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int_fast32_t pgx_getword(jas_stream_t *in, bool bigendian, int prec)\n{\n\tuint_fast32_t val;\n\tint i;\n\tint j;\n\tint c;\n\tint wordsize;\n\n\twordsize = (prec + 7) / 8;\n\n\tif (prec > 32) {\n\t\tgoto error;\n\t}\n\n\tval = 0;\n\tfor (i = 0; i < wordsize; ++i) {\n\t\tif ((c = jas_stream_getc(in)) == EOF) {\n\t\t\tgoto error;\n\t\t}\n\t\tj = bigendian ? (wordsize - 1 - i) : i;\n\t\tval = val | ((c & 0xff) << (8 * j));\n\t}\n\tval &= (1 << prec) - 1;\n\treturn val;\n\nerror:\n\treturn -1;\n}",
+      "fn_code_pos": [
+        [
+          269,
+          0
+        ],
+        [
+          296,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getword",
+        "parameters": {
+          "in": "jas_stream_t",
+          "bigendian": "bool",
+          "prec": "int"
+        },
+        "return_type": "int_fast32_t"
+      }
+    },
+    {
+      "fn_code": "static int pgx_getc(jas_stream_t *in)\n{\n\tint c;\n\tfor (;;) {\n\t\tif ((c = jas_stream_getc(in)) == EOF) {\n\t\t\treturn -1;\n\t\t}\n\t\tif (c != '#') {\n\t\t\treturn c;\n\t\t}\n\t\tdo {\n\t\t\tif ((c = jas_stream_getc(in)) == EOF) {\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t} while (c != '\\n' && c != '\\r');\n\t}\n}",
+      "fn_code_pos": [
+        [
+          298,
+          0
+        ],
+        [
+          314,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getc",
+        "parameters": {
+          "in": "jas_stream_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pgx_getbyteorder(jas_stream_t *in, bool *bigendian)\n{\n\tint c;\n\tchar buf[2];\n\n\tdo {\n\t\tif ((c = pgx_getc(in)) == EOF) {\n\t\t\treturn -1;\n\t\t}\n\t} while (isspace(c));\n\n\tbuf[0] = c;\n\tif ((c = pgx_getc(in)) == EOF) {\n\t\tgoto error;\n\t}\n\tbuf[1] = c;\n\tif (buf[0] == 'M' && buf[1] == 'L') {\n\t\t*bigendian = true;\n\t} else if (buf[0] == 'L' && buf[1] == 'M') {\n\t\t*bigendian = false;\n\t} else {\n\t\tgoto error;\n\t}\n\n\twhile ((c = pgx_getc(in)) != EOF && !isspace(c)) {\n\t\t;\n\t}\n\tif (c == EOF) {\n\t\tgoto error;\n\t}\n\treturn 0;\n\nerror:\n\treturn -1;\n}",
+      "fn_code_pos": [
+        [
+          316,
+          0
+        ],
+        [
+          350,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getbyteorder",
+        "parameters": {
+          "in": "jas_stream_t",
+          "bigendian": "bool"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pgx_getsgnd(jas_stream_t *in, bool *sgnd)\n{\n\tint c;\n\n\tdo {\n\t\tif ((c = pgx_getc(in)) == EOF) {\n\t\t\treturn -1;\n\t\t}\n\t} while (isspace(c));\n\n\tif (c == '+') {\n\t\t*sgnd = false;\n\t} else if (c == '-') {\n\t\t*sgnd = true;\n\t} else {\n\t\tgoto error;\n\t}\n\twhile ((c = pgx_getc(in)) != EOF && !isspace(c)) {\n\t\t;\n\t}\n\tif (c == EOF) {\n\t\tgoto error;\n\t}\n\treturn 0;\n\nerror:\n\treturn -1;\n}",
+      "fn_code_pos": [
+        [
+          352,
+          0
+        ],
+        [
+          379,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getsgnd",
+        "parameters": {
+          "in": "jas_stream_t",
+          "sgnd": "bool"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pgx_getuint32(jas_stream_t *in, uint_fast32_t *val)\n{\n\tint c;\n\tuint_fast32_t v;\n\n\tdo {\n\t\tif ((c = pgx_getc(in)) == EOF) {\n\t\t\treturn -1;\n\t\t}\n\t} while (isspace(c));\n\n\tv = 0;\n\twhile (isdigit(c)) {\n\t\tv = 10 * v + c - '0';\n\t\tif ((c = pgx_getc(in)) < 0) {\n\t\t\treturn -1;\n\t\t}\n\t}\n\tif (!isspace(c)) {\n\t\treturn -1;\n\t}\n\t*val = v;\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          381,
+          0
+        ],
+        [
+          405,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getuint32",
+        "parameters": {
+          "in": "jas_stream_t",
+          "val": "uint_fast32_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static jas_seqent_t pgx_wordtoint(uint_fast32_t v, int prec, bool sgnd)\n{\n\tjas_seqent_t ret;\n\tv &= (1 << prec) - 1;\n\tret = (sgnd && (v & (1 << (prec - 1)))) ? (v - (1 << prec)) : v;\n\treturn ret;\n}",
+      "fn_code_pos": [
+        [
+          407,
+          0
+        ],
+        [
+          413,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_wordtoint",
+        "parameters": {
+          "v": "uint_fast32_t",
+          "prec": "int",
+          "sgnd": "bool"
+        },
+        "return_type": "jas_seqent_t"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "pgx_gethdr(jas_stream_t *in, pgx_hdr_t *hdr)",
+      "fn_dec_pos": [
+        [
+          79,
+          11
+        ],
+        [
+          79,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_gethdr",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "pgx_hdr_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pgx_getdata(jas_stream_t *in, pgx_hdr_t *hdr, jas_image_t *image)",
+      "fn_dec_pos": [
+        [
+          80,
+          11
+        ],
+        [
+          80,
+          76
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getdata",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "pgx_hdr_t",
+          "image": "jas_image_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pgx_getword(jas_stream_t *in, bool bigendian, int prec)",
+      "fn_dec_pos": [
+        [
+          81,
+          20
+        ],
+        [
+          81,
+          75
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getword",
+        "parameters": {
+          "in": "jas_stream_t",
+          "bigendian": "bool",
+          "prec": "int"
+        },
+        "return_type": "int_fast32_t"
+      }
+    },
+    {
+      "fn_code": "pgx_getsgnd(jas_stream_t *in, bool *sgnd)",
+      "fn_dec_pos": [
+        [
+          82,
+          11
+        ],
+        [
+          82,
+          52
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getsgnd",
+        "parameters": {
+          "in": "jas_stream_t",
+          "sgnd": "bool"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pgx_getbyteorder(jas_stream_t *in, bool *bigendian)",
+      "fn_dec_pos": [
+        [
+          83,
+          11
+        ],
+        [
+          83,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getbyteorder",
+        "parameters": {
+          "in": "jas_stream_t",
+          "bigendian": "bool"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pgx_getc(jas_stream_t *in)",
+      "fn_dec_pos": [
+        [
+          84,
+          11
+        ],
+        [
+          84,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getc",
+        "parameters": {
+          "in": "jas_stream_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pgx_getuint32(jas_stream_t *in, uint_fast32_t *val)",
+      "fn_dec_pos": [
+        [
+          85,
+          11
+        ],
+        [
+          85,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_getuint32",
+        "parameters": {
+          "in": "jas_stream_t",
+          "val": "uint_fast32_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pgx_wordtoint(uint_fast32_t word, int prec, bool sgnd)",
+      "fn_dec_pos": [
+        [
+          86,
+          20
+        ],
+        [
+          86,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_wordtoint",
+        "parameters": {
+          "word": "uint_fast32_t",
+          "prec": "int",
+          "sgnd": "bool"
+        },
+        "return_type": "jas_seqent_t"
+      }
+    },
+    {
+      "fn_code": "pgx_decode(jas_stream_t *in, char *optstr)",
+      "fn_dec_pos": [
+        [
+          94,
+          13
+        ],
+        [
+          94,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pgx_decode",
+        "parameters": {
+          "in": "jas_stream_t",
+          "optstr": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include <assert.h>\n",
+      [
+        65,
+        0
+      ],
+      [
+        66,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        66,
+        0
+      ],
+      [
+        67,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_tvp.h\"\n",
+      [
+        68,
+        0
+      ],
+      [
+        69,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_stream.h\"\n",
+      [
+        69,
+        0
+      ],
+      [
+        70,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_image.h\"\n",
+      [
+        70,
+        0
+      ],
+      [
+        71,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_string.h\"\n",
+      [
+        71,
+        0
+      ],
+      [
+        72,
+        0
+      ]
+    ],
+    [
+      "#include \"pgx_cod.h\"\n",
+      [
+        73,
+        0
+      ],
+      [
+        74,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

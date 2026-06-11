@@ -1,0 +1,535 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "Arc *\narc_lookup (Sym *parent, Sym *child)\n{\n  Arc *arc;\n\n  if (!parent || !child)\n    {\n      printf (\"[arc_lookup] parent == 0 || child == 0\\n\");\n      return 0;\n    }\n  DBG (LOOKUPDEBUG, printf (\"[arc_lookup] parent %s child %s\\n\",\n\t\t\t    parent->name, child->name));\n  for (arc = parent->cg.children; arc; arc = arc->next_child)\n    {\n      DBG (LOOKUPDEBUG, printf (\"[arc_lookup]\\t parent %s child %s\\n\",\n\t\t\t\tarc->parent->name, arc->child->name));\n      if (child->addr >= arc->child->addr\n\t  && child->end_addr <= arc->child->end_addr)\n\t{\n\t  return arc;\n\t}\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          57,
+          0
+        ],
+        [
+          80,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_lookup",
+        "parameters": {
+          "parent": "Sym",
+          "child": "Sym"
+        },
+        "return_type": "Arc"
+      }
+    },
+    {
+      "fn_code": "void\narc_add (Sym *parent, Sym *child, unsigned long count)\n{\n  static unsigned int maxarcs = 0;\n  Arc *arc, **newarcs;\n\n  DBG (TALLYDEBUG, printf (\"[arc_add] %lu arcs from %s to %s\\n\",\n\t\t\t   count, parent->name, child->name));\n  arc = arc_lookup (parent, child);\n  if (arc)\n    {\n      /*\n       * A hit: just increment the count.\n       */\n      DBG (TALLYDEBUG, printf (\"[tally] hit %lu += %lu\\n\",\n\t\t\t       arc->count, count));\n      arc->count += count;\n      return;\n    }\n  arc = (Arc *) xmalloc (sizeof (*arc));\n  memset (arc, 0, sizeof (*arc));\n  arc->parent = parent;\n  arc->child = child;\n  arc->count = count;\n\n  /* If this isn't an arc for a recursive call to parent, then add it\n     to the array of arcs.  */\n  if (parent != child)\n    {\n      /* If we've exhausted space in our current array, get a new one\n\t and copy the contents.   We might want to throttle the doubling\n\t factor one day.  */\n      if (numarcs == maxarcs)\n\t{\n\t  /* Determine how much space we want to allocate.  */\n\t  if (maxarcs == 0)\n\t    maxarcs = 1;\n\t  maxarcs *= 2;\n\n\t  /* Allocate the new array.  */\n\t  newarcs = (Arc **)xmalloc(sizeof (Arc *) * maxarcs);\n\n\t  /* Copy the old array's contents into the new array.  */\n\t  memcpy (newarcs, arcs, numarcs * sizeof (Arc *));\n\n\t  /* Free up the old array.  */\n\t  free (arcs);\n\n\t  /* And make the new array be the current array.  */\n\t  arcs = newarcs;\n\t}\n\n      /* Place this arc in the arc array.  */\n      arcs[numarcs++] = arc;\n    }\n\n  /* prepend this child to the children of this parent: */\n  arc->next_child = parent->cg.children;\n  parent->cg.children = arc;\n\n  /* prepend this parent to the parents of this child: */\n  arc->next_parent = child->cg.parents;\n  child->cg.parents = arc;\n}",
+      "fn_code_pos": [
+        [
+          86,
+          0
+        ],
+        [
+          149,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_add",
+        "parameters": {
+          "parent": "Sym",
+          "child": "Sym",
+          "count": "unsigned long"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ncmp_topo (const PTR lp, const PTR rp)\n{\n  const Sym *left = *(const Sym **) lp;\n  const Sym *right = *(const Sym **) rp;\n\n  return left->cg.top_order - right->cg.top_order;\n}",
+      "fn_code_pos": [
+        [
+          152,
+          0
+        ],
+        [
+          159,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmp_topo",
+        "parameters": {
+          "lp": "PTR",
+          "rp": "PTR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\npropagate_time (Sym *parent)\n{\n  Arc *arc;\n  Sym *child;\n  double share, prop_share;\n\n  if (parent->cg.prop.fract == 0.0)\n    {\n      return;\n    }\n\n  /* gather time from children of this parent: */\n\n  for (arc = parent->cg.children; arc; arc = arc->next_child)\n    {\n      child = arc->child;\n      if (arc->count == 0 || child == parent || child->cg.prop.fract == 0)\n\t{\n\t  continue;\n\t}\n      if (child->cg.cyc.head != child)\n\t{\n\t  if (parent->cg.cyc.num == child->cg.cyc.num)\n\t    {\n\t      continue;\n\t    }\n\t  if (parent->cg.top_order <= child->cg.top_order)\n\t    {\n\t      fprintf (stderr, \"[propagate] toporder botches\\n\");\n\t    }\n\t  child = child->cg.cyc.head;\n\t}\n      else\n\t{\n\t  if (parent->cg.top_order <= child->cg.top_order)\n\t    {\n\t      fprintf (stderr, \"[propagate] toporder botches\\n\");\n\t      continue;\n\t    }\n\t}\n      if (child->ncalls == 0)\n\t{\n\t  continue;\n\t}\n\n      /* distribute time for this arc: */\n      arc->time = child->hist.time * (((double) arc->count)\n\t\t\t\t      / ((double) child->ncalls));\n      arc->child_time = child->cg.child_time\n\t* (((double) arc->count) / ((double) child->ncalls));\n      share = arc->time + arc->child_time;\n      parent->cg.child_time += share;\n\n      /* (1 - cg.prop.fract) gets lost along the way: */\n      prop_share = parent->cg.prop.fract * share;\n\n      /* fix things for printing: */\n      parent->cg.prop.child += prop_share;\n      arc->time *= parent->cg.prop.fract;\n      arc->child_time *= parent->cg.prop.fract;\n\n      /* add this share to the parent's cycle header, if any: */\n      if (parent->cg.cyc.head != parent)\n\t{\n\t  parent->cg.cyc.head->cg.child_time += share;\n\t  parent->cg.cyc.head->cg.prop.child += prop_share;\n\t}\n      DBG (PROPDEBUG,\n\t   printf (\"[prop_time] child \\t\");\n\t   print_name (child);\n\t   printf (\" with %f %f %lu/%lu\\n\", child->hist.time,\n\t\t   child->cg.child_time, arc->count, child->ncalls);\n\t   printf (\"[prop_time] parent\\t\");\n\t   print_name (parent);\n\t   printf (\"\\n[prop_time] share %f\\n\", share));\n    }\n}",
+      "fn_code_pos": [
+        [
+          162,
+          0
+        ],
+        [
+          239,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "propagate_time",
+        "parameters": {
+          "parent": "Sym"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncycle_time (void)\n{\n  Sym *member, *cyc;\n\n  for (cyc = &cycle_header[1]; cyc <= &cycle_header[num_cycles]; ++cyc)\n    {\n      for (member = cyc->cg.cyc.next; member; member = member->cg.cyc.next)\n\t{\n\t  if (member->cg.prop.fract == 0.0)\n\t    {\n\t      /*\n\t       * All members have the same propfraction except those\n\t       * that were excluded with -E.\n\t       */\n\t      continue;\n\t    }\n\t  cyc->hist.time += member->hist.time;\n\t}\n      cyc->cg.prop.self = cyc->cg.prop.fract * cyc->hist.time;\n    }\n}",
+      "fn_code_pos": [
+        [
+          246,
+          0
+        ],
+        [
+          267,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cycle_time",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncycle_link (void)\n{\n  Sym *sym, *cyc, *member;\n  Arc *arc;\n  int num;\n\n  /* count the number of cycles, and initialize the cycle lists: */\n\n  num_cycles = 0;\n  for (sym = symtab.base; sym < symtab.limit; ++sym)\n    {\n      /* this is how you find unattached cycles: */\n      if (sym->cg.cyc.head == sym && sym->cg.cyc.next)\n\t{\n\t  ++num_cycles;\n\t}\n    }\n\n  /*\n   * cycle_header is indexed by cycle number: i.e. it is origin 1,\n   * not origin 0.\n   */\n  cycle_header = (Sym *) xmalloc ((num_cycles + 1) * sizeof (Sym));\n\n  /*\n   * Now link cycles to true cycle-heads, number them, accumulate\n   * the data for the cycle.\n   */\n  num = 0;\n  cyc = cycle_header;\n  for (sym = symtab.base; sym < symtab.limit; ++sym)\n    {\n      if (!(sym->cg.cyc.head == sym && sym->cg.cyc.next != 0))\n\t{\n\t  continue;\n\t}\n      ++num;\n      ++cyc;\n      sym_init (cyc);\n      cyc->cg.print_flag = TRUE;\t/* should this be printed? */\n      cyc->cg.top_order = DFN_NAN;\t/* graph call chain top-sort order */\n      cyc->cg.cyc.num = num;\t/* internal number of cycle on */\n      cyc->cg.cyc.head = cyc;\t/* pointer to head of cycle */\n      cyc->cg.cyc.next = sym;\t/* pointer to next member of cycle */\n      DBG (CYCLEDEBUG, printf (\"[cycle_link] \");\n\t   print_name (sym);\n\t   printf (\" is the head of cycle %d\\n\", num));\n\n      /* link members to cycle header: */\n      for (member = sym; member; member = member->cg.cyc.next)\n\t{\n\t  member->cg.cyc.num = num;\n\t  member->cg.cyc.head = cyc;\n\t}\n\n      /*\n       * Count calls from outside the cycle and those among cycle\n       * members:\n       */\n      for (member = sym; member; member = member->cg.cyc.next)\n\t{\n\t  for (arc = member->cg.parents; arc; arc = arc->next_parent)\n\t    {\n\t      if (arc->parent == member)\n\t\t{\n\t\t  continue;\n\t\t}\n\t      if (arc->parent->cg.cyc.num == num)\n\t\t{\n\t\t  cyc->cg.self_calls += arc->count;\n\t\t}\n\t      else\n\t\t{\n\t\t  cyc->ncalls += arc->count;\n\t\t}\n\t    }\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          270,
+          0
+        ],
+        [
+          349,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cycle_link",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ninherit_flags (Sym *child)\n{\n  Sym *head, *parent, *member;\n  Arc *arc;\n\n  head = child->cg.cyc.head;\n  if (child == head)\n    {\n      /* just a regular child, check its parents: */\n      child->cg.print_flag = FALSE;\n      child->cg.prop.fract = 0.0;\n      for (arc = child->cg.parents; arc; arc = arc->next_parent)\n\t{\n\t  parent = arc->parent;\n\t  if (child == parent)\n\t    {\n\t      continue;\n\t    }\n\t  child->cg.print_flag |= parent->cg.print_flag;\n\t  /*\n\t   * If the child was never actually called (e.g., this arc\n\t   * is static (and all others are, too)) no time propagates\n\t   * along this arc.\n\t   */\n\t  if (child->ncalls != 0)\n\t    {\n\t      child->cg.prop.fract += parent->cg.prop.fract\n\t\t* (((double) arc->count) / ((double) child->ncalls));\n\t    }\n\t}\n    }\n  else\n    {\n      /*\n       * Its a member of a cycle, look at all parents from outside\n       * the cycle.\n       */\n      head->cg.print_flag = FALSE;\n      head->cg.prop.fract = 0.0;\n      for (member = head->cg.cyc.next; member; member = member->cg.cyc.next)\n\t{\n\t  for (arc = member->cg.parents; arc; arc = arc->next_parent)\n\t    {\n\t      if (arc->parent->cg.cyc.head == head)\n\t\t{\n\t\t  continue;\n\t\t}\n\t      parent = arc->parent;\n\t      head->cg.print_flag |= parent->cg.print_flag;\n\t      /*\n\t       * If the cycle was never actually called (e.g. this\n\t       * arc is static (and all others are, too)) no time\n\t       * propagates along this arc.\n\t       */\n\t      if (head->ncalls != 0)\n\t\t{\n\t\t  head->cg.prop.fract += parent->cg.prop.fract\n\t\t    * (((double) arc->count) / ((double) head->ncalls));\n\t\t}\n\t    }\n\t}\n      for (member = head; member; member = member->cg.cyc.next)\n\t{\n\t  member->cg.print_flag = head->cg.print_flag;\n\t  member->cg.prop.fract = head->cg.prop.fract;\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          358,
+          0
+        ],
+        [
+          426,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inherit_flags",
+        "parameters": {
+          "child": "Sym"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\npropagate_flags (Sym **symbols)\n{\n  int sym_index;\n  Sym *old_head, *child;\n\n  old_head = 0;\n  for (sym_index = symtab.len - 1; sym_index >= 0; --sym_index)\n    {\n      child = symbols[sym_index];\n      /*\n       * If we haven't done this function or cycle, inherit things\n       * from parent.  This way, we are linear in the number of arcs\n       * since we do all members of a cycle (and the cycle itself)\n       * as we hit the first member of the cycle.\n       */\n      if (child->cg.cyc.head != old_head)\n\t{\n\t  old_head = child->cg.cyc.head;\n\t  inherit_flags (child);\n\t}\n      DBG (PROPDEBUG,\n\t   printf (\"[prop_flags] \");\n\t   print_name (child);\n\t   printf (\"inherits print-flag %d and prop-fract %f\\n\",\n\t\t   child->cg.print_flag, child->cg.prop.fract));\n      if (!child->cg.print_flag)\n\t{\n\t  /*\n\t   * Printflag is off. It gets turned on by being in the\n\t   * INCL_GRAPH table, or there being an empty INCL_GRAPH\n\t   * table and not being in the EXCL_GRAPH table.\n\t   */\n\t  if (sym_lookup (&syms[INCL_GRAPH], child->addr)\n\t      || (syms[INCL_GRAPH].len == 0\n\t\t  && !sym_lookup (&syms[EXCL_GRAPH], child->addr)))\n\t    {\n\t      child->cg.print_flag = TRUE;\n\t    }\n\t}\n      else\n\t{\n\t  /*\n\t   * This function has printing parents: maybe someone wants\n\t   * to shut it up by putting it in the EXCL_GRAPH table.\n\t   * (But favor INCL_GRAPH over EXCL_GRAPH.)\n\t   */\n\t  if (!sym_lookup (&syms[INCL_GRAPH], child->addr)\n\t      && sym_lookup (&syms[EXCL_GRAPH], child->addr))\n\t    {\n\t      child->cg.print_flag = FALSE;\n\t    }\n\t}\n      if (child->cg.prop.fract == 0.0)\n\t{\n\t  /*\n\t   * No parents to pass time to.  Collect time from children\n\t   * if its in the INCL_TIME table, or there is an empty\n\t   * INCL_TIME table and its not in the EXCL_TIME table.\n\t   */\n\t  if (sym_lookup (&syms[INCL_TIME], child->addr)\n\t      || (syms[INCL_TIME].len == 0\n\t\t  && !sym_lookup (&syms[EXCL_TIME], child->addr)))\n\t    {\n\t      child->cg.prop.fract = 1.0;\n\t    }\n\t}\n      else\n\t{\n\t  /*\n\t   * It has parents to pass time to, but maybe someone wants\n\t   * to shut it up by puttting it in the EXCL_TIME table.\n\t   * (But favor being in INCL_TIME tabe over being in\n\t   * EXCL_TIME table.)\n\t   */\n\t  if (!sym_lookup (&syms[INCL_TIME], child->addr)\n\t      && sym_lookup (&syms[EXCL_TIME], child->addr))\n\t    {\n\t      child->cg.prop.fract = 0.0;\n\t    }\n\t}\n      child->cg.prop.self = child->hist.time * child->cg.prop.fract;\n      print_time += child->cg.prop.self;\n      DBG (PROPDEBUG,\n\t   printf (\"[prop_flags] \");\n\t   print_name (child);\n\t   printf (\" ends up with printflag %d and prop-fract %f\\n\",\n\t\t   child->cg.print_flag, child->cg.prop.fract);\n\t   printf (\"[prop_flags] time %f propself %f print_time %f\\n\",\n\t\t   child->hist.time, child->cg.prop.self, print_time));\n    }\n}",
+      "fn_code_pos": [
+        [
+          436,
+          0
+        ],
+        [
+          527,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "propagate_flags",
+        "parameters": {
+          "symbols": "Sym"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ncmp_total (const PTR lp, const PTR rp)\n{\n  const Sym *left = *(const Sym **) lp;\n  const Sym *right = *(const Sym **) rp;\n  double diff;\n\n  diff = (left->cg.prop.self + left->cg.prop.child)\n    - (right->cg.prop.self + right->cg.prop.child);\n  if (diff < 0.0)\n    {\n      return 1;\n    }\n  if (diff > 0.0)\n    {\n      return -1;\n    }\n  if (!left->name && left->cg.cyc.num != 0)\n    {\n      return -1;\n    }\n  if (!right->name && right->cg.cyc.num != 0)\n    {\n      return 1;\n    }\n  if (!left->name)\n    {\n      return -1;\n    }\n  if (!right->name)\n    {\n      return 1;\n    }\n  if (left->name[0] != '_' && right->name[0] == '_')\n    {\n      return -1;\n    }\n  if (left->name[0] == '_' && right->name[0] != '_')\n    {\n      return 1;\n    }\n  if (left->ncalls > right->ncalls)\n    {\n      return -1;\n    }\n  if (left->ncalls < right->ncalls)\n    {\n      return 1;\n    }\n  return strcmp (left->name, right->name);\n}",
+      "fn_code_pos": [
+        [
+          536,
+          0
+        ],
+        [
+          586,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmp_total",
+        "parameters": {
+          "lp": "PTR",
+          "rp": "PTR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "Sym **\ncg_assemble (void)\n{\n  Sym *parent, **time_sorted_syms, **top_sorted_syms;\n  unsigned int sym_index;\n  Arc *arc;\n\n  /* Initialize various things:\n       Zero out child times.\n       Count self-recursive calls.\n       Indicate that nothing is on cycles.  */\n  for (parent = symtab.base; parent < symtab.limit; parent++)\n    {\n      parent->cg.child_time = 0.0;\n      arc = arc_lookup (parent, parent);\n      if (arc && parent == arc->child)\n\t{\n\t  parent->ncalls -= arc->count;\n\t  parent->cg.self_calls = arc->count;\n\t}\n      else\n\t{\n\t  parent->cg.self_calls = 0;\n\t}\n      parent->cg.prop.fract = 0.0;\n      parent->cg.prop.self = 0.0;\n      parent->cg.prop.child = 0.0;\n      parent->cg.print_flag = FALSE;\n      parent->cg.top_order = DFN_NAN;\n      parent->cg.cyc.num = 0;\n      parent->cg.cyc.head = parent;\n      parent->cg.cyc.next = 0;\n      if (ignore_direct_calls)\n\tfind_call (parent, parent->addr, (parent + 1)->addr);\n    }\n\n  /* Topologically order things.  If any node is unnumbered, number\n     it and any of its descendents.  */\n  for (parent = symtab.base; parent < symtab.limit; parent++)\n    {\n      if (parent->cg.top_order == DFN_NAN)\n\tcg_dfn (parent);\n    }\n\n  /* Link together nodes on the same cycle.  */\n  cycle_link ();\n\n  /* Sort the symbol table in reverse topological order.  */\n  top_sorted_syms = (Sym **) xmalloc (symtab.len * sizeof (Sym *));\n  for (sym_index = 0; sym_index < symtab.len; ++sym_index)\n    top_sorted_syms[sym_index] = &symtab.base[sym_index];\n\n  qsort (top_sorted_syms, symtab.len, sizeof (Sym *), cmp_topo);\n  DBG (DFNDEBUG,\n       printf (\"[cg_assemble] topological sort listing\\n\");\n       for (sym_index = 0; sym_index < symtab.len; ++sym_index)\n\t {\n\t   printf (\"[cg_assemble] \");\n\t   printf (\"%d:\", top_sorted_syms[sym_index]->cg.top_order);\n\t   print_name (top_sorted_syms[sym_index]);\n\t   printf (\"\\n\");\n\t }\n  );\n\n  /* Starting from the topological top, propagate print flags to\n     children.  also, calculate propagation fractions.  this happens\n     before time propagation since time propagation uses the\n     fractions.  */\n  propagate_flags (top_sorted_syms);\n\n  /* Starting from the topological bottom, propagate children times\n     up to parents.  */\n  cycle_time ();\n  for (sym_index = 0; sym_index < symtab.len; ++sym_index)\n    propagate_time (top_sorted_syms[sym_index]);\n\n  free (top_sorted_syms);\n\n  /* Now, sort by CG.PROP.SELF + CG.PROP.CHILD.  Sorting both the regular\n     function names and cycle headers.  */\n  time_sorted_syms = (Sym **) xmalloc ((symtab.len + num_cycles) * sizeof (Sym *));\n  for (sym_index = 0; sym_index < symtab.len; sym_index++)\n    time_sorted_syms[sym_index] = &symtab.base[sym_index];\n\n  for (sym_index = 1; sym_index <= num_cycles; sym_index++)\n    time_sorted_syms[symtab.len + sym_index - 1] = &cycle_header[sym_index];\n\n  qsort (time_sorted_syms, symtab.len + num_cycles, sizeof (Sym *),\n\t cmp_total);\n\n  for (sym_index = 0; sym_index < symtab.len + num_cycles; sym_index++)\n    time_sorted_syms[sym_index]->cg.index = sym_index + 1;\n\n  return time_sorted_syms;\n}",
+      "fn_code_pos": [
+        [
+          592,
+          0
+        ],
+        [
+          686,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "Sym"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "cmp_topo (const PTR, const PTR)",
+      "fn_dec_pos": [
+        [
+          40,
+          11
+        ],
+        [
+          40,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmp_topo",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "propagate_time (Sym *)",
+      "fn_dec_pos": [
+        [
+          41,
+          12
+        ],
+        [
+          41,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "propagate_time",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "cycle_time (void)",
+      "fn_dec_pos": [
+        [
+          42,
+          12
+        ],
+        [
+          42,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cycle_time",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "cycle_link (void)",
+      "fn_dec_pos": [
+        [
+          43,
+          12
+        ],
+        [
+          43,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cycle_link",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "inherit_flags (Sym *)",
+      "fn_dec_pos": [
+        [
+          44,
+          12
+        ],
+        [
+          44,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inherit_flags",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "propagate_flags (Sym **)",
+      "fn_dec_pos": [
+        [
+          45,
+          12
+        ],
+        [
+          45,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "propagate_flags",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "cmp_total (const PTR, const PTR)",
+      "fn_dec_pos": [
+        [
+          46,
+          11
+        ],
+        [
+          46,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmp_total",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "arc_lookup (Sym *parent, Sym *child)",
+      "fn_dec_pos": [
+        [
+          58,
+          0
+        ],
+        [
+          58,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_lookup",
+        "parameters": {
+          "parent": "Sym",
+          "child": "Sym"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "cg_assemble (void)",
+      "fn_dec_pos": [
+        [
+          593,
+          0
+        ],
+        [
+          593,
+          18
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cg_assemble",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"gprof.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"search_list.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"source.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"call_graph.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"cg_arcs.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"cg_dfn.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"cg_print.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"utils.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"sym_ids.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

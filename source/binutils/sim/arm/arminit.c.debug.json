@@ -1,0 +1,428 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "void\nARMul_EmulateInit (void)\n{\n  unsigned long i, j;\n\n  for (i = 0; i < 4096; i++)\n    {\t\t\t\t/* the values of 12 bit dp rhs's */\n      ARMul_ImmedTable[i] = ROTATER (i & 0xffL, (i >> 7L) & 0x1eL);\n    }\n\n  for (i = 0; i < 256; ARMul_BitList[i++] = 0);\t/* how many bits in LSM */\n  for (j = 1; j < 256; j <<= 1)\n    for (i = 0; i < 256; i++)\n      if ((i & j) > 0)\n\tARMul_BitList[i]++;\n\n  for (i = 0; i < 256; i++)\n    ARMul_BitList[i] *= 4;\t/* you always need 4 times these values */\n\n}",
+      "fn_code_pos": [
+        [
+          46,
+          0
+        ],
+        [
+          65,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_EmulateInit",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "ARMul_State *\nARMul_NewState (void)\n{\n  ARMul_State *state;\n  unsigned i, j;\n\n  state = (ARMul_State *) malloc (sizeof (ARMul_State));\n  memset (state, 0, sizeof (ARMul_State));\n\n  state->Emulate = RUN;\n  for (i = 0; i < 16; i++)\n    {\n      state->Reg[i] = 0;\n      for (j = 0; j < 7; j++)\n\tstate->RegBank[j][i] = 0;\n    }\n  for (i = 0; i < 7; i++)\n    state->Spsr[i] = 0;\n\n  /* state->Mode = USER26MODE;  */\n  state->Mode = USER32MODE;\n\n  state->CallDebug = FALSE;\n  state->Debug = FALSE;\n  state->VectorCatch = 0;\n  state->Aborted = FALSE;\n  state->Reseted = FALSE;\n  state->Inted = 3;\n  state->LastInted = 3;\n\n  state->MemDataPtr = NULL;\n  state->MemInPtr = NULL;\n  state->MemOutPtr = NULL;\n  state->MemSparePtr = NULL;\n  state->MemSize = 0;\n\n  state->OSptr = NULL;\n  state->CommandLine = NULL;\n\n  state->CP14R0_CCD = -1;\n  state->LastTime = 0;\n\n  state->EventSet = 0;\n  state->Now = 0;\n  state->EventPtr = (struct EventNode **) malloc ((unsigned) EVENTLISTSIZE *\n\t\t\t\t\t\t  sizeof (struct EventNode\n\t\t\t\t\t\t\t  *));\n  for (i = 0; i < EVENTLISTSIZE; i++)\n    *(state->EventPtr + i) = NULL;\n\n  state->prog32Sig = HIGH;\n  state->data32Sig = HIGH;\n\n  state->lateabtSig = LOW;\n  state->bigendSig = LOW;\n\n  state->is_v4 = LOW;\n  state->is_v5 = LOW;\n  state->is_v5e = LOW;\n  state->is_XScale = LOW;\n  state->is_iWMMXt = LOW;\n  state->is_v6 = LOW;\n\n  ARMul_Reset (state);\n\n  return state;\n}",
+      "fn_code_pos": [
+        [
+          71,
+          0
+        ],
+        [
+          137,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_NewState",
+        "parameters": {},
+        "return_type": "ARMul_State"
+      }
+    },
+    {
+      "fn_code": "void\nARMul_SelectProcessor (ARMul_State * state, unsigned properties)\n{\n  if (properties & ARM_Fix26_Prop)\n    {\n      state->prog32Sig = LOW;\n      state->data32Sig = LOW;\n    }\n  else\n    {\n      state->prog32Sig = HIGH;\n      state->data32Sig = HIGH;\n    }\n\n  state->lateabtSig = LOW;\n\n  state->is_v4 = (properties & (ARM_v4_Prop | ARM_v5_Prop)) ? HIGH : LOW;\n  state->is_v5 = (properties & ARM_v5_Prop) ? HIGH : LOW;\n  state->is_v5e = (properties & ARM_v5e_Prop) ? HIGH : LOW;\n  state->is_XScale = (properties & ARM_XScale_Prop) ? HIGH : LOW;\n  state->is_iWMMXt = (properties & ARM_iWMMXt_Prop) ? HIGH : LOW;\n  state->is_ep9312 = (properties & ARM_ep9312_Prop) ? HIGH : LOW;\n  state->is_v6 = (properties & ARM_v6_Prop) ? HIGH : LOW;\n\n  /* Only initialse the coprocessor support once we\n     know what kind of chip we are dealing with.  */\n  ARMul_CoProInit (state);\n}",
+      "fn_code_pos": [
+        [
+          143,
+          0
+        ],
+        [
+          170,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_SelectProcessor",
+        "parameters": {
+          "state": "ARMul_State",
+          "properties": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nARMul_Reset (ARMul_State * state)\n{\n  state->NextInstr = 0;\n\n  if (state->prog32Sig)\n    {\n      state->Reg[15] = 0;\n      state->Cpsr = INTBITS | SVC32MODE;\n      state->Mode = SVC32MODE;\n    }\n  else\n    {\n      state->Reg[15] = R15INTBITS | SVC26MODE;\n      state->Cpsr = INTBITS | SVC26MODE;\n      state->Mode = SVC26MODE;\n    }\n\n  ARMul_CPSRAltered (state);\n  state->Bank = SVCBANK;\n\n  FLUSHPIPE;\n\n  state->EndCondition = 0;\n\n  state->Exception = FALSE;\n  state->NresetSig = HIGH;\n  state->NfiqSig = HIGH;\n  state->NirqSig = HIGH;\n  state->NtransSig = (state->Mode & 3) ? HIGH : LOW;\n  state->abortSig = LOW;\n  state->AbortAddr = 1;\n\n  state->NumInstrs = 0;\n  state->NumNcycles = 0;\n  state->NumScycles = 0;\n  state->NumIcycles = 0;\n  state->NumCcycles = 0;\n  state->NumFcycles = 0;\n#ifdef ASIM\n  (void) ARMul_MemoryInit ();\n  ARMul_OSInit (state);\n#endif\n}",
+      "fn_code_pos": [
+        [
+          176,
+          0
+        ],
+        [
+          219,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_Reset",
+        "parameters": {
+          "state": "ARMul_State"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "ARMword\nARMul_DoProg (ARMul_State * state)\n{\n  ARMword pc = 0;\n\n  state->Emulate = RUN;\n  while (state->Emulate != STOP)\n    {\n      state->Emulate = RUN;\n      if (state->prog32Sig && ARMul_MODE32BIT)\n\tpc = ARMul_Emulate32 (state);\n      else\n\tpc = ARMul_Emulate26 (state);\n    }\n  return (pc);\n}",
+      "fn_code_pos": [
+        [
+          228,
+          0
+        ],
+        [
+          243,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_DoProg",
+        "parameters": {
+          "state": "ARMul_State"
+        },
+        "return_type": "ARMword"
+      }
+    },
+    {
+      "fn_code": "ARMword\nARMul_DoInstr (ARMul_State * state)\n{\n  ARMword pc = 0;\n\n  state->Emulate = ONCE;\n  if (state->prog32Sig && ARMul_MODE32BIT)\n    pc = ARMul_Emulate32 (state);\n  else\n    pc = ARMul_Emulate26 (state);\n\n  return (pc);\n}",
+      "fn_code_pos": [
+        [
+          251,
+          0
+        ],
+        [
+          263,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_DoInstr",
+        "parameters": {
+          "state": "ARMul_State"
+        },
+        "return_type": "ARMword"
+      }
+    },
+    {
+      "fn_code": "void\nARMul_Abort (ARMul_State * state, ARMword vector)\n{\n  ARMword temp;\n  int isize = INSN_SIZE;\n  int esize = (TFLAG ? 0 : 4);\n  int e2size = (TFLAG ? -4 : 0);\n\n  state->Aborted = FALSE;\n\n  if (state->prog32Sig)\n    if (ARMul_MODE26BIT)\n      temp = R15PC;\n    else\n      temp = state->Reg[15];\n  else\n    temp = R15PC | ECC | ER15INT | EMODE;\n\n  switch (vector)\n    {\n    case ARMul_ResetV:\t\t/* RESET */\n      SETABORT (INTBITS, state->prog32Sig ? SVC32MODE : SVC26MODE, 0);\n      break;\n    case ARMul_UndefinedInstrV:\t/* Undefined Instruction */\n      SETABORT (IBIT, state->prog32Sig ? UNDEF32MODE : SVC26MODE, isize);\n      break;\n    case ARMul_SWIV:\t\t/* Software Interrupt */\n      SETABORT (IBIT, state->prog32Sig ? SVC32MODE : SVC26MODE, isize);\n      break;\n    case ARMul_PrefetchAbortV:\t/* Prefetch Abort */\n      state->AbortAddr = 1;\n      SETABORT (IBIT, state->prog32Sig ? ABORT32MODE : SVC26MODE, esize);\n      break;\n    case ARMul_DataAbortV:\t/* Data Abort */\n      SETABORT (IBIT, state->prog32Sig ? ABORT32MODE : SVC26MODE, e2size);\n      break;\n    case ARMul_AddrExceptnV:\t/* Address Exception */\n      SETABORT (IBIT, SVC26MODE, isize);\n      break;\n    case ARMul_IRQV:\t\t/* IRQ */\n      if (   ! state->is_XScale\n\t  || ! state->CPRead[13] (state, 0, & temp)\n\t  || (temp & ARMul_CP13_R0_IRQ))\n        SETABORT (IBIT, state->prog32Sig ? IRQ32MODE : IRQ26MODE, esize);\n      break;\n    case ARMul_FIQV:\t\t/* FIQ */\n      if (   ! state->is_XScale\n\t  || ! state->CPRead[13] (state, 0, & temp)\n\t  || (temp & ARMul_CP13_R0_FIQ))\n        SETABORT (INTBITS, state->prog32Sig ? FIQ32MODE : FIQ26MODE, esize);\n      break;\n    }\n  if (ARMul_MODE32BIT)\n    ARMul_SetR15 (state, vector);\n  else\n    ARMul_SetR15 (state, R15CCINTMODE | vector);\n\n  if (ARMul_ReadWord (state, ARMul_GetPC (state)) == 0)\n    {\n      /* No vector has been installed.  Rather than simulating whatever\n\t random bits might happen to be at address 0x20 onwards we elect\n\t to stop.  */\n      switch (vector)\n\t{\n\tcase ARMul_ResetV: state->EndCondition = RDIError_Reset; break;\n\tcase ARMul_UndefinedInstrV: state->EndCondition = RDIError_UndefinedInstruction; break;\n\tcase ARMul_SWIV: state->EndCondition = RDIError_SoftwareInterrupt; break;\n\tcase ARMul_PrefetchAbortV: state->EndCondition = RDIError_PrefetchAbort; break;\n\tcase ARMul_DataAbortV: state->EndCondition = RDIError_DataAbort; break;\n\tcase ARMul_AddrExceptnV: state->EndCondition = RDIError_AddressException; break;\n\tcase ARMul_IRQV: state->EndCondition = RDIError_IRQ; break;\n\tcase ARMul_FIQV: state->EndCondition = RDIError_FIQ; break;\n\tdefault: break;\n\t}\n      state->Emulate = FALSE;\n    }\n}",
+      "fn_code_pos": [
+        [
+          271,
+          0
+        ],
+        [
+          347,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_Abort",
+        "parameters": {
+          "state": "ARMul_State",
+          "vector": "ARMword"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "ARMul_EmulateInit (void)",
+      "fn_dec_pos": [
+        [
+          26,
+          5
+        ],
+        [
+          26,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_EmulateInit",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "ARMul_NewState (void)",
+      "fn_dec_pos": [
+        [
+          27,
+          13
+        ],
+        [
+          27,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_NewState",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "ARMul_Reset (ARMul_State * state)",
+      "fn_dec_pos": [
+        [
+          28,
+          5
+        ],
+        [
+          28,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_Reset",
+        "parameters": {
+          "state": "ARMul_State"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "ARMul_DoCycle (ARMul_State * state)",
+      "fn_dec_pos": [
+        [
+          29,
+          8
+        ],
+        [
+          29,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_DoCycle",
+        "parameters": {
+          "state": "ARMul_State"
+        },
+        "return_type": "ARMword"
+      }
+    },
+    {
+      "fn_code": "ARMul_DoCoPro (ARMul_State * state)",
+      "fn_dec_pos": [
+        [
+          30,
+          9
+        ],
+        [
+          30,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_DoCoPro",
+        "parameters": {
+          "state": "ARMul_State"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "ARMul_DoProg (ARMul_State * state)",
+      "fn_dec_pos": [
+        [
+          31,
+          8
+        ],
+        [
+          31,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_DoProg",
+        "parameters": {
+          "state": "ARMul_State"
+        },
+        "return_type": "ARMword"
+      }
+    },
+    {
+      "fn_code": "ARMul_DoInstr (ARMul_State * state)",
+      "fn_dec_pos": [
+        [
+          32,
+          8
+        ],
+        [
+          32,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_DoInstr",
+        "parameters": {
+          "state": "ARMul_State"
+        },
+        "return_type": "ARMword"
+      }
+    },
+    {
+      "fn_code": "ARMul_Abort (ARMul_State * state, ARMword address)",
+      "fn_dec_pos": [
+        [
+          33,
+          5
+        ],
+        [
+          33,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_Abort",
+        "parameters": {
+          "state": "ARMul_State",
+          "address": "ARMword"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "ARMul_NewState (void)",
+      "fn_dec_pos": [
+        [
+          72,
+          0
+        ],
+        [
+          72,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ARMul_NewState",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct EventNode",
+      {},
+      "",
+      [
+        115,
+        21
+      ],
+      [
+        115,
+        37
+      ]
+    ],
+    [
+      "struct EventNode",
+      {},
+      "",
+      [
+        116,
+        16
+      ],
+      [
+        116,
+        32
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <string.h>\n",
+      [
+        16,
+        0
+      ],
+      [
+        17,
+        0
+      ]
+    ],
+    [
+      "#include \"armdefs.h\"\n",
+      [
+        18,
+        0
+      ],
+      [
+        19,
+        0
+      ]
+    ],
+    [
+      "#include \"armemu.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"dbg_rdi.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

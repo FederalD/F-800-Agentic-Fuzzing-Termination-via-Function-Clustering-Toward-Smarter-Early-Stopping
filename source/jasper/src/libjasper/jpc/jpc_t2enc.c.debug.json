@@ -1,0 +1,364 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int jpc_putcommacode(jpc_bitstream_t *out, int n)\n{\n\tassert(n >= 0);\n\n\twhile (--n >= 0) {\n\t\tif (jpc_bitstream_putbit(out, 1) == EOF) {\n\t\t\treturn -1;\n\t\t}\n\t}\n\tif (jpc_bitstream_putbit(out, 0) == EOF) {\n\t\treturn -1;\n\t}\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          93,
+          0
+        ],
+        [
+          106,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_putcommacode",
+        "parameters": {
+          "out": "jpc_bitstream_t",
+          "n": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int jpc_putnumnewpasses(jpc_bitstream_t *out, int n)\n{\n\tint ret;\n\n\tif (n <= 0) {\n\t\treturn -1;\n\t} else if (n == 1) {\n\t\tret = jpc_bitstream_putbit(out, 0);\n\t} else if (n == 2) {\n\t\tret = jpc_bitstream_putbits(out, 2, 2);\n\t} else if (n <= 5) {\n\t\tret = jpc_bitstream_putbits(out, 4, 0xc | (n - 3));\n\t} else if (n <= 36) {\n\t\tret = jpc_bitstream_putbits(out, 9, 0x1e0 | (n - 6));\n\t} else if (n <= 164) {\n\t\tret = jpc_bitstream_putbits(out, 16, 0xff80 | (n - 37));\n\t} else {\n\t\t/* The standard has no provision for encoding a larger value.\n\t\tIn practice, however, it is highly unlikely that this\n\t\tlimitation will ever be encountered. */\n\t\treturn -1;\n\t}\n\n\treturn (ret != EOF) ? 0 : (-1);\n}",
+      "fn_code_pos": [
+        [
+          108,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_putnumnewpasses",
+        "parameters": {
+          "out": "jpc_bitstream_t",
+          "n": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int jpc_enc_encpkts(jpc_enc_t *enc, jas_stream_t *out)\n{\n\tjpc_enc_tile_t *tile;\n\tjpc_pi_t *pi;\n\n\ttile = enc->curtile;\n\n\tjpc_init_t2state(enc, 0);\n\tpi = tile->pi;\n\tjpc_pi_init(pi);\n\n\tif (!jpc_pi_next(pi)) {\n\t\tfor (;;) {\n\t\t\tif (jpc_enc_encpkt(enc, out, jpc_pi_cmptno(pi), jpc_pi_rlvlno(pi),\n\t\t\t  jpc_pi_prcno(pi), jpc_pi_lyrno(pi))) {\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tif (jpc_pi_next(pi)) {\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}\n\t}\n\t\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          134,
+          0
+        ],
+        [
+          158,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_enc_encpkts",
+        "parameters": {
+          "enc": "jpc_enc_t",
+          "out": "jas_stream_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int jpc_enc_encpkt(jpc_enc_t *enc, jas_stream_t *out, int compno, int lvlno, int prcno, int lyrno)\n{\n\tjpc_enc_tcmpt_t *comp;\n\tjpc_enc_rlvl_t *lvl;\n\tjpc_enc_band_t *band;\n\tjpc_enc_band_t *endbands;\n\tjpc_enc_cblk_t *cblk;\n\tjpc_enc_cblk_t *endcblks;\n\tjpc_bitstream_t *outb;\n\tjpc_enc_pass_t *pass;\n\tjpc_enc_pass_t *startpass;\n\tjpc_enc_pass_t *lastpass;\n\tjpc_enc_pass_t *endpass;\n\tjpc_enc_pass_t *endpasses;\n\tint i;\n\tint included;\n\tint ret;\n\tjpc_tagtreenode_t *leaf;\n\tint n;\n\tint t1;\n\tint t2;\n\tint adjust;\n\tint maxadjust;\n\tint datalen;\n\tint numnewpasses;\n\tint passcount;\n\tjpc_enc_tile_t *tile;\n\tjpc_enc_prc_t *prc;\n\tjpc_enc_cp_t *cp;\n\tjpc_ms_t *ms;\n\n\ttile = enc->curtile;\n\tcp = enc->cp;\n\n\tif (cp->tcp.csty & JPC_COD_SOP) {\n\t\tif (!(ms = jpc_ms_create(JPC_MS_SOP))) {\n\t\t\treturn -1;\n\t\t}\n\t\tms->parms.sop.seqno = jpc_pi_getind(tile->pi);\n\t\tif (jpc_putms(out, enc->cstate, ms)) {\n\t\t\treturn -1;\n\t\t}\n\t\tjpc_ms_destroy(ms);\n\t}\n\n\toutb = jpc_bitstream_sopen(out, \"w+\");\n\tassert(outb);\n\n\tif (jpc_bitstream_putbit(outb, 1) == EOF) {\n\t\treturn -1;\n\t}\n\tJAS_DBGLOG(10, (\"\\n\"));\n\tJAS_DBGLOG(10, (\"present. \"));\n\n\tcomp = &tile->tcmpts[compno];\n\tlvl = &comp->rlvls[lvlno];\n\tendbands = &lvl->bands[lvl->numbands];\n\tfor (band = lvl->bands; band != endbands; ++band) {\n\t\tif (!band->data) {\n\t\t\tcontinue;\n\t\t}\n\t\tprc = &band->prcs[prcno];\n\t\tif (!prc->cblks) {\n\t\t\tcontinue;\n\t\t}\n\n\t\tendcblks = &prc->cblks[prc->numcblks];\n\t\tfor (cblk = prc->cblks; cblk != endcblks; ++cblk) {\n\t\t\tif (!lyrno) {\n\t\t\t\tleaf = jpc_tagtree_getleaf(prc->nlibtree, cblk - prc->cblks);\n\t\t\t\tjpc_tagtree_setvalue(prc->nlibtree, leaf, cblk->numimsbs);\n\t\t\t}\n\t\t\tpass = cblk->curpass;\n\t\t\tincluded = (pass && pass->lyrno == lyrno);\n\t\t\tif (included && (!cblk->numencpasses)) {\n\t\t\t\tassert(pass->lyrno == lyrno);\n\t\t\t\tleaf = jpc_tagtree_getleaf(prc->incltree,\n\t\t\t\t  cblk - prc->cblks);\n\t\t\t\tjpc_tagtree_setvalue(prc->incltree, leaf, pass->lyrno);\n\t\t\t}\n\t\t}\n\n\t\tendcblks = &prc->cblks[prc->numcblks];\n\t\tfor (cblk = prc->cblks; cblk != endcblks; ++cblk) {\n\t\t\tpass = cblk->curpass;\n\t\t\tincluded = (pass && pass->lyrno == lyrno);\n\t\t\tif (!cblk->numencpasses) {\n\t\t\t\tleaf = jpc_tagtree_getleaf(prc->incltree,\n\t\t\t\t  cblk - prc->cblks);\n\t\t\t\tif (jpc_tagtree_encode(prc->incltree, leaf, lyrno\n\t\t\t\t  + 1, outb) < 0) {\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\t\t\t} else {\n\t\t\t\tif (jpc_bitstream_putbit(outb, included) == EOF) {\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\t\t\t}\n\t\t\tJAS_DBGLOG(10, (\"included=%d \", included));\n\t\t\tif (!included) {\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tif (!cblk->numencpasses) {\n\t\t\t\ti = 1;\n\t\t\t\tleaf = jpc_tagtree_getleaf(prc->nlibtree, cblk - prc->cblks);\n\t\t\t\tfor (;;) {\n\t\t\t\t\tif ((ret = jpc_tagtree_encode(prc->nlibtree, leaf, i, outb)) < 0) {\n\t\t\t\t\t\treturn -1;\n\t\t\t\t\t}\n\t\t\t\t\tif (ret) {\n\t\t\t\t\t\tbreak;\n\t\t\t\t\t}\n\t\t\t\t\t++i;\n\t\t\t\t}\n\t\t\t\tassert(leaf->known_ && i == leaf->value_ + 1);\n\t\t\t}\n\n\t\t\tendpasses = &cblk->passes[cblk->numpasses];\n\t\t\tstartpass = pass;\n\t\t\tendpass = startpass;\n\t\t\twhile (endpass != endpasses && endpass->lyrno == lyrno){\n\t\t\t\t++endpass;\n\t\t\t}\n\t\t\tnumnewpasses = endpass - startpass;\n\t\t\tif (jpc_putnumnewpasses(outb, numnewpasses)) {\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tJAS_DBGLOG(10, (\"numnewpasses=%d \", numnewpasses));\n\n\t\t\tlastpass = endpass - 1;\n\t\t\tn = startpass->start;\n\t\t\tpasscount = 1;\n\t\t\tmaxadjust = 0;\n\t\t\tfor (pass = startpass; pass != endpass; ++pass) {\n\t\t\t\tif (pass->term || pass == lastpass) {\n\t\t\t\t\tdatalen = pass->end - n;\n\t\t\t\t\tt1 = jpc_firstone(datalen) + 1;\n\t\t\t\t\tt2 = cblk->numlenbits + jpc_floorlog2(passcount);\n\t\t\t\t\tadjust = JAS_MAX(t1 - t2, 0);\n\t\t\t\t\tmaxadjust = JAS_MAX(adjust, maxadjust);\n\t\t\t\t\tn += datalen;\n\t\t\t\t\tpasscount = 1;\n\t\t\t\t} else {\n\t\t\t\t\t++passcount;\n\t\t\t\t}\n\t\t\t}\n\t\t\tif (jpc_putcommacode(outb, maxadjust)) {\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tcblk->numlenbits += maxadjust;\n\n\t\t\tlastpass = endpass - 1;\n\t\t\tn = startpass->start;\n\t\t\tpasscount = 1;\n\t\t\tfor (pass = startpass; pass != endpass; ++pass) {\n\t\t\t\tif (pass->term || pass == lastpass) {\n\t\t\t\t\tdatalen = pass->end - n;\nassert(jpc_firstone(datalen) < cblk->numlenbits + jpc_floorlog2(passcount));\n\t\t\t\t\tif (jpc_bitstream_putbits(outb, cblk->numlenbits + jpc_floorlog2(passcount), datalen) == EOF) {\n\t\t\t\t\t\treturn -1;\n\t\t\t\t\t}\n\t\t\t\t\tn += datalen;\n\t\t\t\t\tpasscount = 1;\n\t\t\t\t} else {\n\t\t\t\t\t++passcount;\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\n\tjpc_bitstream_outalign(outb, 0);\n\tjpc_bitstream_close(outb);\n\n\tif (cp->tcp.csty & JPC_COD_EPH) {\n\t\tif (!(ms = jpc_ms_create(JPC_MS_EPH))) {\n\t\t\treturn -1;\n\t\t}\n\t\tjpc_putms(out, enc->cstate, ms);\n\t\tjpc_ms_destroy(ms);\n\t}\n\n\tcomp = &tile->tcmpts[compno];\n\tlvl = &comp->rlvls[lvlno];\n\tendbands = &lvl->bands[lvl->numbands];\n\tfor (band = lvl->bands; band != endbands; ++band) {\n\t\tif (!band->data) {\n\t\t\tcontinue;\n\t\t}\n\t\tprc = &band->prcs[prcno];\n\t\tif (!prc->cblks) {\n\t\t\tcontinue;\n\t\t}\n\t\tendcblks = &prc->cblks[prc->numcblks];\n\t\tfor (cblk = prc->cblks; cblk != endcblks; ++cblk) {\n\t\t\tpass = cblk->curpass;\n\n\t\t\tif (!pass) {\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tif (pass->lyrno != lyrno) {\n\t\t\t\tassert(pass->lyrno < 0 || pass->lyrno > lyrno);\n\t\t\t\tcontinue;\n\t\t\t}\n\n\t\t\tendpasses = &cblk->passes[cblk->numpasses];\n\t\t\tstartpass = pass;\n\t\t\tendpass = startpass;\n\t\t\twhile (endpass != endpasses && endpass->lyrno == lyrno){\n\t\t\t\t++endpass;\n\t\t\t}\n\t\t\tlastpass = endpass - 1;\n\t\t\tnumnewpasses = endpass - startpass;\n\n\t\t\tjas_stream_seek(cblk->stream, startpass->start, SEEK_SET);\n\t\t\tassert(jas_stream_tell(cblk->stream) == startpass->start);\n\t\t\tif (jas_stream_copy(out, cblk->stream, lastpass->end - startpass->start)) {\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tcblk->curpass = (endpass != endpasses) ? endpass : 0;\n\t\t\tcblk->numencpasses += numnewpasses;\n\n\t\t}\n\t}\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          160,
+          0
+        ],
+        [
+          385,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_enc_encpkt",
+        "parameters": {
+          "enc": "jpc_enc_t",
+          "out": "jas_stream_t",
+          "compno": "int",
+          "lvlno": "int",
+          "prcno": "int",
+          "lyrno": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void jpc_save_t2state(jpc_enc_t *enc)\n{\n/* stream pos in embedded T1 stream may be wrong since not saved/restored! */\n\n\tjpc_enc_tcmpt_t *comp;\n\tjpc_enc_tcmpt_t *endcomps;\n\tjpc_enc_rlvl_t *lvl;\n\tjpc_enc_rlvl_t *endlvls;\n\tjpc_enc_band_t *band;\n\tjpc_enc_band_t *endbands;\n\tjpc_enc_cblk_t *cblk;\n\tjpc_enc_cblk_t *endcblks;\n\tjpc_enc_tile_t *tile;\n\tint prcno;\n\tjpc_enc_prc_t *prc;\n\n\ttile = enc->curtile;\n\n\tendcomps = &tile->tcmpts[tile->numtcmpts];\n\tfor (comp = tile->tcmpts; comp != endcomps; ++comp) {\n\t\tendlvls = &comp->rlvls[comp->numrlvls];\n\t\tfor (lvl = comp->rlvls; lvl != endlvls; ++lvl) {\n\t\t\tif (!lvl->bands) {\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tendbands = &lvl->bands[lvl->numbands];\n\t\t\tfor (band = lvl->bands; band != endbands; ++band) {\n\t\t\t\tif (!band->data) {\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tfor (prcno = 0, prc = band->prcs; prcno < lvl->numprcs; ++prcno, ++prc) {\n\t\t\t\t\tif (!prc->cblks) {\n\t\t\t\t\t\tcontinue;\n\t\t\t\t\t}\n\t\t\t\t\tjpc_tagtree_copy(prc->savincltree, prc->incltree);\n\t\t\t\t\tjpc_tagtree_copy(prc->savnlibtree, prc->nlibtree);\n\t\t\t\t\tendcblks = &prc->cblks[prc->numcblks];\n\t\t\t\t\tfor (cblk = prc->cblks; cblk != endcblks; ++cblk) {\n\t\t\t\t\t\tcblk->savedcurpass = cblk->curpass;\n\t\t\t\t\t\tcblk->savednumencpasses = cblk->numencpasses;\n\t\t\t\t\t\tcblk->savednumlenbits = cblk->numlenbits;\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\n}",
+      "fn_code_pos": [
+        [
+          387,
+          0
+        ],
+        [
+          434,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_save_t2state",
+        "parameters": {
+          "enc": "jpc_enc_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void jpc_restore_t2state(jpc_enc_t *enc)\n{\n\n\tjpc_enc_tcmpt_t *comp;\n\tjpc_enc_tcmpt_t *endcomps;\n\tjpc_enc_rlvl_t *lvl;\n\tjpc_enc_rlvl_t *endlvls;\n\tjpc_enc_band_t *band;\n\tjpc_enc_band_t *endbands;\n\tjpc_enc_cblk_t *cblk;\n\tjpc_enc_cblk_t *endcblks;\n\tjpc_enc_tile_t *tile;\n\tint prcno;\n\tjpc_enc_prc_t *prc;\n\n\ttile = enc->curtile;\n\n\tendcomps = &tile->tcmpts[tile->numtcmpts];\n\tfor (comp = tile->tcmpts; comp != endcomps; ++comp) {\n\t\tendlvls = &comp->rlvls[comp->numrlvls];\n\t\tfor (lvl = comp->rlvls; lvl != endlvls; ++lvl) {\n\t\t\tif (!lvl->bands) {\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tendbands = &lvl->bands[lvl->numbands];\n\t\t\tfor (band = lvl->bands; band != endbands; ++band) {\n\t\t\t\tif (!band->data) {\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tfor (prcno = 0, prc = band->prcs; prcno < lvl->numprcs; ++prcno, ++prc) {\n\t\t\t\t\tif (!prc->cblks) {\n\t\t\t\t\t\tcontinue;\n\t\t\t\t\t}\n\t\t\t\t\tjpc_tagtree_copy(prc->incltree, prc->savincltree);\n\t\t\t\t\tjpc_tagtree_copy(prc->nlibtree, prc->savnlibtree);\n\t\t\t\t\tendcblks = &prc->cblks[prc->numcblks];\n\t\t\t\t\tfor (cblk = prc->cblks; cblk != endcblks; ++cblk) {\n\t\t\t\t\t\tcblk->curpass = cblk->savedcurpass;\n\t\t\t\t\t\tcblk->numencpasses = cblk->savednumencpasses;\n\t\t\t\t\t\tcblk->numlenbits = cblk->savednumlenbits;\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}",
+      "fn_code_pos": [
+        [
+          436,
+          0
+        ],
+        [
+          481,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_restore_t2state",
+        "parameters": {
+          "enc": "jpc_enc_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void jpc_init_t2state(jpc_enc_t *enc, int raflag)\n{\n/* It is assumed that band->numbps and cblk->numbps precomputed */\n\n\tjpc_enc_tcmpt_t *comp;\n\tjpc_enc_tcmpt_t *endcomps;\n\tjpc_enc_rlvl_t *lvl;\n\tjpc_enc_rlvl_t *endlvls;\n\tjpc_enc_band_t *band;\n\tjpc_enc_band_t *endbands;\n\tjpc_enc_cblk_t *cblk;\n\tjpc_enc_cblk_t *endcblks;\n\tjpc_enc_pass_t *pass;\n\tjpc_enc_pass_t *endpasses;\n\tjpc_tagtreenode_t *leaf;\n\tjpc_enc_tile_t *tile;\n\tint prcno;\n\tjpc_enc_prc_t *prc;\n\n\ttile = enc->curtile;\n\n\tendcomps = &tile->tcmpts[tile->numtcmpts];\n\tfor (comp = tile->tcmpts; comp != endcomps; ++comp) {\n\t\tendlvls = &comp->rlvls[comp->numrlvls];\n\t\tfor (lvl = comp->rlvls; lvl != endlvls; ++lvl) {\n\t\t\tif (!lvl->bands) {\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tendbands = &lvl->bands[lvl->numbands];\n\t\t\tfor (band = lvl->bands; band != endbands; ++band) {\n\t\t\t\tif (!band->data) {\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tfor (prcno = 0, prc = band->prcs; prcno < lvl->numprcs; ++prcno, ++prc) {\n\t\t\t\t\tif (!prc->cblks) {\n\t\t\t\t\t\tcontinue;\n\t\t\t\t\t}\n\t\t\t\t\tjpc_tagtree_reset(prc->incltree);\n\t\t\t\t\tjpc_tagtree_reset(prc->nlibtree);\n\t\t\t\t\tendcblks = &prc->cblks[prc->numcblks];\n\t\t\t\t\tfor (cblk = prc->cblks; cblk != endcblks; ++cblk) {\n\t\t\t\t\t\tif (jas_stream_rewind(cblk->stream)) {\n\t\t\t\t\t\t\tassert(0);\n\t\t\t\t\t\t}\n\t\t\t\t\t\tcblk->curpass = (cblk->numpasses > 0) ? cblk->passes : 0;\n\t\t\t\t\t\tcblk->numencpasses = 0;\n\t\t\t\t\t\tcblk->numlenbits = 3;\n\t\t\t\t\t\tcblk->numimsbs = band->numbps - cblk->numbps;\n\t\t\t\t\t\tassert(cblk->numimsbs >= 0);\n\t\t\t\t\t\tleaf = jpc_tagtree_getleaf(prc->nlibtree, cblk - prc->cblks);\n\t\t\t\t\t\tjpc_tagtree_setvalue(prc->nlibtree, leaf, cblk->numimsbs);\n\n\t\t\t\t\t\tif (raflag) {\n\t\t\t\t\t\t\tendpasses = &cblk->passes[cblk->numpasses];\n\t\t\t\t\t\t\tfor (pass = cblk->passes; pass != endpasses; ++pass) {\n\t\t\t\t\t\t\t\tpass->lyrno = -1;\n\t\t\t\t\t\t\t\tpass->lyrno = 0;\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n\n}",
+      "fn_code_pos": [
+        [
+          483,
+          0
+        ],
+        [
+          548,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_init_t2state",
+        "parameters": {
+          "enc": "jpc_enc_t",
+          "raflag": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "jpc_pi_t *jpc_enc_pi_create(jpc_enc_cp_t *cp, jpc_enc_tile_t *tile)\n{\n\tjpc_pi_t *pi;\n\tint compno;\n\tjpc_picomp_t *picomp;\n\tjpc_pirlvl_t *pirlvl;\n\tjpc_enc_tcmpt_t *tcomp;\n\tint rlvlno;\n\tjpc_enc_rlvl_t *rlvl;\n\tint prcno;\n\tint *prclyrno;\n\n\tif (!(pi = jpc_pi_create0())) {\n\t\treturn 0;\n\t}\n\tpi->pktno = -1;\n\tpi->numcomps = cp->numcmpts;\n\tif (!(pi->picomps = jas_malloc(pi->numcomps * sizeof(jpc_picomp_t)))) {\n\t\tjpc_pi_destroy(pi);\n\t\treturn 0;\n\t}\n\tfor (compno = 0, picomp = pi->picomps; compno < pi->numcomps; ++compno,\n\t  ++picomp) {\n\t\tpicomp->pirlvls = 0;\n\t}\n\n\tfor (compno = 0, tcomp = tile->tcmpts, picomp = pi->picomps;\n\t  compno < pi->numcomps; ++compno, ++tcomp, ++picomp) {\n\t\tpicomp->numrlvls = tcomp->numrlvls;\n\t\tif (!(picomp->pirlvls = jas_malloc(picomp->numrlvls *\n\t\t  sizeof(jpc_pirlvl_t)))) {\n\t\t\tjpc_pi_destroy(pi);\n\t\t\treturn 0;\n\t\t}\n\t\tfor (rlvlno = 0, pirlvl = picomp->pirlvls; rlvlno <\n\t\t  picomp->numrlvls; ++rlvlno, ++pirlvl) {\n\t\t\tpirlvl->prclyrnos = 0;\n\t\t}\n\t\tfor (rlvlno = 0, pirlvl = picomp->pirlvls, rlvl = tcomp->rlvls;\n\t\t  rlvlno < picomp->numrlvls; ++rlvlno, ++pirlvl, ++rlvl) {\n/* XXX sizeof(long) should be sizeof different type */\n\t\t\tpirlvl->numprcs = rlvl->numprcs;\n\t\t\tif (rlvl->numprcs) {\n\t\t\t\tif (!(pirlvl->prclyrnos = jas_malloc(pirlvl->numprcs *\n\t\t\t\t  sizeof(long)))) {\n\t\t\t\t\tjpc_pi_destroy(pi);\n\t\t\t\t\treturn 0;\n\t\t\t\t}\n\t\t\t} else {\n\t\t\t\tpirlvl->prclyrnos = 0;\n\t\t\t}\n\t\t}\n\t}\n\n\tpi->maxrlvls = 0;\n\tfor (compno = 0, tcomp = tile->tcmpts, picomp = pi->picomps;\n\t  compno < pi->numcomps; ++compno, ++tcomp, ++picomp) {\n\t\tpicomp->hsamp = cp->ccps[compno].sampgrdstepx;\n\t\tpicomp->vsamp = cp->ccps[compno].sampgrdstepy;\n\t\tfor (rlvlno = 0, pirlvl = picomp->pirlvls, rlvl = tcomp->rlvls;\n\t\t  rlvlno < picomp->numrlvls; ++rlvlno, ++pirlvl, ++rlvl) {\n\t\t\tpirlvl->prcwidthexpn = rlvl->prcwidthexpn;\n\t\t\tpirlvl->prcheightexpn = rlvl->prcheightexpn;\n\t\t\tfor (prcno = 0, prclyrno = pirlvl->prclyrnos;\n\t\t\t  prcno < pirlvl->numprcs; ++prcno, ++prclyrno) {\n\t\t\t\t*prclyrno = 0;\n\t\t\t}\n\t\t\tpirlvl->numhprcs = rlvl->numhprcs;\n\t\t}\n\t\tif (pi->maxrlvls < tcomp->numrlvls) {\n\t\t\tpi->maxrlvls = tcomp->numrlvls;\n\t\t}\n\t}\n\n\tpi->numlyrs = tile->numlyrs;\n\tpi->xstart = tile->tlx;\n\tpi->ystart = tile->tly;\n\tpi->xend = tile->brx;\n\tpi->yend = tile->bry;\n\n\tpi->picomp = 0;\n\tpi->pirlvl = 0;\n\tpi->x = 0;\n\tpi->y = 0;\n\tpi->compno = 0;\n\tpi->rlvlno = 0;\n\tpi->prcno = 0;\n\tpi->lyrno = 0;\n\tpi->xstep = 0;\n\tpi->ystep = 0;\n\n\tpi->pchgno = -1;\n\n\tpi->defaultpchg.prgord = tile->prg;\n\tpi->defaultpchg.compnostart = 0;\n\tpi->defaultpchg.compnoend = pi->numcomps;\n\tpi->defaultpchg.rlvlnostart = 0;\n\tpi->defaultpchg.rlvlnoend = pi->maxrlvls;\n\tpi->defaultpchg.lyrnoend = pi->numlyrs;\n\tpi->pchg = 0;\n\n\tpi->valid = 0;\n\n\treturn pi;\n}",
+      "fn_code_pos": [
+        [
+          550,
+          0
+        ],
+        [
+          654,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_enc_pi_create",
+        "parameters": {
+          "cp": "jpc_enc_cp_t",
+          "tile": "jpc_enc_tile_t"
+        },
+        "return_type": "jpc_pi_t"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "jpc_enc_pi_create(jpc_enc_cp_t *cp, jpc_enc_tile_t *tile)",
+      "fn_dec_pos": [
+        [
+          550,
+          10
+        ],
+        [
+          550,
+          67
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_enc_pi_create",
+        "parameters": {
+          "cp": "jpc_enc_cp_t",
+          "tile": "jpc_enc_tile_t"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include <stdio.h>\n",
+      [
+        73,
+        0
+      ],
+      [
+        74,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        74,
+        0
+      ],
+      [
+        75,
+        0
+      ]
+    ],
+    [
+      "#include <assert.h>\n",
+      [
+        75,
+        0
+      ],
+      [
+        76,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_fix.h\"\n",
+      [
+        77,
+        0
+      ],
+      [
+        78,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_malloc.h\"\n",
+      [
+        78,
+        0
+      ],
+      [
+        79,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_math.h\"\n",
+      [
+        79,
+        0
+      ],
+      [
+        80,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_debug.h\"\n",
+      [
+        80,
+        0
+      ],
+      [
+        81,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_flt.h\"\n",
+      [
+        82,
+        0
+      ],
+      [
+        83,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_t2enc.h\"\n",
+      [
+        83,
+        0
+      ],
+      [
+        84,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_t2cod.h\"\n",
+      [
+        84,
+        0
+      ],
+      [
+        85,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_tagtree.h\"\n",
+      [
+        85,
+        0
+      ],
+      [
+        86,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_enc.h\"\n",
+      [
+        86,
+        0
+      ],
+      [
+        87,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_math.h\"\n",
+      [
+        87,
+        0
+      ],
+      [
+        88,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

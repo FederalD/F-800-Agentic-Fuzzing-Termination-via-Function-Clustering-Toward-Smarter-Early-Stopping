@@ -1,0 +1,715 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nread_histogram_header (histogram *record,\n\t\t       FILE *ifp, const char *filename,\n\t\t       int first)\n{\n  unsigned int profrate;\n  char n_hist_dimension[15];\n  char n_hist_dimension_abbrev;\n  double n_hist_scale;\n\n  if (gmon_io_read_vma (ifp, &record->lowpc)\n      || gmon_io_read_vma (ifp, &record->highpc)\n      || gmon_io_read_32 (ifp, &record->num_bins)\n      || gmon_io_read_32 (ifp, &profrate)\n      || gmon_io_read (ifp, n_hist_dimension, 15)\n      || gmon_io_read (ifp, &n_hist_dimension_abbrev, 1))\n    {\n      fprintf (stderr, _(\"%s: %s: unexpected end of file\\n\"),\n\t       whoami, filename);\n\n      done (1);\n    }\n\n  n_hist_scale = (double)((record->highpc - record->lowpc) / sizeof (UNIT))\n    / record->num_bins;\n\n  if (first)\n    {\n      /* We don't try to veryfy profrate is the same for all histogram\n\t records.  If we have two histogram records for the same\n\t address range and profiling samples is done as often\n\t as possible as opposed on timer, then the actual profrate will\n\t be slightly different.  Most of the time the difference does not\n\t matter and insisting that profiling rate is exactly the same\n\t will only create inconvenient.  */\n      hz = profrate;\n      memcpy (hist_dimension, n_hist_dimension, 15);\n      hist_dimension_abbrev = n_hist_dimension_abbrev;\n      hist_scale = n_hist_scale;\n    }\n  else\n    {\n      if (strncmp (n_hist_dimension, hist_dimension, 15) != 0)\n\t{\n\t  fprintf (stderr,\n\t\t   _(\"%s: dimension unit changed between histogram records\\n\"\n\t\t     \"%s: from '%s'\\n\"\n\t\t     \"%s: to '%s'\\n\"),\n\t\t   whoami, whoami, hist_dimension, whoami, n_hist_dimension);\n\t  done (1);\n\t}\n\n      if (n_hist_dimension_abbrev != hist_dimension_abbrev)\n\t{\n\t  fprintf (stderr,\n\t\t   _(\"%s: dimension abbreviation changed between histogram records\\n\"\n\t\t     \"%s: from '%c'\\n\"\n\t\t     \"%s: to '%c'\\n\"),\n\t\t   whoami, whoami, hist_dimension_abbrev, whoami, n_hist_dimension_abbrev);\n\t  done (1);\n\t}\n\n      /* The only reason we require the same scale for histograms is that\n\t there's code (notably printing code), that prints units,\n\t and it would be very confusing to have one unit mean different\n\t things for different functions.  */\n      if (fabs (hist_scale - n_hist_scale) > 0.000001)\n\t{\n\t  fprintf (stderr,\n\t\t   _(\"%s: different scales in histogram records\"),\n\t\t   whoami);\n\t  done (1);\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          88,
+          0
+        ],
+        [
+          162,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_histogram_header",
+        "parameters": {
+          "record": "histogram",
+          "ifp": "FILE",
+          "filename": "char",
+          "first": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nhist_read_rec (FILE * ifp, const char *filename)\n{\n  bfd_vma lowpc, highpc;\n  histogram n_record;\n  histogram *record, *existing_record;\n  unsigned i;\n\n  /* 1. Read the header and see if there's existing record for the\n     same address range and that there are no overlapping records.  */\n  read_histogram_header (&n_record, ifp, filename, num_histograms == 0);\n\n  existing_record = find_histogram (n_record.lowpc, n_record.highpc);\n  if (existing_record)\n    {\n      record = existing_record;\n    }\n  else\n    {\n      /* If this record overlaps, but does not completely match an existing\n\t record, it's an error.  */\n      lowpc = n_record.lowpc;\n      highpc = n_record.highpc;\n      hist_clip_symbol_address (&lowpc, &highpc);\n      if (lowpc != highpc)\n\t{\n\t  fprintf (stderr,\n\t\t   _(\"%s: overlapping histogram records\\n\"),\n\t\t   whoami);\n\t  done (1);\n\t}\n\n      /* This is new record.  Add it to global array and allocate space for\n\t the samples.  */\n      histograms = (struct histogram *)\n          xrealloc (histograms, sizeof (histogram) * (num_histograms + 1));\n      memcpy (histograms + num_histograms,\n\t      &n_record, sizeof (histogram));\n      record = &histograms[num_histograms];\n      ++num_histograms;\n\n      record->sample = (int *) xmalloc (record->num_bins\n\t\t\t\t\t* sizeof (record->sample[0]));\n      memset (record->sample, 0, record->num_bins * sizeof (record->sample[0]));\n    }\n\n  /* 2. We have either a new record (with zeroed histogram data), or an existing\n     record with some data in the histogram already.  Read new data into the\n     record, adding hit counts.  */\n\n  DBG (SAMPLEDEBUG,\n       printf (\"[hist_read_rec] n_lowpc 0x%lx n_highpc 0x%lx ncnt %u\\n\",\n\t       (unsigned long) record->lowpc, (unsigned long) record->highpc,\n               record->num_bins));\n\n  for (i = 0; i < record->num_bins; ++i)\n    {\n      UNIT count;\n      if (fread (&count[0], sizeof (count), 1, ifp) != 1)\n\t{\n\t  fprintf (stderr,\n\t\t  _(\"%s: %s: unexpected EOF after reading %u of %u samples\\n\"),\n\t\t   whoami, filename, i, record->num_bins);\n\t  done (1);\n\t}\n      record->sample[i] += bfd_get_16 (core_bfd, (bfd_byte *) & count[0]);\n      DBG (SAMPLEDEBUG,\n\t   printf (\"[hist_read_rec] 0x%lx: %u\\n\",\n\t\t   (unsigned long) (record->lowpc\n                                    + i * (record->highpc - record->lowpc)\n                                    / record->num_bins),\n\t\t   record->sample[i]));\n    }\n}",
+      "fn_code_pos": [
+        [
+          167,
+          0
+        ],
+        [
+          240,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hist_read_rec",
+        "parameters": {
+          "ifp": "FILE",
+          "filename": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nhist_write_hist (FILE * ofp, const char *filename)\n{\n  UNIT count;\n  unsigned int i, r;\n\n  for (r = 0; r < num_histograms; ++r)\n    {\n      histogram *record = &histograms[r];\n\n      /* Write header.  */\n\n      if (gmon_io_write_8 (ofp, GMON_TAG_TIME_HIST)\n\t  || gmon_io_write_vma (ofp, record->lowpc)\n\t  || gmon_io_write_vma (ofp, record->highpc)\n\t  || gmon_io_write_32 (ofp, record->num_bins)\n\t  || gmon_io_write_32 (ofp, hz)\n\t  || gmon_io_write (ofp, hist_dimension, 15)\n\t  || gmon_io_write (ofp, &hist_dimension_abbrev, 1))\n\t{\n\t  perror (filename);\n\t  done (1);\n\t}\n\n      for (i = 0; i < record->num_bins; ++i)\n\t{\n\t  bfd_put_16 (core_bfd, (bfd_vma) record->sample[i], (bfd_byte *) &count[0]);\n\n\t  if (fwrite (&count[0], sizeof (count), 1, ofp) != 1)\n\t    {\n\t      perror (filename);\n\t      done (1);\n\t    }\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          246,
+          0
+        ],
+        [
+          281,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hist_write_hist",
+        "parameters": {
+          "ofp": "FILE",
+          "filename": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nscale_and_align_entries (void)\n{\n  Sym *sym;\n  bfd_vma bin_of_entry;\n  bfd_vma bin_of_code;\n\n  for (sym = symtab.base; sym < symtab.limit; sym++)\n    {\n      histogram *r = find_histogram_for_pc (sym->addr);\n\n      sym->hist.scaled_addr = sym->addr / sizeof (UNIT);\n\n      if (r)\n\t{\n\t  bin_of_entry = (sym->hist.scaled_addr - r->lowpc) / hist_scale;\n\t  bin_of_code = ((sym->hist.scaled_addr + UNITS_TO_CODE - r->lowpc)\n\t\t     / hist_scale);\n\t  if (bin_of_entry < bin_of_code)\n\t    {\n\t      DBG (SAMPLEDEBUG,\n\t\t   printf (\"[scale_and_align_entries] pushing 0x%lx to 0x%lx\\n\",\n\t\t\t   (unsigned long) sym->hist.scaled_addr,\n\t\t\t   (unsigned long) (sym->hist.scaled_addr\n\t\t\t\t\t    + UNITS_TO_CODE)));\n\t      sym->hist.scaled_addr += UNITS_TO_CODE;\n\t    }\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          290,
+          0
+        ],
+        [
+          319,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "scale_and_align_entries",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhist_assign_samples_1 (histogram *r)\n{\n  bfd_vma bin_low_pc, bin_high_pc;\n  bfd_vma sym_low_pc, sym_high_pc;\n  bfd_vma overlap, addr;\n  unsigned int bin_count;\n  unsigned int i, j, k;\n  double count_time, credit;\n\n  bfd_vma lowpc = r->lowpc / sizeof (UNIT);\n\n  /* Iterate over all sample bins.  */\n  for (i = 0, k = 1; i < r->num_bins; ++i)\n    {\n      bin_count = r->sample[i];\n      if (! bin_count)\n\tcontinue;\n\n      bin_low_pc = lowpc + (bfd_vma) (hist_scale * i);\n      bin_high_pc = lowpc + (bfd_vma) (hist_scale * (i + 1));\n      count_time = bin_count;\n\n      DBG (SAMPLEDEBUG,\n\t   printf (\n      \"[assign_samples] bin_low_pc=0x%lx, bin_high_pc=0x%lx, bin_count=%u\\n\",\n\t\t    (unsigned long) (sizeof (UNIT) * bin_low_pc),\n\t\t    (unsigned long) (sizeof (UNIT) * bin_high_pc),\n\t\t    bin_count));\n      total_time += count_time;\n\n      /* Credit all symbols that are covered by bin I.\n\n         PR gprof/13325: Make sure that K does not get decremented\n\t and J will never be less than 0.  */\n      for (j = k - 1; j < symtab.len; k = ++j)\n\t{\n\t  sym_low_pc = symtab.base[j].hist.scaled_addr;\n\t  sym_high_pc = symtab.base[j + 1].hist.scaled_addr;\n\n\t  /* If high end of bin is below entry address,\n\t     go for next bin.  */\n\t  if (bin_high_pc < sym_low_pc)\n\t    break;\n\n\t  /* If low end of bin is above high end of symbol,\n\t     go for next symbol.  */\n\t  if (bin_low_pc >= sym_high_pc)\n\t    continue;\n\n\t  overlap =\n\t    MIN (bin_high_pc, sym_high_pc) - MAX (bin_low_pc, sym_low_pc);\n\t  if (overlap > 0)\n\t    {\n\t      DBG (SAMPLEDEBUG,\n\t\t   printf (\n\t       \"[assign_samples] [0x%lx,0x%lx) %s gets %f ticks %ld overlap\\n\",\n\t\t\t   (unsigned long) symtab.base[j].addr,\n\t\t\t   (unsigned long) (sizeof (UNIT) * sym_high_pc),\n\t\t\t   symtab.base[j].name, overlap * count_time / hist_scale,\n\t\t\t   (long) overlap));\n\n\t      addr = symtab.base[j].addr;\n\t      credit = overlap * count_time / hist_scale;\n\n\t      /* Credit symbol if it appears in INCL_FLAT or that\n\t\t table is empty and it does not appear it in\n\t\t EXCL_FLAT.  */\n\t      if (sym_lookup (&syms[INCL_FLAT], addr)\n\t\t  || (syms[INCL_FLAT].len == 0\n\t\t      && !sym_lookup (&syms[EXCL_FLAT], addr)))\n\t\t{\n\t\t  symtab.base[j].hist.time += credit;\n\t\t}\n\t      else\n\t\t{\n\t\t  total_time -= credit;\n\t\t}\n\t    }\n\t}\n    }\n\n  DBG (SAMPLEDEBUG, printf (\"[assign_samples] total_time %f\\n\",\n\t\t\t    total_time));\n}",
+      "fn_code_pos": [
+        [
+          359,
+          0
+        ],
+        [
+          443,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hist_assign_samples_1",
+        "parameters": {
+          "r": "histogram"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nhist_assign_samples (void)\n{\n  unsigned i;\n\n  scale_and_align_entries ();\n\n  for (i = 0; i < num_histograms; ++i)\n    hist_assign_samples_1 (&histograms[i]);\n\n}",
+      "fn_code_pos": [
+        [
+          446,
+          0
+        ],
+        [
+          456,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hist_assign_samples",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nprint_header (int prefix)\n{\n  char unit[64];\n\n  sprintf (unit, _(\"%c%c/call\"), prefix, hist_dimension_abbrev);\n\n  if (bsd_style_output)\n    {\n      printf (_(\"\\ngranularity: each sample hit covers %ld byte(s)\"),\n\t      (long) hist_scale * (long) sizeof (UNIT));\n      if (total_time > 0.0)\n\t{\n\t  printf (_(\" for %.2f%% of %.2f %s\\n\\n\"),\n\t\t  100.0 / total_time, total_time / hz, hist_dimension);\n\t}\n    }\n  else\n    {\n      printf (_(\"\\nEach sample counts as %g %s.\\n\"), 1.0 / hz, hist_dimension);\n    }\n\n  if (total_time <= 0.0)\n    {\n      printf (_(\" no time accumulated\\n\\n\"));\n\n      /* This doesn't hurt since all the numerators will be zero.  */\n      total_time = 1.0;\n    }\n\n  printf (\"%5.5s %10.10s %8.8s %8.8s %8.8s %8.8s  %-8.8s\\n\",\n\t  \"%  \", _(\"cumulative\"), _(\"self  \"), \"\", _(\"self  \"), _(\"total \"),\n\t  \"\");\n  printf (\"%5.5s %9.9s  %8.8s %8.8s %8.8s %8.8s  %-8.8s\\n\",\n\t  _(\"time\"), hist_dimension, hist_dimension, _(\"calls\"), unit, unit,\n\t  _(\"name\"));\n}",
+      "fn_code_pos": [
+        [
+          460,
+          0
+        ],
+        [
+          496,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_header",
+        "parameters": {
+          "prefix": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nprint_line (Sym *sym, double scale)\n{\n  if (ignore_zeros && sym->ncalls == 0 && sym->hist.time == 0)\n    return;\n\n  accum_time += sym->hist.time;\n\n  if (bsd_style_output)\n    printf (\"%5.1f %10.2f %8.2f\",\n\t    total_time > 0.0 ? 100 * sym->hist.time / total_time : 0.0,\n\t    accum_time / hz, sym->hist.time / hz);\n  else\n    printf (\"%6.2f %9.2f %8.2f\",\n\t    total_time > 0.0 ? 100 * sym->hist.time / total_time : 0.0,\n\t    accum_time / hz, sym->hist.time / hz);\n\n  if (sym->ncalls != 0)\n    printf (\" %8lu %8.2f %8.2f  \",\n\t    sym->ncalls, scale * sym->hist.time / hz / sym->ncalls,\n\t    scale * (sym->hist.time + sym->cg.child_time) / hz / sym->ncalls);\n  else\n    printf (\" %8.8s %8.8s %8.8s  \", \"\", \"\", \"\");\n\n  if (bsd_style_output)\n    print_name (sym);\n  else\n    print_name_only (sym);\n\n  printf (\"\\n\");\n}",
+      "fn_code_pos": [
+        [
+          499,
+          0
+        ],
+        [
+          529,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_line",
+        "parameters": {
+          "sym": "Sym",
+          "scale": "double"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ncmp_time (const PTR lp, const PTR rp)\n{\n  const Sym *left = *(const Sym **) lp;\n  const Sym *right = *(const Sym **) rp;\n  double time_diff;\n\n  time_diff = right->hist.time - left->hist.time;\n\n  if (time_diff > 0.0)\n    return 1;\n\n  if (time_diff < 0.0)\n    return -1;\n\n  if (right->ncalls > left->ncalls)\n    return 1;\n\n  if (right->ncalls < left->ncalls)\n    return -1;\n\n  return strcmp (left->name, right->name);\n}",
+      "fn_code_pos": [
+        [
+          536,
+          0
+        ],
+        [
+          558,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmp_time",
+        "parameters": {
+          "lp": "PTR",
+          "rp": "PTR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nhist_print (void)\n{\n  Sym **time_sorted_syms, *top_dog, *sym;\n  unsigned int sym_index;\n  unsigned log_scale;\n  double top_time;\n  bfd_vma addr;\n\n  if (first_output)\n    first_output = FALSE;\n  else\n    printf (\"\\f\\n\");\n\n  accum_time = 0.0;\n\n  if (bsd_style_output)\n    {\n      if (print_descriptions)\n\t{\n\t  printf (_(\"\\n\\n\\nflat profile:\\n\"));\n\t  flat_blurb (stdout);\n\t}\n    }\n  else\n    {\n      printf (_(\"Flat profile:\\n\"));\n    }\n\n  /* Sort the symbol table by time (call-count and name as secondary\n     and tertiary keys).  */\n  time_sorted_syms = (Sym **) xmalloc (symtab.len * sizeof (Sym *));\n\n  for (sym_index = 0; sym_index < symtab.len; ++sym_index)\n    time_sorted_syms[sym_index] = &symtab.base[sym_index];\n\n  qsort (time_sorted_syms, symtab.len, sizeof (Sym *), cmp_time);\n\n  if (bsd_style_output)\n    {\n      log_scale = 5;\t\t/* Milli-seconds is BSD-default.  */\n    }\n  else\n    {\n      /* Search for symbol with highest per-call\n\t execution time and scale accordingly.  */\n      log_scale = 0;\n      top_dog = 0;\n      top_time = 0.0;\n\n      for (sym_index = 0; sym_index < symtab.len; ++sym_index)\n\t{\n\t  sym = time_sorted_syms[sym_index];\n\n\t  if (sym->ncalls != 0)\n\t    {\n\t      double call_time;\n\n\t      call_time = (sym->hist.time + sym->cg.child_time) / sym->ncalls;\n\n\t      if (call_time > top_time)\n\t\t{\n\t\t  top_dog = sym;\n\t\t  top_time = call_time;\n\t\t}\n\t    }\n\t}\n\n      if (top_dog && top_dog->ncalls != 0 && top_time > 0.0)\n\t{\n\t  top_time /= hz;\n\n\t  for (log_scale = 0; log_scale < ARRAY_SIZE (SItab); log_scale ++)\n\t    {\n\t      double scaled_value = SItab[log_scale].scale * top_time;\n\n\t      if (scaled_value >= 1.0 && scaled_value < 1000.0)\n\t\tbreak;\n\t    }\n\t}\n    }\n\n  /* For now, the dimension is always seconds.  In the future, we\n     may also want to support other (pseudo-)dimensions (such as\n     I-cache misses etc.).  */\n  print_header (SItab[log_scale].prefix);\n\n  for (sym_index = 0; sym_index < symtab.len; ++sym_index)\n    {\n      addr = time_sorted_syms[sym_index]->addr;\n\n      /* Print symbol if its in INCL_FLAT table or that table\n\tis empty and the symbol is not in EXCL_FLAT.  */\n      if (sym_lookup (&syms[INCL_FLAT], addr)\n\t  || (syms[INCL_FLAT].len == 0\n\t      && !sym_lookup (&syms[EXCL_FLAT], addr)))\n\tprint_line (time_sorted_syms[sym_index], SItab[log_scale].scale);\n    }\n\n  free (time_sorted_syms);\n\n  if (print_descriptions && !bsd_style_output)\n    flat_blurb (stdout);\n}",
+      "fn_code_pos": [
+        [
+          563,
+          0
+        ],
+        [
+          666,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hist_print",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\nhist_check_address (unsigned address)\n{\n  unsigned i;\n\n  for (i = 0; i < num_histograms; ++i)\n    if (histograms[i].lowpc <= address && address < histograms[i].highpc)\n      return 1;\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          668,
+          0
+        ],
+        [
+          678,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hist_check_address",
+        "parameters": {
+          "address": "unsigned"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nhist_clip_symbol_address (bfd_vma *p_lowpc, bfd_vma *p_highpc)\n{\n  unsigned i;\n  int found = 0;\n\n  if (num_histograms == 0)\n    {\n      *p_highpc = *p_lowpc;\n      return;\n    }\n\n  for (i = 0; i < num_histograms; ++i)\n    {\n      bfd_vma common_low, common_high;\n      common_low = max (histograms[i].lowpc, *p_lowpc);\n      common_high = min (histograms[i].highpc, *p_highpc);\n\n      if (common_low < common_high)\n\t{\n\t  if (found)\n\t    {\n\t      fprintf (stderr,\n\t\t       _(\"%s: found a symbol that covers \"\n\t\t\t \"several histogram records\"),\n\t\t\t whoami);\n\t      done (1);\n\t    }\n\n\t  found = 1;\n\t  *p_lowpc = common_low;\n\t  *p_highpc = common_high;\n\t}\n    }\n\n  if (!found)\n    *p_highpc = *p_lowpc;\n}",
+      "fn_code_pos": [
+        [
+          687,
+          0
+        ],
+        [
+          724,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hist_clip_symbol_address",
+        "parameters": {
+          "p_lowpc": "bfd_vma",
+          "p_highpc": "bfd_vma"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static histogram *\nfind_histogram (bfd_vma lowpc, bfd_vma highpc)\n{\n  unsigned i;\n  for (i = 0; i < num_histograms; ++i)\n    {\n      if (histograms[i].lowpc == lowpc && histograms[i].highpc == highpc)\n\treturn &histograms[i];\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          729,
+          0
+        ],
+        [
+          739,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_histogram",
+        "parameters": {
+          "lowpc": "bfd_vma",
+          "highpc": "bfd_vma"
+        },
+        "return_type": "histogram"
+      }
+    },
+    {
+      "fn_code": "static histogram *\nfind_histogram_for_pc (bfd_vma pc)\n{\n  unsigned i;\n  for (i = 0; i < num_histograms; ++i)\n    {\n      if (histograms[i].lowpc <= pc && pc < histograms[i].highpc)\n\treturn &histograms[i];\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          743,
+          0
+        ],
+        [
+          753,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_histogram_for_pc",
+        "parameters": {
+          "pc": "bfd_vma"
+        },
+        "return_type": "histogram"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "scale_and_align_entries (void)",
+      "fn_dec_pos": [
+        [
+          38,
+          12
+        ],
+        [
+          38,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "scale_and_align_entries",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "print_header (int)",
+      "fn_dec_pos": [
+        [
+          39,
+          12
+        ],
+        [
+          39,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_header",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "print_line (Sym *, double)",
+      "fn_dec_pos": [
+        [
+          40,
+          12
+        ],
+        [
+          40,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_line",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "cmp_time (const PTR, const PTR)",
+      "fn_dec_pos": [
+        [
+          41,
+          11
+        ],
+        [
+          41,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmp_time",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "flat_blurb (FILE * fp)",
+      "fn_dec_pos": [
+        [
+          44,
+          12
+        ],
+        [
+          44,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "flat_blurb",
+        "parameters": {
+          "fp": "FILE"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "find_histogram (bfd_vma lowpc, bfd_vma highpc)",
+      "fn_dec_pos": [
+        [
+          46,
+          18
+        ],
+        [
+          46,
+          64
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_histogram",
+        "parameters": {
+          "lowpc": "bfd_vma",
+          "highpc": "bfd_vma"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "find_histogram_for_pc (bfd_vma pc)",
+      "fn_dec_pos": [
+        [
+          47,
+          18
+        ],
+        [
+          47,
+          52
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_histogram_for_pc",
+        "parameters": {
+          "pc": "bfd_vma"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "find_histogram (bfd_vma lowpc, bfd_vma highpc)",
+      "fn_dec_pos": [
+        [
+          730,
+          0
+        ],
+        [
+          730,
+          46
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_histogram",
+        "parameters": {
+          "lowpc": "bfd_vma",
+          "highpc": "bfd_vma"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "find_histogram_for_pc (bfd_vma pc)",
+      "fn_dec_pos": [
+        [
+          744,
+          0
+        ],
+        [
+          744,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_histogram_for_pc",
+        "parameters": {
+          "pc": "bfd_vma"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct\n  {\n    char prefix;\n    double scale;\n  }",
+      {
+        "prefix": "char",
+        "scale": "double"
+      },
+      "",
+      [
+        60,
+        6
+      ],
+      [
+        64,
+        3
+      ]
+    ],
+    [
+      "struct\n  {\n    char prefix;\n    double scale;\n  }",
+      {
+        "prefix": "char",
+        "scale": "double"
+      },
+      "",
+      [
+        60,
+        6
+      ],
+      [
+        64,
+        3
+      ]
+    ],
+    [
+      "struct histogram",
+      {},
+      "",
+      [
+        201,
+        20
+      ],
+      [
+        201,
+        36
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"gprof.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"search_list.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"source.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"corefile.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"gmon_io.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"gmon_out.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"hist.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"sym_ids.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"utils.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"math.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"stdio.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"stdlib.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

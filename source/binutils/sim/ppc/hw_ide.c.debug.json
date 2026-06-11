@@ -1,0 +1,818 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static const char *\nide_state_name(ide_states state)\n{\n  switch (state) {\n  case idle_state: return \"idle\";\n  case busy_loaded_state: return \"busy_loaded_state\";\n  case busy_drained_state: return \"busy_drained_state\";\n  case busy_dma_state: return \"busy_dma_state\";\n  case busy_command_state: return \"busy_command_state\";\n  case loading_state: return \"loading_state\";\n  case draining_state: return \"draining_state\";\n  default: return \"illegal-state\";\n  }\n}",
+      "fn_code_pos": [
+        [
+          195,
+          0
+        ],
+        [
+          208,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ide_state_name",
+        "parameters": {
+          "state": "ide_states"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nset_interrupt(device *me,\n\t      ide_controller *controller)\n{\n  if ((controller->reg[ide_control_reg] & 0x2) == 0) {\n    DTRACE(ide, (\"controller %d - interrupt set\\n\", controller->nr));\n    device_interrupt_event(me, controller->nr, 1, NULL, 0);\n    controller->is_interrupting = 1;\n  }\n}",
+      "fn_code_pos": [
+        [
+          242,
+          0
+        ],
+        [
+          251,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "set_interrupt",
+        "parameters": {
+          "me": "device",
+          "controller": "ide_controller"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nclear_interrupt(device *me,\n\t\tide_controller *controller)\n{\n  if (controller->is_interrupting) {\n    DTRACE(ide, (\"controller %d - interrupt clear\\n\", controller->nr));\n    device_interrupt_event(me, controller->nr, 0, NULL, 0);\n    controller->is_interrupting = 0;\n  }\n}",
+      "fn_code_pos": [
+        [
+          254,
+          0
+        ],
+        [
+          263,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "clear_interrupt",
+        "parameters": {
+          "me": "device",
+          "controller": "ide_controller"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_event(void *data)\n{\n  ide_controller *controller = data;\n  device *me = controller->me;\n  controller->event_tag = 0;\n  switch (controller->state) {\n  case busy_loaded_state:\n  case busy_drained_state:\n    if (controller->current_transfer > 0) {\n      controller->state = (controller->state == busy_loaded_state\n\t\t\t   ? loading_state : draining_state);\n    }\n    else {\n      controller->state = idle_state;\n    }\n    set_interrupt(me, controller);\n    break;\n  default:\n    device_error(me, \"controller %d - unexpected event\", controller->nr);\n    break;\n  }\n}",
+      "fn_code_pos": [
+        [
+          266,
+          0
+        ],
+        [
+          288,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_event",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nschedule_ready_event(device *me,\n\t\t     ide_controller *controller)\n{\n  if (controller->event_tag != 0)\n    device_error(me, \"controller %d - attempting to schedule multiple events\",\n\t\t controller->nr);\n  controller->event_tag = \n    device_event_queue_schedule(me, controller->ready_delay,\n\t\t\t\tdo_event, controller);\n}",
+      "fn_code_pos": [
+        [
+          291,
+          0
+        ],
+        [
+          301,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "schedule_ready_event",
+        "parameters": {
+          "me": "device",
+          "controller": "ide_controller"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_fifo_read(device *me,\n\t     ide_controller *controller,\n\t     void *dest,\n\t     int nr_bytes)\n{\n  if (controller->state != draining_state)\n    device_error(me, \"controller %d - reading fifo when not ready (%s)\",\n\t\t controller->nr,\n\t\t ide_state_name(controller->state));\n  if (controller->fifo_pos + nr_bytes > controller->fifo_size)\n    device_error(me, \"controller %d - fifo underflow\", controller->nr);\n  if (nr_bytes > 0) {\n    memcpy(dest, &controller->fifo[controller->fifo_pos], nr_bytes);\n    controller->fifo_pos += nr_bytes;\n  }\n  if (controller->fifo_pos == controller->fifo_size) {\n    controller->current_transfer -= 1;\n    if (controller->current_transfer > 0\n\t&& controller->current_drive != NULL) {\n      DTRACE(ide, (\"controller %d:%d - reading %d byte block at 0x%x\\n\",\n\t\t   controller->nr,\n\t\t   controller->current_drive->nr,\n\t\t   controller->fifo_size,\n\t\t   controller->current_byte));\n      if (device_io_read_buffer(controller->current_drive->device,\n\t\t\t\tcontroller->fifo,\n\t\t\t\t0, controller->current_byte,\n\t\t\t\tcontroller->fifo_size,\n\t\t\t\tNULL, 0)\n\t  != controller->fifo_size)\n\tdevice_error(me, \"controller %d - disk %s io read error\",\n\t\t     controller->nr,\n\t\t     device_path(controller->current_drive->device));\n    }\n    controller->state = busy_drained_state;\n    controller->fifo_pos = 0;\n    controller->current_byte += controller->fifo_size;\n    schedule_ready_event(me, controller);\n  }\n}",
+      "fn_code_pos": [
+        [
+          304,
+          0
+        ],
+        [
+          344,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_fifo_read",
+        "parameters": {
+          "me": "device",
+          "controller": "ide_controller",
+          "dest": "void",
+          "nr_bytes": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_fifo_write(device *me,\n\t      ide_controller *controller,\n\t      const void *source,\n\t      int nr_bytes)\n{\n  if (controller->state != loading_state)\n    device_error(me, \"controller %d - writing fifo when not ready (%s)\",\n\t\t controller->nr,\n\t\t ide_state_name(controller->state));\n  if (controller->fifo_pos + nr_bytes > controller->fifo_size)\n    device_error(me, \"controller %d - fifo overflow\", controller->nr);\n  if (nr_bytes > 0) {\n    memcpy(&controller->fifo[controller->fifo_pos], source, nr_bytes);\n    controller->fifo_pos += nr_bytes;\n  }\n  if (controller->fifo_pos == controller->fifo_size) {\n    if (controller->current_transfer > 0\n\t&& controller->current_drive != NULL) {\n      DTRACE(ide, (\"controller %d:%d - writing %d byte block at 0x%x\\n\",\n\t\t   controller->nr,\n\t\t   controller->current_drive->nr,\n\t\t   controller->fifo_size,\n\t\t   controller->current_byte));\n      if (device_io_write_buffer(controller->current_drive->device,\n\t\t\t\t controller->fifo,\n\t\t\t\t 0, controller->current_byte,\n\t\t\t\t controller->fifo_size,\n\t\t\t\t NULL, 0)\n\t  != controller->fifo_size)\n\tdevice_error(me, \"controller %d - disk %s io write error\",\n\t\t     controller->nr,\n\t\t     device_path(controller->current_drive->device));\n    }\n    controller->current_transfer -= 1;\n    controller->fifo_pos = 0;\n    controller->current_byte += controller->fifo_size;\n    controller->state = busy_loaded_state;\n    schedule_ready_event(me, controller);\n  }\n}",
+      "fn_code_pos": [
+        [
+          347,
+          0
+        ],
+        [
+          387,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_fifo_write",
+        "parameters": {
+          "me": "device",
+          "controller": "ide_controller",
+          "source": "void",
+          "nr_bytes": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nsetup_fifo(device *me,\n\t   ide_controller *controller,\n\t   int is_simple,\n\t   int is_with_disk,\n\t   io_direction direction)\n{\n  /* find the disk */\n  if (is_with_disk) {\n    int drive_nr = (controller->reg[ide_drive_head_reg] & 0x10) != 0;\n    controller->current_drive = &controller->drive[drive_nr];\n  }\n  else {\n    controller->current_drive = NULL;\n  }\n\n  /* number of transfers */\n  if (is_simple)\n    controller->current_transfer = 1;\n  else {\n    int sector_count = controller->reg[ide_sector_count_reg];\n    if (sector_count == 0)\n      controller->current_transfer = 256;\n    else\n      controller->current_transfer = sector_count;\n  }\n\n  /* the transfer size */\n  if (controller->current_drive == NULL)\n    controller->fifo_size = 512;\n  else\n    controller->fifo_size = controller->current_drive->geometry.byte;\n\n  /* empty the fifo */\n  controller->fifo_pos = 0;\n\n  /* the starting address */\n  if (controller->current_drive == NULL)\n    controller->current_byte = 0;\n  else if (controller->reg[ide_drive_head_reg] & 0x40) {\n    /* LBA addressing mode */\n    controller->current_byte = controller->fifo_size\n      * (((controller->reg[ide_drive_head_reg] & 0xf) << 24)\n\t | (controller->reg[ide_cylinder_reg1] << 16)\n\t | (controller->reg[ide_cylinder_reg0] << 8)\n\t | (controller->reg[ide_sector_number_reg]));\n  }\n  else if (controller->current_drive->geometry.head != 0\n\t   && controller->current_drive->geometry.sector != 0) {\n    /* CHS addressing mode */\n    int head_nr = controller->reg[ide_drive_head_reg] & 0xf;\n    int cylinder_nr = ((controller->reg[ide_cylinder_reg1] << 8)\n\t\t    | controller->reg[ide_cylinder_reg0]);\n    int sector_nr = controller->reg[ide_sector_number_reg];\n    controller->current_byte = controller->fifo_size\n      * ((cylinder_nr * controller->current_drive->geometry.head + head_nr)\n\t * controller->current_drive->geometry.sector + sector_nr - 1);\n  }\n  else\n    device_error(me, \"controller %d:%d - CHS addressing disabled\",\n\t\t controller->nr, controller->current_drive->nr);\n  DTRACE(ide, (\"controller %ld:%ld - transfer (%s) %ld blocks of %ld bytes from 0x%lx\\n\",\n\t       (long)controller->nr,\n\t       controller->current_drive == NULL ? -1L : (long)controller->current_drive->nr,\n\t       direction == is_read ? \"read\" : \"write\",\n\t       (long)controller->current_transfer,\n\t       (long)controller->fifo_size,\n\t       (unsigned long)controller->current_byte));\n  switch (direction) {\n  case is_read:\n    /* force a primeing read */\n    controller->current_transfer += 1;\n    controller->state = draining_state; \n    controller->fifo_pos = controller->fifo_size;\n    do_fifo_read(me, controller, NULL, 0);\n    break;\n  case is_write:\n    controller->state = loading_state;\n    break;\n  }\n}",
+      "fn_code_pos": [
+        [
+          390,
+          0
+        ],
+        [
+          470,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "setup_fifo",
+        "parameters": {
+          "me": "device",
+          "controller": "ide_controller",
+          "is_simple": "int",
+          "is_with_disk": "int",
+          "direction": "io_direction"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_command(device *me,\n\t   ide_controller *controller,\n\t   int command)\n{\n  if (controller->state != idle_state)\n    device_error(me, \"controller %d - command when not idle\", controller->nr);\n  switch (command) {\n  case 0x20: case 0x21: /* read-sectors */\n    setup_fifo(me, controller, 0/*is_simple*/, 1/*is_with_disk*/, is_read);\n    break;\n  case 0x30: case 0x31: /* write */\n    setup_fifo(me, controller, 0/*is_simple*/, 1/*is_with_disk*/, is_write);\n    break;\n  }\n}",
+      "fn_code_pos": [
+        [
+          473,
+          0
+        ],
+        [
+          488,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_command",
+        "parameters": {
+          "me": "device",
+          "controller": "ide_controller",
+          "command": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned8\nget_status(device *me,\n\t   ide_controller *controller)\n{\n  switch (controller->state) {\n  case loading_state:\n  case draining_state:\n    return 0x08; /* data req */\n  case busy_loaded_state:\n  case busy_drained_state:\n    return 0x80; /* busy */\n  case idle_state:\n    return 0x40; /* drive ready */\n  default:\n    device_error(me, \"internal error\");\n    return 0;\n  }\n}",
+      "fn_code_pos": [
+        [
+          490,
+          0
+        ],
+        [
+          507,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_status",
+        "parameters": {
+          "me": "device",
+          "controller": "ide_controller"
+        },
+        "return_type": "unsigned8"
+      }
+    },
+    {
+      "fn_code": "static void\ndecode_address(device *me,\n\t       address_decoder *decoder,\n\t       int space,\n\t       unsigned_word address,\n\t       int *controller,\n\t       int *reg,\n\t       io_direction direction)\n{\n  int i;\n  for (i = 0; i < nr_address_blocks; i++) {\n    if (space == decoder->block[i].space\n\t&& address >= decoder->block[i].base_addr\n\t&& address <= decoder->block[i].bound_addr) {\n      *controller = decoder->block[i].controller;\n      *reg = (address\n\t      - decoder->block[i].base_addr\n\t      + decoder->block[i].base_reg);\n      if (direction == is_write) {\n\tswitch (*reg) {\n\tcase ide_error_reg: *reg = ide_feature_reg; break;\n\tcase ide_status_reg: *reg = ide_command_reg; break;\n\tcase ide_alternate_status_reg: *reg = ide_control_reg; break;\n\tdefault: break;\n\t}\n      }\n      return;\n    }\n  }\n  device_error(me, \"address %d:0x%lx invalid\",\n\t       space, (unsigned long)address);\n}",
+      "fn_code_pos": [
+        [
+          529,
+          0
+        ],
+        [
+          560,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decode_address",
+        "parameters": {
+          "me": "device",
+          "decoder": "address_decoder",
+          "space": "int",
+          "address": "unsigned_word",
+          "controller": "int",
+          "reg": "int",
+          "direction": "io_direction"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nbuild_address_decoder(device *me,\n\t\t      address_decoder *decoder)\n{\n  int reg;\n  for (reg = 1; reg < 6; reg++) {\n    reg_property_spec unit;\n    int space;\n    unsigned_word address;\n    unsigned size;\n    /* find and decode the reg property */\n    if (!device_find_reg_array_property(me, \"reg\", reg, &unit))\n      device_error(me, \"missing or invalid reg entry %d\", reg);\n    device_address_to_attach_address(device_parent(me), &unit.address,\n\t\t\t\t     &space, &address, me);\n    device_size_to_attach_size(device_parent(me), &unit.size, &size, me);\n    /* insert it into the address decoder */\n    switch (reg) {\n    case 1:\n    case 2:\n      /* command register block */\n      if (size != 8)\n\tdevice_error(me, \"reg entry %d must have a size of 8\", reg);\n      decoder->block[reg-1].space = space;\n      decoder->block[reg-1].base_addr = address;\n      decoder->block[reg-1].bound_addr = address + size - 1;\n      decoder->block[reg-1].controller = (reg + 1) % nr_ide_controllers;\n      decoder->block[reg-1].base_reg = ide_data_reg;\n      DTRACE(ide, (\"controller %d command register block at %d:0x%lx..0x%lx\\n\",\n\t\t   decoder->block[reg-1].controller,\n\t\t   decoder->block[reg-1].space,\n\t\t   (unsigned long)decoder->block[reg-1].base_addr,\n\t\t   (unsigned long)decoder->block[reg-1].bound_addr));\n      break;\n    case 3:\n    case 4:\n      /* control register block */\n      if (size != 1)\n\tdevice_error(me, \"reg entry %d must have a size of 1\", reg);\n      decoder->block[reg-1].space = space;\n      decoder->block[reg-1].base_addr = address;\n      decoder->block[reg-1].bound_addr = address + size - 1;\n      decoder->block[reg-1].controller = (reg + 1) % nr_ide_controllers;\n      decoder->block[reg-1].base_reg = ide_alternate_status_reg;\n      DTRACE(ide, (\"controller %d control register block at %d:0x%lx..0x%lx\\n\",\n\t\t   decoder->block[reg-1].controller,\n\t\t   decoder->block[reg-1].space,\n\t\t   (unsigned long)decoder->block[reg-1].base_addr,\n\t\t   (unsigned long)decoder->block[reg-1].bound_addr));\n      break;\n    case 5:\n      /* dma register block */\n      if (size != 8)\n\tdevice_error(me, \"reg entry %d must have a size of 8\", reg);\n      decoder->block[reg-1].space = space;\n      decoder->block[reg-1].base_addr = address;\n      decoder->block[reg-1].bound_addr = address + 4 - 1;\n      decoder->block[reg-1].base_reg = ide_dma_command_reg;\n      decoder->block[reg-1].controller = 0;\n      DTRACE(ide, (\"controller %d dma register block at %d:0x%lx..0x%lx\\n\",\n\t\t   decoder->block[reg-1].controller,\n\t\t   decoder->block[reg-1].space,\n\t\t   (unsigned long)decoder->block[reg-1].base_addr,\n\t\t   (unsigned long)decoder->block[reg-1].bound_addr));\n      decoder->block[reg].space = space;\n      decoder->block[reg].base_addr = address + 4;\n      decoder->block[reg].bound_addr = address + 8 - 1;\n      decoder->block[reg].controller = 1;\n      decoder->block[reg].base_reg = ide_dma_command_reg;\n      DTRACE(ide, (\"controller %d dma register block at %d:0x%lx..0x%lx\\n\",\n\t\t   decoder->block[reg].controller,\n\t\t   decoder->block[reg-1].space,\n\t\t   (unsigned long)decoder->block[reg].base_addr,\n\t\t   (unsigned long)decoder->block[reg].bound_addr));\n      break;\n    default:\n      device_error(me, \"internal error - bad switch\");\n      break;\n    }\n  }\n}",
+      "fn_code_pos": [
+        [
+          563,
+          0
+        ],
+        [
+          643,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "build_address_decoder",
+        "parameters": {
+          "me": "device",
+          "decoder": "address_decoder"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_ide_init_address(device *me)\n{\n  hw_ide_device *ide = device_data(me);\n  int controller;\n  int drive;\n \n  /* zero some things */\n  for (controller = 0; controller < nr_ide_controllers; controller++) {\n    memset(&ide->controller[controller], 0, sizeof(ide_controller));\n    for (drive = 0; drive < nr_ide_drives_per_controller; drive++) {\n      ide->controller[controller].drive[drive].nr = drive;\n    }\n    ide->controller[controller].me = me;\n    if (device_find_property(me, \"ready-delay\") != NULL)\n      ide->controller[controller].ready_delay =\n\tdevice_find_integer_property(me, \"ready-delay\");\n  }\n\n  /* attach this device to its parent */\n  generic_device_init_address(me);\n\n  /* determine our own address map */\n  build_address_decoder(me, &ide->decoder);\n\n}",
+      "fn_code_pos": [
+        [
+          653,
+          0
+        ],
+        [
+          678,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_ide_init_address",
+        "parameters": {
+          "me": "device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_ide_attach_address(device *me,\n\t\t      attach_type type,\n\t\t      int space,\n\t\t      unsigned_word addr,\n\t\t      unsigned nr_bytes,\n\t\t      access_type access,\n\t\t      device *client) /*callback/default*/\n{\n  hw_ide_device *ide = (hw_ide_device*)device_data(me);\n  int controller_nr = addr / nr_ide_drives_per_controller;\n  int drive_nr = addr % nr_ide_drives_per_controller;\n  ide_controller *controller;\n  ide_drive *drive;\n  if (controller_nr >= nr_ide_controllers)\n    device_error(me, \"no controller for disk %s\",\n\t\t device_path(client));\n\n  controller = &ide->controller[controller_nr];\n  drive = &controller->drive[drive_nr];\n  drive->device = client;\n  if (device_find_property(client, \"ide-byte-count\") != NULL)\n    drive->geometry.byte = device_find_integer_property(client, \"ide-byte-count\");\n  else\n    drive->geometry.byte = 512;\n  if (device_find_property(client, \"ide-sector-count\") != NULL)\n    drive->geometry.sector = device_find_integer_property(client, \"ide-sector-count\");\n  if (device_find_property(client, \"ide-head-count\") != NULL)\n    drive->geometry.head = device_find_integer_property(client, \"ide-head-count\");\n  drive->default_geometry = drive->geometry;\n  DTRACE(ide, (\"controller %d:%d %s byte-count %d, sector-count %d, head-count %d\\n\",\n\t       controller_nr,\n\t       drive->nr,\n\t       device_path(client),\n\t       drive->geometry.byte,\n\t       drive->geometry.sector,\n\t       drive->geometry.head));\n}",
+      "fn_code_pos": [
+        [
+          681,
+          0
+        ],
+        [
+          718,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_ide_attach_address",
+        "parameters": {
+          "me": "device",
+          "type": "attach_type",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "access": "access_type",
+          "client": "device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_ide_io_read_buffer(device *me,\n\t\t      void *dest,\n\t\t      int space,\n\t\t      unsigned_word addr,\n\t\t      unsigned nr_bytes,\n\t\t      cpu *processor,\n\t\t      unsigned_word cia)\n{\n  hw_ide_device *ide = (hw_ide_device *)device_data(me);\n  int control_nr;\n  int reg;\n  ide_controller *controller;\n\n  /* find the interface */\n  decode_address(me, &ide->decoder, space, addr, &control_nr, &reg, is_read);\n  controller = & ide->controller[control_nr];\n\n  /* process the transfer */\n  memset(dest, 0, nr_bytes);\n  switch (reg) {\n  case ide_data_reg:\n    do_fifo_read(me, controller, dest, nr_bytes);\n    break;\n  case ide_status_reg:\n    *(unsigned8*)dest = get_status(me, controller);\n    clear_interrupt(me, controller);\n    break;\n  case ide_alternate_status_reg:\n    *(unsigned8*)dest = get_status(me, controller);\n    break;\n  case ide_error_reg:\n  case ide_sector_count_reg:\n  case ide_sector_number_reg:\n  case ide_cylinder_reg0:\n  case ide_cylinder_reg1:\n  case ide_drive_head_reg:\n  case ide_control_reg:\n  case ide_dma_command_reg:\n  case ide_dma_status_reg:\n  case ide_dma_prd_table_address_reg0:\n  case ide_dma_prd_table_address_reg1:\n  case ide_dma_prd_table_address_reg2:\n  case ide_dma_prd_table_address_reg3:\n    *(unsigned8*)dest = controller->reg[reg];\n    break;\n  default:\n    device_error(me, \"bus-error at address 0x%lx\", addr);\n    break;\n  }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          721,
+          0
+        ],
+        [
+          772,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_ide_io_read_buffer",
+        "parameters": {
+          "me": "device",
+          "dest": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_ide_io_write_buffer(device *me,\n\t\t       const void *source,\n\t\t       int space,\n\t\t       unsigned_word addr,\n\t\t       unsigned nr_bytes,\n\t\t       cpu *processor,\n\t\t       unsigned_word cia)\n{\n  hw_ide_device *ide = (hw_ide_device *)device_data(me);\n  int control_nr;\n  int reg;\n  ide_controller *controller;\n\n  /* find the interface */\n  decode_address(me, &ide->decoder, space, addr, &control_nr, &reg, is_write);\n  controller = &ide->controller[control_nr];\n\n  /* process the access */\n  switch (reg) {\n  case ide_data_reg:\n    do_fifo_write(me, controller, source, nr_bytes);\n    break;\n  case ide_command_reg:\n    do_command(me, controller, *(unsigned8*)source);\n    break;\n  case ide_control_reg:\n    controller->reg[reg] = *(unsigned8*)source;\n    /* possibly cancel interrupts */\n    if ((controller->reg[reg] & 0x02) == 0x02)\n      clear_interrupt(me, controller);\n    break;\n  case ide_feature_reg:\n  case ide_sector_count_reg:\n  case ide_sector_number_reg:\n  case ide_cylinder_reg0:\n  case ide_cylinder_reg1:\n  case ide_drive_head_reg:\n  case ide_dma_command_reg:\n  case ide_dma_status_reg:\n  case ide_dma_prd_table_address_reg0:\n  case ide_dma_prd_table_address_reg1:\n  case ide_dma_prd_table_address_reg2:\n  case ide_dma_prd_table_address_reg3:\n    controller->reg[reg] = *(unsigned8*)source;\n    break;\n  default:\n    device_error(me, \"bus-error at 0x%lx\", addr);\n    break;\n  }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          775,
+          0
+        ],
+        [
+          826,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_ide_io_write_buffer",
+        "parameters": {
+          "me": "device",
+          "source": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void *\nhw_ide_create(const char *name,\n\t      const device_unit *unit_address,\n\t      const char *args)\n{\n  hw_ide_device *ide = ZALLOC(hw_ide_device);\n  return ide;\n}",
+      "fn_code_pos": [
+        [
+          852,
+          0
+        ],
+        [
+          859,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_ide_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "ide_state_name(ide_states state)",
+      "fn_dec_pos": [
+        [
+          196,
+          0
+        ],
+        [
+          196,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ide_state_name",
+        "parameters": {
+          "state": "ide_states"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "hw_ide_create(const char *name,\n\t      const device_unit *unit_address,\n\t      const char *args)",
+      "fn_dec_pos": [
+        [
+          853,
+          0
+        ],
+        [
+          855,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_ide_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct _ide_geometry {\n  int head;\n  int sector;\n  int byte;\n} ide_geometry;",
+      {
+        "head": "int",
+        "sector": "int",
+        "byte": "int"
+      },
+      "ide_geometry",
+      [
+        210,
+        0
+      ],
+      [
+        214,
+        15
+      ]
+    ],
+    [
+      "typedef struct _ide_drive {\n  int nr;\n  device *device;\n  ide_geometry geometry;\n  ide_geometry default_geometry;\n} ide_drive;",
+      {
+        "nr": "int",
+        "*device": "device",
+        "geometry": "ide_geometry",
+        "default_geometry": "ide_geometry"
+      },
+      "ide_drive",
+      [
+        216,
+        0
+      ],
+      [
+        221,
+        12
+      ]
+    ],
+    [
+      "typedef struct _ide_controller {\n  int nr;\n  ide_states state;\n  unsigned8 reg[nr_ide_registers];\n  unsigned8 fifo[nr_fifo_entries];\n  int fifo_pos;\n  int fifo_size;\n  ide_drive *current_drive;\n  int current_byte;\n  int current_transfer;\n  ide_drive drive[nr_ide_drives_per_controller];\n  device *me;\n  event_entry_tag event_tag;\n  int is_interrupting;\n  signed64 ready_delay;\n} ide_controller;",
+      {
+        "nr": "int",
+        "state": "ide_states",
+        "reg[nr_ide_registers]": "unsigned8",
+        "fifo[nr_fifo_entries]": "unsigned8",
+        "fifo_pos": "int",
+        "fifo_size": "int",
+        "*current_drive": "ide_drive",
+        "current_byte": "int",
+        "current_transfer": "int",
+        "drive[nr_ide_drives_per_controller]": "ide_drive",
+        "*me": "device",
+        "event_tag": "event_entry_tag",
+        "is_interrupting": "int",
+        "ready_delay": "signed64"
+      },
+      "ide_controller",
+      [
+        223,
+        0
+      ],
+      [
+        238,
+        17
+      ]
+    ],
+    [
+      "typedef struct _address_block {\n  int space;\n  unsigned_word base_addr;\n  unsigned_word bound_addr;\n  int controller;\n  int base_reg;\n} address_block;",
+      {
+        "space": "int",
+        "base_addr": "unsigned_word",
+        "bound_addr": "unsigned_word",
+        "controller": "int",
+        "base_reg": "int"
+      },
+      "address_block",
+      [
+        517,
+        0
+      ],
+      [
+        523,
+        16
+      ]
+    ],
+    [
+      "typedef struct _address_decoder {\n  address_block block[nr_address_blocks];\n} address_decoder;",
+      {
+        "block[nr_address_blocks]": "address_block"
+      },
+      "address_decoder",
+      [
+        525,
+        0
+      ],
+      [
+        527,
+        18
+      ]
+    ],
+    [
+      "typedef struct _hw_ide_device {\n  ide_controller controller[nr_ide_controllers];\n  address_decoder decoder;\n} hw_ide_device;",
+      {
+        "controller[nr_ide_controllers]": "ide_controller",
+        "decoder": "address_decoder"
+      },
+      "hw_ide_device",
+      [
+        647,
+        0
+      ],
+      [
+        650,
+        16
+      ]
+    ],
+    [
+      "typedef struct _ide_geometry {\n  int head;\n  int sector;\n  int byte;\n} ide_geometry;",
+      {
+        "head": "int",
+        "sector": "int",
+        "byte": "int"
+      },
+      "ide_geometry",
+      [
+        210,
+        0
+      ],
+      [
+        214,
+        15
+      ]
+    ],
+    [
+      "typedef struct _ide_drive {\n  int nr;\n  device *device;\n  ide_geometry geometry;\n  ide_geometry default_geometry;\n} ide_drive;",
+      {
+        "nr": "int",
+        "*device": "device",
+        "geometry": "ide_geometry",
+        "default_geometry": "ide_geometry"
+      },
+      "ide_drive",
+      [
+        216,
+        0
+      ],
+      [
+        221,
+        12
+      ]
+    ],
+    [
+      "typedef struct _ide_controller {\n  int nr;\n  ide_states state;\n  unsigned8 reg[nr_ide_registers];\n  unsigned8 fifo[nr_fifo_entries];\n  int fifo_pos;\n  int fifo_size;\n  ide_drive *current_drive;\n  int current_byte;\n  int current_transfer;\n  ide_drive drive[nr_ide_drives_per_controller];\n  device *me;\n  event_entry_tag event_tag;\n  int is_interrupting;\n  signed64 ready_delay;\n} ide_controller;",
+      {
+        "nr": "int",
+        "state": "ide_states",
+        "reg[nr_ide_registers]": "unsigned8",
+        "fifo[nr_fifo_entries]": "unsigned8",
+        "fifo_pos": "int",
+        "fifo_size": "int",
+        "*current_drive": "ide_drive",
+        "current_byte": "int",
+        "current_transfer": "int",
+        "drive[nr_ide_drives_per_controller]": "ide_drive",
+        "*me": "device",
+        "event_tag": "event_entry_tag",
+        "is_interrupting": "int",
+        "ready_delay": "signed64"
+      },
+      "ide_controller",
+      [
+        223,
+        0
+      ],
+      [
+        238,
+        17
+      ]
+    ],
+    [
+      "typedef struct _address_block {\n  int space;\n  unsigned_word base_addr;\n  unsigned_word bound_addr;\n  int controller;\n  int base_reg;\n} address_block;",
+      {
+        "space": "int",
+        "base_addr": "unsigned_word",
+        "bound_addr": "unsigned_word",
+        "controller": "int",
+        "base_reg": "int"
+      },
+      "address_block",
+      [
+        517,
+        0
+      ],
+      [
+        523,
+        16
+      ]
+    ],
+    [
+      "typedef struct _address_decoder {\n  address_block block[nr_address_blocks];\n} address_decoder;",
+      {
+        "block[nr_address_blocks]": "address_block"
+      },
+      "address_decoder",
+      [
+        525,
+        0
+      ],
+      [
+        527,
+        18
+      ]
+    ],
+    [
+      "typedef struct _hw_ide_device {\n  ide_controller controller[nr_ide_controllers];\n  address_decoder decoder;\n} hw_ide_device;",
+      {
+        "controller[nr_ide_controllers]": "ide_controller",
+        "decoder": "address_decoder"
+      },
+      "hw_ide_device",
+      [
+        647,
+        0
+      ],
+      [
+        650,
+        16
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"device_table.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "typedef enum _io_direction {\n  is_read,\n  is_write,\n} io_direction;",
+      {
+        "is_read": "",
+        "is_write": ""
+      },
+      "io_direction",
+      [
+        144,
+        0
+      ],
+      [
+        147,
+        15
+      ]
+    ],
+    [
+      "enum {\n  nr_ide_controllers = 2,\n  nr_ide_drives_per_controller = 2,\n  nr_fifo_entries = 8192,\n}",
+      {
+        "nr_ide_controllers": "",
+        "nr_ide_drives_per_controller": "",
+        "nr_fifo_entries": ""
+      },
+      "",
+      [
+        150,
+        0
+      ],
+      [
+        154,
+        1
+      ]
+    ],
+    [
+      "enum {\n  /* command register block - read */\n  ide_data_reg,\n  ide_error_reg, /*ide_feature_reg*/\n  ide_sector_count_reg,\n  ide_sector_number_reg,\n  ide_cylinder_reg0,\n  ide_cylinder_reg1,\n  ide_drive_head_reg,\n  ide_status_reg, /*ide_command_reg*/\n  /* command register block - write */\n  ide_feature_reg, /*ide_error_reg*/\n  ide_command_reg, /*ide_status_reg*/\n  /* control register block - read */\n  ide_alternate_status_reg, /*ide_control_reg*/\n  ide_control_reg, /*ide_alternate_status_reg*/\n  /* dma register block */\n  ide_dma_command_reg,\n  ide_dma_unused_1_reg,\n  ide_dma_status_reg,\n  ide_dma_unused_3_reg,\n  ide_dma_prd_table_address_reg0,\n  ide_dma_prd_table_address_reg1,\n  ide_dma_prd_table_address_reg2,\n  ide_dma_prd_table_address_reg3,\n  nr_ide_registers,\n}",
+      {
+        "ide_data_reg": "",
+        "ide_error_reg": "",
+        "ide_sector_count_reg": "",
+        "ide_sector_number_reg": "",
+        "ide_cylinder_reg0": "",
+        "ide_cylinder_reg1": "",
+        "ide_drive_head_reg": "",
+        "ide_status_reg": "",
+        "ide_feature_reg": "",
+        "ide_command_reg": "",
+        "ide_alternate_status_reg": "",
+        "ide_control_reg": "",
+        "ide_dma_command_reg": "",
+        "ide_dma_unused_1_reg": "",
+        "ide_dma_status_reg": "",
+        "ide_dma_unused_3_reg": "",
+        "ide_dma_prd_table_address_reg0": "",
+        "ide_dma_prd_table_address_reg1": "",
+        "ide_dma_prd_table_address_reg2": "",
+        "ide_dma_prd_table_address_reg3": "",
+        "nr_ide_registers": ""
+      },
+      "",
+      [
+        156,
+        0
+      ],
+      [
+        182,
+        1
+      ]
+    ],
+    [
+      "typedef enum _ide_states {\n  idle_state,\n  busy_loaded_state,\n  busy_drained_state,\n  busy_dma_state,\n  busy_command_state,\n  loading_state,\n  draining_state,\n} ide_states;",
+      {
+        "idle_state": "",
+        "busy_loaded_state": "",
+        "busy_drained_state": "",
+        "busy_dma_state": "",
+        "busy_command_state": "",
+        "loading_state": "",
+        "draining_state": ""
+      },
+      "ide_states",
+      [
+        185,
+        0
+      ],
+      [
+        193,
+        13
+      ]
+    ],
+    [
+      "enum {\n  nr_address_blocks = 6,\n}",
+      {
+        "nr_address_blocks": ""
+      },
+      "",
+      [
+        513,
+        0
+      ],
+      [
+        515,
+        1
+      ]
+    ]
+  ]
+}

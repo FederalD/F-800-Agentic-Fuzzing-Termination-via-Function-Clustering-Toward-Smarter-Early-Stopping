@@ -1,0 +1,1105 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int\nmain (int argc, char **argv)\n{\n  int opt;\n  char *input_file = NULL;\n  const char *input_format = NULL;\n  const char *output_format = NULL;\n  const char *header_file = NULL;\n  char *ld_arg = NULL;\n  Nlm_Internal_Fixed_Header fixed_hdr_struct;\n  Nlm_Internal_Variable_Header var_hdr_struct;\n  Nlm_Internal_Version_Header version_hdr_struct;\n  Nlm_Internal_Copyright_Header copyright_hdr_struct;\n  Nlm_Internal_Extended_Header extended_hdr_struct;\n  bfd *inbfd;\n  bfd *outbfd;\n  asymbol **newsyms, **outsyms;\n  long symcount, newsymalloc, newsymcount;\n  long symsize;\n  asection *text_sec, *bss_sec, *data_sec;\n  bfd_vma vma;\n  bfd_size_type align;\n  asymbol *endsym;\n  long i;\n  char inlead, outlead;\n  bfd_boolean gotstart, gotexit, gotcheck;\n  struct stat st;\n  FILE *custom_data = NULL;\n  FILE *help_data = NULL;\n  FILE *message_data = NULL;\n  FILE *rpc_data = NULL;\n  FILE *shared_data = NULL;\n  size_t custom_size = 0;\n  size_t help_size = 0;\n  size_t message_size = 0;\n  size_t module_size = 0;\n  size_t rpc_size = 0;\n  asection *custom_section = NULL;\n  asection *help_section = NULL;\n  asection *message_section = NULL;\n  asection *module_section = NULL;\n  asection *rpc_section = NULL;\n  asection *shared_section = NULL;\n  bfd *sharedbfd;\n  size_t shared_offset = 0;\n  size_t shared_size = 0;\n  static Nlm_Internal_Fixed_Header sharedhdr;\n  int len;\n  char *modname;\n  char **matching;\n\n#if defined (HAVE_SETLOCALE) && defined (HAVE_LC_MESSAGES)\n  setlocale (LC_MESSAGES, \"\");\n#endif\n#if defined (HAVE_SETLOCALE)\n  setlocale (LC_CTYPE, \"\");\n#endif\n  bindtextdomain (PACKAGE, LOCALEDIR);\n  textdomain (PACKAGE);\n\n  program_name = argv[0];\n  xmalloc_set_program_name (program_name);\n  bfd_set_error_program_name (program_name);\n\n  expandargv (&argc, &argv);\n\n  bfd_init ();\n  set_default_bfd_target ();\n\n  while ((opt = getopt_long (argc, argv, \"dHhI:l:O:T:Vv\", long_options,\n\t\t\t     (int *) NULL))\n\t != EOF)\n    {\n      switch (opt)\n\t{\n\tcase 'd':\n\t  debug = 1;\n\t  break;\n\tcase 'H':\n\tcase 'h':\n\t  show_usage (stdout, 0);\n\t  break;\n\tcase 'I':\n\t  input_format = optarg;\n\t  break;\n\tcase 'l':\n\t  ld_arg = optarg;\n\t  break;\n\tcase 'O':\n\t  output_format = optarg;\n\t  break;\n\tcase 'T':\n\t  header_file = optarg;\n\t  break;\n\tcase 'v':\n\tcase 'V':\n\t  print_version (\"nlmconv\");\n\t  break;\n\tcase 0:\n\t  break;\n\tdefault:\n\t  show_usage (stderr, 1);\n\t  break;\n\t}\n    }\n\n  /* The input and output files may be named on the command line.  */\n  output_file = NULL;\n  if (optind < argc)\n    {\n      input_file = argv[optind];\n      ++optind;\n      if (optind < argc)\n\t{\n\t  output_file = argv[optind];\n\t  ++optind;\n\t  if (optind < argc)\n\t    show_usage (stderr, 1);\n\t  if (filename_cmp (input_file, output_file) == 0)\n\t    {\n\t      fatal (_(\"input and output files must be different\"));\n\t    }\n\t}\n    }\n\n  /* Initialize the header information to default values.  */\n  fixed_hdr = &fixed_hdr_struct;\n  memset ((void *) &fixed_hdr_struct, 0, sizeof fixed_hdr_struct);\n  var_hdr = &var_hdr_struct;\n  memset ((void *) &var_hdr_struct, 0, sizeof var_hdr_struct);\n  version_hdr = &version_hdr_struct;\n  memset ((void *) &version_hdr_struct, 0, sizeof version_hdr_struct);\n  copyright_hdr = &copyright_hdr_struct;\n  memset ((void *) &copyright_hdr_struct, 0, sizeof copyright_hdr_struct);\n  extended_hdr = &extended_hdr_struct;\n  memset ((void *) &extended_hdr_struct, 0, sizeof extended_hdr_struct);\n  check_procedure = NULL;\n  custom_file = NULL;\n  debug_info = FALSE;\n  exit_procedure = \"_Stop\";\n  export_symbols = NULL;\n  map_file = NULL;\n  full_map = FALSE;\n  help_file = NULL;\n  import_symbols = NULL;\n  message_file = NULL;\n  modules = NULL;\n  sharelib_file = NULL;\n  start_procedure = \"_Prelude\";\n  verbose = FALSE;\n  rpc_file = NULL;\n\n  parse_errors = 0;\n\n  /* Parse the header file (if there is one).  */\n  if (header_file != NULL)\n    {\n      if (! nlmlex_file (header_file)\n\t  || yyparse () != 0\n\t  || parse_errors != 0)\n\texit (1);\n    }\n\n  if (input_files != NULL)\n    {\n      if (input_file != NULL)\n\t{\n\t  fatal (_(\"input file named both on command line and with INPUT\"));\n\t}\n      if (input_files->next == NULL)\n\tinput_file = input_files->string;\n      else\n\tinput_file = link_inputs (input_files, ld_arg, map_file);\n    }\n  else if (input_file == NULL)\n    {\n      non_fatal (_(\"no input file\"));\n      show_usage (stderr, 1);\n    }\n\n  inbfd = bfd_openr (input_file, input_format);\n  if (inbfd == NULL)\n    bfd_fatal (input_file);\n\n  if (! bfd_check_format_matches (inbfd, bfd_object, &matching))\n    {\n      bfd_nonfatal (input_file);\n      if (bfd_get_error () == bfd_error_file_ambiguously_recognized)\n\t{\n\t  list_matching_formats (matching);\n\t  free (matching);\n\t}\n      exit (1);\n    }\n\n  if (output_format == NULL)\n    output_format = select_output_format (bfd_get_arch (inbfd),\n\t\t\t\t\t  bfd_get_mach (inbfd),\n\t\t\t\t\t  bfd_big_endian (inbfd));\n\n  assert (output_format != NULL);\n\n  /* Use the output file named on the command line if it exists.\n     Otherwise use the file named in the OUTPUT statement.  */\n  if (output_file == NULL)\n    {\n      non_fatal (_(\"no name for output file\"));\n      show_usage (stderr, 1);\n    }\n\n  outbfd = bfd_openw (output_file, output_format);\n  if (outbfd == NULL)\n    bfd_fatal (output_file);\n  if (! bfd_set_format (outbfd, bfd_object))\n    bfd_fatal (output_file);\n\n  assert (bfd_get_flavour (outbfd) == bfd_target_nlm_flavour);\n\n  /* XXX: Should we accept the unknown bfd format here ?  */\n  if (bfd_arch_get_compatible (inbfd, outbfd, TRUE) == NULL)\n    non_fatal (_(\"warning: input and output formats are not compatible\"));\n\n  /* Move the values read from the command file into outbfd.  */\n  *nlm_fixed_header (outbfd) = fixed_hdr_struct;\n  *nlm_variable_header (outbfd) = var_hdr_struct;\n  *nlm_version_header (outbfd) = version_hdr_struct;\n  *nlm_copyright_header (outbfd) = copyright_hdr_struct;\n  *nlm_extended_header (outbfd) = extended_hdr_struct;\n\n  /* Start copying the input BFD to the output BFD.  */\n  if (! bfd_set_file_flags (outbfd, bfd_get_file_flags (inbfd)))\n    bfd_fatal (bfd_get_filename (outbfd));\n\n  symsize = bfd_get_symtab_upper_bound (inbfd);\n  if (symsize < 0)\n    bfd_fatal (input_file);\n  symbols = (asymbol **) xmalloc (symsize);\n  symcount = bfd_canonicalize_symtab (inbfd, symbols);\n  if (symcount < 0)\n    bfd_fatal (input_file);\n\n  /* Make sure we have a .bss section.  */\n  bss_sec = bfd_get_section_by_name (outbfd, NLM_UNINITIALIZED_DATA_NAME);\n  if (bss_sec == NULL)\n    {\n      bss_sec = bfd_make_section_with_flags (outbfd,\n\t\t\t\t\t     NLM_UNINITIALIZED_DATA_NAME,\n\t\t\t\t\t     SEC_ALLOC);\n      if (bss_sec == NULL\n\t  || ! bfd_set_section_alignment (outbfd, bss_sec, 1))\n\tbfd_fatal (_(\"make .bss section\"));\n    }\n\n  /* We store the original section names in the .nlmsections section,\n     so that programs which understand it can resurrect the original\n     sections from the NLM.  We will put a pointer to .nlmsections in\n     the NLM header area.  */\n  secsec = bfd_make_section_with_flags (outbfd, \".nlmsections\",\n\t\t\t\t\tSEC_HAS_CONTENTS);\n  if (secsec == NULL)\n    bfd_fatal (_(\"make .nlmsections section\"));\n\n#ifdef NLMCONV_POWERPC\n  /* For PowerPC NetWare we need to build stubs for calls to undefined\n     symbols.  Because each stub requires an entry in the TOC section\n     which must be at the same location as other entries in the TOC\n     section, we must do this before determining where the TOC section\n     goes in setup_sections.  */\n  if (bfd_get_arch (inbfd) == bfd_arch_powerpc)\n    powerpc_build_stubs (inbfd, outbfd, &symbols, &symcount);\n#endif\n\n  /* Set up the sections.  */\n  bfd_map_over_sections (inbfd, setup_sections, (void *) outbfd);\n\n  text_sec = bfd_get_section_by_name (outbfd, NLM_CODE_NAME);\n\n  /* The .bss section immediately follows the .data section.  */\n  data_sec = bfd_get_section_by_name (outbfd, NLM_INITIALIZED_DATA_NAME);\n  if (data_sec != NULL)\n    {\n      bfd_size_type add;\n\n      vma = bfd_get_section_size (data_sec);\n      align = 1 << bss_sec->alignment_power;\n      add = ((vma + align - 1) &~ (align - 1)) - vma;\n      vma += add;\n      if (! bfd_set_section_vma (outbfd, bss_sec, vma))\n\tbfd_fatal (_(\"set .bss vma\"));\n      if (add != 0)\n\t{\n\t  bfd_size_type data_size;\n\n\t  data_size = bfd_get_section_size (data_sec);\n\t  if (! bfd_set_section_size (outbfd, data_sec, data_size + add))\n\t    bfd_fatal (_(\"set .data size\"));\n\t}\n    }\n\n  /* Adjust symbol information.  */\n  inlead = bfd_get_symbol_leading_char (inbfd);\n  outlead = bfd_get_symbol_leading_char (outbfd);\n  gotstart = FALSE;\n  gotexit = FALSE;\n  gotcheck = FALSE;\n  newsymalloc = 10;\n  newsyms = (asymbol **) xmalloc (newsymalloc * sizeof (asymbol *));\n  newsymcount = 0;\n  endsym = NULL;\n  for (i = 0; i < symcount; i++)\n    {\n      asymbol *sym;\n\n      sym = symbols[i];\n\n      /* Add or remove a leading underscore.  */\n      if (inlead != outlead)\n\t{\n\t  if (inlead != '\\0')\n\t    {\n\t      if (bfd_asymbol_name (sym)[0] == inlead)\n\t\t{\n\t\t  if (outlead == '\\0')\n\t\t    ++sym->name;\n\t\t  else\n\t\t    {\n\t\t      char *new_name;\n\n\t\t      new_name = xmalloc (strlen (bfd_asymbol_name (sym)) + 1);\n\t\t      new_name[0] = outlead;\n\t\t      strcpy (new_name + 1, bfd_asymbol_name (sym) + 1);\n\t\t      sym->name = new_name;\n\t\t    }\n\t\t}\n\t    }\n\t  else\n\t    {\n\t      char *new_name;\n\n\t      new_name = xmalloc (strlen (bfd_asymbol_name (sym)) + 2);\n\t      new_name[0] = outlead;\n\t      strcpy (new_name + 1, bfd_asymbol_name (sym));\n\t      sym->name = new_name;\n\t    }\n\t}\n\n      /* NLM's have an uninitialized data section, but they do not\n\t have a common section in the Unix sense.  Move all common\n\t symbols into the .bss section, and mark them as exported.  */\n      if (bfd_is_com_section (bfd_get_section (sym)))\n\t{\n\t  bfd_vma size = sym->value;\n\n\t  sym->section = bss_sec;\n\t  sym->value = bfd_get_section_size (bss_sec);\n\t  size += sym->value;\n\t  align = 1 << bss_sec->alignment_power;\n\t  size = (size + align - 1) & ~(align - 1);\n\t  bfd_set_section_size (outbfd, bss_sec, size);\n\t  sym->flags |= BSF_EXPORT | BSF_GLOBAL;\n\t}\n      else if (bfd_get_section (sym)->output_section != NULL)\n\t{\n\t  /* Move the symbol into the output section.  */\n\t  sym->value += bfd_get_section (sym)->output_offset;\n\t  sym->section = bfd_get_section (sym)->output_section;\n\t  /* This is no longer a section symbol.  */\n\t  sym->flags &=~ BSF_SECTION_SYM;\n\t}\n\n      /* Force _edata and _end to be defined.  This would normally be\n\t done by the linker, but the manipulation of the common\n\t symbols will confuse it.  */\n      if ((sym->flags & BSF_DEBUGGING) == 0\n\t  && bfd_asymbol_name (sym)[0] == '_'\n\t  && bfd_is_und_section (bfd_get_section (sym)))\n\t{\n\t  if (strcmp (bfd_asymbol_name (sym), \"_edata\") == 0)\n\t    {\n\t      sym->section = bss_sec;\n\t      sym->value = 0;\n\t    }\n\t  if (strcmp (bfd_asymbol_name (sym), \"_end\") == 0)\n\t    {\n\t      sym->section = bss_sec;\n\t      endsym = sym;\n\t    }\n\n#ifdef NLMCONV_POWERPC\n\t  /* For PowerPC NetWare, we define __GOT0.  This is the start\n\t     of the .got section.  */\n\t  if (bfd_get_arch (inbfd) == bfd_arch_powerpc\n\t      && strcmp (bfd_asymbol_name (sym), \"__GOT0\") == 0)\n\t    {\n\t      asection *got_sec;\n\n\t      got_sec = bfd_get_section_by_name (inbfd, \".got\");\n\t      assert (got_sec != (asection *) NULL);\n\t      sym->value = got_sec->output_offset;\n\t      sym->section = got_sec->output_section;\n\t    }\n#endif\n\t}\n\n      /* If this is a global symbol, check the export list.  */\n      if ((sym->flags & (BSF_EXPORT | BSF_GLOBAL)) != 0)\n\t{\n\t  struct string_list *l;\n\t  int found_simple;\n\n\t  /* Unfortunately, a symbol can appear multiple times on the\n\t     export list, with and without prefixes.  */\n\t  found_simple = 0;\n\t  for (l = export_symbols; l != NULL; l = l->next)\n\t    {\n\t      if (strcmp (l->string, bfd_asymbol_name (sym)) == 0)\n\t\tfound_simple = 1;\n\t      else\n\t\t{\n\t\t  char *zbase;\n\n\t\t  zbase = strchr (l->string, '@');\n\t\t  if (zbase != NULL\n\t\t      && strcmp (zbase + 1, bfd_asymbol_name (sym)) == 0)\n\t\t    {\n\t\t      /* We must add a symbol with this prefix.  */\n\t\t      if (newsymcount >= newsymalloc)\n\t\t\t{\n\t\t\t  newsymalloc += 10;\n\t\t\t  newsyms = ((asymbol **)\n\t\t\t\t     xrealloc ((void *) newsyms,\n\t\t\t\t\t       (newsymalloc\n\t\t\t\t\t\t* sizeof (asymbol *))));\n\t\t\t}\n\t\t      newsyms[newsymcount] =\n\t\t\t(asymbol *) xmalloc (sizeof (asymbol));\n\t\t      *newsyms[newsymcount] = *sym;\n\t\t      newsyms[newsymcount]->name = l->string;\n\t\t      ++newsymcount;\n\t\t    }\n\t\t}\n\t    }\n\t  if (! found_simple)\n\t    {\n\t      /* The unmodified symbol is actually not exported at\n\t\t all.  */\n\t      sym->flags &=~ (BSF_GLOBAL | BSF_EXPORT);\n\t      sym->flags |= BSF_LOCAL;\n\t    }\n\t}\n\n      /* If it's an undefined symbol, see if it's on the import list.\n\t Change the prefix if necessary.  */\n      if (bfd_is_und_section (bfd_get_section (sym)))\n\t{\n\t  struct string_list *l;\n\n\t  for (l = import_symbols; l != NULL; l = l->next)\n\t    {\n\t      if (strcmp (l->string, bfd_asymbol_name (sym)) == 0)\n\t\tbreak;\n\t      else\n\t\t{\n\t\t  char *zbase;\n\n\t\t  zbase = strchr (l->string, '@');\n\t\t  if (zbase != NULL\n\t\t      && strcmp (zbase + 1, bfd_asymbol_name (sym)) == 0)\n\t\t    {\n\t\t      sym->name = l->string;\n\t\t      break;\n\t\t    }\n\t\t}\n\t    }\n\t  if (l == NULL)\n\t    non_fatal (_(\"warning: symbol %s imported but not in import list\"),\n\t\t       bfd_asymbol_name (sym));\n\t}\n\n      /* See if it's one of the special named symbols.  */\n      if ((sym->flags & BSF_DEBUGGING) == 0)\n\t{\n\t  bfd_vma val;\n\n\t  /* FIXME: If these symbols are not in the .text section, we\n\t     add the .text section size to the value.  This may not be\n\t     correct for all targets.  I'm not sure how this should\n\t     really be handled.  */\n\t  if (strcmp (bfd_asymbol_name (sym), start_procedure) == 0)\n\t    {\n\t      val = bfd_asymbol_value (sym);\n\t      if (bfd_get_section (sym) == data_sec\n\t\t  && text_sec != (asection *) NULL)\n\t\tval += bfd_section_size (outbfd, text_sec);\n\t      if (! bfd_set_start_address (outbfd, val))\n\t\tbfd_fatal (_(\"set start address\"));\n\t      gotstart = TRUE;\n\t    }\n\t  if (strcmp (bfd_asymbol_name (sym), exit_procedure) == 0)\n\t    {\n\t      val = bfd_asymbol_value (sym);\n\t      if (bfd_get_section (sym) == data_sec\n\t\t  && text_sec != (asection *) NULL)\n\t\tval += bfd_section_size (outbfd, text_sec);\n\t      nlm_fixed_header (outbfd)->exitProcedureOffset = val;\n\t      gotexit = TRUE;\n\t    }\n\t  if (check_procedure != NULL\n\t      && strcmp (bfd_asymbol_name (sym), check_procedure) == 0)\n\t    {\n\t      val = bfd_asymbol_value (sym);\n\t      if (bfd_get_section (sym) == data_sec\n\t\t  && text_sec != (asection *) NULL)\n\t\tval += bfd_section_size (outbfd, text_sec);\n\t      nlm_fixed_header (outbfd)->checkUnloadProcedureOffset = val;\n\t      gotcheck = TRUE;\n\t    }\n\t}\n    }\n\n  if (endsym != NULL)\n    {\n      endsym->value = bfd_get_section_size (bss_sec);\n\n      /* FIXME: If any relocs referring to _end use inplace addends,\n\t then I think they need to be updated.  This is handled by\n\t i386_mangle_relocs.  Is it needed for any other object\n\t formats?  */\n    }\n\n  if (newsymcount == 0)\n    outsyms = symbols;\n  else\n    {\n      outsyms = (asymbol **) xmalloc ((symcount + newsymcount + 1)\n\t\t\t\t      * sizeof (asymbol *));\n      memcpy (outsyms, symbols, symcount * sizeof (asymbol *));\n      memcpy (outsyms + symcount, newsyms, newsymcount * sizeof (asymbol *));\n      outsyms[symcount + newsymcount] = NULL;\n    }\n\n  bfd_set_symtab (outbfd, outsyms, symcount + newsymcount);\n\n  if (! gotstart)\n    non_fatal (_(\"warning: START procedure %s not defined\"), start_procedure);\n  if (! gotexit)\n    non_fatal (_(\"warning: EXIT procedure %s not defined\"), exit_procedure);\n  if (check_procedure != NULL && ! gotcheck)\n    non_fatal (_(\"warning: CHECK procedure %s not defined\"), check_procedure);\n\n  /* Add additional sections required for the header information.  */\n  if (custom_file != NULL)\n    {\n      custom_data = fopen (custom_file, \"r\");\n      if (custom_data == NULL\n\t  || fstat (fileno (custom_data), &st) < 0)\n\t{\n\t  fprintf (stderr, \"%s:%s: %s\\n\", program_name, custom_file,\n\t\t   strerror (errno));\n\t  custom_file = NULL;\n\t}\n      else\n\t{\n\t  custom_size = st.st_size;\n\t  custom_section = bfd_make_section_with_flags (outbfd, \".nlmcustom\",\n\t\t\t\t\t\t\tSEC_HAS_CONTENTS);\n\t  if (custom_section == NULL\n\t      || ! bfd_set_section_size (outbfd, custom_section, custom_size))\n\t    bfd_fatal (_(\"custom section\"));\n\t}\n    }\n  if (help_file != NULL)\n    {\n      help_data = fopen (help_file, \"r\");\n      if (help_data == NULL\n\t  || fstat (fileno (help_data), &st) < 0)\n\t{\n\t  fprintf (stderr, \"%s:%s: %s\\n\", program_name, help_file,\n\t\t   strerror (errno));\n\t  help_file = NULL;\n\t}\n      else\n\t{\n\t  help_size = st.st_size;\n\t  help_section = bfd_make_section_with_flags (outbfd, \".nlmhelp\",\n\t\t\t\t\t\t      SEC_HAS_CONTENTS);\n\t  if (help_section == NULL\n\t      || ! bfd_set_section_size (outbfd, help_section, help_size))\n\t    bfd_fatal (_(\"help section\"));\n\t  LITMEMCPY (nlm_extended_header (outbfd)->stamp, \"MeSsAgEs\");\n\t}\n    }\n  if (message_file != NULL)\n    {\n      message_data = fopen (message_file, \"r\");\n      if (message_data == NULL\n\t  || fstat (fileno (message_data), &st) < 0)\n\t{\n\t  fprintf (stderr, \"%s:%s: %s\\n\", program_name, message_file,\n\t\t   strerror (errno));\n\t  message_file = NULL;\n\t}\n      else\n\t{\n\t  message_size = st.st_size;\n\t  message_section = bfd_make_section_with_flags (outbfd,\n\t\t\t\t\t\t\t \".nlmmessages\",\n\t\t\t\t\t\t\t SEC_HAS_CONTENTS);\n\t  if (message_section == NULL\n\t      || ! bfd_set_section_size (outbfd, message_section, message_size))\n\t    bfd_fatal (_(\"message section\"));\n\t  LITMEMCPY (nlm_extended_header (outbfd)->stamp, \"MeSsAgEs\");\n\t}\n    }\n  if (modules != NULL)\n    {\n      struct string_list *l;\n\n      module_size = 0;\n      for (l = modules; l != NULL; l = l->next)\n\tmodule_size += strlen (l->string) + 1;\n      module_section = bfd_make_section_with_flags (outbfd, \".nlmmodules\",\n\t\t\t\t\t\t    SEC_HAS_CONTENTS);\n      if (module_section == NULL\n\t  || ! bfd_set_section_size (outbfd, module_section, module_size))\n\tbfd_fatal (_(\"module section\"));\n    }\n  if (rpc_file != NULL)\n    {\n      rpc_data = fopen (rpc_file, \"r\");\n      if (rpc_data == NULL\n\t  || fstat (fileno (rpc_data), &st) < 0)\n\t{\n\t  fprintf (stderr, \"%s:%s: %s\\n\", program_name, rpc_file,\n\t\t   strerror (errno));\n\t  rpc_file = NULL;\n\t}\n      else\n\t{\n\t  rpc_size = st.st_size;\n\t  rpc_section = bfd_make_section_with_flags (outbfd, \".nlmrpc\",\n\t\t\t\t\t\t     SEC_HAS_CONTENTS);\n\t  if (rpc_section == NULL\n\t      || ! bfd_set_section_size (outbfd, rpc_section, rpc_size))\n\t    bfd_fatal (_(\"rpc section\"));\n\t  LITMEMCPY (nlm_extended_header (outbfd)->stamp, \"MeSsAgEs\");\n\t}\n    }\n  if (sharelib_file != NULL)\n    {\n      sharedbfd = bfd_openr (sharelib_file, output_format);\n      if (sharedbfd == NULL\n\t  || ! bfd_check_format (sharedbfd, bfd_object))\n\t{\n\t  fprintf (stderr, \"%s:%s: %s\\n\", program_name, sharelib_file,\n\t\t   bfd_errmsg (bfd_get_error ()));\n\t  sharelib_file = NULL;\n\t}\n      else\n\t{\n\t  sharedhdr = *nlm_fixed_header (sharedbfd);\n\t  bfd_close (sharedbfd);\n\t  shared_data = fopen (sharelib_file, \"r\");\n\t  if (shared_data == NULL\n\t      || (fstat (fileno (shared_data), &st) < 0))\n\t    {\n\t      fprintf (stderr, \"%s:%s: %s\\n\", program_name, sharelib_file,\n\t\t       strerror (errno));\n\t      sharelib_file = NULL;\n\t    }\n\t  else\n\t    {\n\t      /* If we were clever, we could just copy out the\n\t\t sections of the shared library which we actually\n\t\t need.  However, we would have to figure out the sizes\n\t\t of the external and public information, and that can\n\t\t not be done without reading through them.  */\n\t      if (sharedhdr.uninitializedDataSize > 0)\n\t\t{\n\t\t  /* There is no place to record this information.  */\n\t\t  non_fatal (_(\"%s: warning: shared libraries can not have uninitialized data\"),\n\t\t\t     sharelib_file);\n\t\t}\n\t      shared_offset = st.st_size;\n\t      if (shared_offset > (size_t) sharedhdr.codeImageOffset)\n\t\tshared_offset = sharedhdr.codeImageOffset;\n\t      if (shared_offset > (size_t) sharedhdr.dataImageOffset)\n\t\tshared_offset = sharedhdr.dataImageOffset;\n\t      if (shared_offset > (size_t) sharedhdr.relocationFixupOffset)\n\t\tshared_offset = sharedhdr.relocationFixupOffset;\n\t      if (shared_offset > (size_t) sharedhdr.externalReferencesOffset)\n\t\tshared_offset = sharedhdr.externalReferencesOffset;\n\t      if (shared_offset > (size_t) sharedhdr.publicsOffset)\n\t\tshared_offset = sharedhdr.publicsOffset;\n\t      shared_size = st.st_size - shared_offset;\n\t      shared_section = bfd_make_section_with_flags (outbfd,\n\t\t\t\t\t\t\t    \".nlmshared\",\n\t\t\t\t\t\t\t    SEC_HAS_CONTENTS);\n\t      if (shared_section == NULL\n\t\t  || ! bfd_set_section_size (outbfd, shared_section,\n\t\t\t\t\t     shared_size))\n\t\tbfd_fatal (_(\"shared section\"));\n\t      LITMEMCPY (nlm_extended_header (outbfd)->stamp, \"MeSsAgEs\");\n\t    }\n\t}\n    }\n\n  /* Check whether a version was given.  */\n  if (!CONST_STRNEQ (version_hdr->stamp, \"VeRsIoN#\"))\n    non_fatal (_(\"warning: No version number given\"));\n\n  /* At least for now, always create an extended header, because that\n     is what NLMLINK does.  */\n  LITMEMCPY (nlm_extended_header (outbfd)->stamp, \"MeSsAgEs\");\n\n  LITMEMCPY (nlm_cygnus_ext_header (outbfd)->stamp, \"CyGnUsEx\");\n\n  /* If the date was not given, force it in.  */\n  if (nlm_version_header (outbfd)->month == 0\n      && nlm_version_header (outbfd)->day == 0\n      && nlm_version_header (outbfd)->year == 0)\n    {\n      time_t now;\n      struct tm *ptm;\n\n      time (&now);\n      ptm = localtime (&now);\n      nlm_version_header (outbfd)->month = ptm->tm_mon + 1;\n      nlm_version_header (outbfd)->day = ptm->tm_mday;\n      nlm_version_header (outbfd)->year = ptm->tm_year + 1900;\n      LITMEMCPY (version_hdr->stamp, \"VeRsIoN#\");\n    }\n\n#ifdef NLMCONV_POWERPC\n  /* Resolve the stubs we build for PowerPC NetWare.  */\n  if (bfd_get_arch (inbfd) == bfd_arch_powerpc)\n    powerpc_resolve_stubs (inbfd, outbfd);\n#endif\n\n  /* Copy over the sections.  */\n  bfd_map_over_sections (inbfd, copy_sections, (void *) outbfd);\n\n  /* Finish up the header information.  */\n  if (custom_file != NULL)\n    {\n      void *data;\n\n      data = xmalloc (custom_size);\n      if (fread (data, 1, custom_size, custom_data) != custom_size)\n\tnon_fatal (_(\"%s: read: %s\"), custom_file, strerror (errno));\n      else\n\t{\n\t  if (! bfd_set_section_contents (outbfd, custom_section, data,\n\t\t\t\t\t  (file_ptr) 0, custom_size))\n\t    bfd_fatal (_(\"custom section\"));\n\t  nlm_fixed_header (outbfd)->customDataOffset =\n\t    custom_section->filepos;\n\t  nlm_fixed_header (outbfd)->customDataSize = custom_size;\n\t}\n      free (data);\n    }\n  if (! debug_info)\n    {\n      /* As a special hack, the backend recognizes a debugInfoOffset\n\t of -1 to mean that it should not output any debugging\n\t information.  This can not be handling by fiddling with the\n\t symbol table because exported symbols appear in both the\n\t export information and the debugging information.  */\n      nlm_fixed_header (outbfd)->debugInfoOffset = (file_ptr) -1;\n    }\n  if (full_map)\n    non_fatal (_(\"warning: FULLMAP is not supported; try ld -M\"));\n  if (help_file != NULL)\n    {\n      void *data;\n\n      data = xmalloc (help_size);\n      if (fread (data, 1, help_size, help_data) != help_size)\n\tnon_fatal (_(\"%s: read: %s\"), help_file, strerror (errno));\n      else\n\t{\n\t  if (! bfd_set_section_contents (outbfd, help_section, data,\n\t\t\t\t\t  (file_ptr) 0, help_size))\n\t    bfd_fatal (_(\"help section\"));\n\t  nlm_extended_header (outbfd)->helpFileOffset =\n\t    help_section->filepos;\n\t  nlm_extended_header (outbfd)->helpFileLength = help_size;\n\t}\n      free (data);\n    }\n  if (message_file != NULL)\n    {\n      void *data;\n\n      data = xmalloc (message_size);\n      if (fread (data, 1, message_size, message_data) != message_size)\n\tnon_fatal (_(\"%s: read: %s\"), message_file, strerror (errno));\n      else\n\t{\n\t  if (! bfd_set_section_contents (outbfd, message_section, data,\n\t\t\t\t\t  (file_ptr) 0, message_size))\n\t    bfd_fatal (_(\"message section\"));\n\t  nlm_extended_header (outbfd)->messageFileOffset =\n\t    message_section->filepos;\n\t  nlm_extended_header (outbfd)->messageFileLength = message_size;\n\n\t  /* FIXME: Are these offsets correct on all platforms?  Are\n\t     they 32 bits on all platforms?  What endianness?  */\n\t  nlm_extended_header (outbfd)->languageID =\n\t    bfd_h_get_32 (outbfd, (bfd_byte *) data + 106);\n\t  nlm_extended_header (outbfd)->messageCount =\n\t    bfd_h_get_32 (outbfd, (bfd_byte *) data + 110);\n\t}\n      free (data);\n    }\n  if (modules != NULL)\n    {\n      void *data;\n      unsigned char *set;\n      struct string_list *l;\n      bfd_size_type c;\n\n      data = xmalloc (module_size);\n      c = 0;\n      set = (unsigned char *) data;\n      for (l = modules; l != NULL; l = l->next)\n\t{\n\t  *set = strlen (l->string);\n\t  strncpy ((char *) set + 1, l->string, *set);\n\t  set += *set + 1;\n\t  ++c;\n\t}\n      if (! bfd_set_section_contents (outbfd, module_section, data,\n\t\t\t\t      (file_ptr) 0, module_size))\n\tbfd_fatal (_(\"module section\"));\n      nlm_fixed_header (outbfd)->moduleDependencyOffset =\n\tmodule_section->filepos;\n      nlm_fixed_header (outbfd)->numberOfModuleDependencies = c;\n    }\n  if (rpc_file != NULL)\n    {\n      void *data;\n\n      data = xmalloc (rpc_size);\n      if (fread (data, 1, rpc_size, rpc_data) != rpc_size)\n\tnon_fatal (_(\"%s: read: %s\"), rpc_file, strerror (errno));\n      else\n\t{\n\t  if (! bfd_set_section_contents (outbfd, rpc_section, data,\n\t\t\t\t\t  (file_ptr) 0, rpc_size))\n\t    bfd_fatal (_(\"rpc section\"));\n\t  nlm_extended_header (outbfd)->RPCDataOffset =\n\t    rpc_section->filepos;\n\t  nlm_extended_header (outbfd)->RPCDataLength = rpc_size;\n\t}\n      free (data);\n    }\n  if (sharelib_file != NULL)\n    {\n      void *data;\n\n      data = xmalloc (shared_size);\n      if (fseek (shared_data, shared_offset, SEEK_SET) != 0\n\t  || fread (data, 1, shared_size, shared_data) != shared_size)\n\tnon_fatal (_(\"%s: read: %s\"), sharelib_file, strerror (errno));\n      else\n\t{\n\t  if (! bfd_set_section_contents (outbfd, shared_section, data,\n\t\t\t\t\t  (file_ptr) 0, shared_size))\n\t    bfd_fatal (_(\"shared section\"));\n\t}\n      nlm_extended_header (outbfd)->sharedCodeOffset =\n\tsharedhdr.codeImageOffset - shared_offset + shared_section->filepos;\n      nlm_extended_header (outbfd)->sharedCodeLength =\n\tsharedhdr.codeImageSize;\n      nlm_extended_header (outbfd)->sharedDataOffset =\n\tsharedhdr.dataImageOffset - shared_offset + shared_section->filepos;\n      nlm_extended_header (outbfd)->sharedDataLength =\n\tsharedhdr.dataImageSize;\n      nlm_extended_header (outbfd)->sharedRelocationFixupOffset =\n\t(sharedhdr.relocationFixupOffset\n\t - shared_offset\n\t + shared_section->filepos);\n      nlm_extended_header (outbfd)->sharedRelocationFixupCount =\n\tsharedhdr.numberOfRelocationFixups;\n      nlm_extended_header (outbfd)->sharedExternalReferenceOffset =\n\t(sharedhdr.externalReferencesOffset\n\t - shared_offset\n\t + shared_section->filepos);\n      nlm_extended_header (outbfd)->sharedExternalReferenceCount =\n\tsharedhdr.numberOfExternalReferences;\n      nlm_extended_header (outbfd)->sharedPublicsOffset =\n\tsharedhdr.publicsOffset - shared_offset + shared_section->filepos;\n      nlm_extended_header (outbfd)->sharedPublicsCount =\n\tsharedhdr.numberOfPublics;\n      nlm_extended_header (outbfd)->sharedDebugRecordOffset =\n\tsharedhdr.debugInfoOffset - shared_offset + shared_section->filepos;\n      nlm_extended_header (outbfd)->sharedDebugRecordCount =\n\tsharedhdr.numberOfDebugRecords;\n      nlm_extended_header (outbfd)->SharedInitializationOffset =\n\tsharedhdr.codeStartOffset;\n      nlm_extended_header (outbfd)->SharedExitProcedureOffset =\n\tsharedhdr.exitProcedureOffset;\n      free (data);\n    }\n\n  {\n    const int    max_len  = NLM_MODULE_NAME_SIZE - 2;\n    const char * filename = lbasename (output_file);\n\n    len = strlen (filename);\n    if (len > max_len)\n      len = max_len;\n    nlm_fixed_header (outbfd)->moduleName[0] = len;\n\n    strncpy (nlm_fixed_header (outbfd)->moduleName + 1, filename, max_len);\n    nlm_fixed_header (outbfd)->moduleName[max_len + 1] = '\\0';\n\n    for (modname = nlm_fixed_header (outbfd)->moduleName;\n\t *modname != '\\0';\n\t modname++)\n      *modname = TOUPPER (*modname);\n  }\n\n  strncpy (nlm_variable_header (outbfd)->oldThreadName, \" LONG\",\n\t   NLM_OLD_THREAD_NAME_LENGTH);\n\n  nlm_cygnus_ext_header (outbfd)->offset = secsec->filepos;\n  nlm_cygnus_ext_header (outbfd)->length = bfd_section_size (outbfd, secsec);\n\n  if (! bfd_close (outbfd))\n    bfd_fatal (output_file);\n  if (! bfd_close (inbfd))\n    bfd_fatal (input_file);\n\n  if (unlink_on_exit != NULL)\n    unlink (unlink_on_exit);\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          151,
+          0
+        ],
+        [
+          1090,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nshow_usage (FILE *file, int status)\n{\n  fprintf (file, _(\"Usage: %s [option(s)] [in-file [out-file]]\\n\"), program_name);\n  fprintf (file, _(\" Convert an object file into a NetWare Loadable Module\\n\"));\n  fprintf (file, _(\" The options are:\\n\\\n  -I --input-target=<bfdname>   Set the input binary file format\\n\\\n  -O --output-target=<bfdname>  Set the output binary file format\\n\\\n  -T --header-file=<file>       Read <file> for NLM header information\\n\\\n  -l --linker=<linker>          Use <linker> for any linking\\n\\\n  -d --debug                    Display on stderr the linker command line\\n\\\n  @<file>                       Read options from <file>.\\n\\\n  -h --help                     Display this information\\n\\\n  -v --version                  Display the program's version\\n\\\n\"));\n  if (REPORT_BUGS_TO[0] && status == 0)\n    fprintf (file, _(\"Report bugs to %s\\n\"), REPORT_BUGS_TO);\n  exit (status);\n}",
+      "fn_code_pos": [
+        [
+          1095,
+          0
+        ],
+        [
+          1113,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "show_usage",
+        "parameters": {
+          "file": "FILE",
+          "status": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static const char *\nselect_output_format (enum bfd_architecture arch, unsigned long mach,\n\t\t      bfd_boolean bigendian ATTRIBUTE_UNUSED)\n{\n  switch (arch)\n    {\n#ifdef NLMCONV_I386\n    case bfd_arch_i386:\n      return \"nlm32-i386\";\n#endif\n#ifdef NLMCONV_SPARC\n    case bfd_arch_sparc:\n      return \"nlm32-sparc\";\n#endif\n#ifdef NLMCONV_ALPHA\n    case bfd_arch_alpha:\n      return \"nlm32-alpha\";\n#endif\n#ifdef NLMCONV_POWERPC\n    case bfd_arch_powerpc:\n      return \"nlm32-powerpc\";\n#endif\n    default:\n      fatal (_(\"support not compiled in for %s\"),\n\t     bfd_printable_arch_mach (arch, mach));\n    }\n  /*NOTREACHED*/\n}",
+      "fn_code_pos": [
+        [
+          1118,
+          0
+        ],
+        [
+          1145,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "select_output_format",
+        "parameters": {
+          "arch": "enum bfd_architecture",
+          "mach": "unsigned long",
+          "bigendian": "bfd_boolean"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\ncopy_sections (bfd *inbfd, asection *insec, void *data_ptr)\n{\n  static bfd_size_type secsecoff = 0;\n  bfd *outbfd = (bfd *) data_ptr;\n  const char *inname;\n  asection *outsec;\n  bfd_size_type size;\n  bfd_byte *contents;\n  long reloc_size;\n  bfd_byte buf[4];\n  bfd_size_type add;\n\n  inname = bfd_section_name (inbfd, insec);\n\n  outsec = insec->output_section;\n  assert (outsec != NULL);\n\n  size = bfd_get_section_size (insec);\n\n  if ((bfd_get_section_flags (inbfd, insec) & SEC_HAS_CONTENTS) == 0)\n    contents = NULL;\n  else\n    {\n      if (!bfd_malloc_and_get_section (inbfd, insec, &contents))\n\tbfd_fatal (bfd_get_filename (inbfd));\n    }\n\n  reloc_size = bfd_get_reloc_upper_bound (inbfd, insec);\n  if (reloc_size < 0)\n    bfd_fatal (bfd_get_filename (inbfd));\n  if (reloc_size != 0)\n    {\n      arelent **relocs;\n      long reloc_count;\n\n      relocs = (arelent **) xmalloc (reloc_size);\n      reloc_count = bfd_canonicalize_reloc (inbfd, insec, relocs, symbols);\n      if (reloc_count < 0)\n\tbfd_fatal (bfd_get_filename (inbfd));\n      mangle_relocs (outbfd, insec, &relocs, &reloc_count, (char *) contents,\n\t\t     size);\n\n      /* FIXME: refers to internal BFD fields.  */\n      if (outsec->orelocation != (arelent **) NULL)\n\t{\n\t  bfd_size_type total_count;\n\t  arelent **combined;\n\n\t  total_count = reloc_count + outsec->reloc_count;\n\t  combined = (arelent **) xmalloc (total_count * sizeof (arelent *));\n\t  memcpy (combined, outsec->orelocation,\n\t\t  outsec->reloc_count * sizeof (arelent *));\n\t  memcpy (combined + outsec->reloc_count, relocs,\n\t\t  (size_t) (reloc_count * sizeof (arelent *)));\n\t  free (outsec->orelocation);\n\t  reloc_count = total_count;\n\t  relocs = combined;\n\t}\n\n      bfd_set_reloc (outbfd, outsec, relocs, reloc_count);\n    }\n\n  if (contents != NULL)\n    {\n      if (! bfd_set_section_contents (outbfd, outsec, contents,\n\t\t\t\t      insec->output_offset, size))\n\tbfd_fatal (bfd_get_filename (outbfd));\n      free (contents);\n    }\n\n  /* Add this section to .nlmsections.  */\n  if (! bfd_set_section_contents (outbfd, secsec, (void *) inname, secsecoff,\n\t\t\t\t  strlen (inname) + 1))\n    bfd_fatal (_(\"set .nlmsection contents\"));\n  secsecoff += strlen (inname) + 1;\n\n  add = ((secsecoff + 3) &~ 3) - secsecoff;\n  if (add != 0)\n    {\n      bfd_h_put_32 (outbfd, (bfd_vma) 0, buf);\n      if (! bfd_set_section_contents (outbfd, secsec, buf, secsecoff, add))\n\tbfd_fatal (_(\"set .nlmsection contents\"));\n      secsecoff += add;\n    }\n\n  if (contents != NULL)\n    bfd_h_put_32 (outbfd, (bfd_vma) outsec->filepos, buf);\n  else\n    bfd_h_put_32 (outbfd, (bfd_vma) 0, buf);\n  if (! bfd_set_section_contents (outbfd, secsec, buf, secsecoff, 4))\n    bfd_fatal (_(\"set .nlmsection contents\"));\n  secsecoff += 4;\n\n  bfd_h_put_32 (outbfd, (bfd_vma) size, buf);\n  if (! bfd_set_section_contents (outbfd, secsec, buf, secsecoff, 4))\n    bfd_fatal (_(\"set .nlmsection contents\"));\n  secsecoff += 4;\n}",
+      "fn_code_pos": [
+        [
+          1218,
+          0
+        ],
+        [
+          1316,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "copy_sections",
+        "parameters": {
+          "inbfd": "bfd",
+          "insec": "asection",
+          "data_ptr": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nmangle_relocs (bfd *outbfd, asection *insec, arelent ***relocs_ptr,\n\t       long *reloc_count_ptr, char *contents,\n\t       bfd_size_type contents_size)\n{\n  switch (bfd_get_arch (outbfd))\n    {\n#ifdef NLMCONV_I386\n    case bfd_arch_i386:\n      i386_mangle_relocs (outbfd, insec, relocs_ptr, reloc_count_ptr,\n\t\t\t  contents, contents_size);\n      break;\n#endif\n#ifdef NLMCONV_ALPHA\n    case bfd_arch_alpha:\n      alpha_mangle_relocs (outbfd, insec, relocs_ptr, reloc_count_ptr,\n\t\t\t   contents, contents_size);\n      break;\n#endif\n#ifdef NLMCONV_POWERPC\n    case bfd_arch_powerpc:\n      powerpc_mangle_relocs (outbfd, insec, relocs_ptr, reloc_count_ptr,\n\t\t\t     contents, contents_size);\n      break;\n#endif\n    default:\n      default_mangle_relocs (outbfd, insec, relocs_ptr, reloc_count_ptr,\n\t\t\t     contents, contents_size);\n      break;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1321,
+          0
+        ],
+        [
+          1351,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mangle_relocs",
+        "parameters": {
+          "outbfd": "bfd",
+          "insec": "asection",
+          "relocs_ptr": "arelent",
+          "reloc_count_ptr": "long",
+          "contents": "char",
+          "contents_size": "bfd_size_type"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ni386_mangle_relocs (bfd *outbfd, asection *insec, arelent ***relocs_ptr,\n\t\t    long *reloc_count_ptr, char *contents,\n\t\t    bfd_size_type contents_size)\n{\n  long reloc_count, i;\n  arelent **relocs;\n\n  reloc_count = *reloc_count_ptr;\n  relocs = *relocs_ptr;\n  for (i = 0; i < reloc_count; i++)\n    {\n      arelent *rel;\n      asymbol *sym;\n      bfd_size_type address;\n      bfd_vma addend;\n\n      rel = *relocs++;\n      /* PR 17512: file: 057f89c1.  */\n      if (rel->sym_ptr_ptr == NULL)\n\tcontinue;\n      sym = *rel->sym_ptr_ptr;\n\n      /* We're moving the relocs from the input section to the output\n\t section, so we must adjust the address accordingly.  */\n      address = rel->address;\n      rel->address += insec->output_offset;\n\n      /* Note that no serious harm will ensue if we fail to change a\n\t reloc.  The backend will fail when writing out the reloc.  */\n\n      /* Make sure this reloc is within the data we have.  We use only\n\t 4 byte relocs here, so we insist on having 4 bytes.  */\n      if (address + 4 > contents_size)\n\tcontinue;\n\n      /* A PC relative reloc entirely within a single section is\n\t completely unnecessary.  This can be generated by ld -r.  */\n      if (sym == insec->symbol\n\t  && rel->howto != NULL\n\t  && rel->howto->pc_relative\n\t  && ! rel->howto->pcrel_offset)\n\t{\n\t  --*reloc_count_ptr;\n\t  --relocs;\n\t  memmove (relocs, relocs + 1,\n\t\t   (size_t) ((reloc_count - i) * sizeof (arelent *)));\n\t  continue;\n\t}\n\n      /* Get the amount the relocation will add in.  */\n      addend = rel->addend + sym->value;\n\n      /* NetWare doesn't support PC relative relocs against defined\n\t symbols, so we have to eliminate them by doing the relocation\n\t now.  We can only do this if the reloc is within a single\n\t section.  */\n      if (rel->howto != NULL\n\t  && rel->howto->pc_relative\n\t  && bfd_get_section (sym) == insec->output_section)\n\t{\n\t  bfd_vma val;\n\n\t  if (rel->howto->pcrel_offset)\n\t    addend -= address;\n\n\t  val = bfd_get_32 (outbfd, (bfd_byte *) contents + address);\n\t  val += addend;\n\t  bfd_put_32 (outbfd, val, (bfd_byte *) contents + address);\n\n\t  --*reloc_count_ptr;\n\t  --relocs;\n\t  memmove (relocs, relocs + 1,\n\t\t   (size_t) ((reloc_count - i) * sizeof (arelent *)));\n\t  continue;\n\t}\n\n      /* NetWare doesn't support reloc addends, so we get rid of them\n\t here by simply adding them into the object data.  We handle\n\t the symbol value, if any, the same way.  */\n      if (addend != 0\n\t  && rel->howto != NULL\n\t  && rel->howto->rightshift == 0\n\t  && rel->howto->size == 2\n\t  && rel->howto->bitsize == 32\n\t  && rel->howto->bitpos == 0\n\t  && rel->howto->src_mask == 0xffffffff\n\t  && rel->howto->dst_mask == 0xffffffff)\n\t{\n\t  bfd_vma val;\n\n\t  val = bfd_get_32 (outbfd, (bfd_byte *) contents + address);\n\t  val += addend;\n\t  bfd_put_32 (outbfd, val, (bfd_byte *) contents + address);\n\n\t  /* Adjust the reloc for the changes we just made.  */\n\t  rel->addend = 0;\n\t  if (! bfd_is_und_section (bfd_get_section (sym)))\n\t    rel->sym_ptr_ptr = bfd_get_section (sym)->symbol_ptr_ptr;\n\t}\n\n      /* NetWare uses a reloc with pcrel_offset set.  We adjust\n\t pc_relative relocs accordingly.  We are going to change the\n\t howto field, so we can only do this if the current one is\n\t compatible.  We should check that special_function is NULL\n\t here, but at the moment coff-i386 uses a special_function\n\t which does not affect what we are doing here.  */\n      if (rel->howto != NULL\n\t  && rel->howto->pc_relative\n\t  && ! rel->howto->pcrel_offset\n\t  && rel->howto->rightshift == 0\n\t  && rel->howto->size == 2\n\t  && rel->howto->bitsize == 32\n\t  && rel->howto->bitpos == 0\n\t  && rel->howto->src_mask == 0xffffffff\n\t  && rel->howto->dst_mask == 0xffffffff)\n\t{\n\t  bfd_vma val;\n\n\t  /* When pcrel_offset is not set, it means that the negative\n\t     of the address of the memory location is stored in the\n\t     memory location.  We must add it back in.  */\n\t  val = bfd_get_32 (outbfd, (bfd_byte *) contents + address);\n\t  val += address;\n\t  bfd_put_32 (outbfd, val, (bfd_byte *) contents + address);\n\n\t  /* We must change to a new howto.  */\n\t  rel->howto = &nlm_i386_pcrel_howto;\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          1398,
+          0
+        ],
+        [
+          1528,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_mangle_relocs",
+        "parameters": {
+          "outbfd": "bfd",
+          "insec": "asection",
+          "relocs_ptr": "arelent",
+          "reloc_count_ptr": "long",
+          "contents": "char",
+          "contents_size": "bfd_size_type"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nalpha_mangle_relocs (bfd *outbfd, asection *insec,\n\t\t     arelent ***relocs_ptr, long *reloc_count_ptr,\n\t\t     char *contents ATTRIBUTE_UNUSED,\n\t\t     bfd_size_type contents_size ATTRIBUTE_UNUSED)\n{\n  long old_reloc_count;\n  arelent **old_relocs;\n  arelent **relocs;\n\n  old_reloc_count = *reloc_count_ptr;\n  old_relocs = *relocs_ptr;\n  relocs = (arelent **) xmalloc ((old_reloc_count + 3) * sizeof (arelent *));\n  *relocs_ptr = relocs;\n\n  if (nlm_alpha_backend_data (outbfd)->lita_address == 0)\n    {\n      bfd *inbfd;\n      asection *lita_section;\n\n      inbfd = insec->owner;\n      lita_section = bfd_get_section_by_name (inbfd, _LITA);\n      if (lita_section != (asection *) NULL)\n\t{\n\t  nlm_alpha_backend_data (outbfd)->lita_address =\n\t    bfd_get_section_vma (inbfd, lita_section);\n\t  nlm_alpha_backend_data (outbfd)->lita_size =\n\t    bfd_section_size (inbfd, lita_section);\n\t}\n      else\n\t{\n\t  /* Avoid outputting this reloc again.  */\n\t  nlm_alpha_backend_data (outbfd)->lita_address = 4;\n\t}\n\n      *relocs = (arelent *) xmalloc (sizeof (arelent));\n      (*relocs)->sym_ptr_ptr = bfd_abs_section_ptr->symbol_ptr_ptr;\n      (*relocs)->address = nlm_alpha_backend_data (outbfd)->lita_address;\n      (*relocs)->addend = nlm_alpha_backend_data (outbfd)->lita_size + 1;\n      (*relocs)->howto = &nlm32_alpha_nw_howto;\n      ++relocs;\n      ++(*reloc_count_ptr);\n    }\n\n  /* Get the GP value from bfd.  */\n  if (nlm_alpha_backend_data (outbfd)->gp == 0)\n    nlm_alpha_backend_data (outbfd)->gp =\n      bfd_ecoff_get_gp_value (insec->owner);\n\n  *relocs = (arelent *) xmalloc (sizeof (arelent));\n  (*relocs)->sym_ptr_ptr = bfd_abs_section_ptr->symbol_ptr_ptr;\n  (*relocs)->address = nlm_alpha_backend_data (outbfd)->gp;\n  (*relocs)->addend = 0;\n  (*relocs)->howto = &nlm32_alpha_nw_howto;\n  ++relocs;\n  ++(*reloc_count_ptr);\n\n  memcpy (relocs, old_relocs, (size_t) old_reloc_count * sizeof (arelent *));\n  relocs[old_reloc_count] = (arelent *) NULL;\n\n  free (old_relocs);\n\n  if (insec->output_offset != 0)\n    {\n      bfd_size_type i;\n\n      for (i = 0; i < (bfd_size_type) old_reloc_count; i++, relocs++)\n\t(*relocs)->address += insec->output_offset;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1554,
+          0
+        ],
+        [
+          1623,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mangle_relocs",
+        "parameters": {
+          "outbfd": "bfd",
+          "insec": "asection",
+          "relocs_ptr": "arelent",
+          "reloc_count_ptr": "long",
+          "contents": "char",
+          "ATTRIBUTE_UNUSED": "bfd_size_type"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\npowerpc_build_stubs (bfd *inbfd, bfd *outbfd ATTRIBUTE_UNUSED,\n\t\t     asymbol ***symbols_ptr, long *symcount_ptr)\n{\n  asection *stub_sec;\n  asection *got_sec;\n  unsigned int got_base;\n  long i;\n  long symcount;\n  long stubcount;\n\n  /* Make a section to hold stubs.  We don't set SEC_HAS_CONTENTS for\n     the section to prevent copy_sections from reading from it.  */\n  stub_sec = bfd_make_section_with_flags (inbfd, \".stubs\",\n\t\t\t\t\t  (SEC_CODE\n\t\t\t\t\t   | SEC_RELOC\n\t\t\t\t\t   | SEC_ALLOC\n\t\t\t\t\t   | SEC_LOAD));\n  if (stub_sec == (asection *) NULL\n      || ! bfd_set_section_alignment (inbfd, stub_sec, 2))\n    bfd_fatal (\".stubs\");\n\n  /* Get the TOC section, which is named .got.  */\n  got_sec = bfd_get_section_by_name (inbfd, \".got\");\n  if (got_sec == (asection *) NULL)\n    {\n      got_sec = bfd_make_section_with_flags (inbfd, \".got\",\n\t\t\t\t\t     (SEC_DATA\n\t\t\t\t\t      | SEC_RELOC\n\t\t\t\t\t      | SEC_ALLOC\n\t\t\t\t\t      | SEC_LOAD\n\t\t\t\t\t      | SEC_HAS_CONTENTS));\n      if (got_sec == (asection *) NULL\n\t  || ! bfd_set_section_alignment (inbfd, got_sec, 2))\n\tbfd_fatal (\".got\");\n    }\n\n  powerpc_initial_got_size = bfd_section_size (inbfd, got_sec);\n  got_base = powerpc_initial_got_size;\n  got_base = (got_base + 3) &~ 3;\n\n  stubcount = 0;\n\n  symcount = *symcount_ptr;\n  for (i = 0; i < symcount; i++)\n    {\n      asymbol *sym;\n      asymbol *newsym;\n      char *newname;\n      struct powerpc_stub *item;\n\n      sym = (*symbols_ptr)[i];\n\n      /* We must make a stub for every undefined symbol whose name\n\t starts with '.'.  */\n      if (bfd_asymbol_name (sym)[0] != '.'\n\t  || ! bfd_is_und_section (bfd_get_section (sym)))\n\tcontinue;\n\n      /* Make a new undefined symbol with the same name but without\n\t the leading `.'.  */\n      newsym = xmalloc (sizeof (asymbol));\n      *newsym = *sym;\n      newname = xmalloc (strlen (bfd_asymbol_name (sym)));\n      strcpy (newname, bfd_asymbol_name (sym) + 1);\n      newsym->name = newname;\n\n      /* Define the `.' symbol to be in the stub section.  */\n      sym->section = stub_sec;\n      sym->value = stubcount * POWERPC_STUB_SIZE;\n      /* We set the BSF_DYNAMIC flag here so that we can check it when\n\t we are mangling relocs.  FIXME: This is a hack.  */\n      sym->flags = BSF_LOCAL | BSF_DYNAMIC;\n\n      /* Add this stub to the linked list.  */\n      item = (struct powerpc_stub *) xmalloc (sizeof (struct powerpc_stub));\n      item->start = sym;\n      item->reloc = newsym;\n      item->toc_index = got_base + stubcount * POWERPC_STUB_TOC_ENTRY_SIZE;\n\n      item->next = powerpc_stubs;\n      powerpc_stubs = item;\n\n      ++stubcount;\n    }\n\n  if (stubcount > 0)\n    {\n      asymbol **s;\n      struct powerpc_stub *l;\n\n      /* Add the new symbols we just created to the symbol table.  */\n      *symbols_ptr = (asymbol **) xrealloc ((char *) *symbols_ptr,\n\t\t\t\t\t    ((symcount + stubcount)\n\t\t\t\t\t     * sizeof (asymbol)));\n      *symcount_ptr += stubcount;\n      s = &(*symbols_ptr)[symcount];\n      for (l = powerpc_stubs; l != (struct powerpc_stub *) NULL; l = l->next)\n\t*s++ = l->reloc;\n\n      /* Set the size of the .stubs section and increase the size of\n\t the .got section.  */\n      if (! bfd_set_section_size (inbfd, stub_sec,\n\t\t\t\t  stubcount * POWERPC_STUB_SIZE)\n\t  || ! bfd_set_section_size (inbfd, got_sec,\n\t\t\t\t     (got_base\n\t\t\t\t      + (stubcount\n\t\t\t\t\t * POWERPC_STUB_TOC_ENTRY_SIZE))))\n\tbfd_fatal (_(\"stub section sizes\"));\n    }\n}",
+      "fn_code_pos": [
+        [
+          1686,
+          0
+        ],
+        [
+          1796,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "powerpc_build_stubs",
+        "parameters": {
+          "inbfd": "bfd",
+          "outbfd": "bfd",
+          "symbols_ptr": "asymbol",
+          "symcount_ptr": "long"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\npowerpc_resolve_stubs (bfd *inbfd, bfd *outbfd)\n{\n  bfd_byte buf[POWERPC_STUB_SIZE];\n  unsigned int i;\n  unsigned int stubcount;\n  arelent **relocs;\n  asection *got_sec;\n  arelent **r;\n  struct powerpc_stub *l;\n\n  if (powerpc_stubs == (struct powerpc_stub *) NULL)\n    return;\n\n  for (i = 0; i < POWERPC_STUB_INSN_COUNT; i++)\n    bfd_put_32 (outbfd, (bfd_vma) powerpc_stub_insns[i], buf + i * 4);\n\n  got_sec = bfd_get_section_by_name (inbfd, \".got\");\n  assert (got_sec != (asection *) NULL);\n  assert (got_sec->output_section->orelocation == (arelent **) NULL);\n\n  stubcount = 0;\n  for (l = powerpc_stubs; l != (struct powerpc_stub *) NULL; l = l->next)\n    ++stubcount;\n  relocs = (arelent **) xmalloc (stubcount * sizeof (arelent *));\n\n  r = relocs;\n  for (l = powerpc_stubs; l != (struct powerpc_stub *) NULL; l = l->next)\n    {\n      arelent *reloc;\n\n      /* Adjust the first instruction to use the right TOC index.  */\n      bfd_put_32 (outbfd, (bfd_vma) powerpc_stub_insns[0] + l->toc_index, buf);\n\n      /* Write this stub out.  */\n      if (! bfd_set_section_contents (outbfd,\n\t\t\t\t      bfd_get_section (l->start),\n\t\t\t\t      buf,\n\t\t\t\t      l->start->value,\n\t\t\t\t      POWERPC_STUB_SIZE))\n\tbfd_fatal (_(\"writing stub\"));\n\n      /* Create a new reloc for the TOC entry.  */\n      reloc = (arelent *) xmalloc (sizeof (arelent));\n      reloc->sym_ptr_ptr = &l->reloc;\n      reloc->address = l->toc_index + got_sec->output_offset;\n      reloc->addend = 0;\n      reloc->howto = bfd_reloc_type_lookup (inbfd, BFD_RELOC_32);\n\n      *r++ = reloc;\n    }\n\n  bfd_set_reloc (outbfd, got_sec->output_section, relocs, stubcount);\n}",
+      "fn_code_pos": [
+        [
+          1801,
+          0
+        ],
+        [
+          1854,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "powerpc_resolve_stubs",
+        "parameters": {
+          "inbfd": "bfd",
+          "outbfd": "bfd"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\npowerpc_mangle_relocs (bfd *outbfd, asection *insec,\n\t\t       arelent ***relocs_ptr,\n\t\t       long *reloc_count_ptr, char *contents,\n\t\t       bfd_size_type contents_size ATTRIBUTE_UNUSED)\n{\n  reloc_howto_type *toc_howto;\n  long reloc_count;\n  arelent **relocs;\n  long i;\n\n  toc_howto = bfd_reloc_type_lookup (insec->owner, BFD_RELOC_PPC_TOC16);\n  if (toc_howto == (reloc_howto_type *) NULL)\n    fatal (_(\"Unable to locate PPC_TOC16 reloc information\"));\n\n  /* If this is the .got section, clear out all the contents beyond\n     the initial size.  We must do this here because copy_sections is\n     going to write out whatever we return in the contents field.  */\n  if (strcmp (bfd_get_section_name (insec->owner, insec), \".got\") == 0)\n    memset (contents + powerpc_initial_got_size, 0,\n\t    (size_t) (bfd_get_section_size (insec) - powerpc_initial_got_size));\n\n  reloc_count = *reloc_count_ptr;\n  relocs = *relocs_ptr;\n  for (i = 0; i < reloc_count; i++)\n    {\n      arelent *rel;\n      asymbol *sym;\n      bfd_vma sym_value;\n\n      rel = *relocs++;\n      sym = *rel->sym_ptr_ptr;\n\n      /* Convert any relocs against the .bss section into relocs\n         against the .data section.  */\n      if (strcmp (bfd_get_section_name (outbfd, bfd_get_section (sym)),\n\t\t  NLM_UNINITIALIZED_DATA_NAME) == 0)\n\t{\n\t  asection *datasec;\n\n\t  datasec = bfd_get_section_by_name (outbfd,\n\t\t\t\t\t     NLM_INITIALIZED_DATA_NAME);\n\t  if (datasec != NULL)\n\t    {\n\t      rel->addend += (bfd_get_section_vma (outbfd,\n\t\t\t\t\t\t   bfd_get_section (sym))\n\t\t\t      + sym->value);\n\t      rel->sym_ptr_ptr = datasec->symbol_ptr_ptr;\n\t      sym = *rel->sym_ptr_ptr;\n\t    }\n\t}\n\n      /* PR 17512: file: 70cfde95.  */\n      if (rel->howto == NULL)\n\tcontinue;\n\n      /* We must be able to resolve all PC relative relocs at this\n\t point.  If we get a branch to an undefined symbol we build a\n\t stub, since NetWare will resolve undefined symbols into a\n\t pointer to a function descriptor.  */\n      if (rel->howto->pc_relative)\n\t{\n\t  /* This check for whether a symbol is in the same section as\n\t     the reloc will be wrong if there is a PC relative reloc\n\t     between two sections both of which were placed in the\n\t     same output section.  This should not happen.  */\n\t  if (bfd_get_section (sym) != insec->output_section)\n\t    non_fatal (_(\"unresolved PC relative reloc against %s\"),\n\t\t       bfd_asymbol_name (sym));\n\t  else\n\t    {\n\t      bfd_vma val;\n\n\t      if (rel->address > contents_size - 4)\n\t\t{\n\t\t  non_fatal (_(\"Out of range relocation: %lx\"),\n\t\t\t     (long) rel->address);\n\t\t  break;\n\t\t}\n\n\t      assert (rel->howto->size == 2 && rel->howto->pcrel_offset);\n\t      val = bfd_get_32 (outbfd, (bfd_byte *) contents + rel->address);\n\t      val = ((val &~ rel->howto->dst_mask)\n\t\t     | (((val & rel->howto->src_mask)\n\t\t\t + (sym->value - rel->address)\n\t\t\t + rel->addend)\n\t\t\t& rel->howto->dst_mask));\n\t      bfd_put_32 (outbfd, val, (bfd_byte *) contents + rel->address);\n\n\t      /* If this reloc is against an stubbed symbol and the\n\t\t next instruction is\n\t\t     cror 31,31,31\n\t\t then we replace the next instruction with\n\t\t     lwz  r2,20(r1)\n\t\t This reloads the TOC pointer after a stub call.  */\n\t      if (bfd_asymbol_name (sym)[0] == '.'\n\t\t  && (sym->flags & BSF_DYNAMIC) != 0\n\t\t  && (bfd_get_32 (outbfd,\n\t\t\t\t  (bfd_byte *) contents + rel->address + 4)\n\t\t      == 0x4ffffb82)) /* cror 31,31,31 */\n\t\tbfd_put_32 (outbfd, (bfd_vma) 0x80410014, /* lwz r2,20(r1) */\n\t\t\t    (bfd_byte *) contents + rel->address + 4);\n\n\t      --*reloc_count_ptr;\n\t      --relocs;\n\t      memmove (relocs, relocs + 1,\n\t\t       (size_t) ((reloc_count - 1) * sizeof (arelent *)));\n\t      continue;\n\t    }\n\t}\n\n      /* When considering a TOC reloc, we do not want to include the\n\t symbol value.  The symbol will be start of the TOC section\n\t (which is named .got).  We do want to include the addend.  */\n      if (rel->howto == toc_howto)\n\tsym_value = 0;\n      else\n\tsym_value = sym->value;\n\n      /* If this is a relocation against a symbol with a value, or\n\t there is a reloc addend, we need to update the addend in the\n\t object file.  */\n      if (sym_value + rel->addend != 0)\n\t{\n\t  bfd_vma val;\n\n\t  switch (rel->howto->size)\n\t    {\n\t    case 1:\n\t      if (rel->address > contents_size - 2)\n\t\t{\n\t\t  non_fatal (_(\"Out of range relocation: %lx\"),\n\t\t\t     (long) rel->address);\n\t\t  break;\n\t\t}\n\n\t      val = bfd_get_16 (outbfd,\n\t\t\t\t(bfd_byte *) contents + rel->address);\n\t      val = ((val &~ rel->howto->dst_mask)\n\t\t     | (((val & rel->howto->src_mask)\n\t\t\t + sym_value\n\t\t\t + rel->addend)\n\t\t\t& rel->howto->dst_mask));\n\t      if ((bfd_signed_vma) val < - 0x8000\n\t\t  || (bfd_signed_vma) val >= 0x8000)\n\t\tnon_fatal (_(\"overflow when adjusting relocation against %s\"),\n\t\t\t   bfd_asymbol_name (sym));\n\t      bfd_put_16 (outbfd, val, (bfd_byte *) contents + rel->address);\n\t      break;\n\n\t    case 2:\n\t      /* PR 17512: file: 0455a112.  */\n\t      if (rel->address > contents_size - 4)\n\t\t{\n\t\t  non_fatal (_(\"Out of range relocation: %lx\"),\n\t\t\t     (long) rel->address);\n\t\t  break;\n\t\t}\n\n\t      val = bfd_get_32 (outbfd,\n\t\t\t\t(bfd_byte *) contents + rel->address);\n\t      val = ((val &~ rel->howto->dst_mask)\n\t\t     | (((val & rel->howto->src_mask)\n\t\t\t + sym_value\n\t\t\t + rel->addend)\n\t\t\t& rel->howto->dst_mask));\n\t      bfd_put_32 (outbfd, val, (bfd_byte *) contents + rel->address);\n\t      break;\n\n\t    default:\n\t      fatal (_(\"Unsupported relocation size: %d\"), rel->howto->size);\n\t    }\n\n\t  if (! bfd_is_und_section (bfd_get_section (sym)))\n\t    rel->sym_ptr_ptr = bfd_get_section (sym)->symbol_ptr_ptr;\n\t  rel->addend = 0;\n\t}\n\n      /* Now that we have incorporated the addend, remove any TOC\n\t relocs.  */\n      if (rel->howto == toc_howto)\n\t{\n\t  --*reloc_count_ptr;\n\t  --relocs;\n\t  memmove (relocs, relocs + 1,\n\t\t   (size_t) ((reloc_count - i) * sizeof (arelent *)));\n\t  continue;\n\t}\n\n      rel->address += insec->output_offset;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1862,
+          0
+        ],
+        [
+          2053,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "powerpc_mangle_relocs",
+        "parameters": {
+          "outbfd": "bfd",
+          "insec": "asection",
+          "relocs_ptr": "arelent",
+          "reloc_count_ptr": "long",
+          "contents": "char",
+          "ATTRIBUTE_UNUSED": "bfd_size_type"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\nlink_inputs (struct string_list *inputs, char *ld, char * mfile)\n{\n  size_t c;\n  struct string_list *q;\n  char **argv;\n  size_t i;\n  int pid;\n  int status;\n  char *errfmt;\n  char *errarg;\n\n  c = 0;\n  for (q = inputs; q != NULL; q = q->next)\n    ++c;\n\n  argv = (char **) xmalloc ((c + 7) * sizeof (char *));\n\n#ifndef __MSDOS__\n  if (ld == NULL)\n    {\n      char *p;\n\n      /* Find the linker to invoke based on how nlmconv was run.  */\n      p = program_name + strlen (program_name);\n      while (p != program_name)\n\t{\n\t  if (p[-1] == '/')\n\t    {\n\t      ld = (char *) xmalloc (p - program_name + strlen (LD_NAME) + 1);\n\t      memcpy (ld, program_name, p - program_name);\n\t      strcpy (ld + (p - program_name), LD_NAME);\n\t      break;\n\t    }\n\t  --p;\n\t}\n    }\n#endif\n\n  if (ld == NULL)\n    ld = (char *) LD_NAME;\n\n  unlink_on_exit = make_temp_file (\".O\");\n\n  argv[0] = ld;\n  argv[1] = (char *) \"-Ur\";\n  argv[2] = (char *) \"-o\";\n  argv[3] = unlink_on_exit;\n  /* If we have been given the name of a mapfile and that\n     name is not 'stderr' then pass it on to the linker.  */\n  if (mfile\n      && * mfile\n      && strcmp (mfile, \"stderr\") == 0)\n    {\n      argv[4] = (char *) \"-Map\";\n      argv[5] = mfile;\n      i = 6;\n    }\n  else\n    i = 4;\n\n  for (q = inputs; q != NULL; q = q->next, i++)\n    argv[i] = q->string;\n  argv[i] = NULL;\n\n  if (debug)\n    {\n      for (i = 0; argv[i] != NULL; i++)\n\tfprintf (stderr, \" %s\", argv[i]);\n      fprintf (stderr, \"\\n\");\n    }\n\n  pid = pexecute (ld, argv, program_name, (char *) NULL, &errfmt, &errarg,\n\t\t  PEXECUTE_SEARCH | PEXECUTE_ONE);\n  free (argv);\n\n  if (pid == -1)\n    {\n      fprintf (stderr, _(\"%s: execution of %s failed: \"), program_name, ld);\n      fprintf (stderr, errfmt, errarg);\n      unlink (unlink_on_exit);\n      exit (1);\n    }\n\n  if (pwait (pid, &status, 0) < 0)\n    {\n      perror (\"pwait\");\n      unlink (unlink_on_exit);\n      exit (1);\n    }\n\n  if (status != 0)\n    {\n      non_fatal (_(\"Execution of %s failed\"), ld);\n      unlink (unlink_on_exit);\n      exit (1);\n    }\n\n  return unlink_on_exit;\n}",
+      "fn_code_pos": [
+        [
+          2066,
+          0
+        ],
+        [
+          2165,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "link_inputs",
+        "parameters": {
+          "inputs": "struct string_list",
+          "ld": "char",
+          "mfile": "char"
+        },
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "strerror (int)",
+      "fn_dec_pos": [
+        [
+          60,
+          13
+        ],
+        [
+          60,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "strerror",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "main (int, char **)",
+      "fn_dec_pos": [
+        [
+          122,
+          4
+        ],
+        [
+          122,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "show_usage (FILE *, int)",
+      "fn_dec_pos": [
+        [
+          124,
+          12
+        ],
+        [
+          124,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "show_usage",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "select_output_format\n  (enum bfd_architecture, unsigned long, bfd_boolean)",
+      "fn_dec_pos": [
+        [
+          125,
+          19
+        ],
+        [
+          126,
+          53
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "select_output_format",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "setup_sections (bfd *, asection *, void *)",
+      "fn_dec_pos": [
+        [
+          127,
+          12
+        ],
+        [
+          127,
+          54
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "setup_sections",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "copy_sections (bfd *, asection *, void *)",
+      "fn_dec_pos": [
+        [
+          128,
+          12
+        ],
+        [
+          128,
+          53
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "copy_sections",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "mangle_relocs\n  (bfd *, asection *, arelent ***, long *, char *, bfd_size_type)",
+      "fn_dec_pos": [
+        [
+          129,
+          12
+        ],
+        [
+          130,
+          65
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mangle_relocs",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "default_mangle_relocs\n  (bfd *, asection *, arelent ***, long *, char *, bfd_size_type)",
+      "fn_dec_pos": [
+        [
+          131,
+          12
+        ],
+        [
+          132,
+          65
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "default_mangle_relocs",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "link_inputs (struct string_list *, char *, char *)",
+      "fn_dec_pos": [
+        [
+          133,
+          13
+        ],
+        [
+          133,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "link_inputs",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "i386_mangle_relocs (bfd *, asection *, arelent ***, long *, char *, bfd_size_type)",
+      "fn_dec_pos": [
+        [
+          136,
+          12
+        ],
+        [
+          136,
+          94
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_mangle_relocs",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "alpha_mangle_relocs (bfd *, asection *, arelent ***, long *, char *, bfd_size_type)",
+      "fn_dec_pos": [
+        [
+          140,
+          12
+        ],
+        [
+          140,
+          95
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mangle_relocs",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "powerpc_build_stubs (bfd *, bfd *, asymbol ***, long *)",
+      "fn_dec_pos": [
+        [
+          144,
+          12
+        ],
+        [
+          144,
+          67
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "powerpc_build_stubs",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "powerpc_resolve_stubs (bfd *, bfd *)",
+      "fn_dec_pos": [
+        [
+          145,
+          12
+        ],
+        [
+          145,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "powerpc_resolve_stubs",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "powerpc_mangle_relocs (bfd *, asection *, arelent ***, long *, char *, bfd_size_type)",
+      "fn_dec_pos": [
+        [
+          146,
+          12
+        ],
+        [
+          146,
+          97
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "powerpc_mangle_relocs",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "select_output_format (enum bfd_architecture arch, unsigned long mach,\n\t\t      bfd_boolean bigendian ATTRIBUTE_UNUSED)",
+      "fn_dec_pos": [
+        [
+          1119,
+          0
+        ],
+        [
+          1120,
+          47
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "select_output_format",
+        "parameters": {
+          "arch": "enum bfd_architecture",
+          "mach": "unsigned long",
+          "bigendian": "bfd_boolean"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "link_inputs (struct string_list *inputs, char *ld, char * mfile)",
+      "fn_dec_pos": [
+        [
+          2067,
+          0
+        ],
+        [
+          2067,
+          64
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "link_inputs",
+        "parameters": {
+          "inputs": "struct string_list",
+          "ld": "char",
+          "mfile": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct powerpc_stub\n{\n  /* Next stub in linked list.  */\n  struct powerpc_stub *next;\n\n  /* Symbol whose value is the start of the stub.  This is a symbol\n     whose name begins with `.'.  */\n  asymbol *start;\n\n  /* Symbol we are going to create a reloc against.  This is a symbol\n     with the same name as START but without the leading `.'.  */\n  asymbol *reloc;\n\n  /* The TOC index for this stub.  This is the index into the TOC\n     section at which the reloc is created.  */\n  unsigned int toc_index;\n}",
+      {
+        "*next": "struct powerpc_stub",
+        "*start": "asymbol",
+        "*reloc": "asymbol",
+        "toc_index": "unsigned int"
+      },
+      "powerpc_stub",
+      [
+        1634,
+        0
+      ],
+      [
+        1650,
+        1
+      ]
+    ],
+    [
+      "struct option",
+      {},
+      "",
+      [
+        106,
+        7
+      ],
+      [
+        106,
+        20
+      ]
+    ],
+    [
+      "struct string_list",
+      {},
+      "",
+      [
+        133,
+        26
+      ],
+      [
+        133,
+        44
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        177,
+        2
+      ],
+      [
+        177,
+        13
+      ]
+    ],
+    [
+      "struct string_list",
+      {},
+      "",
+      [
+        558,
+        3
+      ],
+      [
+        558,
+        21
+      ]
+    ],
+    [
+      "struct string_list",
+      {},
+      "",
+      [
+        606,
+        3
+      ],
+      [
+        606,
+        21
+      ]
+    ],
+    [
+      "struct string_list",
+      {},
+      "",
+      [
+        767,
+        6
+      ],
+      [
+        767,
+        24
+      ]
+    ],
+    [
+      "struct tm",
+      {},
+      "",
+      [
+        874,
+        6
+      ],
+      [
+        874,
+        15
+      ]
+    ],
+    [
+      "struct string_list",
+      {},
+      "",
+      [
+        970,
+        6
+      ],
+      [
+        970,
+        24
+      ]
+    ],
+    [
+      "struct powerpc_stub\n{\n  /* Next stub in linked list.  */\n  struct powerpc_stub *next;\n\n  /* Symbol whose value is the start of the stub.  This is a symbol\n     whose name begins with `.'.  */\n  asymbol *start;\n\n  /* Symbol we are going to create a reloc against.  This is a symbol\n     with the same name as START but without the leading `.'.  */\n  asymbol *reloc;\n\n  /* The TOC index for this stub.  This is the index into the TOC\n     section at which the reloc is created.  */\n  unsigned int toc_index;\n}",
+      {
+        "*next": "struct powerpc_stub",
+        "*start": "asymbol",
+        "*reloc": "asymbol",
+        "toc_index": "unsigned int"
+      },
+      "powerpc_stub",
+      [
+        1634,
+        0
+      ],
+      [
+        1650,
+        1
+      ]
+    ],
+    [
+      "struct powerpc_stub",
+      {},
+      "",
+      [
+        1637,
+        2
+      ],
+      [
+        1637,
+        21
+      ]
+    ],
+    [
+      "struct powerpc_stub",
+      {},
+      "",
+      [
+        1654,
+        7
+      ],
+      [
+        1654,
+        26
+      ]
+    ],
+    [
+      "struct powerpc_stub",
+      {},
+      "",
+      [
+        1735,
+        6
+      ],
+      [
+        1735,
+        25
+      ]
+    ],
+    [
+      "struct powerpc_stub",
+      {},
+      "",
+      [
+        1761,
+        14
+      ],
+      [
+        1761,
+        33
+      ]
+    ],
+    [
+      "struct powerpc_stub",
+      {},
+      "",
+      [
+        1761,
+        54
+      ],
+      [
+        1761,
+        73
+      ]
+    ],
+    [
+      "struct powerpc_stub",
+      {},
+      "",
+      [
+        1775,
+        6
+      ],
+      [
+        1775,
+        25
+      ]
+    ],
+    [
+      "struct powerpc_stub",
+      {},
+      "",
+      [
+        1783,
+        36
+      ],
+      [
+        1783,
+        55
+      ]
+    ],
+    [
+      "struct powerpc_stub",
+      {},
+      "",
+      [
+        1810,
+        2
+      ],
+      [
+        1810,
+        21
+      ]
+    ],
+    [
+      "struct powerpc_stub",
+      {},
+      "",
+      [
+        1812,
+        24
+      ],
+      [
+        1812,
+        43
+      ]
+    ],
+    [
+      "struct powerpc_stub",
+      {},
+      "",
+      [
+        1823,
+        32
+      ],
+      [
+        1823,
+        51
+      ]
+    ],
+    [
+      "struct powerpc_stub",
+      {},
+      "",
+      [
+        1828,
+        32
+      ],
+      [
+        1828,
+        51
+      ]
+    ],
+    [
+      "struct string_list",
+      {},
+      "",
+      [
+        2067,
+        13
+      ],
+      [
+        2067,
+        31
+      ]
+    ],
+    [
+      "struct string_list",
+      {},
+      "",
+      [
+        2070,
+        2
+      ],
+      [
+        2070,
+        20
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"filenames.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include \"safe-ctype.h\"\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"ansidecl.h\"\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <time.h>\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <assert.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include \"getopt.h\"\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include \"libnlm.h\"\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ],
+    [
+      "#include \"nlmconv.h\"\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include \"coff/sym.h\"\n",
+      [
+        51,
+        0
+      ],
+      [
+        52,
+        0
+      ]
+    ],
+    [
+      "#include \"coff/ecoff.h\"\n",
+      [
+        52,
+        0
+      ],
+      [
+        53,
+        0
+      ]
+    ],
+    [
+      "#include \"bucomm.h\"\n",
+      [
+        55,
+        0
+      ],
+      [
+        56,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum bfd_architecture",
+      {},
+      "",
+      [
+        126,
+        3
+      ],
+      [
+        126,
+        24
+      ]
+    ],
+    [
+      "enum bfd_architecture",
+      {},
+      "",
+      [
+        1119,
+        22
+      ],
+      [
+        1119,
+        43
+      ]
+    ]
+  ]
+}

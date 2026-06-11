@@ -1,0 +1,1726 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static const char *\nopic_register_name(opic_register type)\n{\n  switch (type) {\n  case invalid_opic_register: return \"invalid_opic_register\";\n  case interrupt_source_N_destination_register: return \"interrupt_source_N_destination_register\";\n  case interrupt_source_N_vector_priority_register: return \"interrupt_source_N_vector_priority_register\";\n  case timer_N_destination_register: return \"timer_N_destination_register\";\n  case timer_N_vector_priority_register: return \"timer_N_vector_priority_register\";\n  case timer_N_base_count_register: return \"timer_N_base_count_register\";\n  case timer_N_current_count_register: return \"timer_N_current_count_register\";\n  case timer_frequency_reporting_register: return \"timer_frequency_reporting_register\";\n  case ipi_N_vector_priority_register: return \"ipi_N_vector_priority_register\";\n  case ipi_N_dispatch_register: return \"ipi_N_dispatch_register\";\n  case spurious_vector_register: return \"spurious_vector_register\";\n  case processor_init_register: return \"processor_init_register\";\n  case vendor_identification_register: return \"vendor_identification_register\";\n  case global_configuration_register_N: return \"global_configuration_register_N\";\n  case feature_reporting_register_N: return \"feature_reporting_register_N\";\n  case end_of_interrupt_register_N: return \"end_of_interrupt_register_N\";\n  case interrupt_acknowledge_register_N: return \"interrupt_acknowledge_register_N\";\n  case current_task_priority_register_N: return \"current_task_priority_register_N\";\n  }\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          277,
+          0
+        ],
+        [
+          301,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "opic_register_name",
+        "parameters": {
+          "type": "opic_register"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_opic_init_data(device *me)\n{\n  hw_opic_device *opic = (hw_opic_device*)device_data(me);\n  int isb;\n  int idu_reg;\n  int nr_isu_blocks;\n  int i;\n\n  /* determine the first valid reg property entry (there could be\n     leading reg entries with invalid (zero) size fields) and the\n     number of isu entries found in the reg property. */\n  idu_reg = 0;\n  nr_isu_blocks = 0;\n  while (1) {\n    reg_property_spec unit;\n    int attach_space;\n    unsigned_word attach_address;\n    unsigned attach_size;\n    if (!device_find_reg_array_property(me, \"reg\", idu_reg + nr_isu_blocks,\n\t\t\t\t\t&unit))\n      break;\n    if (nr_isu_blocks > 0\n\t|| (device_address_to_attach_address(device_parent(me), &unit.address,\n\t\t\t\t\t     &attach_space, &attach_address,\n\t\t\t\t\t     me)\n\t    && device_size_to_attach_size(device_parent(me), &unit.size,\n\t\t\t\t\t  &attach_size,\n\t\t\t\t\t  me))) {\n      /* we count any thing once we've found one valid address/size pair */\n      nr_isu_blocks += 1;\n    }\n    else {\n      idu_reg += 1;\n    }\n  }\n\n  /* determine the number and location of the multiple interrupt\n     source units and the single interrupt delivery unit */\n  if (opic->isu_block == NULL) {\n    int reg_nr;\n    opic->nr_isu_blocks = nr_isu_blocks;\n    opic->isu_block = zalloc(sizeof(opic_isu_block) * opic->nr_isu_blocks);\n    isb = 0;\n    reg_nr = idu_reg;\n    while (isb < opic->nr_isu_blocks) {\n      reg_property_spec reg;\n      if (!device_find_reg_array_property(me, \"reg\", reg_nr, &reg))\n\tdevice_error(me, \"reg property missing entry number %d\", reg_nr);\n      opic->isu_block[isb].reg = reg_nr;\n      if (!device_address_to_attach_address(device_parent(me), &reg.address,\n\t\t\t\t\t    &opic->isu_block[isb].space,\n\t\t\t\t\t    &opic->isu_block[isb].address,\n\t\t\t\t\t    me)\n\t  || !device_size_to_attach_size(device_parent(me), &reg.size,\n\t\t\t\t\t &opic->isu_block[isb].size,\n\t\t\t\t\t me)) {\n\tdevice_error(me, \"reg property entry %d invalid\", reg_nr);\n      }\n      if (!device_find_integer_array_property(me, \"interrupt-ranges\",\n\t\t\t\t\t      reg_nr * 2,\n\t\t\t\t\t      &opic->isu_block[isb].int_number)\n\t  || !device_find_integer_array_property(me, \"interrupt-ranges\",\n\t\t\t\t\t\t reg_nr * 2 + 1,\n\t\t\t\t\t\t &opic->isu_block[isb].range))\n\tdevice_error(me, \"missing or invalid interrupt-ranges property entry %d\", reg_nr);\n      /* first reg entry specifies the address of both the IDU and the\n         first set of ISU registers, adjust things accordingly */\n      if (reg_nr == idu_reg) {\n\topic->idu.reg = opic->isu_block[isb].reg;\n\topic->idu.space = opic->isu_block[isb].space;\n\topic->idu.address = opic->isu_block[isb].address;\n\topic->idu.size = opic->isu_block[isb].size;\n\topic->isu_block[isb].address += idu_isu_base;\n\topic->isu_block[isb].size = opic->isu_block[isb].range * (16 + 16);\n      }\n      /* was this a valid reg entry? */\n      if (opic->isu_block[isb].range == 0) {\n\topic->nr_isu_blocks -= 1;\n      }\n      else {\n\topic->nr_external_interrupts += opic->isu_block[isb].range;\n\tisb++;\n      }\n      reg_nr++;\n    }\n  }\n  DTRACE(opic, (\"interrupt source unit block - effective number of blocks %d\\n\",\n\t\t(int)opic->nr_isu_blocks));\n\n\n  /* the number of other interrupts */\n  opic->nr_interprocessor_interrupts = 4;\n  opic->nr_timer_interrupts = 4;\n\n\n  /* create space for the interrupt source registers */\n  if (opic->interrupt_source != NULL) {\n    memset(opic->interrupt_source, 0, opic->sizeof_interrupt_source);\n  }\n  else {\n    opic->nr_interrupt_sources = (opic->nr_external_interrupts\n\t\t\t\t  + opic->nr_interprocessor_interrupts\n\t\t\t\t  + opic->nr_timer_interrupts);\n    if (opic->nr_interrupt_sources > max_nr_interrupt_sources)\n      device_error(me, \"number of interrupt sources exceeded\");\n    opic->sizeof_interrupt_source = (sizeof(opic_interrupt_source)\n\t\t\t\t     * opic->nr_interrupt_sources);\n    opic->interrupt_source = zalloc(opic->sizeof_interrupt_source);\n    opic->external_interrupt_source = opic->interrupt_source;\n    opic->interprocessor_interrupt_source = (opic->external_interrupt_source\n\t\t\t\t\t     + opic->nr_external_interrupts);\n    opic->timer_interrupt_source = (opic->interprocessor_interrupt_source\n\t\t\t\t    + opic->nr_interprocessor_interrupts);\n  }\n  for (i = 0; i < opic->nr_interrupt_sources; i++) {\n    opic_interrupt_source *source = &opic->interrupt_source[i];\n    source->nr = i;\n    source->is_masked = isu_mask_bit;\n  }\n  DTRACE(opic, (\"interrupt sources - external %d, timer %d, ipi %d, total %d\\n\",\n\t\topic->nr_external_interrupts,\n\t\topic->nr_timer_interrupts,\n\t\topic->nr_interprocessor_interrupts,\n\t\topic->nr_interrupt_sources));\n\n\n  /* timers or interprocessor interrupts */\n  if (opic->timer != NULL)\n    memset(opic->timer, 0, opic->sizeof_timer);\n  else {\n    opic->nr_timer_interrupts = 4;\n    opic->sizeof_timer = sizeof(opic_timer) * opic->nr_timer_interrupts;\n    opic->timer = zalloc(opic->sizeof_timer);\n  }\n  for (i = 0; i < opic->nr_timer_interrupts; i++) {\n    opic_timer *timer = &opic->timer[i];\n    timer->nr = i;\n    timer->me = me;\n    timer->opic = opic;\n    timer->inhibited = 1;\n    timer->interrupt_source = &opic->timer_interrupt_source[i];\n  }\n  if (device_find_property(me, \"timer-frequency\"))\n    opic->timer_frequency = device_find_integer_property(me, \"timer-frequency\");\n  else\n    opic->timer_frequency = 1;\n\n\n  /* create space for the interrupt destination registers */\n  if (opic->interrupt_destination != NULL) {\n    memset(opic->interrupt_destination, 0, opic->sizeof_interrupt_destination);\n  }\n  else {\n    opic->nr_interrupt_destinations = tree_find_integer_property(me, \"/openprom/options/smp\");\n    opic->sizeof_interrupt_destination = (sizeof(opic_interrupt_destination)\n\t\t\t\t\t  * opic->nr_interrupt_destinations);\n    opic->interrupt_destination = zalloc(opic->sizeof_interrupt_destination);\n    if (opic->nr_interrupt_destinations > max_nr_interrupt_destinations)\n      device_error(me, \"number of interrupt destinations exceeded\");\n  }\n  for (i = 0; i < opic->nr_interrupt_destinations; i++) {\n    opic_interrupt_destination *dest = &opic->interrupt_destination[i];\n    dest->bit = (1 << i);\n    dest->nr = i;\n    dest->init_port = (device_interrupt_decode(me, \"init0\", output_port)\n\t\t       + i);\n    dest->intr_port = (device_interrupt_decode(me, \"intr0\", output_port)\n\t\t       + i);\n    dest->base_priority = max_nr_task_priorities - 1;\n  }\n  DTRACE(opic, (\"interrupt destinations - total %d\\n\",\n\t\t(int)opic->nr_interrupt_destinations));\n  \n\n  /* verify and print out the ISU's */\n  for (isb = 0; isb < opic->nr_isu_blocks; isb++) {\n    unsigned correct_size;\n    if ((opic->isu_block[isb].address % opic_alignment) != 0)\n      device_error(me, \"interrupt source unit %d address not aligned to %d byte boundary\",\n\t\t   isb, opic_alignment);\n    correct_size = opic->isu_block[isb].range * sizeof_isu_register_block;\n    if (opic->isu_block[isb].size != correct_size)\n      device_error(me, \"interrupt source unit %d (reg %d) has an incorrect size, should be 0x%x\",\n\t\t   isb, opic->isu_block[isb].reg, correct_size);\n    DTRACE(opic, (\"interrupt source unit block %ld - address %d:0x%lx, size 0x%lx, int-number %ld, range %ld\\n\",\n\t\t  (long)isb,\n\t\t  (int)opic->isu_block[isb].space,\n\t\t  (unsigned long)opic->isu_block[isb].address,\n\t\t  (unsigned long)opic->isu_block[isb].size,\n\t\t  (long)opic->isu_block[isb].int_number,\n\t\t  (long)opic->isu_block[isb].range));\n  }\n\n\n  /* verify and print out the IDU */\n  {\n    unsigned correct_size;\n    unsigned alternate_size;\n    if ((opic->idu.address % opic_alignment) != 0)\n      device_error(me, \"interrupt delivery unit not aligned to %d byte boundary\",\n\t\t   opic_alignment);\n    correct_size = (idu_per_processor_register_base\n\t\t    + (sizeof_idu_per_processor_register_block\n\t\t       * opic->nr_interrupt_destinations));\n    alternate_size = (idu_per_processor_register_base\n\t\t      + (sizeof_idu_per_processor_register_block\n\t\t\t * max_nr_interrupt_destinations));\n    if (opic->idu.size != correct_size\n\t&& opic->idu.size != alternate_size)\n      device_error(me, \"interrupt delivery unit has incorrect size, should be 0x%x or 0x%x\",\n\t\t   correct_size, alternate_size);\n    DTRACE(opic, (\"interrupt delivery unit - address %d:0x%lx, size 0x%lx\\n\",\n\t\t  (int)opic->idu.space,\n\t\t  (unsigned long)opic->idu.address,\n\t\t  (unsigned long)opic->idu.size));\n  }\n\n  /* initialize the init interrupts */\n  opic->init = 0;\n\n\n  /* vendor ident */\n  if (device_find_property(me, \"vendor-identification\") != NULL)\n    opic->vendor_identification = device_find_integer_property(me, \"vendor-identification\");\n  else\n    opic->vendor_identification = 0;\n\n  /* misc registers */\n  opic->spurious_vector = 0xff;\n\n}",
+      "fn_code_pos": [
+        [
+          364,
+          0
+        ],
+        [
+          595,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_opic_init_data",
+        "parameters": {
+          "me": "device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nassert_interrupt(device *me,\n\t\t hw_opic_device *opic,\n\t\t opic_interrupt_destination *dest)\n{\n  ASSERT(dest >= opic->interrupt_destination);\n  ASSERT(dest < opic->interrupt_destination + opic->nr_interrupt_destinations);\n  DTRACE(opic, (\"assert interrupt - intr port %d\\n\", dest->intr_port));\n  device_interrupt_event(me, dest->intr_port, 1, NULL, 0);\n}",
+      "fn_code_pos": [
+        [
+          600,
+          0
+        ],
+        [
+          609,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "assert_interrupt",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "dest": "opic_interrupt_destination"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nnegate_interrupt(device *me,\n\t\t hw_opic_device *opic,\n\t\t opic_interrupt_destination *dest)\n{\n  ASSERT(dest >= opic->interrupt_destination);\n  ASSERT(dest < opic->interrupt_destination + opic->nr_interrupt_destinations);\n  DTRACE(opic, (\"negate interrupt - intr port %d\\n\", dest->intr_port));\n  device_interrupt_event(me, dest->intr_port, 0, NULL, 0);\n}",
+      "fn_code_pos": [
+        [
+          612,
+          0
+        ],
+        [
+          621,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "negate_interrupt",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "dest": "opic_interrupt_destination"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ncan_deliver(device *me,\n\t    opic_interrupt_source *source,\n\t    opic_interrupt_destination *dest)\n{\n  return (source != NULL && dest != NULL\n\t  && source->priority > dest->base_priority\n\t  && (dest->current_in_service == NULL\n\t      || source->priority > dest->current_in_service->priority));\n}",
+      "fn_code_pos": [
+        [
+          624,
+          0
+        ],
+        [
+          633,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "can_deliver",
+        "parameters": {
+          "me": "device",
+          "source": "opic_interrupt_source",
+          "dest": "opic_interrupt_destination"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndeliver_pending(device *me,\n\t\thw_opic_device *opic,\n\t\topic_interrupt_destination *dest)\n{\n  ASSERT(can_deliver(me, dest->current_pending, dest));\n  dest->current_in_service = dest->current_pending;\n  dest->current_in_service->in_service |= dest->bit;\n  if (!dest->current_pending->is_level_triggered) {\n    if (dest->current_pending->is_multicast)\n      dest->current_pending->pending &= ~dest->bit;\n    else\n      dest->current_pending->pending = 0;\n  }\n  dest->current_pending = NULL;\n  negate_interrupt(me, opic, dest);\n  return dest->current_in_service->vector;\n}",
+      "fn_code_pos": [
+        [
+          636,
+          0
+        ],
+        [
+          653,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "deliver_pending",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "dest": "opic_interrupt_destination"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static opic_interrupt_source *\nfind_interrupt_for_dest(device *me,\n\t\t\thw_opic_device *opic,\n\t\t\topic_interrupt_destination *dest,\n\t\t\tinterrupt_class class)\n{\n  int i;\n  opic_interrupt_source *pending = NULL;\n  for (i = 0; i < opic->nr_interrupt_sources; i++) {\n    opic_interrupt_source *src = &opic->interrupt_source[i];\n    /* is this a potential hit? */\n    switch (class) {\n    case in_service_interrupt:\n      if ((src->in_service & dest->bit) == 0)\n\tcontinue;\n      break;\n    case pending_interrupt:\n      if ((src->pending & dest->bit) == 0)\n\tcontinue;\n      break;\n    }\n    /* see if it is the highest priority */\n    if (pending == NULL)\n      pending = src;\n    else if (src->priority > pending->priority)\n      pending = src;\n  }\n  return pending;\n}\n\n\nstatic opic_interrupt_destination *\nfind_lowest_dest(device *me, \n\t\t hw_opic_device *opic,\n\t\t opic_interrupt_source *src)\n{\n  int i;\n  opic_interrupt_destination *lowest = NULL;\n  for (i = 0; i < opic->nr_interrupt_destinations; i++) {\n    opic_interrupt_destination *dest = &opic->interrupt_destination[i];\n    if (src->destination & dest->bit) {\n      if (dest->base_priority < src->priority) {\n\tif (lowest == NULL)\n\t  lowest = dest;\n\telse if (lowest->base_priority > dest->base_priority)\n\t  lowest = dest;\n\telse if (lowest->current_in_service != NULL\n\t\t && dest->current_in_service == NULL)\n\t  lowest = dest; /* not doing anything */\n\telse if (lowest->current_in_service != NULL\n\t\t && dest->current_in_service != NULL\n\t\t && (lowest->current_in_service->priority\n\t\t     > dest->current_in_service->priority))\n\t  lowest = dest; /* less urgent */\n\t/* FIXME - need to be more fair */\t\n      }\n    }\n  }\n  return lowest;\n}\n\n\nstatic void\nhandle_interrupt(device *me,\n\t\t hw_opic_device *opic,\n\t\t opic_interrupt_source *src,\n\t\t int asserted)\n{\n  if (src->is_masked) {\n    DTRACE(opic, (\"interrupt %d - ignore masked\\n\", src->nr));\n  }\n  else if (src->is_multicast) {\n    /* always try to deliver multicast interrupts - just easier */\n    int i;\n    ASSERT(!src->is_level_triggered);\n    ASSERT(src->is_positive_polarity);\n    ASSERT(asserted);\n    for (i = 0; i < opic->nr_interrupt_destinations; i++) {\n      opic_interrupt_destination *dest = &opic->interrupt_destination[i];\n      if (src->destination & dest->bit) {\n\tif (src->pending & dest->bit) {\n\t  DTRACE(opic, (\"interrupt %d - multicast still pending to %d\\n\",\n\t\t\tsrc->nr, dest->nr));\n\t}\n\telse if (can_deliver(me, src, dest)) {\n\t  dest->current_pending = src;\n\t  src->pending |= dest->bit;\n\t  assert_interrupt(me, opic, dest);\n\t  DTRACE(opic, (\"interrupt %d - multicast to %d\\n\",\n\t\t\tsrc->nr, dest->nr));\n\t}\n\telse {\n\t  src->pending |= dest->bit;\n\t  DTRACE(opic, (\"interrupt %d - multicast pending to %d\\n\",\n\t\t\tsrc->nr, dest->nr));\n\t}\n      }\n    }\n  }\n  else if (src->is_level_triggered\n\t   && src->is_positive_polarity\n\t   && !asserted) {\n    if (src->pending)\n      DTRACE(opic, (\"interrupt %d - ignore withdrawn (active high)\\n\",\n\t\t    src->nr));\n    else\n      DTRACE(opic, (\"interrupt %d - ignore low level (active high)\\n\",\n\t\t    src->nr));\n    ASSERT(!src->is_multicast);\n    src->pending = 0;\n  }\n  else if (src->is_level_triggered\n\t   && !src->is_positive_polarity\n\t   && asserted) {\n    if (src->pending)\n      DTRACE(opic, (\"interrupt %d - ignore withdrawn (active low)\\n\",\n\t\t    src->nr));\n    else\n      DTRACE(opic, (\"interrupt %d - ignore high level (active low)\\n\",\n\t\t    src->nr));\n\n    ASSERT(!src->is_multicast);\n    src->pending = 0;\n  }\n  else if (!src->is_level_triggered\n\t   && src->is_positive_polarity\n\t   && !asserted) {\n    DTRACE(opic, (\"interrupt %d - ignore falling edge (positive edge trigered)\\n\",\n\t\t  src->nr));\n  }\n  else if (!src->is_level_triggered\n\t   && !src->is_positive_polarity\n\t   && asserted) {\n    DTRACE(opic, (\"interrupt %d - ignore rising edge (negative edge trigered)\\n\",\n\t\t  src->nr));\n  }\n  else if (src->in_service != 0) {\n    /* leave the interrupt where it is */\n    ASSERT(!src->is_multicast);\n    ASSERT(src->pending == 0 || src->pending == src->in_service);\n    src->pending = src->in_service;\n    DTRACE(opic, (\"interrupt %ld - ignore already in service to 0x%lx\\n\",\n\t\t  (long)src->nr, (long)src->in_service));\n  }\n  else if (src->pending != 0) {\n    DTRACE(opic, (\"interrupt %ld - ignore still pending to 0x%lx\\n\",\n\t\t  (long)src->nr, (long)src->pending));\n  }\n  else {\n    /* delivery is needed */\n    opic_interrupt_destination *dest = find_lowest_dest(me, opic, src);\n    if (can_deliver(me, src, dest)) {\n      dest->current_pending = src;\n      src->pending = dest->bit;\n      DTRACE(opic, (\"interrupt %d - delivered to %d\\n\", src->nr, dest->nr));\n      assert_interrupt(me, opic, dest);\n    }\n    else {\n      src->pending = src->destination; /* any can take this */\n      DTRACE(opic, (\"interrupt %ld - pending to 0x%lx\\n\",\n\t\t    (long)src->nr, (long)src->pending));\n    }\n  }\n}",
+      "fn_code_pos": [
+        [
+          661,
+          0
+        ],
+        [
+          824,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_interrupt_for_dest",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "dest": "opic_interrupt_destination",
+          "class": "interrupt_class"
+        },
+        "return_type": "opic_interrupt_source"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_interrupt_acknowledge_register_N_read(device *me,\n\t\t\t\t\t hw_opic_device *opic,\n\t\t\t\t\t int dest_nr)\n{\n  opic_interrupt_destination *dest = &opic->interrupt_destination[dest_nr];\n  unsigned vector;\n\n  ASSERT(dest_nr >= 0 && dest_nr < opic->nr_interrupt_destinations);\n  ASSERT(dest_nr == dest->nr);\n\n  /* try the current pending */\n  if (can_deliver(me, dest->current_pending, dest)) {\n    ASSERT(dest->current_pending->pending & dest->bit);\n    vector = deliver_pending(me, opic, dest);\n    DTRACE(opic, (\"interrupt ack %d - entering %d (pending) - vector %d (%d), priority %d\\n\",\n\t\t  dest->nr,\n\t\t  dest->current_in_service->nr,\n\t\t  dest->current_in_service->vector, vector,\n\t\t  dest->current_in_service->priority));\n  }\n  else {\n    /* try for something else */\n    dest->current_pending = find_interrupt_for_dest(me, opic, dest, pending_interrupt);\n    if (can_deliver(me, dest->current_pending, dest)) {\n      vector = deliver_pending(me, opic, dest);    \n      DTRACE(opic, (\"interrupt ack %d - entering %d (not pending) - vector %d (%d), priority %d\\n\",\n\t\t    dest->nr,\n\t\t    dest->current_in_service->nr,\n\t\t    dest->current_in_service->vector, vector,\n\t\t    dest->current_in_service->priority));\n    }\n    else {\n      dest->current_pending = NULL;\n      vector = opic->spurious_vector;\n      DTRACE(opic, (\"interrupt ack %d - spurious interrupt %d\\n\",\n\t\t    dest->nr, vector));\n    }\n  }\n  return vector;\n}",
+      "fn_code_pos": [
+        [
+          826,
+          0
+        ],
+        [
+          866,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_interrupt_acknowledge_register_N_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "dest_nr": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndo_end_of_interrupt_register_N_write(device *me,\n\t\t\t\t     hw_opic_device *opic,\n\t\t\t\t     int dest_nr,\n\t\t\t\t     unsigned reg)\n{\n  opic_interrupt_destination *dest = &opic->interrupt_destination[dest_nr];\n\n  ASSERT(dest_nr >= 0 && dest_nr < opic->nr_interrupt_destinations);\n  ASSERT(dest_nr == dest->nr);\n\n  /* check the value written is zero */\n  if (reg != 0) {\n    DTRACE(opic, (\"eoi %d - ignoring nonzero value\\n\", dest->nr));\n  }\n\n  /* user doing wierd things? */\n  if (dest->current_in_service == NULL) {\n    DTRACE(opic, (\"eoi %d - strange, no current interrupt\\n\", dest->nr));\n    return;\n  }\n\n  /* an internal stuff up? */\n  if (!(dest->current_in_service->in_service & dest->bit)) {\n    device_error(me, \"eoi %d - current interrupt not in service\", dest->nr);\n  }\n\n  /* find what was probably the previous in service interrupt */\n  dest->current_in_service->in_service &= ~dest->bit;\n  DTRACE(opic, (\"eoi %d - ending %d - priority %d, vector %d\\n\",\n\t\tdest->nr,\n\t\tdest->current_in_service->nr,\n\t\tdest->current_in_service->priority,\n\t\tdest->current_in_service->vector));\n  dest->current_in_service = find_interrupt_for_dest(me, opic, dest, in_service_interrupt);\n  if (dest->current_in_service != NULL)\n    DTRACE(opic, (\"eoi %d - resuming %d - priority %d, vector %d\\n\",\n\t\t  dest->nr,\n\t\t  dest->current_in_service->nr,\n\t\t  dest->current_in_service->priority,\n\t\t  dest->current_in_service->vector));\n  else\n    DTRACE(opic, (\"eoi %d - resuming none\\n\", dest->nr));\n\n  /* check to see if that shouldn't be interrupted */\n  dest->current_pending = find_interrupt_for_dest(me, opic, dest, pending_interrupt);\n  if (can_deliver(me, dest->current_pending, dest)) {\n    ASSERT(dest->current_pending->pending & dest->bit);\n    assert_interrupt(me, opic, dest);\n  }\n  else {\n    dest->current_pending = NULL;\n  }\n}",
+      "fn_code_pos": [
+        [
+          869,
+          0
+        ],
+        [
+          922,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_end_of_interrupt_register_N_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "dest_nr": "int",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndecode_opic_address(device *me,\n\t\t    hw_opic_device *opic,\n\t\t    int space,\n\t\t    unsigned_word address,\n\t\t    unsigned nr_bytes,\n\t\t    opic_register *type,\n\t\t    int *index)\n{\n  int isb = 0;\n\n  /* is the size valid? */\n  if (nr_bytes != 4) {\n    *type = invalid_opic_register;\n    *index = -1;\n    return;\n  }\n\n  /* try for a per-processor register within the interrupt delivery\n     unit */\n  if (space == opic->idu.space\n      && address >= (opic->idu.address + idu_per_processor_register_base)\n      && address < (opic->idu.address + idu_per_processor_register_base\n\t\t    + (sizeof_idu_per_processor_register_block\n\t\t       * opic->nr_interrupt_destinations))) {\n    unsigned_word block_offset = (address\n\t\t\t\t  - opic->idu.address\n\t\t\t\t  - idu_per_processor_register_base);\n    unsigned_word offset = block_offset % sizeof_idu_per_processor_register_block;\n    *index = block_offset / sizeof_idu_per_processor_register_block;\n    switch (offset) {\n    case 0x040:\n      *type = ipi_N_dispatch_register;\n      *index = 0;\n      break;\n    case 0x050:\n      *type = ipi_N_dispatch_register;\n      *index = 1;\n      break;\n    case 0x060:\n      *type = ipi_N_dispatch_register;\n      *index = 2;\n      break;\n    case 0x070:\n      *type = ipi_N_dispatch_register;\n      *index = 3;\n      break;\n    case 0x080:\n      *type = current_task_priority_register_N;\n      break;\n    case 0x0a0:\n      *type = interrupt_acknowledge_register_N;\n      break;\n    case 0x0b0:\n      *type = end_of_interrupt_register_N;\n      break;\n    default:\n      *type = invalid_opic_register;\n      break;\n    }\n    DTRACE(opic, (\"per-processor register %d:0x%lx - %s[%d]\\n\",\n\t\t  space, (unsigned long)address,\n\t\t  opic_register_name(*type),\n\t\t  *index));\n    return;\n  }\n\n  /* try for an interrupt source unit */\n  for (isb = 0; isb < opic->nr_isu_blocks; isb++) {\n    if (opic->isu_block[isb].space == space\n\t&& address >= opic->isu_block[isb].address\n\t&& address < (opic->isu_block[isb].address + opic->isu_block[isb].size)) {\n      unsigned_word block_offset = address - opic->isu_block[isb].address;\n      unsigned_word offset = block_offset % sizeof_isu_register_block;\n      *index = (opic->isu_block[isb].int_number\n\t\t+ (block_offset / sizeof_isu_register_block));\n      switch (offset) {\n      case 0x00:\n\t*type = interrupt_source_N_vector_priority_register;\n\tbreak;\n      case 0x10:\n\t*type = interrupt_source_N_destination_register;\n\tbreak;\n      default:\n\t*type = invalid_opic_register;\n\tbreak;\n      }\n      DTRACE(opic, (\"isu register %d:0x%lx - %s[%d]\\n\",\n\t\t    space, (unsigned long)address,\n\t\t    opic_register_name(*type),\n\t\t    *index));\n      return;\n    }\n  }\n\n  /* try for a timer */\n  if (space == opic->idu.space\n      && address >= (opic->idu.address + idu_timer_base)\n      && address < (opic->idu.address + idu_timer_base\n\t\t    + opic->nr_timer_interrupts * sizeof_timer_register_block)) {\n    unsigned_word offset = address % sizeof_timer_register_block;\n    *index = ((address - opic->idu.address - idu_timer_base)\n\t      / sizeof_timer_register_block);\n    switch (offset) {\n    case 0x00:\n      *type = timer_N_current_count_register;\n      break;\n    case 0x10:\n      *type = timer_N_base_count_register;\n      break;\n    case 0x20:\n      *type = timer_N_vector_priority_register;\n      break;\n    case 0x30:\n      *type = timer_N_destination_register;\n      break;\n    default:\n      *type = invalid_opic_register;\n      break;\n    }\n    DTRACE(opic, (\"timer register %d:0x%lx - %s[%d]\\n\",\n\t\t  space, (unsigned long)address,\n\t\t  opic_register_name(*type),\n\t\t  *index));\n    return;\n  }\n\n  /* finally some other misc global register */\n  if (space == opic->idu.space\n      && address >= opic->idu.address\n      && address < opic->idu.address + opic->idu.size) {\n    unsigned_word block_offset = address - opic->idu.address;\n    switch (block_offset) {\n    case 0x010f0:\n      *type = timer_frequency_reporting_register;\n      *index = -1;\n      break;\n    case 0x010e0:\n      *type = spurious_vector_register;\n      *index = -1;\n      break;\n    case 0x010d0:\n    case 0x010c0:\n    case 0x010b0:\n    case 0x010a0:\n      *type = ipi_N_vector_priority_register;\n      *index = (block_offset - 0x010a0) / 16;\n      break;\n    case 0x01090:\n      *type = processor_init_register;\n      *index = -1;\n      break;\n    case 0x01080:\n      *type = vendor_identification_register;\n      *index = -1;\n      break;\n    case 0x01020:\n      *type = global_configuration_register_N;\n      *index = 0;\n      break;\n    case 0x01000:\n      *type = feature_reporting_register_N;\n      *index = 0;\n      break;\n    default:\n      *type = invalid_opic_register;\n      *index = -1;\n      break;\n    }\n    DTRACE(opic, (\"global register %d:0x%lx - %s[%d]\\n\",\n\t\t  space, (unsigned long)address,\n\t\t  opic_register_name(*type),\n\t\t  *index));\n    return;\n  }\n\n  /* nothing matched */\n  *type = invalid_opic_register;\n  DTRACE(opic, (\"invalid register %d:0x%lx\\n\",\n\t\tspace, (unsigned long)address));\n  return;\n}",
+      "fn_code_pos": [
+        [
+          925,
+          0
+        ],
+        [
+          1106,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decode_opic_address",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "space": "int",
+          "address": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "type": "opic_register",
+          "index": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_processor_init_register_read(device *me,\n\t\t\t\thw_opic_device *opic)\n{\n  unsigned reg = opic->init;\n  DTRACE(opic, (\"processor init register - read 0x%lx\\n\",\n\t\t(long)reg));\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1114,
+          0
+        ],
+        [
+          1122,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_processor_init_register_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndo_processor_init_register_write(device *me,\n\t\t\t\t hw_opic_device *opic,\n\t\t\t\t unsigned reg)\n{\n  int i;\n  for (i = 0; i < opic->nr_interrupt_destinations; i++) {\n    opic_interrupt_destination *dest = &opic->interrupt_destination[i];\n    if ((reg & dest->bit) != (opic->init & dest->bit)) {\n      if (reg & dest->bit) {\n\tDTRACE(opic, (\"processor init register - write 0x%lx - asserting init%d\\n\",\n\t\t      (long)reg, i));\n\topic->init |= dest->bit;\n\tdevice_interrupt_event(me, dest->init_port, 1, NULL, 0);\n      }\n      else {\n\tDTRACE(opic, (\"processor init register - write 0x%lx - negating init%d\\n\",\n\t\t      (long)reg, i));\n\topic->init &= ~dest->bit;\n\tdevice_interrupt_event(me, dest->init_port, 0, NULL, 0);\n      }\n    }\n  }\n}",
+      "fn_code_pos": [
+        [
+          1124,
+          0
+        ],
+        [
+          1147,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_processor_init_register_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nread_vector_priority_register(device *me,\n\t\t\t      hw_opic_device *opic,\n\t\t\t      opic_interrupt_source *interrupt,\n\t\t\t      const char *reg_name,\n\t\t\t      int reg_index)\n{\n  unsigned reg;\n  reg = 0;\n  reg |= interrupt->is_masked;\n  reg |= (interrupt->in_service || interrupt->pending\n\t  ? isu_active_bit : 0); /* active */\n  reg |= interrupt->is_multicast;\n  reg |= interrupt->is_positive_polarity;\n  reg |= interrupt->is_level_triggered; /* sense? */\n  reg |= interrupt->priority << isu_priority_shift;\n  reg |= interrupt->vector;\n  DTRACE(opic, (\"%s %d vector/priority register - read 0x%lx\\n\",\n\t\treg_name, reg_index, (unsigned long)reg));\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1153,
+          0
+        ],
+        [
+          1173,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_vector_priority_register",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "interrupt": "opic_interrupt_source",
+          "reg_name": "char",
+          "reg_index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_interrupt_source_N_vector_priority_register_read(device *me,\n\t\t\t\t\t\t    hw_opic_device *opic,\n\t\t\t\t\t\t    int index)\n{\n  unsigned reg;\n  ASSERT(index < opic->nr_external_interrupts);\n  reg = read_vector_priority_register(me, opic,\n\t\t\t\t      &opic->interrupt_source[index],\n\t\t\t\t      \"interrupt source\", index);\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1175,
+          0
+        ],
+        [
+          1186,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_interrupt_source_N_vector_priority_register_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nwrite_vector_priority_register(device *me,\n\t\t\t       hw_opic_device *opic,\n\t\t\t       opic_interrupt_source *interrupt,\n\t\t\t       unsigned reg,\n\t\t\t       const char *reg_name,\n\t\t\t       int reg_index)\n{\n  interrupt->is_masked = (reg & isu_mask_bit);\n  interrupt->is_multicast = (reg & isu_multicast_bit);\n  interrupt->is_positive_polarity = (reg & isu_positive_polarity_bit);\n  interrupt->is_level_triggered = (reg & isu_level_triggered_bit);\n  interrupt->priority = ((reg >> isu_priority_shift)\n\t\t\t % max_nr_task_priorities);\n  interrupt->vector = (reg & isu_vector_bits);\n  DTRACE(opic, (\"%s %d vector/priority register - write 0x%lx - %s%s%s-polarity, %s-triggered, priority %ld vector %ld\\n\",\n\t\treg_name,\n\t\treg_index,\n\t\t(unsigned long)reg,\n\t\tinterrupt->is_masked ? \"masked, \" : \"\",\n\t\tinterrupt->is_multicast ? \"multicast, \" : \"\",\n\t\tinterrupt->is_positive_polarity ? \"positive\" : \"negative\",\n\t\tinterrupt->is_level_triggered ? \"level\" : \"edge\",\n\t\t(long)interrupt->priority,\n\t\t(long)interrupt->vector));\n}",
+      "fn_code_pos": [
+        [
+          1188,
+          0
+        ],
+        [
+          1213,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_vector_priority_register",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "interrupt": "opic_interrupt_source",
+          "reg": "unsigned",
+          "reg_name": "char",
+          "reg_index": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_interrupt_source_N_vector_priority_register_write(device *me,\n\t\t\t\t\t\t     hw_opic_device *opic,\n\t\t\t\t\t\t     int index,\n\t\t\t\t\t\t     unsigned reg)\n{\n  ASSERT(index < opic->nr_external_interrupts);\n  reg &= ~isu_multicast_bit; /* disable multicast */\n  write_vector_priority_register(me, opic,\n\t\t\t\t &opic->interrupt_source[index],\n\t\t\t\t reg, \"interrupt source\", index);\n}",
+      "fn_code_pos": [
+        [
+          1215,
+          0
+        ],
+        [
+          1226,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_interrupt_source_N_vector_priority_register_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nread_destination_register(device *me,\n\t\t\t  hw_opic_device *opic,\n\t\t\t  opic_interrupt_source *interrupt,\n\t\t\t  const char *reg_name,\n\t\t\t  int reg_index)\n{\n  unsigned long reg;\n  reg = interrupt->destination;\n  DTRACE(opic, (\"%s %d destination register - read 0x%lx\\n\",\n\t\treg_name, reg_index, reg));\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1232,
+          0
+        ],
+        [
+          1244,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_destination_register",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "interrupt": "opic_interrupt_source",
+          "reg_name": "char",
+          "reg_index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_interrupt_source_N_destination_register_read(device *me,\n\t\t\t\t\t\thw_opic_device *opic,\n\t\t\t\t\t\tint index)\n{\n  unsigned reg;\n  ASSERT(index < opic->nr_external_interrupts);\n  reg = read_destination_register(me, opic, &opic->external_interrupt_source[index],\n\t\t\t\t  \"interrupt source\", index);\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1246,
+          0
+        ],
+        [
+          1256,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_interrupt_source_N_destination_register_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nwrite_destination_register(device *me,\n\t\t\t   hw_opic_device *opic,\n\t\t\t   opic_interrupt_source *interrupt,\n\t\t\t   unsigned reg,\n\t\t\t   const char *reg_name,\n\t\t\t   int reg_index)\n{\n  reg &= (1 << opic->nr_interrupt_destinations) - 1; /* mask out invalid */\n  DTRACE(opic, (\"%s %d destination register - write 0x%x\\n\",\n\t\treg_name, reg_index, reg));\n  interrupt->destination = reg;\n}",
+      "fn_code_pos": [
+        [
+          1258,
+          0
+        ],
+        [
+          1270,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_destination_register",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "interrupt": "opic_interrupt_source",
+          "reg": "unsigned",
+          "reg_name": "char",
+          "reg_index": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_interrupt_source_N_destination_register_write(device *me,\n\t\t\t\t\t\t hw_opic_device *opic,\n\t\t\t\t\t\t int index,\n\t\t\t\t\t\t unsigned reg)\n{\n  ASSERT(index < opic->nr_external_interrupts);\n  write_destination_register(me, opic, &opic->external_interrupt_source[index],\n\t\t\t     reg, \"interrupt source\", index);\n}",
+      "fn_code_pos": [
+        [
+          1272,
+          0
+        ],
+        [
+          1281,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_interrupt_source_N_destination_register_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_spurious_vector_register_read(device *me,\n\t\t\t\t hw_opic_device *opic)\n{\n  unsigned long reg = opic->spurious_vector;\n  DTRACE(opic, (\"spurious vector register - read 0x%lx\\n\", reg));\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1287,
+          0
+        ],
+        [
+          1294,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_spurious_vector_register_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndo_spurious_vector_register_write(device *me,\n\t\t\t\t  hw_opic_device *opic,\n\t\t\t\t  unsigned reg)\n{\n  reg &= 0xff; /* mask off invalid */\n  DTRACE(opic, (\"spurious vector register - write 0x%x\\n\", reg));\n  opic->spurious_vector = reg;\n}",
+      "fn_code_pos": [
+        [
+          1296,
+          0
+        ],
+        [
+          1304,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_spurious_vector_register_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_current_task_priority_register_N_read(device *me,\n\t\t\t\t\t hw_opic_device *opic,\n\t\t\t\t\t int index)\n{\n  opic_interrupt_destination *interrupt_destination = &opic->interrupt_destination[index];\n  unsigned reg;\n  ASSERT(index >= 0 && index < opic->nr_interrupt_destinations);\n  reg = interrupt_destination->base_priority;\n  DTRACE(opic, (\"current task priority register %d - read 0x%x\\n\", index, reg));\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1310,
+          0
+        ],
+        [
+          1321,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_current_task_priority_register_N_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndo_current_task_priority_register_N_write(device *me,\n\t\t\t\t\t  hw_opic_device *opic,\n\t\t\t\t\t  int index,\n\t\t\t\t\t  unsigned reg)\n{\n  opic_interrupt_destination *interrupt_destination = &opic->interrupt_destination[index];\n  ASSERT(index >= 0 && index < opic->nr_interrupt_destinations);\n  reg %= max_nr_task_priorities;\n  DTRACE(opic, (\"current task priority register %d - write 0x%x\\n\", index, reg));\n  interrupt_destination->base_priority = reg;\n}",
+      "fn_code_pos": [
+        [
+          1323,
+          0
+        ],
+        [
+          1334,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_current_task_priority_register_N_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_timer_frequency_reporting_register_read(device *me,\n\t\t\t\t\t   hw_opic_device *opic)\n{\n  unsigned reg;\n  reg = opic->timer_frequency;\n  DTRACE(opic, (\"timer frequency reporting register - read 0x%x\\n\", reg));\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1340,
+          0
+        ],
+        [
+          1348,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_timer_frequency_reporting_register_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndo_timer_frequency_reporting_register_write(device *me,\n\t\t\t\t\t    hw_opic_device *opic,\n\t\t\t\t\t    unsigned reg)\n{\n  DTRACE(opic, (\"timer frequency reporting register - write 0x%x\\n\", reg));\n  opic->timer_frequency = reg;\n}",
+      "fn_code_pos": [
+        [
+          1350,
+          0
+        ],
+        [
+          1357,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_timer_frequency_reporting_register_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_timer_N_current_count_register_read(device *me,\n\t\t\t\t       hw_opic_device *opic,\n\t\t\t\t       int index)\n{\n  opic_timer *timer = &opic->timer[index];\n  unsigned reg;\n  ASSERT(index >= 0 && index < opic->nr_timer_interrupts);\n  if (timer->inhibited)\n    reg = timer->count; /* stalled value */\n  else\n    reg = timer->count - device_event_queue_time(me); /* time remaining */\n  DTRACE(opic, (\"timer %d current count register - read 0x%x\\n\", index, reg));\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1362,
+          0
+        ],
+        [
+          1376,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_timer_N_current_count_register_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_timer_N_base_count_register_read(device *me,\n\t\t\t\t    hw_opic_device *opic,\n\t\t\t\t    int index)\n{\n  opic_timer *timer = &opic->timer[index];\n  unsigned reg;\n  ASSERT(index >= 0 && index < opic->nr_timer_interrupts);\n  reg = timer->base_count;\n  DTRACE(opic, (\"timer %d base count register - read 0x%x\\n\", index, reg));\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1379,
+          0
+        ],
+        [
+          1390,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_timer_N_base_count_register_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ntimer_event(void *data)\n{\n  opic_timer *timer = data;\n  device *me = timer->me;\n  if (timer->inhibited)\n    device_error(timer->me, \"internal-error - timer event occured when timer %d inhibited\",\n\t\t timer->nr);\n  handle_interrupt(timer->me, timer->opic, timer->interrupt_source, 1);\n  timer->timeout_event = device_event_queue_schedule(me, timer->base_count,\n\t\t\t\t\t\t     timer_event, timer);\n  DTRACE(opic, (\"timer %d - interrupt at %ld, next at %d\\n\",\n\t\ttimer->nr, (long)device_event_queue_time(me), timer->base_count));\n}",
+      "fn_code_pos": [
+        [
+          1393,
+          0
+        ],
+        [
+          1406,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "timer_event",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_timer_N_base_count_register_write(device *me,\n\t\t\t\t     hw_opic_device *opic,\n\t\t\t\t     int index,\n\t\t\t\t     unsigned reg)\n{\n  opic_timer *timer = &opic->timer[index];\n  int inhibit;\n  ASSERT(index >= 0 && index < opic->nr_timer_interrupts);\n  inhibit = reg & 0x80000000;\n  if (timer->inhibited && !inhibit) {\n    timer->inhibited = 0;\n    if (timer->timeout_event != NULL)\n      device_event_queue_deschedule(me, timer->timeout_event);\n    timer->count = device_event_queue_time(me) + reg;\n    timer->base_count = reg;\n    timer->timeout_event = device_event_queue_schedule(me, timer->base_count,\n\t\t\t\t\t\t       timer_event, (void*)timer);\n    DTRACE(opic, (\"timer %d base count register - write 0x%x - timer started\\n\",\n\t\t  index, reg));\n  }\n  else if (!timer->inhibited && inhibit) {\n    if (timer->timeout_event != NULL)\n      device_event_queue_deschedule(me, timer->timeout_event);\n    timer->count = timer->count - device_event_queue_time(me);\n    timer->inhibited = 1;\n    timer->base_count = reg;\n    DTRACE(opic, (\"timer %d base count register - write 0x%x - timer stopped\\n\",\n\t\t  index, reg));\n  }\n  else {\n    ASSERT((timer->inhibited && inhibit) || (!timer->inhibited && !inhibit));\n    DTRACE(opic, (\"timer %d base count register - write 0x%x\\n\", index, reg));\n    timer->base_count = reg;\n  }\n}",
+      "fn_code_pos": [
+        [
+          1409,
+          0
+        ],
+        [
+          1444,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_timer_N_base_count_register_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_timer_N_vector_priority_register_read(device *me,\n\t\t\t\t\t hw_opic_device *opic,\n\t\t\t\t\t int index)\n{\n  unsigned reg;\n  ASSERT(index >= 0 && index < opic->nr_timer_interrupts);\n  reg = read_vector_priority_register(me, opic,\n\t\t\t\t      &opic->timer_interrupt_source[index],\n\t\t\t\t      \"timer\", index);\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1447,
+          0
+        ],
+        [
+          1458,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_timer_N_vector_priority_register_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndo_timer_N_vector_priority_register_write(device *me,\n\t\t\t\t\t  hw_opic_device *opic,\n\t\t\t\t\t  int index,\n\t\t\t\t\t  unsigned reg)\n{\n  ASSERT(index >= 0 && index < opic->nr_timer_interrupts);\n  reg &= ~isu_level_triggered_bit; /* force edge trigger */\n  reg |= isu_positive_polarity_bit; /* force rising (positive) edge */\n  reg |= isu_multicast_bit; /* force multicast */\n  write_vector_priority_register(me, opic,\n\t\t\t\t &opic->timer_interrupt_source[index],\n\t\t\t\t reg, \"timer\", index);\n}",
+      "fn_code_pos": [
+        [
+          1460,
+          0
+        ],
+        [
+          1473,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_timer_N_vector_priority_register_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_timer_N_destination_register_read(device *me,\n\t\t\t\t     hw_opic_device *opic,\n\t\t\t\t     int index)\n{\n  unsigned reg;\n  ASSERT(index >= 0 && index < opic->nr_timer_interrupts);\n  reg = read_destination_register(me, opic, &opic->timer_interrupt_source[index],\n\t\t\t\t  \"timer\", index);\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1476,
+          0
+        ],
+        [
+          1486,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_timer_N_destination_register_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndo_timer_N_destination_register_write(device *me,\n\t\t\t\t      hw_opic_device *opic,\n\t\t\t\t      int index,\n\t\t\t\t      unsigned reg)\n{\n  ASSERT(index >= 0 && index < opic->nr_timer_interrupts);\n  write_destination_register(me, opic, &opic->timer_interrupt_source[index],\n\t\t\t     reg, \"timer\", index);\n}",
+      "fn_code_pos": [
+        [
+          1488,
+          0
+        ],
+        [
+          1497,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_timer_N_destination_register_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_ipi_N_vector_priority_register_read(device *me,\n\t\t\t\t       hw_opic_device *opic,\n\t\t\t\t       int index)\n{\n  unsigned reg;\n  ASSERT(index >= 0 && index < opic->nr_interprocessor_interrupts);\n  reg = read_vector_priority_register(me, opic,\n\t\t\t\t      &opic->interprocessor_interrupt_source[index],\n\t\t\t\t      \"ipi\", index);\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1502,
+          0
+        ],
+        [
+          1513,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_ipi_N_vector_priority_register_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndo_ipi_N_vector_priority_register_write(device *me,\n\t\t\t\t\thw_opic_device *opic,\n\t\t\t\t\tint index,\n\t\t\t\t\tunsigned reg)\n{\n  ASSERT(index >= 0 && index < opic->nr_interprocessor_interrupts);\n  reg &= ~isu_level_triggered_bit; /* force edge trigger */\n  reg |= isu_positive_polarity_bit; /* force rising (positive) edge */\n  reg |= isu_multicast_bit; /* force a multicast source */\n  write_vector_priority_register(me, opic,\n\t\t\t\t &opic->interprocessor_interrupt_source[index],\n\t\t\t\t reg, \"ipi\", index);\n}",
+      "fn_code_pos": [
+        [
+          1515,
+          0
+        ],
+        [
+          1528,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_ipi_N_vector_priority_register_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_ipi_N_dispatch_register_write(device *me,\n\t\t\t\t hw_opic_device *opic,\n\t\t\t\t int index,\n\t\t\t\t unsigned reg)\n{\n  opic_interrupt_source *source = &opic->interprocessor_interrupt_source[index];\n  ASSERT(index >= 0 && index < opic->nr_interprocessor_interrupts);\n  DTRACE(opic, (\"ipi %d interrupt dispatch register - write 0x%x\\n\", index, reg));\n  source->destination = reg;\n  handle_interrupt(me, opic, source, 1);\n}",
+      "fn_code_pos": [
+        [
+          1530,
+          0
+        ],
+        [
+          1541,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_ipi_N_dispatch_register_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_vendor_identification_register_read(device *me,\n\t\t\t\t       hw_opic_device *opic)\n{\n  unsigned reg;\n  reg = opic->vendor_identification;\n  DTRACE(opic, (\"vendor identification register - read 0x%x\\n\", reg));\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1546,
+          0
+        ],
+        [
+          1554,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_vendor_identification_register_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_feature_reporting_register_N_read(device *me,\n\t\t\t\t     hw_opic_device *opic,\n\t\t\t\t     int index)\n{\n  unsigned reg = 0;\n  ASSERT(index == 0);\n  switch (index) {\n  case 0:\n    reg |= (opic->nr_external_interrupts << 16);\n    reg |= (opic->nr_interrupt_destinations << 8);\n    reg |= (2/*version 1.2*/);\n    break;\n  }\n  DTRACE(opic, (\"feature reporting register %d - read 0x%x\\n\", index, reg));\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1556,
+          0
+        ],
+        [
+          1572,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_feature_reporting_register_N_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndo_global_configuration_register_N_read(device *me,\n\t\t\t\t\thw_opic_device *opic,\n\t\t\t\t\tint index)\n{\n  unsigned reg = 0;\n  ASSERT(index == 0);\n  switch (index) {\n  case 0:\n    reg |= gcr0_8259_bit; /* hardwire 8259 disabled */\n    break;\n  }\n  DTRACE(opic, (\"global configuration register %d - read 0x%x\\n\", index, reg));\n  return reg;\n}",
+      "fn_code_pos": [
+        [
+          1574,
+          0
+        ],
+        [
+          1588,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_global_configuration_register_N_read",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndo_global_configuration_register_N_write(device *me,\n\t\t\t\t\t hw_opic_device *opic,\n\t\t\t\t\t int index,\n\t\t\t\t\t unsigned reg)\n{\n  ASSERT(index == 0);\n  if (reg & gcr0_reset_bit) {\n    DTRACE(opic, (\"global configuration register %d - write 0x%x - reseting opic\\n\", index, reg));\n    hw_opic_init_data(me);\n  }\n  if (!(reg & gcr0_8259_bit)) {\n    DTRACE(opic, (\"global configuration register %d - write 0x%x - ignoring 8259 enable\\n\", index, reg));\n  }\n}",
+      "fn_code_pos": [
+        [
+          1590,
+          0
+        ],
+        [
+          1604,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_global_configuration_register_N_write",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "index": "int",
+          "reg": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_opic_io_read_buffer(device *me,\n\t\t       void *dest,\n\t\t       int space,\n\t\t       unsigned_word addr,\n\t\t       unsigned nr_bytes,\n\t\t       cpu *processor,\n\t\t       unsigned_word cia)\n{\n  hw_opic_device *opic = (hw_opic_device*)device_data(me);\n  opic_register type;\n  int index;\n  decode_opic_address(me, opic, space, addr, nr_bytes, &type, &index);\n  if (type == invalid_opic_register) {\n    device_error(me, \"invalid opic read access to %d:0x%lx (%d bytes)\",\n\t\t space, (unsigned long)addr, nr_bytes);\n  }\n  else {\n    unsigned reg;\n    switch (type) {\n    case processor_init_register:\n      reg = do_processor_init_register_read(me, opic);\n      break;\n    case interrupt_source_N_vector_priority_register:\n      reg = do_interrupt_source_N_vector_priority_register_read(me, opic, index);\n      break;\n    case interrupt_source_N_destination_register:\n      reg = do_interrupt_source_N_destination_register_read(me, opic, index);\n      break;\n    case interrupt_acknowledge_register_N:\n      reg = do_interrupt_acknowledge_register_N_read(me, opic, index);\n      break;\n    case spurious_vector_register:\n      reg = do_spurious_vector_register_read(me, opic);\n      break;\n    case current_task_priority_register_N:\n      reg = do_current_task_priority_register_N_read(me, opic, index);\n      break;\n    case timer_frequency_reporting_register:\n      reg = do_timer_frequency_reporting_register_read(me, opic);\n      break;\n    case timer_N_current_count_register:\n      reg = do_timer_N_current_count_register_read(me, opic, index);\n      break;\n    case timer_N_base_count_register:\n      reg = do_timer_N_base_count_register_read(me, opic, index);\n      break;\n    case timer_N_vector_priority_register:\n      reg = do_timer_N_vector_priority_register_read(me, opic, index);\n      break;\n    case timer_N_destination_register:\n      reg = do_timer_N_destination_register_read(me, opic, index);\n      break;\n    case ipi_N_vector_priority_register:\n      reg = do_ipi_N_vector_priority_register_read(me, opic, index);\n      break;\n    case feature_reporting_register_N:\n      reg = do_feature_reporting_register_N_read(me, opic, index);\n      break;\n    case global_configuration_register_N:\n      reg = do_global_configuration_register_N_read(me, opic, index);\n      break;\n    case vendor_identification_register:\n      reg = do_vendor_identification_register_read(me, opic);\n      break;\n    default:\n      reg = 0;\n      device_error(me, \"unimplemented read of register %s[%d]\",\n\t\t   opic_register_name(type), index);\n    }\n    *(unsigned_4*)dest = H2LE_4(reg);\n  }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          1610,
+          0
+        ],
+        [
+          1683,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_opic_io_read_buffer",
+        "parameters": {
+          "me": "device",
+          "dest": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_opic_io_write_buffer(device *me,\n\t\t\tconst void *source,\n\t\t\tint space,\n\t\t\tunsigned_word addr,\n\t\t\tunsigned nr_bytes,\n\t\t\tcpu *processor,\n\t\t\tunsigned_word cia)\n{\n  hw_opic_device *opic = (hw_opic_device*)device_data(me);\n  opic_register type;\n  int index;\n  decode_opic_address(me, opic, space, addr, nr_bytes, &type, &index);\n  if (type == invalid_opic_register) {\n    device_error(me, \"invalid opic write access to %d:0x%lx (%d bytes)\",\n\t\t space, (unsigned long)addr, nr_bytes);\n  }\n  else {\n    unsigned reg = LE2H_4(*(unsigned_4*)source);\n    switch (type) {\n    case processor_init_register:\n      do_processor_init_register_write(me, opic, reg);\n      break;\n    case interrupt_source_N_vector_priority_register:\n      do_interrupt_source_N_vector_priority_register_write(me, opic, index, reg);\n      break;\n    case interrupt_source_N_destination_register:\n      do_interrupt_source_N_destination_register_write(me, opic, index, reg);\n      break;\n    case end_of_interrupt_register_N:\n      do_end_of_interrupt_register_N_write(me, opic, index, reg);\n      break;\n    case spurious_vector_register:\n      do_spurious_vector_register_write(me, opic, reg);\n      break;\n    case current_task_priority_register_N:\n      do_current_task_priority_register_N_write(me, opic, index, reg);\n      break;\n    case timer_frequency_reporting_register:\n      do_timer_frequency_reporting_register_write(me, opic, reg);\n      break;\n    case timer_N_base_count_register:\n      do_timer_N_base_count_register_write(me, opic, index, reg);\n      break;\n    case timer_N_vector_priority_register:\n      do_timer_N_vector_priority_register_write(me, opic, index, reg);\n      break;\n    case timer_N_destination_register:\n      do_timer_N_destination_register_write(me, opic, index, reg);\n      break;\n    case ipi_N_dispatch_register:\n      do_ipi_N_dispatch_register_write(me, opic, index, reg);\n      break;\n    case ipi_N_vector_priority_register:\n      do_ipi_N_vector_priority_register_write(me, opic, index, reg);\n      break;\n    case global_configuration_register_N:\n      do_global_configuration_register_N_write(me, opic, index, reg);\n      break;\n    default:\n      device_error(me, \"unimplemented write to register %s[%d]\",\n\t\t   opic_register_name(type), index);\n    }\n  }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          1686,
+          0
+        ],
+        [
+          1751,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_opic_io_write_buffer",
+        "parameters": {
+          "me": "device",
+          "source": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nhw_opic_interrupt_event(device *me,\n\t\t\tint my_port,\n\t\t\tdevice *source,\n\t\t\tint source_port,\n\t\t\tint level,\n\t\t\tcpu *processor,\n\t\t\tunsigned_word cia)\n{\n  hw_opic_device *opic = (hw_opic_device*)device_data(me);\n\n  int isb;\n  int src_nr = 0;\n\n  /* find the corresponding internal input port */\n  for (isb = 0; isb < opic->nr_isu_blocks; isb++) {\n    if (my_port >= opic->isu_block[isb].int_number\n\t&& my_port < opic->isu_block[isb].int_number + opic->isu_block[isb].range) {\n      src_nr += my_port - opic->isu_block[isb].int_number;\n      break;\n    }\n    else\n      src_nr += opic->isu_block[isb].range;\n  }\n  if (isb == opic->nr_isu_blocks)\n    device_error(me, \"interrupt %d out of range\", my_port);\n  DTRACE(opic, (\"external-interrupt %d, internal %d, level %d\\n\",\n\t\tmy_port, src_nr, level));\n\n  /* pass it on */\n  ASSERT(src_nr >= 0 && src_nr < opic->nr_external_interrupts);\n  handle_interrupt(me, opic, &opic->external_interrupt_source[src_nr], level);\n}",
+      "fn_code_pos": [
+        [
+          1754,
+          0
+        ],
+        [
+          1786,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_opic_interrupt_event",
+        "parameters": {
+          "me": "device",
+          "my_port": "int",
+          "source": "device",
+          "source_port": "int",
+          "level": "int",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void *\nhw_opic_create(const char *name,\n\t       const device_unit *unit_address,\n\t       const char *args)\n{\n  hw_opic_device *opic = ZALLOC(hw_opic_device);\n  return opic;\n}",
+      "fn_code_pos": [
+        [
+          1809,
+          0
+        ],
+        [
+          1816,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_opic_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "opic_register_name(opic_register type)",
+      "fn_dec_pos": [
+        [
+          278,
+          0
+        ],
+        [
+          278,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "opic_register_name",
+        "parameters": {
+          "type": "opic_register"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "find_interrupt_for_dest(device *me,\n\t\t\thw_opic_device *opic,\n\t\t\topic_interrupt_destination *dest,\n\t\t\tinterrupt_class class)",
+      "fn_dec_pos": [
+        [
+          662,
+          0
+        ],
+        [
+          665,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_interrupt_for_dest",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "dest": "opic_interrupt_destination",
+          "class": "interrupt_class"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "if (src->priority > pending->priority)",
+      "fn_dec_pos": [
+        [
+          685,
+          9
+        ],
+        [
+          685,
+          47
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "if",
+        "parameters": {
+          "priority": "src"
+        },
+        "return_type": "else"
+      }
+    },
+    {
+      "fn_code": "find_lowest_dest(device *me, \n\t\t hw_opic_device *opic,\n\t\t opic_interrupt_source *src)",
+      "fn_dec_pos": [
+        [
+          693,
+          0
+        ],
+        [
+          695,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_lowest_dest",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "src": "opic_interrupt_source"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "handle_interrupt(device *me,\n\t\t hw_opic_device *opic,\n\t\t opic_interrupt_source *src,\n\t\t int asserted)",
+      "fn_dec_pos": [
+        [
+          724,
+          0
+        ],
+        [
+          727,
+          16
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "handle_interrupt",
+        "parameters": {
+          "me": "device",
+          "opic": "hw_opic_device",
+          "src": "opic_interrupt_source",
+          "asserted": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "hw_opic_create(const char *name,\n\t       const device_unit *unit_address,\n\t       const char *args)",
+      "fn_dec_pos": [
+        [
+          1810,
+          0
+        ],
+        [
+          1812,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_opic_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct _opic_interrupt_source {\n  unsigned is_masked; /* left in place */\n  unsigned is_multicast; /* left in place */\n  unsigned is_positive_polarity; /* left in place */\n  unsigned is_level_triggered; /* left in place */\n  unsigned priority;\n  unsigned vector;\n  /* misc */\n  int nr;\n  unsigned destination;\n  unsigned pending;\n  unsigned in_service;\n} opic_interrupt_source;",
+      {
+        "is_masked": "unsigned",
+        "is_multicast": "unsigned",
+        "is_positive_polarity": "unsigned",
+        "is_level_triggered": "unsigned",
+        "priority": "unsigned",
+        "vector": "unsigned",
+        "nr": "int",
+        "destination": "unsigned",
+        "pending": "unsigned",
+        "in_service": "unsigned"
+      },
+      "opic_interrupt_source",
+      [
+        203,
+        0
+      ],
+      [
+        215,
+        24
+      ]
+    ],
+    [
+      "typedef struct _opic_interrupt_destination {\n  int nr;\n  unsigned base_priority;\n  opic_interrupt_source *current_pending;\n  opic_interrupt_source *current_in_service;\n  unsigned bit;\n  int init_port;\n  int intr_port;\n} opic_interrupt_destination;",
+      {
+        "nr": "int",
+        "base_priority": "unsigned",
+        "*current_pending": "opic_interrupt_source",
+        "*current_in_service": "opic_interrupt_source",
+        "bit": "unsigned",
+        "init_port": "int",
+        "intr_port": "int"
+      },
+      "opic_interrupt_destination",
+      [
+        220,
+        0
+      ],
+      [
+        228,
+        29
+      ]
+    ],
+    [
+      "typedef struct _opic_isu_block { /* interrupt source unit block */\n  int space;\n  unsigned_word address;\n  unsigned size;\n  unsigned_cell int_number;\n  unsigned_cell range;\n  int reg;\n} opic_isu_block;",
+      {
+        "space": "int",
+        "address": "unsigned_word",
+        "size": "unsigned",
+        "int_number": "unsigned_cell",
+        "range": "unsigned_cell",
+        "reg": "int"
+      },
+      "opic_isu_block",
+      [
+        233,
+        0
+      ],
+      [
+        240,
+        17
+      ]
+    ],
+    [
+      "typedef struct _opic_idu { /* interrupt delivery unit */\n  int reg;\n  int space;\n  unsigned_word address;\n  unsigned size;\n} opic_idu;",
+      {
+        "reg": "int",
+        "space": "int",
+        "address": "unsigned_word",
+        "size": "unsigned"
+      },
+      "opic_idu",
+      [
+        243,
+        0
+      ],
+      [
+        248,
+        11
+      ]
+    ],
+    [
+      "typedef struct _opic_timer {\n  int nr;\n  device *me; /* find my way home */\n  hw_opic_device *opic; /* ditto */\n  unsigned base_count;\n  int inhibited;\n  signed64 count; /* *ONLY* if inhibited */\n  event_entry_tag timeout_event;\n  opic_interrupt_source *interrupt_source;\n} opic_timer;",
+      {
+        "nr": "int",
+        "*me": "device",
+        "*opic": "hw_opic_device",
+        "base_count": "unsigned",
+        "inhibited": "int",
+        "count": "signed64",
+        "timeout_event": "event_entry_tag",
+        "*interrupt_source": "opic_interrupt_source"
+      },
+      "opic_timer",
+      [
+        307,
+        0
+      ],
+      [
+        316,
+        13
+      ]
+    ],
+    [
+      "struct _hw_opic_device {\n\n  /* vendor id */\n  unsigned vendor_identification;\n\n  /* interrupt destinations - processors */\n  int nr_interrupt_destinations;\n  opic_interrupt_destination *interrupt_destination;\n  unsigned sizeof_interrupt_destination;\n\n  /* bogus interrupts */\n  int spurious_vector;\n\n  /* interrupt sources - external interrupt source units + extra internal ones */\n  int nr_interrupt_sources;\n  opic_interrupt_source *interrupt_source;\n  unsigned sizeof_interrupt_source;\n\n  /* external interrupts */\n  int nr_external_interrupts;\n  opic_interrupt_source *external_interrupt_source;\n\n  /* inter-processor-interrupts */\n  int nr_interprocessor_interrupts;\n  opic_interrupt_source *interprocessor_interrupt_source;\n\n  /* timers */\n  int nr_timer_interrupts;\n  opic_timer *timer;\n  unsigned sizeof_timer;\n  opic_interrupt_source *timer_interrupt_source;\n  unsigned timer_frequency;\n\n  /* init register */\n  unsigned32 init;\n\n  /* address maps */\n  opic_idu idu;\n  int nr_isu_blocks;\n  opic_isu_block *isu_block;\n}",
+      {
+        "vendor_identification": "unsigned",
+        "nr_interrupt_destinations": "int",
+        "*interrupt_destination": "opic_interrupt_destination",
+        "sizeof_interrupt_destination": "unsigned",
+        "spurious_vector": "int",
+        "nr_interrupt_sources": "int",
+        "*interrupt_source": "opic_interrupt_source",
+        "sizeof_interrupt_source": "unsigned",
+        "nr_external_interrupts": "int",
+        "*external_interrupt_source": "opic_interrupt_source",
+        "nr_interprocessor_interrupts": "int",
+        "*interprocessor_interrupt_source": "opic_interrupt_source",
+        "nr_timer_interrupts": "int",
+        "*timer": "opic_timer",
+        "sizeof_timer": "unsigned",
+        "*timer_interrupt_source": "opic_interrupt_source",
+        "timer_frequency": "unsigned",
+        "init": "unsigned32",
+        "idu": "opic_idu",
+        "nr_isu_blocks": "int",
+        "*isu_block": "opic_isu_block"
+      },
+      "_hw_opic_device",
+      [
+        321,
+        0
+      ],
+      [
+        361,
+        1
+      ]
+    ],
+    [
+      "typedef struct _hw_opic_device hw_opic_device;",
+      {},
+      "hw_opic_device",
+      [
+        153,
+        0
+      ],
+      [
+        153,
+        46
+      ]
+    ],
+    [
+      "typedef struct _opic_interrupt_source {\n  unsigned is_masked; /* left in place */\n  unsigned is_multicast; /* left in place */\n  unsigned is_positive_polarity; /* left in place */\n  unsigned is_level_triggered; /* left in place */\n  unsigned priority;\n  unsigned vector;\n  /* misc */\n  int nr;\n  unsigned destination;\n  unsigned pending;\n  unsigned in_service;\n} opic_interrupt_source;",
+      {
+        "is_masked": "unsigned",
+        "is_multicast": "unsigned",
+        "is_positive_polarity": "unsigned",
+        "is_level_triggered": "unsigned",
+        "priority": "unsigned",
+        "vector": "unsigned",
+        "nr": "int",
+        "destination": "unsigned",
+        "pending": "unsigned",
+        "in_service": "unsigned"
+      },
+      "opic_interrupt_source",
+      [
+        203,
+        0
+      ],
+      [
+        215,
+        24
+      ]
+    ],
+    [
+      "typedef struct _opic_interrupt_destination {\n  int nr;\n  unsigned base_priority;\n  opic_interrupt_source *current_pending;\n  opic_interrupt_source *current_in_service;\n  unsigned bit;\n  int init_port;\n  int intr_port;\n} opic_interrupt_destination;",
+      {
+        "nr": "int",
+        "base_priority": "unsigned",
+        "*current_pending": "opic_interrupt_source",
+        "*current_in_service": "opic_interrupt_source",
+        "bit": "unsigned",
+        "init_port": "int",
+        "intr_port": "int"
+      },
+      "opic_interrupt_destination",
+      [
+        220,
+        0
+      ],
+      [
+        228,
+        29
+      ]
+    ],
+    [
+      "typedef struct _opic_isu_block { /* interrupt source unit block */\n  int space;\n  unsigned_word address;\n  unsigned size;\n  unsigned_cell int_number;\n  unsigned_cell range;\n  int reg;\n} opic_isu_block;",
+      {
+        "space": "int",
+        "address": "unsigned_word",
+        "size": "unsigned",
+        "int_number": "unsigned_cell",
+        "range": "unsigned_cell",
+        "reg": "int"
+      },
+      "opic_isu_block",
+      [
+        233,
+        0
+      ],
+      [
+        240,
+        17
+      ]
+    ],
+    [
+      "typedef struct _opic_idu { /* interrupt delivery unit */\n  int reg;\n  int space;\n  unsigned_word address;\n  unsigned size;\n} opic_idu;",
+      {
+        "reg": "int",
+        "space": "int",
+        "address": "unsigned_word",
+        "size": "unsigned"
+      },
+      "opic_idu",
+      [
+        243,
+        0
+      ],
+      [
+        248,
+        11
+      ]
+    ],
+    [
+      "typedef struct _opic_timer {\n  int nr;\n  device *me; /* find my way home */\n  hw_opic_device *opic; /* ditto */\n  unsigned base_count;\n  int inhibited;\n  signed64 count; /* *ONLY* if inhibited */\n  event_entry_tag timeout_event;\n  opic_interrupt_source *interrupt_source;\n} opic_timer;",
+      {
+        "nr": "int",
+        "*me": "device",
+        "*opic": "hw_opic_device",
+        "base_count": "unsigned",
+        "inhibited": "int",
+        "count": "signed64",
+        "timeout_event": "event_entry_tag",
+        "*interrupt_source": "opic_interrupt_source"
+      },
+      "opic_timer",
+      [
+        307,
+        0
+      ],
+      [
+        316,
+        13
+      ]
+    ],
+    [
+      "struct _hw_opic_device {\n\n  /* vendor id */\n  unsigned vendor_identification;\n\n  /* interrupt destinations - processors */\n  int nr_interrupt_destinations;\n  opic_interrupt_destination *interrupt_destination;\n  unsigned sizeof_interrupt_destination;\n\n  /* bogus interrupts */\n  int spurious_vector;\n\n  /* interrupt sources - external interrupt source units + extra internal ones */\n  int nr_interrupt_sources;\n  opic_interrupt_source *interrupt_source;\n  unsigned sizeof_interrupt_source;\n\n  /* external interrupts */\n  int nr_external_interrupts;\n  opic_interrupt_source *external_interrupt_source;\n\n  /* inter-processor-interrupts */\n  int nr_interprocessor_interrupts;\n  opic_interrupt_source *interprocessor_interrupt_source;\n\n  /* timers */\n  int nr_timer_interrupts;\n  opic_timer *timer;\n  unsigned sizeof_timer;\n  opic_interrupt_source *timer_interrupt_source;\n  unsigned timer_frequency;\n\n  /* init register */\n  unsigned32 init;\n\n  /* address maps */\n  opic_idu idu;\n  int nr_isu_blocks;\n  opic_isu_block *isu_block;\n}",
+      {
+        "vendor_identification": "unsigned",
+        "nr_interrupt_destinations": "int",
+        "*interrupt_destination": "opic_interrupt_destination",
+        "sizeof_interrupt_destination": "unsigned",
+        "spurious_vector": "int",
+        "nr_interrupt_sources": "int",
+        "*interrupt_source": "opic_interrupt_source",
+        "sizeof_interrupt_source": "unsigned",
+        "nr_external_interrupts": "int",
+        "*external_interrupt_source": "opic_interrupt_source",
+        "nr_interprocessor_interrupts": "int",
+        "*interprocessor_interrupt_source": "opic_interrupt_source",
+        "nr_timer_interrupts": "int",
+        "*timer": "opic_timer",
+        "sizeof_timer": "unsigned",
+        "*timer_interrupt_source": "opic_interrupt_source",
+        "timer_frequency": "unsigned",
+        "init": "unsigned32",
+        "idu": "opic_idu",
+        "nr_isu_blocks": "int",
+        "*isu_block": "opic_isu_block"
+      },
+      "_hw_opic_device",
+      [
+        321,
+        0
+      ],
+      [
+        361,
+        1
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"device_table.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <strings.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum {\n  max_nr_interrupt_sources = 2048,\n  max_nr_interrupt_destinations = 32,\n  max_nr_task_priorities = 16,\n}",
+      {
+        "max_nr_interrupt_sources": "",
+        "max_nr_interrupt_destinations": "",
+        "max_nr_task_priorities": ""
+      },
+      "",
+      [
+        158,
+        0
+      ],
+      [
+        162,
+        1
+      ]
+    ],
+    [
+      "enum {\n  opic_alignment = 16,\n}",
+      {
+        "opic_alignment": ""
+      },
+      "",
+      [
+        165,
+        0
+      ],
+      [
+        167,
+        1
+      ]
+    ],
+    [
+      "enum {\n  gcr0_8259_bit = 0x20000000,\n  gcr0_reset_bit = 0x80000000,\n}",
+      {
+        "gcr0_8259_bit": "",
+        "gcr0_reset_bit": ""
+      },
+      "",
+      [
+        172,
+        0
+      ],
+      [
+        175,
+        1
+      ]
+    ],
+    [
+      "enum {\n  idu_isu_base = 0x10000,\n  sizeof_isu_register_block = 32,\n  idu_per_processor_register_base = 0x20000,\n  sizeof_idu_per_processor_register_block = 0x1000,\n  idu_timer_base = 0x01100,\n  sizeof_timer_register_block = 0x00040,\n}",
+      {
+        "idu_isu_base": "",
+        "sizeof_isu_register_block": "",
+        "idu_per_processor_register_base": "",
+        "sizeof_idu_per_processor_register_block": "",
+        "idu_timer_base": "",
+        "sizeof_timer_register_block": ""
+      },
+      "",
+      [
+        180,
+        0
+      ],
+      [
+        187,
+        1
+      ]
+    ],
+    [
+      "enum {\n  isu_mask_bit = 0x80000000,\n  isu_active_bit = 0x40000000,\n  isu_multicast_bit = 0x20000000,\n  isu_positive_polarity_bit = 0x00800000,\n  isu_level_triggered_bit = 0x00400000,\n  isu_priority_shift = 16,\n  isu_vector_bits = 0x000000ff,\n}",
+      {
+        "isu_mask_bit": "",
+        "isu_active_bit": "",
+        "isu_multicast_bit": "",
+        "isu_positive_polarity_bit": "",
+        "isu_level_triggered_bit": "",
+        "isu_priority_shift": "",
+        "isu_vector_bits": ""
+      },
+      "",
+      [
+        192,
+        0
+      ],
+      [
+        200,
+        1
+      ]
+    ],
+    [
+      "typedef enum {\n  /* bad */\n  invalid_opic_register,\n  /* interrupt source */\n  interrupt_source_N_destination_register,\n  interrupt_source_N_vector_priority_register,\n  /* timers */\n  timer_N_destination_register,\n  timer_N_vector_priority_register,\n  timer_N_base_count_register,\n  timer_N_current_count_register,\n  timer_frequency_reporting_register,\n  /* inter-processor interrupts */\n  ipi_N_vector_priority_register,\n  ipi_N_dispatch_register,\n  /* global configuration */\n  spurious_vector_register,\n  processor_init_register,\n  vendor_identification_register,\n  global_configuration_register_N,\n  feature_reporting_register_N,\n  /* per processor */\n  end_of_interrupt_register_N,\n  interrupt_acknowledge_register_N,\n  current_task_priority_register_N,\n} opic_register;",
+      {
+        "invalid_opic_register": "",
+        "interrupt_source_N_destination_register": "",
+        "interrupt_source_N_vector_priority_register": "",
+        "timer_N_destination_register": "",
+        "timer_N_vector_priority_register": "",
+        "timer_N_base_count_register": "",
+        "timer_N_current_count_register": "",
+        "timer_frequency_reporting_register": "",
+        "ipi_N_vector_priority_register": "",
+        "ipi_N_dispatch_register": "",
+        "spurious_vector_register": "",
+        "processor_init_register": "",
+        "vendor_identification_register": "",
+        "global_configuration_register_N": "",
+        "feature_reporting_register_N": "",
+        "end_of_interrupt_register_N": "",
+        "interrupt_acknowledge_register_N": "",
+        "current_task_priority_register_N": ""
+      },
+      "opic_register",
+      [
+        250,
+        0
+      ],
+      [
+        275,
+        16
+      ]
+    ],
+    [
+      "typedef enum {\n  pending_interrupt,\n  in_service_interrupt,\n} interrupt_class;",
+      {
+        "pending_interrupt": "",
+        "in_service_interrupt": ""
+      },
+      "interrupt_class",
+      [
+        656,
+        0
+      ],
+      [
+        659,
+        18
+      ]
+    ]
+  ]
+}

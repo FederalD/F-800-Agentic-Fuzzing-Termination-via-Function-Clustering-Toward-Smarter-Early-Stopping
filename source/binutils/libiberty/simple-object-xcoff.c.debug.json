@@ -1,0 +1,2446 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void *\nsimple_object_xcoff_match (unsigned char header[SIMPLE_OBJECT_MATCH_HEADER_LEN],\n\t\t\t   int descriptor, off_t offset,\n\t\t\t   const char *segment_name ATTRIBUTE_UNUSED,\n\t\t\t   const char **errmsg, int *err)\n{\n  unsigned short magic;\n  unsigned short (*fetch_16) (const unsigned char *);\n  unsigned int (*fetch_32) (const unsigned char *);\n  ulong_type (*fetch_64) (const unsigned char *);\n  unsigned char hdrbuf[sizeof (struct external_filehdr)];\n  struct simple_object_xcoff_read *ocr;\n  int u64;\n\n  magic = simple_object_fetch_big_16 (header);\n\n  if (magic != U802TOCMAGIC && magic != U64_TOCMAGIC)\n    {\n      *errmsg = NULL;\n      *err = 0;\n      return NULL;\n    }\n\n  fetch_16 = simple_object_fetch_big_16;\n  fetch_32 = simple_object_fetch_big_32;\n  fetch_64 = simple_object_fetch_big_64;\n\n  if (!simple_object_internal_read (descriptor, offset, hdrbuf, sizeof hdrbuf,\n\t\t\t\t    errmsg, err))\n    return NULL;\n\n  u64 = magic == U64_TOCMAGIC;\n\n  ocr = XNEW (struct simple_object_xcoff_read);\n  ocr->magic = magic;\n  ocr->nscns = fetch_16 (hdrbuf + offsetof (struct external_filehdr, f_nscns));\n  if (u64)\n    {\n      ocr->symptr = fetch_64 (hdrbuf\n\t\t\t      + offsetof (struct external_filehdr,\n\t\t\t\t\t  u.xcoff64.f_symptr));\n      ocr->nsyms = fetch_32 (hdrbuf + offsetof (struct external_filehdr,\n\t\t\t\t\t\tu.xcoff64.f_nsyms));\n      ocr->scnhdr_offset = (sizeof (struct external_filehdr)\n\t\t\t    + fetch_16 (hdrbuf + offsetof (struct external_filehdr,\n\t\t\t\t\t\t\t   u.xcoff64.f_opthdr)));\n\n    }\n  else\n    {\n      ocr->symptr = fetch_32 (hdrbuf\n\t\t\t      + offsetof (struct external_filehdr,\n\t\t\t\t\t  u.xcoff32.f_symptr));\n      ocr->nsyms = fetch_32 (hdrbuf + offsetof (struct external_filehdr,\n\t\t\t\t\t\tu.xcoff32.f_nsyms));\n      ocr->scnhdr_offset = (sizeof (struct external_filehdr) - 4\n\t\t\t    + fetch_16 (hdrbuf + offsetof (struct external_filehdr,\n\t\t\t\t\t\t\t   u.xcoff32.f_opthdr)));\n\n    }\n\n  return (void *) ocr;\n}",
+      "fn_code_pos": [
+        [
+          290,
+          0
+        ],
+        [
+          352,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_match",
+        "parameters": {
+          "header": "unsigned char",
+          "descriptor": "int",
+          "offset": "off_t",
+          "ATTRIBUTE_UNUSED": "char",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\nsimple_object_xcoff_read_strtab (simple_object_read *sobj, size_t *strtab_size,\n\t\t\t\t const char **errmsg, int *err)\n{\n  struct simple_object_xcoff_read *ocr =\n    (struct simple_object_xcoff_read *) sobj->data;\n  off_t strtab_offset;\n  unsigned char strsizebuf[4];\n  size_t strsize;\n  char *strtab;\n\n  strtab_offset = sobj->offset + ocr->symptr\n    + ocr->nsyms * SYMESZ;\n  if (!simple_object_internal_read (sobj->descriptor, strtab_offset,\n\t\t\t\t    strsizebuf, 4, errmsg, err))\n    return NULL;\n  strsize = simple_object_fetch_big_32 (strsizebuf);\n  strtab = XNEWVEC (char, strsize);\n  if (!simple_object_internal_read (sobj->descriptor, strtab_offset,\n\t\t\t\t    (unsigned char *) strtab, strsize, errmsg,\n\t\t\t\t    err))\n    {\n      XDELETEVEC (strtab);\n      return NULL;\n    }\n  *strtab_size = strsize;\n  return strtab;\n}",
+      "fn_code_pos": [
+        [
+          356,
+          0
+        ],
+        [
+          383,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_read_strtab",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "strtab_size": "size_t",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static const char *\nsimple_object_xcoff_find_sections (simple_object_read *sobj,\n\t\t\t\t  int (*pfn) (void *, const char *,\n\t\t\t\t\t      off_t offset, off_t length),\n\t\t\t\t  void *data,\n\t\t\t\t  int *err)\n{\n  struct simple_object_xcoff_read *ocr =\n    (struct simple_object_xcoff_read *) sobj->data;\n  int u64 = ocr->magic == U64_TOCMAGIC;\n  size_t scnhdr_size;\n  unsigned char *scnbuf;\n  const char *errmsg;\n  unsigned int (*fetch_32) (const unsigned char *);\n  ulong_type (*fetch_64) (const unsigned char *);\n  unsigned int nscns;\n  char *strtab;\n  size_t strtab_size;\n  unsigned int i;\n\n  scnhdr_size = u64 ? SCNHSZ64 : SCNHSZ32;\n  scnbuf = XNEWVEC (unsigned char, scnhdr_size * ocr->nscns);\n  if (!simple_object_internal_read (sobj->descriptor,\n\t\t\t\t    sobj->offset + ocr->scnhdr_offset,\n\t\t\t\t    scnbuf, scnhdr_size * ocr->nscns, &errmsg,\n\t\t\t\t    err))\n    {\n      XDELETEVEC (scnbuf);\n      return errmsg;\n    }\n\n  fetch_32 = simple_object_fetch_big_32;\n  fetch_64 = simple_object_fetch_big_64;\n\n  nscns = ocr->nscns;\n  strtab = NULL;\n  strtab_size = 0;\n  for (i = 0; i < nscns; ++i)\n    {\n      unsigned char *scnhdr;\n      unsigned char *scnname;\n      char namebuf[SCNNMLEN + 1];\n      char *name;\n      off_t scnptr;\n      unsigned int size;\n\n      scnhdr = scnbuf + i * scnhdr_size;\n      scnname = scnhdr + offsetof (struct external_scnhdr, s_name);\n      memcpy (namebuf, scnname, SCNNMLEN);\n      namebuf[SCNNMLEN] = '\\0';\n      name = &namebuf[0];\n      if (namebuf[0] == '/')\n\t{\n\t  size_t strindex;\n\t  char *end;\n\n\t  strindex = strtol (namebuf + 1, &end, 10);\n\t  if (*end == '\\0')\n\t    {\n\t      /* The real section name is found in the string\n\t\t table.  */\n\t      if (strtab == NULL)\n\t\t{\n\t\t  strtab = simple_object_xcoff_read_strtab (sobj,\n\t\t\t\t\t\t\t   &strtab_size,\n\t\t\t\t\t\t\t   &errmsg, err);\n\t\t  if (strtab == NULL)\n\t\t    {\n\t\t      XDELETEVEC (scnbuf);\n\t\t      return errmsg;\n\t\t    }\n\t\t}\n\n\t      if (strindex < 4 || strindex >= strtab_size)\n\t\t{\n\t\t  XDELETEVEC (strtab);\n\t\t  XDELETEVEC (scnbuf);\n\t\t  *err = 0;\n\t\t  return \"section string index out of range\";\n\t\t}\n\n\t      name = strtab + strindex;\n\t    }\n\t}\n\n      if (u64)\n\t{\n\t  scnptr = fetch_64 (scnhdr + offsetof (struct external_scnhdr,\n\t\t\t\t\t\tu.xcoff64.s_scnptr));\n\t  size = fetch_64 (scnhdr + offsetof (struct external_scnhdr,\n\t\t\t\t\t      u.xcoff64.s_size));\n\t}\n      else\n\t{\n\t  scnptr = fetch_32 (scnhdr + offsetof (struct external_scnhdr,\n\t\t\t\t\t\tu.xcoff32.s_scnptr));\n\t  size = fetch_32 (scnhdr + offsetof (struct external_scnhdr,\n\t\t\t\t\t      u.xcoff32.s_size));\n\t}\n\n      if (!(*pfn) (data, name, scnptr, size))\n\tbreak;\n    }\n\n  if (strtab != NULL)\n    XDELETEVEC (strtab);\n  XDELETEVEC (scnbuf);\n\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          387,
+          0
+        ],
+        [
+          496,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_find_sections",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "pfn": "int",
+          "offset": "off_t",
+          "length": "off_t",
+          "data": "void",
+          "err": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void *\nsimple_object_xcoff_fetch_attributes (simple_object_read *sobj,\n\t\t\t\t     const char **errmsg ATTRIBUTE_UNUSED,\n\t\t\t\t     int *err ATTRIBUTE_UNUSED)\n{\n  struct simple_object_xcoff_read *ocr =\n    (struct simple_object_xcoff_read *) sobj->data;\n  struct simple_object_xcoff_attributes *ret;\n\n  ret = XNEW (struct simple_object_xcoff_attributes);\n  ret->magic = ocr->magic;\n  ret->flags = ocr->flags;\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          500,
+          0
+        ],
+        [
+          513,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_fetch_attributes",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nsimple_object_xcoff_release_read (void *data)\n{\n  XDELETE (data);\n}",
+      "fn_code_pos": [
+        [
+          517,
+          0
+        ],
+        [
+          521,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_release_read",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static const char *\nsimple_object_xcoff_attributes_merge (void *todata, void *fromdata, int *err)\n{\n  struct simple_object_xcoff_attributes *to =\n    (struct simple_object_xcoff_attributes *) todata;\n  struct simple_object_xcoff_attributes *from =\n    (struct simple_object_xcoff_attributes *) fromdata;\n\n  if (to->magic != from->magic)\n    {\n      *err = 0;\n      return \"XCOFF object format mismatch\";\n    }\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          525,
+          0
+        ],
+        [
+          539,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_attributes_merge",
+        "parameters": {
+          "todata": "void",
+          "fromdata": "void",
+          "err": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nsimple_object_xcoff_release_attributes (void *data)\n{\n  XDELETE (data);\n}",
+      "fn_code_pos": [
+        [
+          543,
+          0
+        ],
+        [
+          547,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_release_attributes",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void *\nsimple_object_xcoff_start_write (void *attributes_data,\n\t\t\t\tconst char **errmsg ATTRIBUTE_UNUSED,\n\t\t\t\tint *err ATTRIBUTE_UNUSED)\n{\n  struct simple_object_xcoff_attributes *attrs =\n    (struct simple_object_xcoff_attributes *) attributes_data;\n  struct simple_object_xcoff_attributes *ret;\n\n  /* We're just going to record the attributes, but we need to make a\n     copy because the user may delete them.  */\n  ret = XNEW (struct simple_object_xcoff_attributes);\n  *ret = *attrs;\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          551,
+          0
+        ],
+        [
+          565,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_start_write",
+        "parameters": {
+          "attributes_data": "void",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nsimple_object_xcoff_write_filehdr (simple_object_write *sobj, int descriptor,\n\t\t\t\t  unsigned int nscns, size_t symtab_offset,\n\t\t\t\t  unsigned int nsyms, const char **errmsg,\n\t\t\t\t  int *err)\n{\n  struct simple_object_xcoff_attributes *attrs =\n    (struct simple_object_xcoff_attributes *) sobj->data;\n  int u64 = attrs->magic == U64_TOCMAGIC;\n  unsigned char hdrbuf[sizeof (struct external_filehdr)];\n  unsigned char *hdr;\n  void (*set_16) (unsigned char *, unsigned short);\n  void (*set_32) (unsigned char *, unsigned int);\n  void (*set_64) (unsigned char *, ulong_type);\n\n  hdr = &hdrbuf[0];\n\n  set_16 = simple_object_set_big_16;\n  set_32 = simple_object_set_big_32;\n  set_64 = simple_object_set_big_64;\n\n  memset (hdr, 0, sizeof (struct external_filehdr));\n\n  set_16 (hdr + offsetof (struct external_filehdr, f_magic), attrs->magic);\n  set_16 (hdr + offsetof (struct external_filehdr, f_nscns), nscns);\n  /* f_timdat left as zero.  */\n  if (u64)\n    {\n      set_64 (hdr + offsetof (struct external_filehdr, u.xcoff64.f_symptr),\n\t      symtab_offset);\n      set_32 (hdr + offsetof (struct external_filehdr, u.xcoff64.f_nsyms),\n\t      nsyms);\n      /* f_opthdr left as zero.  */\n      set_16 (hdr + offsetof (struct external_filehdr, u.xcoff64.f_flags),\n\t      attrs->flags);\n    }\n  else\n    {\n      set_32 (hdr + offsetof (struct external_filehdr, u.xcoff64.f_symptr),\n\t      symtab_offset);\n      set_32 (hdr + offsetof (struct external_filehdr, u.xcoff64.f_nsyms),\n\t      nsyms);\n      /* f_opthdr left as zero.  */\n      set_16 (hdr + offsetof (struct external_filehdr, u.xcoff64.f_flags),\n\t      attrs->flags);\n    }\n\n  return simple_object_internal_write (descriptor, 0, hdrbuf,\n\t\t\t\t       sizeof (struct external_filehdr),\n\t\t\t\t       errmsg, err);\n}",
+      "fn_code_pos": [
+        [
+          569,
+          0
+        ],
+        [
+          619,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_write_filehdr",
+        "parameters": {
+          "sobj": "simple_object_write",
+          "descriptor": "int",
+          "nscns": "unsigned int",
+          "symtab_offset": "size_t",
+          "nsyms": "unsigned int",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nsimple_object_xcoff_write_scnhdr (simple_object_write *sobj,\n\t\t\t\t  int descriptor,\n\t\t\t\t  const char *name, size_t *name_offset,\n\t\t\t\t  off_t scnhdr_offset, size_t scnsize,\n\t\t\t\t  off_t offset, unsigned int align,\n\t\t\t\t  const char **errmsg, int *err)\n{\n  struct simple_object_xcoff_read *ocr =\n    (struct simple_object_xcoff_read *) sobj->data;\n  int u64 = ocr->magic == U64_TOCMAGIC;\n  void (*set_32) (unsigned char *, unsigned int);\n  void (*set_64) (unsigned char *, unsigned int);\n  unsigned char hdrbuf[sizeof (struct external_scnhdr)];\n  unsigned char *hdr;\n  size_t namelen;\n  unsigned int flags;\n\n  set_32 = simple_object_set_big_32;\n  set_64 = simple_object_set_big_32;\n\n  memset (hdrbuf, 0, sizeof hdrbuf);\n  hdr = &hdrbuf[0];\n\n  namelen = strlen (name);\n  if (namelen <= SCNNMLEN)\n    strncpy ((char *) hdr + offsetof (struct external_scnhdr, s_name),\n\t     name, SCNNMLEN);\n  else\n    {\n      snprintf ((char *) hdr + offsetof (struct external_scnhdr, s_name),\n\t\tSCNNMLEN, \"/%lu\", (unsigned long) *name_offset);\n      *name_offset += namelen + 1;\n    }\n\n  /* s_paddr left as zero.  */\n  /* s_vaddr left as zero.  */\n  if (u64)\n    {\n      set_64 (hdr + offsetof (struct external_scnhdr, u.xcoff64.s_size),\n\t      scnsize);\n      set_64 (hdr + offsetof (struct external_scnhdr, u.xcoff64.s_scnptr),\n\t      offset);\n    }\n  else\n    {\n      set_32 (hdr + offsetof (struct external_scnhdr, u.xcoff32.s_size),\n\t      scnsize);\n      set_32 (hdr + offsetof (struct external_scnhdr, u.xcoff32.s_scnptr),\n\t      offset);\n    }\n  /* s_relptr left as zero.  */\n  /* s_lnnoptr left as zero.  */\n  /* s_nreloc left as zero.  */\n  /* s_nlnno left as zero.  */\n  flags = STYP_DATA;\n  if (align > 13)\n    align = 13;\n  if (u64)\n    set_32 (hdr + offsetof (struct external_scnhdr, u.xcoff64.s_flags), flags);\n  else\n    set_32 (hdr + offsetof (struct external_scnhdr, u.xcoff32.s_flags), flags);\n\n  return simple_object_internal_write (descriptor, scnhdr_offset, hdrbuf,\n\t\t\t\t       u64 ? SCNHSZ64 : SCNHSZ32,\n\t\t\t\t       errmsg, err);\n}",
+      "fn_code_pos": [
+        [
+          623,
+          0
+        ],
+        [
+          689,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_write_scnhdr",
+        "parameters": {
+          "sobj": "simple_object_write",
+          "descriptor": "int",
+          "name": "char",
+          "name_offset": "size_t",
+          "scnhdr_offset": "off_t",
+          "scnsize": "size_t",
+          "offset": "off_t",
+          "align": "unsigned int",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static const char *\nsimple_object_xcoff_write_to_file (simple_object_write *sobj, int descriptor,\n\t\t\t\t  int *err)\n{\n  struct simple_object_xcoff_read *ocr =\n    (struct simple_object_xcoff_read *) sobj->data;\n  int u64 = ocr->magic == U64_TOCMAGIC;\n  unsigned int nscns, secnum;\n  simple_object_write_section *section;\n  off_t scnhdr_offset;\n  size_t symtab_offset;\n  off_t secsym_offset;\n  unsigned int nsyms;\n  size_t offset;\n  size_t name_offset;\n  const char *errmsg;\n  unsigned char strsizebuf[4];\n  /* The interface doesn't give us access to the name of the input file\n     yet.  We want to use its basename for the FILE symbol.  This is\n     what 'gas' uses when told to assemble from stdin.  */\n  const char *source_filename = \"fake\";\n  size_t sflen;\n  union\n  {\n    struct external_syment sym;\n    union external_auxent aux;\n  } syms[2];\n  void (*set_16) (unsigned char *, unsigned short);\n  void (*set_32) (unsigned char *, unsigned int);\n\n  set_16 = simple_object_set_big_16;\n  set_32 = simple_object_set_big_32;\n\n  nscns = 0;\n  for (section = sobj->sections; section != NULL; section = section->next)\n    ++nscns;\n\n  scnhdr_offset = sizeof (struct external_filehdr) - (u64 ? 4 : 0);\n  offset = scnhdr_offset + nscns * (u64 ? SCNHSZ64 : SCNHSZ32);\n  name_offset = 4;\n  for (section = sobj->sections; section != NULL; section = section->next)\n    {\n      size_t mask;\n      size_t new_offset;\n      size_t scnsize;\n      struct simple_object_write_section_buffer *buffer;\n\n      mask = (1U << section->align) - 1;\n      new_offset = offset & mask;\n      new_offset &= ~ mask;\n      while (new_offset > offset)\n\t{\n\t  unsigned char zeroes[16];\n\t  size_t write;\n\n\t  memset (zeroes, 0, sizeof zeroes);\n\t  write = new_offset - offset;\n\t  if (write > sizeof zeroes)\n\t    write = sizeof zeroes;\n\t  if (!simple_object_internal_write (descriptor, offset, zeroes, write,\n\t\t\t\t\t     &errmsg, err))\n\t    return errmsg;\n\t}\n\n      scnsize = 0;\n      for (buffer = section->buffers; buffer != NULL; buffer = buffer->next)\n\t{\n\t  if (!simple_object_internal_write (descriptor, offset + scnsize,\n\t\t\t\t\t     ((const unsigned char *)\n\t\t\t\t\t      buffer->buffer),\n\t\t\t\t\t     buffer->size, &errmsg, err))\n\t    return errmsg;\n\t  scnsize += buffer->size;\n\t}\n\n      if (!simple_object_xcoff_write_scnhdr (sobj, descriptor, section->name,\n\t\t\t\t\t    &name_offset, scnhdr_offset,\n\t\t\t\t\t    scnsize, offset, section->align,\n\t\t\t\t\t    &errmsg, err))\n\treturn errmsg;\n\n      scnhdr_offset += u64 ? SCNHSZ64 : SCNHSZ32;\n      offset += scnsize;\n    }\n\n  /* Symbol table is always half-word aligned.  */\n  offset += (offset & 1);\n  /* There is a file symbol and a section symbol per section,\n     and each of these has a single auxiliary symbol following.  */\n  nsyms = 2 * (nscns + 1);\n  symtab_offset = offset;\n  /* Advance across space reserved for symbol table to locate\n     start of string table.  */\n  offset += nsyms * SYMESZ;\n\n  /* Write out file symbol.  */\n  memset (&syms[0], 0, sizeof (syms));\n  if (!u64)\n    strcpy ((char *)&syms[0].sym.u.xcoff32.n.n_name[0], \".file\");\n  set_16 (&syms[0].sym.n_scnum[0], N_DEBUG);\n  set_16 (&syms[0].sym.n_type[0], IMAGE_SYM_TYPE);\n  syms[0].sym.n_sclass[0] = C_FILE;\n  syms[0].sym.n_numaux[0] = 1;\n  /* The name need not be nul-terminated if it fits into the x_fname field\n     directly, but must be if it has to be placed into the string table.  */\n  sflen = strlen (source_filename);\n  if (sflen <= FILNMLEN)\n    memcpy (&syms[1].aux.x_file.x_fname[0], source_filename, sflen);\n  else\n    {\n      set_32 (&syms[1].aux.x_file._x.x_offset[0], name_offset);\n      if (!simple_object_internal_write (descriptor, offset + name_offset,\n\t\t\t\t\t ((const unsigned char *)\n\t\t\t\t\t  source_filename),\n\t\t\t\t\t sflen + 1, &errmsg, err))\n\treturn errmsg;\n      name_offset += strlen (source_filename) + 1;\n    }\n  if (!simple_object_internal_write (descriptor, symtab_offset,\n\t\t\t\t     (const unsigned char *) &syms[0],\n\t\t\t\t     sizeof (syms), &errmsg, err))\n    return errmsg;\n\n  /* Write the string table length, followed by the strings and section\n     symbols in step with each other.  */\n  set_32 (strsizebuf, name_offset);\n  if (!simple_object_internal_write (descriptor, offset, strsizebuf, 4,\n\t\t\t\t     &errmsg, err))\n    return errmsg;\n\n  name_offset = 4;\n  secsym_offset = symtab_offset + sizeof (syms);\n  memset (&syms[0], 0, sizeof (syms));\n  set_16 (&syms[0].sym.n_type[0], IMAGE_SYM_TYPE);\n  syms[0].sym.n_sclass[0] = C_STAT;\n  syms[0].sym.n_numaux[0] = 1;\n  secnum = 1;\n\n  for (section = sobj->sections; section != NULL; section = section->next)\n    {\n      size_t namelen;\n      size_t scnsize;\n      struct simple_object_write_section_buffer *buffer;\n\n      namelen = strlen (section->name);\n      set_16 (&syms[0].sym.n_scnum[0], secnum++);\n      scnsize = 0;\n      for (buffer = section->buffers; buffer != NULL; buffer = buffer->next)\n\tscnsize += buffer->size;\n      set_32 (&syms[1].aux.x_scn.x_scnlen[0], scnsize);\n      if (namelen > SCNNMLEN)\n\t{\n\t  set_32 (&syms[0].sym.u.xcoff32.n.n.n_zeroes[0], 0);\n\t  set_32 (&syms[0].sym.u.xcoff32.n.n.n_offset[0], name_offset);\n\t  if (!simple_object_internal_write (descriptor, offset + name_offset,\n\t\t\t\t\t     ((const unsigned char *)\n\t\t\t\t\t      section->name),\n\t\t\t\t\t     namelen + 1, &errmsg, err))\n\t    return errmsg;\n\t  name_offset += namelen + 1;\n\t}\n      else\n\t{\n\t  memcpy (&syms[0].sym.u.xcoff32.n.n_name[0], section->name,\n\t\t  strlen (section->name));\n\t  memset (&syms[0].sym.u.xcoff32.n.n_name[strlen (section->name)], 0,\n\t\t  N_SYMNMLEN - strlen (section->name));\n\t}\n\n      if (!simple_object_internal_write (descriptor, secsym_offset,\n\t\t\t\t\t (const unsigned char *) &syms[0],\n\t\t\t\t\t sizeof (syms), &errmsg, err))\n\treturn errmsg;\n      secsym_offset += sizeof (syms);\n    }\n\n  if (!simple_object_xcoff_write_filehdr (sobj, descriptor, nscns,\n\t\t\t\t\t symtab_offset, nsyms, &errmsg, err))\n    return errmsg;\n\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          693,
+          0
+        ],
+        [
+          874,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_write_to_file",
+        "parameters": {
+          "sobj": "simple_object_write",
+          "descriptor": "int",
+          "err": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nsimple_object_xcoff_release_write (void *data)\n{\n  XDELETE (data);\n}",
+      "fn_code_pos": [
+        [
+          878,
+          0
+        ],
+        [
+          882,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_release_write",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "simple_object_xcoff_match (unsigned char header[SIMPLE_OBJECT_MATCH_HEADER_LEN],\n\t\t\t   int descriptor, off_t offset,\n\t\t\t   const char *segment_name ATTRIBUTE_UNUSED,\n\t\t\t   const char **errmsg, int *err)",
+      "fn_dec_pos": [
+        [
+          291,
+          0
+        ],
+        [
+          294,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_match",
+        "parameters": {
+          "header": "unsigned char",
+          "descriptor": "int",
+          "offset": "off_t",
+          "ATTRIBUTE_UNUSED": "char",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*fetch_16) (const unsigned char *)",
+      "fn_dec_pos": [
+        [
+          297,
+          17
+        ],
+        [
+          297,
+          52
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*fetch_32) (const unsigned char *)",
+      "fn_dec_pos": [
+        [
+          298,
+          15
+        ],
+        [
+          298,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*fetch_64) (const unsigned char *)",
+      "fn_dec_pos": [
+        [
+          299,
+          13
+        ],
+        [
+          299,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "ulong_type"
+      }
+    },
+    {
+      "fn_code": "simple_object_xcoff_read_strtab (simple_object_read *sobj, size_t *strtab_size,\n\t\t\t\t const char **errmsg, int *err)",
+      "fn_dec_pos": [
+        [
+          357,
+          0
+        ],
+        [
+          358,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_read_strtab",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "strtab_size": "size_t",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "simple_object_xcoff_find_sections (simple_object_read *sobj,\n\t\t\t\t  int (*pfn) (void *, const char *,\n\t\t\t\t\t      off_t offset, off_t length),\n\t\t\t\t  void *data,\n\t\t\t\t  int *err)",
+      "fn_dec_pos": [
+        [
+          388,
+          0
+        ],
+        [
+          392,
+          15
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_find_sections",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "pfn": "int",
+          "offset": "off_t",
+          "length": "off_t",
+          "data": "void",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*pfn) (void *, const char *,\n\t\t\t\t\t      off_t offset, off_t length)",
+      "fn_dec_pos": [
+        [
+          389,
+          10
+        ],
+        [
+          390,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "offset": "off_t",
+          "length": "off_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "(*fetch_32) (const unsigned char *)",
+      "fn_dec_pos": [
+        [
+          400,
+          15
+        ],
+        [
+          400,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*fetch_64) (const unsigned char *)",
+      "fn_dec_pos": [
+        [
+          401,
+          13
+        ],
+        [
+          401,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "ulong_type"
+      }
+    },
+    {
+      "fn_code": "simple_object_xcoff_fetch_attributes (simple_object_read *sobj,\n\t\t\t\t     const char **errmsg ATTRIBUTE_UNUSED,\n\t\t\t\t     int *err ATTRIBUTE_UNUSED)",
+      "fn_dec_pos": [
+        [
+          501,
+          0
+        ],
+        [
+          503,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_fetch_attributes",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "simple_object_xcoff_attributes_merge (void *todata, void *fromdata, int *err)",
+      "fn_dec_pos": [
+        [
+          526,
+          0
+        ],
+        [
+          526,
+          77
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_attributes_merge",
+        "parameters": {
+          "todata": "void",
+          "fromdata": "void",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "simple_object_xcoff_start_write (void *attributes_data,\n\t\t\t\tconst char **errmsg ATTRIBUTE_UNUSED,\n\t\t\t\tint *err ATTRIBUTE_UNUSED)",
+      "fn_dec_pos": [
+        [
+          552,
+          0
+        ],
+        [
+          554,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_start_write",
+        "parameters": {
+          "attributes_data": "void",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*set_16) (unsigned char *, unsigned short)",
+      "fn_dec_pos": [
+        [
+          580,
+          7
+        ],
+        [
+          580,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "(*set_32) (unsigned char *, unsigned int)",
+      "fn_dec_pos": [
+        [
+          581,
+          7
+        ],
+        [
+          581,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "(*set_64) (unsigned char *, ulong_type)",
+      "fn_dec_pos": [
+        [
+          582,
+          7
+        ],
+        [
+          582,
+          46
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "(*set_32) (unsigned char *, unsigned int)",
+      "fn_dec_pos": [
+        [
+          634,
+          7
+        ],
+        [
+          634,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "(*set_64) (unsigned char *, unsigned int)",
+      "fn_dec_pos": [
+        [
+          635,
+          7
+        ],
+        [
+          635,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "simple_object_xcoff_write_to_file (simple_object_write *sobj, int descriptor,\n\t\t\t\t  int *err)",
+      "fn_dec_pos": [
+        [
+          694,
+          0
+        ],
+        [
+          695,
+          15
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_xcoff_write_to_file",
+        "parameters": {
+          "sobj": "simple_object_write",
+          "descriptor": "int",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*set_16) (unsigned char *, unsigned short)",
+      "fn_dec_pos": [
+        [
+          720,
+          7
+        ],
+        [
+          720,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "(*set_32) (unsigned char *, unsigned int)",
+      "fn_dec_pos": [
+        [
+          721,
+          7
+        ],
+        [
+          721,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct external_filehdr\n{\n  unsigned char f_magic[2];\t/* magic number\t\t\t*/\n  unsigned char f_nscns[2];\t/* number of sections\t\t*/\n  unsigned char f_timdat[4];\t/* time & date stamp\t\t*/\n  union\n  {\n    struct\n    {\n      unsigned char f_symptr[4];\t/* file pointer to symtab\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n    } xcoff32;\n    struct\n    {\n      unsigned char f_symptr[8];\t/* file pointer to symtab\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n    } xcoff64;\n  } u;\n}",
+      {
+        "f_magic[2]": "unsigned char",
+        "f_nscns[2]": "unsigned char",
+        "f_timdat[4]": "unsigned char",
+        "u": "union\n  {\n    struct\n    {\n      unsigned char f_symptr[4];\t/* file pointer to symtab\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n    } xcoff32;\n    struct\n    {\n      unsigned char f_symptr[8];\t/* file pointer to symtab\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n    } xcoff64;\n  }",
+        "xcoff32": "struct\n    {\n      unsigned char f_symptr[4];\t/* file pointer to symtab\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n    }",
+        "f_symptr[4]": "unsigned char",
+        "f_nsyms[4]": "unsigned char",
+        "f_opthdr[2]": "unsigned char",
+        "f_flags[2]": "unsigned char",
+        "xcoff64": "struct\n    {\n      unsigned char f_symptr[8];\t/* file pointer to symtab\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n    }",
+        "f_symptr[8]": "unsigned char"
+      },
+      "external_filehdr",
+      [
+        48,
+        0
+      ],
+      [
+        70,
+        1
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char f_symptr[4];\t/* file pointer to symtab\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n    }",
+      {
+        "f_symptr[4]": "unsigned char",
+        "f_nsyms[4]": "unsigned char",
+        "f_opthdr[2]": "unsigned char",
+        "f_flags[2]": "unsigned char"
+      },
+      "",
+      [
+        55,
+        4
+      ],
+      [
+        61,
+        5
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char f_symptr[8];\t/* file pointer to symtab\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n    }",
+      {
+        "f_symptr[8]": "unsigned char",
+        "f_opthdr[2]": "unsigned char",
+        "f_flags[2]": "unsigned char",
+        "f_nsyms[4]": "unsigned char"
+      },
+      "",
+      [
+        62,
+        4
+      ],
+      [
+        68,
+        5
+      ]
+    ],
+    [
+      "struct external_scnhdr\n{\n  unsigned char s_name[8];\t/* section name\t\t\t\t*/\n  union\n  {\n    struct\n    {\n      unsigned char s_paddr[4];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[4];\t/* virtual address\t\t\t*/\n      unsigned char s_size[4];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[4];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[4];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[4];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[2];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[2];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    } xcoff32;\n    struct\n    {\n      unsigned char s_paddr[8];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[8];\t/* virtual address\t\t\t*/\n      unsigned char s_size[8];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[8];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[8];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[8];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[4];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[4];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    } xcoff64;\n  } u;\n}",
+      {
+        "s_name[8]": "unsigned char",
+        "u": "union\n  {\n    struct\n    {\n      unsigned char s_paddr[4];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[4];\t/* virtual address\t\t\t*/\n      unsigned char s_size[4];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[4];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[4];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[4];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[2];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[2];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    } xcoff32;\n    struct\n    {\n      unsigned char s_paddr[8];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[8];\t/* virtual address\t\t\t*/\n      unsigned char s_size[8];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[8];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[8];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[8];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[4];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[4];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    } xcoff64;\n  }",
+        "xcoff32": "struct\n    {\n      unsigned char s_paddr[4];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[4];\t/* virtual address\t\t\t*/\n      unsigned char s_size[4];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[4];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[4];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[4];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[2];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[2];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    }",
+        "s_paddr[4]": "unsigned char",
+        "s_vaddr[4]": "unsigned char",
+        "s_size[4]": "unsigned char",
+        "s_scnptr[4]": "unsigned char",
+        "s_relptr[4]": "unsigned char",
+        "s_lnnoptr[4]": "unsigned char",
+        "s_nreloc[2]": "unsigned char",
+        "s_nlnno[2]": "unsigned char",
+        "s_flags[4]": "unsigned char",
+        "xcoff64": "struct\n    {\n      unsigned char s_paddr[8];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[8];\t/* virtual address\t\t\t*/\n      unsigned char s_size[8];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[8];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[8];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[8];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[4];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[4];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    }",
+        "s_paddr[8]": "unsigned char",
+        "s_vaddr[8]": "unsigned char",
+        "s_size[8]": "unsigned char",
+        "s_scnptr[8]": "unsigned char",
+        "s_relptr[8]": "unsigned char",
+        "s_lnnoptr[8]": "unsigned char",
+        "s_nreloc[4]": "unsigned char",
+        "s_nlnno[4]": "unsigned char"
+      },
+      "external_scnhdr",
+      [
+        86,
+        0
+      ],
+      [
+        116,
+        1
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char s_paddr[4];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[4];\t/* virtual address\t\t\t*/\n      unsigned char s_size[4];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[4];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[4];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[4];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[2];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[2];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    }",
+      {
+        "s_paddr[4]": "unsigned char",
+        "s_vaddr[4]": "unsigned char",
+        "s_size[4]": "unsigned char",
+        "s_scnptr[4]": "unsigned char",
+        "s_relptr[4]": "unsigned char",
+        "s_lnnoptr[4]": "unsigned char",
+        "s_nreloc[2]": "unsigned char",
+        "s_nlnno[2]": "unsigned char",
+        "s_flags[4]": "unsigned char"
+      },
+      "",
+      [
+        91,
+        4
+      ],
+      [
+        102,
+        5
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char s_paddr[8];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[8];\t/* virtual address\t\t\t*/\n      unsigned char s_size[8];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[8];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[8];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[8];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[4];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[4];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    }",
+      {
+        "s_paddr[8]": "unsigned char",
+        "s_vaddr[8]": "unsigned char",
+        "s_size[8]": "unsigned char",
+        "s_scnptr[8]": "unsigned char",
+        "s_relptr[8]": "unsigned char",
+        "s_lnnoptr[8]": "unsigned char",
+        "s_nreloc[4]": "unsigned char",
+        "s_nlnno[4]": "unsigned char",
+        "s_flags[4]": "unsigned char"
+      },
+      "",
+      [
+        103,
+        4
+      ],
+      [
+        114,
+        5
+      ]
+    ],
+    [
+      "struct external_syment\n{\n  union {\n    struct {\n      union {\n        /* The name of the symbol.  There is an implicit null character\n           after the end of the array.  */\n        char n_name[N_SYMNMLEN];\n        struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        } n;\n      } n;\n\n      /* The symbol's value.  */\n      unsigned char n_value[4];\n    } xcoff32;\n    struct {\n      /* The symbol's value.  */\n      unsigned char n_value[8];\n\n      /* The offset of the symbol from the start of the string table.  */\n      unsigned char n_offset[4];\n    } xcoff64;\n  } u;\n\n  /* The number of the section to which this symbol belongs.  */\n  unsigned char n_scnum[2];\n\n  /* The type of symbol.  (It can be interpreted as an n_lang\n     and an n_cpu byte, but we don't care about that here.)  */\n  unsigned char n_type[2];\n\n  /* The class of symbol (a C_* value).  */\n  unsigned char n_sclass[1];\n\n  /* The number of auxiliary symbols attached to this entry.  */\n  unsigned char n_numaux[1];\n}",
+      {
+        "u": "union {\n    struct {\n      union {\n        /* The name of the symbol.  There is an implicit null character\n           after the end of the array.  */\n        char n_name[N_SYMNMLEN];\n        struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        } n;\n      } n;\n\n      /* The symbol's value.  */\n      unsigned char n_value[4];\n    } xcoff32;\n    struct {\n      /* The symbol's value.  */\n      unsigned char n_value[8];\n\n      /* The offset of the symbol from the start of the string table.  */\n      unsigned char n_offset[4];\n    } xcoff64;\n  }",
+        "xcoff32": "struct {\n      union {\n        /* The name of the symbol.  There is an implicit null character\n           after the end of the array.  */\n        char n_name[N_SYMNMLEN];\n        struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        } n;\n      } n;\n\n      /* The symbol's value.  */\n      unsigned char n_value[4];\n    }",
+        "n": "struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        }",
+        "n_name[N_SYMNMLEN]": "char",
+        "n_zeroes[4]": "unsigned char",
+        "n_offset[4]": "unsigned char",
+        "n_value[4]": "unsigned char",
+        "xcoff64": "struct {\n      /* The symbol's value.  */\n      unsigned char n_value[8];\n\n      /* The offset of the symbol from the start of the string table.  */\n      unsigned char n_offset[4];\n    }",
+        "n_value[8]": "unsigned char",
+        "n_scnum[2]": "unsigned char",
+        "n_type[2]": "unsigned char",
+        "n_sclass[1]": "unsigned char",
+        "n_numaux[1]": "unsigned char"
+      },
+      "external_syment",
+      [
+        135,
+        0
+      ],
+      [
+        175,
+        1
+      ]
+    ],
+    [
+      "struct {\n      union {\n        /* The name of the symbol.  There is an implicit null character\n           after the end of the array.  */\n        char n_name[N_SYMNMLEN];\n        struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        } n;\n      } n;\n\n      /* The symbol's value.  */\n      unsigned char n_value[4];\n    }",
+      {
+        "n": "struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        }",
+        "n_name[N_SYMNMLEN]": "char",
+        "n_zeroes[4]": "unsigned char",
+        "n_offset[4]": "unsigned char",
+        "n_value[4]": "unsigned char"
+      },
+      "",
+      [
+        138,
+        4
+      ],
+      [
+        153,
+        5
+      ]
+    ],
+    [
+      "struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        }",
+      {
+        "n_zeroes[4]": "unsigned char",
+        "n_offset[4]": "unsigned char"
+      },
+      "",
+      [
+        143,
+        8
+      ],
+      [
+        148,
+        9
+      ]
+    ],
+    [
+      "struct {\n      /* The symbol's value.  */\n      unsigned char n_value[8];\n\n      /* The offset of the symbol from the start of the string table.  */\n      unsigned char n_offset[4];\n    }",
+      {
+        "n_value[8]": "unsigned char",
+        "n_offset[4]": "unsigned char"
+      },
+      "",
+      [
+        154,
+        4
+      ],
+      [
+        160,
+        5
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char x_zeroes[4];\n      unsigned char x_offset[4];\n      unsigned char x_pad[FILNMLEN-8];\n      unsigned char x_ftype;\n    }",
+      {
+        "x_zeroes[4]": "unsigned char",
+        "x_offset[4]": "unsigned char",
+        "x_pad[FILNMLEN-8]": "unsigned char",
+        "x_ftype": "unsigned char"
+      },
+      "",
+      [
+        191,
+        4
+      ],
+      [
+        197,
+        5
+      ]
+    ],
+    [
+      "struct\n  {\n    unsigned char x_scnlen[4];\t\t/* section length\t\t*/\n    unsigned char x_nreloc[2];\t\t/* # relocation entries\t\t*/\n    unsigned char x_nlinno[2];\t\t/* # line numbers\t\t*/\n  }",
+      {
+        "x_scnlen[4]": "unsigned char",
+        "x_nreloc[2]": "unsigned char",
+        "x_nlinno[2]": "unsigned char"
+      },
+      "",
+      [
+        200,
+        2
+      ],
+      [
+        205,
+        3
+      ]
+    ],
+    [
+      "struct\n    {\n      struct\n      {\n\tunsigned char x_scnlen[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_stab;\t\t/* dbx stab info index */\n\tunsigned char x_snstab[2];\t/* sect num with dbx stab */\n      } x_csect;\n    }",
+      {
+        "x_csect": "struct\n      {\n\tunsigned char x_scnlen[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_stab;\t\t/* dbx stab info index */\n\tunsigned char x_snstab[2];\t/* sect num with dbx stab */\n      }",
+        "x_scnlen[4]": "unsigned char",
+        "x_parmhash[4]": "unsigned char",
+        "x_snhash[2]": "unsigned char",
+        "x_smtyp": "unsigned char",
+        "x_smclas": "unsigned char",
+        "x_stab": "unsigned char",
+        "x_snstab[2]": "unsigned char"
+      },
+      "",
+      [
+        209,
+        4
+      ],
+      [
+        221,
+        5
+      ]
+    ],
+    [
+      "struct\n      {\n\tunsigned char x_scnlen[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_stab;\t\t/* dbx stab info index */\n\tunsigned char x_snstab[2];\t/* sect num with dbx stab */\n      }",
+      {
+        "x_scnlen[4]": "unsigned char",
+        "x_parmhash[4]": "unsigned char",
+        "x_snhash[2]": "unsigned char",
+        "x_smtyp": "unsigned char",
+        "x_smclas": "unsigned char",
+        "x_stab": "unsigned char",
+        "x_snstab[2]": "unsigned char"
+      },
+      "",
+      [
+        211,
+        6
+      ],
+      [
+        220,
+        7
+      ]
+    ],
+    [
+      "struct\n    {\n      struct\n      {\n\tunsigned char x_scnlen_lo[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_scnlen_hi[4];\n\tunsigned char pad;\n\tunsigned char x_auxtype;\n      } x_csect;\n    }",
+      {
+        "x_csect": "struct\n      {\n\tunsigned char x_scnlen_lo[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_scnlen_hi[4];\n\tunsigned char pad;\n\tunsigned char x_auxtype;\n      }",
+        "x_scnlen_lo[4]": "unsigned char",
+        "x_parmhash[4]": "unsigned char",
+        "x_snhash[2]": "unsigned char",
+        "x_smtyp": "unsigned char",
+        "x_smclas": "unsigned char",
+        "x_scnlen_hi[4]": "unsigned char",
+        "pad": "unsigned char",
+        "x_auxtype": "unsigned char"
+      },
+      "",
+      [
+        222,
+        4
+      ],
+      [
+        235,
+        5
+      ]
+    ],
+    [
+      "struct\n      {\n\tunsigned char x_scnlen_lo[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_scnlen_hi[4];\n\tunsigned char pad;\n\tunsigned char x_auxtype;\n      }",
+      {
+        "x_scnlen_lo[4]": "unsigned char",
+        "x_parmhash[4]": "unsigned char",
+        "x_snhash[2]": "unsigned char",
+        "x_smtyp": "unsigned char",
+        "x_smclas": "unsigned char",
+        "x_scnlen_hi[4]": "unsigned char",
+        "pad": "unsigned char",
+        "x_auxtype": "unsigned char"
+      },
+      "",
+      [
+        224,
+        6
+      ],
+      [
+        234,
+        7
+      ]
+    ],
+    [
+      "struct\n  {\n    unsigned char x_scnlen[4];\t\t/* section length */\n    unsigned char pad1[4];\n    unsigned char x_nreloc[4];\t\t/* number RLDs */\n  }",
+      {
+        "x_scnlen[4]": "unsigned char",
+        "pad1[4]": "unsigned char",
+        "x_nreloc[4]": "unsigned char"
+      },
+      "",
+      [
+        238,
+        2
+      ],
+      [
+        243,
+        3
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read\n{\n  /* Magic number.  */\n  unsigned short magic;\n  /* Number of sections.  */\n  unsigned short nscns;\n  /* File offset of symbol table.  */\n  off_t symptr;\n  /* Number of symbol table entries.  */\n  unsigned int nsyms;\n  /* Flags.  */\n  unsigned short flags;\n  /* Offset of section headers in file.  */\n  off_t scnhdr_offset;\n}",
+      {
+        "magic": "unsigned short",
+        "nscns": "unsigned short",
+        "symptr": "off_t",
+        "nsyms": "unsigned int",
+        "flags": "unsigned short",
+        "scnhdr_offset": "off_t"
+      },
+      "simple_object_xcoff_read",
+      [
+        262,
+        0
+      ],
+      [
+        276,
+        1
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes\n{\n  /* Magic number.  */\n  unsigned short magic;\n  /* Flags.  */\n  unsigned short flags;\n}",
+      {
+        "magic": "unsigned short",
+        "flags": "unsigned short"
+      },
+      "simple_object_xcoff_attributes",
+      [
+        280,
+        0
+      ],
+      [
+        286,
+        1
+      ]
+    ],
+    [
+      "struct external_filehdr\n{\n  unsigned char f_magic[2];\t/* magic number\t\t\t*/\n  unsigned char f_nscns[2];\t/* number of sections\t\t*/\n  unsigned char f_timdat[4];\t/* time & date stamp\t\t*/\n  union\n  {\n    struct\n    {\n      unsigned char f_symptr[4];\t/* file pointer to symtab\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n    } xcoff32;\n    struct\n    {\n      unsigned char f_symptr[8];\t/* file pointer to symtab\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n    } xcoff64;\n  } u;\n}",
+      {
+        "f_magic[2]": "unsigned char",
+        "f_nscns[2]": "unsigned char",
+        "f_timdat[4]": "unsigned char",
+        "u": "union\n  {\n    struct\n    {\n      unsigned char f_symptr[4];\t/* file pointer to symtab\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n    } xcoff32;\n    struct\n    {\n      unsigned char f_symptr[8];\t/* file pointer to symtab\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n    } xcoff64;\n  }",
+        "xcoff32": "struct\n    {\n      unsigned char f_symptr[4];\t/* file pointer to symtab\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n    }",
+        "f_symptr[4]": "unsigned char",
+        "f_nsyms[4]": "unsigned char",
+        "f_opthdr[2]": "unsigned char",
+        "f_flags[2]": "unsigned char",
+        "xcoff64": "struct\n    {\n      unsigned char f_symptr[8];\t/* file pointer to symtab\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n    }",
+        "f_symptr[8]": "unsigned char"
+      },
+      "external_filehdr",
+      [
+        48,
+        0
+      ],
+      [
+        70,
+        1
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char f_symptr[4];\t/* file pointer to symtab\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n    }",
+      {
+        "f_symptr[4]": "unsigned char",
+        "f_nsyms[4]": "unsigned char",
+        "f_opthdr[2]": "unsigned char",
+        "f_flags[2]": "unsigned char"
+      },
+      "",
+      [
+        55,
+        4
+      ],
+      [
+        61,
+        5
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char f_symptr[8];\t/* file pointer to symtab\t*/\n      unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n      unsigned char f_flags[2];\t/* flags\t\t\t*/\n      unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n    }",
+      {
+        "f_symptr[8]": "unsigned char",
+        "f_opthdr[2]": "unsigned char",
+        "f_flags[2]": "unsigned char",
+        "f_nsyms[4]": "unsigned char"
+      },
+      "",
+      [
+        62,
+        4
+      ],
+      [
+        68,
+        5
+      ]
+    ],
+    [
+      "struct external_scnhdr\n{\n  unsigned char s_name[8];\t/* section name\t\t\t\t*/\n  union\n  {\n    struct\n    {\n      unsigned char s_paddr[4];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[4];\t/* virtual address\t\t\t*/\n      unsigned char s_size[4];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[4];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[4];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[4];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[2];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[2];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    } xcoff32;\n    struct\n    {\n      unsigned char s_paddr[8];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[8];\t/* virtual address\t\t\t*/\n      unsigned char s_size[8];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[8];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[8];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[8];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[4];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[4];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    } xcoff64;\n  } u;\n}",
+      {
+        "s_name[8]": "unsigned char",
+        "u": "union\n  {\n    struct\n    {\n      unsigned char s_paddr[4];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[4];\t/* virtual address\t\t\t*/\n      unsigned char s_size[4];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[4];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[4];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[4];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[2];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[2];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    } xcoff32;\n    struct\n    {\n      unsigned char s_paddr[8];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[8];\t/* virtual address\t\t\t*/\n      unsigned char s_size[8];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[8];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[8];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[8];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[4];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[4];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    } xcoff64;\n  }",
+        "xcoff32": "struct\n    {\n      unsigned char s_paddr[4];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[4];\t/* virtual address\t\t\t*/\n      unsigned char s_size[4];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[4];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[4];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[4];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[2];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[2];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    }",
+        "s_paddr[4]": "unsigned char",
+        "s_vaddr[4]": "unsigned char",
+        "s_size[4]": "unsigned char",
+        "s_scnptr[4]": "unsigned char",
+        "s_relptr[4]": "unsigned char",
+        "s_lnnoptr[4]": "unsigned char",
+        "s_nreloc[2]": "unsigned char",
+        "s_nlnno[2]": "unsigned char",
+        "s_flags[4]": "unsigned char",
+        "xcoff64": "struct\n    {\n      unsigned char s_paddr[8];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[8];\t/* virtual address\t\t\t*/\n      unsigned char s_size[8];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[8];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[8];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[8];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[4];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[4];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    }",
+        "s_paddr[8]": "unsigned char",
+        "s_vaddr[8]": "unsigned char",
+        "s_size[8]": "unsigned char",
+        "s_scnptr[8]": "unsigned char",
+        "s_relptr[8]": "unsigned char",
+        "s_lnnoptr[8]": "unsigned char",
+        "s_nreloc[4]": "unsigned char",
+        "s_nlnno[4]": "unsigned char"
+      },
+      "external_scnhdr",
+      [
+        86,
+        0
+      ],
+      [
+        116,
+        1
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char s_paddr[4];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[4];\t/* virtual address\t\t\t*/\n      unsigned char s_size[4];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[4];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[4];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[4];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[2];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[2];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    }",
+      {
+        "s_paddr[4]": "unsigned char",
+        "s_vaddr[4]": "unsigned char",
+        "s_size[4]": "unsigned char",
+        "s_scnptr[4]": "unsigned char",
+        "s_relptr[4]": "unsigned char",
+        "s_lnnoptr[4]": "unsigned char",
+        "s_nreloc[2]": "unsigned char",
+        "s_nlnno[2]": "unsigned char",
+        "s_flags[4]": "unsigned char"
+      },
+      "",
+      [
+        91,
+        4
+      ],
+      [
+        102,
+        5
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char s_paddr[8];\t/* physical address, aliased s_nlib \t*/\n      unsigned char s_vaddr[8];\t/* virtual address\t\t\t*/\n      unsigned char s_size[8];\t/* section size\t\t\t\t*/\n      unsigned char s_scnptr[8];\t/* file ptr to raw data for section */\n      unsigned char s_relptr[8];\t/* file ptr to relocation\t*/\n      unsigned char s_lnnoptr[8];\t/* file ptr to line numbers\t*/\n      unsigned char s_nreloc[4];\t/* number of relocation entries\t*/\n      unsigned char s_nlnno[4];\t/* number of line number entries\t*/\n      unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n    }",
+      {
+        "s_paddr[8]": "unsigned char",
+        "s_vaddr[8]": "unsigned char",
+        "s_size[8]": "unsigned char",
+        "s_scnptr[8]": "unsigned char",
+        "s_relptr[8]": "unsigned char",
+        "s_lnnoptr[8]": "unsigned char",
+        "s_nreloc[4]": "unsigned char",
+        "s_nlnno[4]": "unsigned char",
+        "s_flags[4]": "unsigned char"
+      },
+      "",
+      [
+        103,
+        4
+      ],
+      [
+        114,
+        5
+      ]
+    ],
+    [
+      "struct external_syment\n{\n  union {\n    struct {\n      union {\n        /* The name of the symbol.  There is an implicit null character\n           after the end of the array.  */\n        char n_name[N_SYMNMLEN];\n        struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        } n;\n      } n;\n\n      /* The symbol's value.  */\n      unsigned char n_value[4];\n    } xcoff32;\n    struct {\n      /* The symbol's value.  */\n      unsigned char n_value[8];\n\n      /* The offset of the symbol from the start of the string table.  */\n      unsigned char n_offset[4];\n    } xcoff64;\n  } u;\n\n  /* The number of the section to which this symbol belongs.  */\n  unsigned char n_scnum[2];\n\n  /* The type of symbol.  (It can be interpreted as an n_lang\n     and an n_cpu byte, but we don't care about that here.)  */\n  unsigned char n_type[2];\n\n  /* The class of symbol (a C_* value).  */\n  unsigned char n_sclass[1];\n\n  /* The number of auxiliary symbols attached to this entry.  */\n  unsigned char n_numaux[1];\n}",
+      {
+        "u": "union {\n    struct {\n      union {\n        /* The name of the symbol.  There is an implicit null character\n           after the end of the array.  */\n        char n_name[N_SYMNMLEN];\n        struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        } n;\n      } n;\n\n      /* The symbol's value.  */\n      unsigned char n_value[4];\n    } xcoff32;\n    struct {\n      /* The symbol's value.  */\n      unsigned char n_value[8];\n\n      /* The offset of the symbol from the start of the string table.  */\n      unsigned char n_offset[4];\n    } xcoff64;\n  }",
+        "xcoff32": "struct {\n      union {\n        /* The name of the symbol.  There is an implicit null character\n           after the end of the array.  */\n        char n_name[N_SYMNMLEN];\n        struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        } n;\n      } n;\n\n      /* The symbol's value.  */\n      unsigned char n_value[4];\n    }",
+        "n": "struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        }",
+        "n_name[N_SYMNMLEN]": "char",
+        "n_zeroes[4]": "unsigned char",
+        "n_offset[4]": "unsigned char",
+        "n_value[4]": "unsigned char",
+        "xcoff64": "struct {\n      /* The symbol's value.  */\n      unsigned char n_value[8];\n\n      /* The offset of the symbol from the start of the string table.  */\n      unsigned char n_offset[4];\n    }",
+        "n_value[8]": "unsigned char",
+        "n_scnum[2]": "unsigned char",
+        "n_type[2]": "unsigned char",
+        "n_sclass[1]": "unsigned char",
+        "n_numaux[1]": "unsigned char"
+      },
+      "external_syment",
+      [
+        135,
+        0
+      ],
+      [
+        175,
+        1
+      ]
+    ],
+    [
+      "struct {\n      union {\n        /* The name of the symbol.  There is an implicit null character\n           after the end of the array.  */\n        char n_name[N_SYMNMLEN];\n        struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        } n;\n      } n;\n\n      /* The symbol's value.  */\n      unsigned char n_value[4];\n    }",
+      {
+        "n": "struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        }",
+        "n_name[N_SYMNMLEN]": "char",
+        "n_zeroes[4]": "unsigned char",
+        "n_offset[4]": "unsigned char",
+        "n_value[4]": "unsigned char"
+      },
+      "",
+      [
+        138,
+        4
+      ],
+      [
+        153,
+        5
+      ]
+    ],
+    [
+      "struct {\n          /* If n_zeroes is zero, n_offset is the offset the name from\n             the start of the string table.  */\n          unsigned char n_zeroes[4];\n          unsigned char n_offset[4];\n        }",
+      {
+        "n_zeroes[4]": "unsigned char",
+        "n_offset[4]": "unsigned char"
+      },
+      "",
+      [
+        143,
+        8
+      ],
+      [
+        148,
+        9
+      ]
+    ],
+    [
+      "struct {\n      /* The symbol's value.  */\n      unsigned char n_value[8];\n\n      /* The offset of the symbol from the start of the string table.  */\n      unsigned char n_offset[4];\n    }",
+      {
+        "n_value[8]": "unsigned char",
+        "n_offset[4]": "unsigned char"
+      },
+      "",
+      [
+        154,
+        4
+      ],
+      [
+        160,
+        5
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char x_zeroes[4];\n      unsigned char x_offset[4];\n      unsigned char x_pad[FILNMLEN-8];\n      unsigned char x_ftype;\n    }",
+      {
+        "x_zeroes[4]": "unsigned char",
+        "x_offset[4]": "unsigned char",
+        "x_pad[FILNMLEN-8]": "unsigned char",
+        "x_ftype": "unsigned char"
+      },
+      "",
+      [
+        191,
+        4
+      ],
+      [
+        197,
+        5
+      ]
+    ],
+    [
+      "struct\n  {\n    unsigned char x_scnlen[4];\t\t/* section length\t\t*/\n    unsigned char x_nreloc[2];\t\t/* # relocation entries\t\t*/\n    unsigned char x_nlinno[2];\t\t/* # line numbers\t\t*/\n  }",
+      {
+        "x_scnlen[4]": "unsigned char",
+        "x_nreloc[2]": "unsigned char",
+        "x_nlinno[2]": "unsigned char"
+      },
+      "",
+      [
+        200,
+        2
+      ],
+      [
+        205,
+        3
+      ]
+    ],
+    [
+      "struct\n    {\n      struct\n      {\n\tunsigned char x_scnlen[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_stab;\t\t/* dbx stab info index */\n\tunsigned char x_snstab[2];\t/* sect num with dbx stab */\n      } x_csect;\n    }",
+      {
+        "x_csect": "struct\n      {\n\tunsigned char x_scnlen[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_stab;\t\t/* dbx stab info index */\n\tunsigned char x_snstab[2];\t/* sect num with dbx stab */\n      }",
+        "x_scnlen[4]": "unsigned char",
+        "x_parmhash[4]": "unsigned char",
+        "x_snhash[2]": "unsigned char",
+        "x_smtyp": "unsigned char",
+        "x_smclas": "unsigned char",
+        "x_stab": "unsigned char",
+        "x_snstab[2]": "unsigned char"
+      },
+      "",
+      [
+        209,
+        4
+      ],
+      [
+        221,
+        5
+      ]
+    ],
+    [
+      "struct\n      {\n\tunsigned char x_scnlen[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_stab;\t\t/* dbx stab info index */\n\tunsigned char x_snstab[2];\t/* sect num with dbx stab */\n      }",
+      {
+        "x_scnlen[4]": "unsigned char",
+        "x_parmhash[4]": "unsigned char",
+        "x_snhash[2]": "unsigned char",
+        "x_smtyp": "unsigned char",
+        "x_smclas": "unsigned char",
+        "x_stab": "unsigned char",
+        "x_snstab[2]": "unsigned char"
+      },
+      "",
+      [
+        211,
+        6
+      ],
+      [
+        220,
+        7
+      ]
+    ],
+    [
+      "struct\n    {\n      struct\n      {\n\tunsigned char x_scnlen_lo[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_scnlen_hi[4];\n\tunsigned char pad;\n\tunsigned char x_auxtype;\n      } x_csect;\n    }",
+      {
+        "x_csect": "struct\n      {\n\tunsigned char x_scnlen_lo[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_scnlen_hi[4];\n\tunsigned char pad;\n\tunsigned char x_auxtype;\n      }",
+        "x_scnlen_lo[4]": "unsigned char",
+        "x_parmhash[4]": "unsigned char",
+        "x_snhash[2]": "unsigned char",
+        "x_smtyp": "unsigned char",
+        "x_smclas": "unsigned char",
+        "x_scnlen_hi[4]": "unsigned char",
+        "pad": "unsigned char",
+        "x_auxtype": "unsigned char"
+      },
+      "",
+      [
+        222,
+        4
+      ],
+      [
+        235,
+        5
+      ]
+    ],
+    [
+      "struct\n      {\n\tunsigned char x_scnlen_lo[4];\t/* csect length */\n\tunsigned char x_parmhash[4];\t/* parm type hash index */\n\tunsigned char x_snhash[2];\t/* sect num with parm hash */\n\tunsigned char x_smtyp;\t\t/* symbol align and type */\n\tunsigned char x_smclas;\t\t/* storage mapping class */\n\tunsigned char x_scnlen_hi[4];\n\tunsigned char pad;\n\tunsigned char x_auxtype;\n      }",
+      {
+        "x_scnlen_lo[4]": "unsigned char",
+        "x_parmhash[4]": "unsigned char",
+        "x_snhash[2]": "unsigned char",
+        "x_smtyp": "unsigned char",
+        "x_smclas": "unsigned char",
+        "x_scnlen_hi[4]": "unsigned char",
+        "pad": "unsigned char",
+        "x_auxtype": "unsigned char"
+      },
+      "",
+      [
+        224,
+        6
+      ],
+      [
+        234,
+        7
+      ]
+    ],
+    [
+      "struct\n  {\n    unsigned char x_scnlen[4];\t\t/* section length */\n    unsigned char pad1[4];\n    unsigned char x_nreloc[4];\t\t/* number RLDs */\n  }",
+      {
+        "x_scnlen[4]": "unsigned char",
+        "pad1[4]": "unsigned char",
+        "x_nreloc[4]": "unsigned char"
+      },
+      "",
+      [
+        238,
+        2
+      ],
+      [
+        243,
+        3
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read\n{\n  /* Magic number.  */\n  unsigned short magic;\n  /* Number of sections.  */\n  unsigned short nscns;\n  /* File offset of symbol table.  */\n  off_t symptr;\n  /* Number of symbol table entries.  */\n  unsigned int nsyms;\n  /* Flags.  */\n  unsigned short flags;\n  /* Offset of section headers in file.  */\n  off_t scnhdr_offset;\n}",
+      {
+        "magic": "unsigned short",
+        "nscns": "unsigned short",
+        "symptr": "off_t",
+        "nsyms": "unsigned int",
+        "flags": "unsigned short",
+        "scnhdr_offset": "off_t"
+      },
+      "simple_object_xcoff_read",
+      [
+        262,
+        0
+      ],
+      [
+        276,
+        1
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes\n{\n  /* Magic number.  */\n  unsigned short magic;\n  /* Flags.  */\n  unsigned short flags;\n}",
+      {
+        "magic": "unsigned short",
+        "flags": "unsigned short"
+      },
+      "simple_object_xcoff_attributes",
+      [
+        280,
+        0
+      ],
+      [
+        286,
+        1
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        300,
+        31
+      ],
+      [
+        300,
+        54
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read",
+      {},
+      "",
+      [
+        301,
+        2
+      ],
+      [
+        301,
+        33
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        325,
+        44
+      ],
+      [
+        325,
+        67
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        329,
+        21
+      ],
+      [
+        329,
+        44
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        331,
+        48
+      ],
+      [
+        331,
+        71
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        333,
+        36
+      ],
+      [
+        333,
+        59
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        334,
+        38
+      ],
+      [
+        334,
+        61
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        341,
+        21
+      ],
+      [
+        341,
+        44
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        343,
+        48
+      ],
+      [
+        343,
+        71
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        345,
+        36
+      ],
+      [
+        345,
+        59
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        346,
+        38
+      ],
+      [
+        346,
+        61
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read",
+      {},
+      "",
+      [
+        360,
+        2
+      ],
+      [
+        360,
+        33
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read",
+      {},
+      "",
+      [
+        361,
+        5
+      ],
+      [
+        361,
+        36
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read",
+      {},
+      "",
+      [
+        394,
+        2
+      ],
+      [
+        394,
+        33
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read",
+      {},
+      "",
+      [
+        395,
+        5
+      ],
+      [
+        395,
+        36
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        434,
+        35
+      ],
+      [
+        434,
+        57
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        474,
+        41
+      ],
+      [
+        474,
+        63
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        476,
+        39
+      ],
+      [
+        476,
+        61
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        481,
+        41
+      ],
+      [
+        481,
+        63
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        483,
+        39
+      ],
+      [
+        483,
+        61
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read",
+      {},
+      "",
+      [
+        505,
+        2
+      ],
+      [
+        505,
+        33
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read",
+      {},
+      "",
+      [
+        506,
+        5
+      ],
+      [
+        506,
+        36
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes",
+      {},
+      "",
+      [
+        507,
+        2
+      ],
+      [
+        507,
+        39
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes",
+      {},
+      "",
+      [
+        528,
+        2
+      ],
+      [
+        528,
+        39
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes",
+      {},
+      "",
+      [
+        529,
+        5
+      ],
+      [
+        529,
+        42
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes",
+      {},
+      "",
+      [
+        530,
+        2
+      ],
+      [
+        530,
+        39
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes",
+      {},
+      "",
+      [
+        531,
+        5
+      ],
+      [
+        531,
+        42
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes",
+      {},
+      "",
+      [
+        556,
+        2
+      ],
+      [
+        556,
+        39
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes",
+      {},
+      "",
+      [
+        557,
+        5
+      ],
+      [
+        557,
+        42
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes",
+      {},
+      "",
+      [
+        558,
+        2
+      ],
+      [
+        558,
+        39
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes",
+      {},
+      "",
+      [
+        575,
+        2
+      ],
+      [
+        575,
+        39
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_attributes",
+      {},
+      "",
+      [
+        576,
+        5
+      ],
+      [
+        576,
+        42
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        578,
+        31
+      ],
+      [
+        578,
+        54
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        590,
+        26
+      ],
+      [
+        590,
+        49
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        592,
+        26
+      ],
+      [
+        592,
+        49
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        593,
+        26
+      ],
+      [
+        593,
+        49
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        597,
+        30
+      ],
+      [
+        597,
+        53
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        599,
+        30
+      ],
+      [
+        599,
+        53
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        602,
+        30
+      ],
+      [
+        602,
+        53
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        607,
+        30
+      ],
+      [
+        607,
+        53
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        609,
+        30
+      ],
+      [
+        609,
+        53
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        612,
+        30
+      ],
+      [
+        612,
+        53
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        617,
+        19
+      ],
+      [
+        617,
+        42
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read",
+      {},
+      "",
+      [
+        631,
+        2
+      ],
+      [
+        631,
+        33
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read",
+      {},
+      "",
+      [
+        632,
+        5
+      ],
+      [
+        632,
+        36
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        636,
+        31
+      ],
+      [
+        636,
+        53
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        649,
+        38
+      ],
+      [
+        649,
+        60
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        653,
+        41
+      ],
+      [
+        653,
+        63
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        662,
+        30
+      ],
+      [
+        662,
+        52
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        664,
+        30
+      ],
+      [
+        664,
+        52
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        669,
+        30
+      ],
+      [
+        669,
+        52
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        671,
+        30
+      ],
+      [
+        671,
+        52
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        682,
+        28
+      ],
+      [
+        682,
+        50
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        684,
+        28
+      ],
+      [
+        684,
+        50
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read",
+      {},
+      "",
+      [
+        697,
+        2
+      ],
+      [
+        697,
+        33
+      ]
+    ],
+    [
+      "struct simple_object_xcoff_read",
+      {},
+      "",
+      [
+        698,
+        5
+      ],
+      [
+        698,
+        36
+      ]
+    ],
+    [
+      "struct external_syment",
+      {},
+      "",
+      [
+        717,
+        4
+      ],
+      [
+        717,
+        26
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        730,
+        26
+      ],
+      [
+        730,
+        49
+      ]
+    ],
+    [
+      "struct simple_object_write_section_buffer",
+      {},
+      "",
+      [
+        738,
+        6
+      ],
+      [
+        738,
+        47
+      ]
+    ],
+    [
+      "struct simple_object_write_section_buffer",
+      {},
+      "",
+      [
+        835,
+        6
+      ],
+      [
+        835,
+        47
+      ]
+    ],
+    [
+      "struct simple_object_functions",
+      {},
+      "",
+      [
+        886,
+        6
+      ],
+      [
+        886,
+        36
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"simple-object.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <stddef.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <stdint.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <inttypes.h>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"simple-object-common.h\"\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

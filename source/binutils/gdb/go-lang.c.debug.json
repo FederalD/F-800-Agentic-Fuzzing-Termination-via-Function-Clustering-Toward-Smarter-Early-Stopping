@@ -1,0 +1,928 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "const char *\ngo_main_name (void)\n{\n  struct bound_minimal_symbol msym;\n\n  msym = lookup_minimal_symbol (GO_MAIN_MAIN, NULL, NULL);\n  if (msym.minsym != NULL)\n    return GO_MAIN_MAIN;\n\n  /* No known entry procedure found, the main program is probably not Go.  */\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          53,
+          0
+        ],
+        [
+          64,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "go_main_name",
+        "parameters": {},
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static int\ngccgo_string_p (struct type *type)\n{\n  /* gccgo strings don't necessarily have a name we can use.  */\n\n  if (TYPE_NFIELDS (type) == 2)\n    {\n      struct type *type0 = TYPE_FIELD_TYPE (type, 0);\n      struct type *type1 = TYPE_FIELD_TYPE (type, 1);\n\n      type0 = check_typedef (type0);\n      type1 = check_typedef (type1);\n\n      if (TYPE_CODE (type0) == TYPE_CODE_PTR\n\t  && strcmp (TYPE_FIELD_NAME (type, 0), \"__data\") == 0\n\t  && TYPE_CODE (type1) == TYPE_CODE_INT\n\t  && strcmp (TYPE_FIELD_NAME (type, 1), \"__length\") == 0)\n\t{\n\t  struct type *target_type = TYPE_TARGET_TYPE (type0);\n\n\t  target_type = check_typedef (target_type);\n\n\t  if (TYPE_CODE (target_type) == TYPE_CODE_INT\n\t      && TYPE_LENGTH (target_type) == 1\n\t      && strcmp (TYPE_NAME (target_type), \"uint8\") == 0)\n\t    return 1;\n\t}\n    }\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          69,
+          0
+        ],
+        [
+          99,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gccgo_string_p",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nsixg_string_p (struct type *type)\n{\n  if (TYPE_NFIELDS (type) == 2\n      && TYPE_TAG_NAME (type) != NULL\n      && strcmp (TYPE_TAG_NAME (type), \"string\") == 0)\n    return 1;\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          104,
+          0
+        ],
+        [
+          113,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sixg_string_p",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "enum go_type\ngo_classify_struct_type (struct type *type)\n{\n  type = check_typedef (type);\n\n  /* Recognize strings as they're useful to be able to print without\n     pretty-printers.  */\n  if (gccgo_string_p (type)\n      || sixg_string_p (type))\n    return GO_TYPE_STRING;\n\n  return GO_TYPE_NONE;\n}",
+      "fn_code_pos": [
+        [
+          118,
+          0
+        ],
+        [
+          130,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "go_classify_struct_type",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nunpack_package_and_object (char *buf,\n\t\t\t   const char **packagep, const char **objectp)\n{\n  char *last_dot;\n\n  last_dot = strrchr (buf, '.');\n  gdb_assert (last_dot != NULL);\n  *objectp = last_dot + 1;\n  *last_dot = '\\0';\n  last_dot = strrchr (buf, '.');\n  if (last_dot != NULL)\n    *packagep = last_dot + 1;\n  else\n    *packagep = buf;\n}",
+      "fn_code_pos": [
+        [
+          137,
+          0
+        ],
+        [
+          152,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "unpack_package_and_object",
+        "parameters": {
+          "buf": "char",
+          "packagep": "char",
+          "objectp": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\nunpack_mangled_go_symbol (const char *mangled_name,\n\t\t\t  const char **packagep,\n\t\t\t  const char **objectp,\n\t\t\t  const char **method_type_packagep,\n\t\t\t  const char **method_type_objectp,\n\t\t\t  int *method_type_is_pointerp)\n{\n  char *buf;\n  char *p;\n  int len = strlen (mangled_name);\n  /* Pointer to last digit in \"N<digit(s)>_\".  */\n  char *saw_digit;\n  /* Pointer to \"N\" if valid \"N<digit(s)>_\" found.  */\n  char *method_type;\n  /* Pointer to the first '.'.  */\n  const char *first_dot;\n  /* Pointer to the last '.'.  */\n  const char *last_dot;\n  /* Non-zero if we saw a pointer indicator.  */\n  int saw_pointer;\n\n  *packagep = *objectp = NULL;\n  *method_type_packagep = *method_type_objectp = NULL;\n  *method_type_is_pointerp = 0;\n\n  /* main.init is mangled specially.  */\n  if (strcmp (mangled_name, \"__go_init_main\") == 0)\n    {\n      char *package = xstrdup (\"main\");\n\n      *packagep = package;\n      *objectp = \"init\";\n      return package;\n    }\n\n  /* main.main is mangled specially (missing prefix).  */\n  if (strcmp (mangled_name, \"main.main\") == 0)\n    {\n      char *package = xstrdup (\"main\");\n\n      *packagep = package;\n      *objectp = \"main\";\n      return package;\n    }\n\n  /* We may get passed, e.g., \"main.T.Foo\", which is *not* mangled.\n     Alas it looks exactly like \"prefix.package.object.\"\n     To cope for now we only recognize the following prefixes:\n\n     go: the default\n     libgo_.*: used by gccgo's runtime\n\n     Thus we don't support -fgo-prefix (except as used by the runtime).  */\n  if (!startswith (mangled_name, \"go.\")\n      && !startswith (mangled_name, \"libgo_\"))\n    return NULL;\n\n  /* Quick check for whether a search may be fruitful.  */\n  /* Ignore anything with @plt, etc. in it.  */\n  if (strchr (mangled_name, '@') != NULL)\n    return NULL;\n  /* It must have at least two dots.  */\n  first_dot = strchr (mangled_name, '.');\n  if (first_dot == NULL)\n    return NULL;\n  /* Treat \"foo.bar\" as unmangled.  It can collide with lots of other\n     languages and it's not clear what the consequences are.\n     And except for main.main, all gccgo symbols are at least\n     prefix.package.object.  */\n  last_dot = strrchr (mangled_name, '.');\n  if (last_dot == first_dot)\n    return NULL;\n\n  /* More quick checks.  */\n  if (last_dot[1] == '\\0' /* foo. */\n      || last_dot[-1] == '.') /* foo..bar */\n    return NULL;\n\n  /* At this point we've decided we have a mangled Go symbol.  */\n\n  buf = xstrdup (mangled_name);\n\n  /* Search backwards looking for \"N<digit(s)>\".  */\n  p = buf + len;\n  saw_digit = method_type = NULL;\n  saw_pointer = 0;\n  while (p > buf)\n    {\n      int current = *(const unsigned char *) --p;\n      int current_is_digit = isdigit (current);\n\n      if (saw_digit)\n\t{\n\t  if (current_is_digit)\n\t    continue;\n\t  if (current == 'N'\n\t      && ((p > buf && p[-1] == '.')\n\t\t  || (p > buf + 1 && p[-1] == 'p' && p[-2] == '.')))\n\t    {\n\t      if (atoi (p + 1) == strlen (saw_digit + 2))\n\t\t{\n\t\t  if (p[-1] == '.')\n\t\t    method_type = p - 1;\n\t\t  else\n\t\t    {\n\t\t      gdb_assert (p[-1] == 'p');\n\t\t      saw_pointer = 1;\n\t\t      method_type = p - 2;\n\t\t    }\n\t\t  break;\n\t\t}\n\t    }\n\t  /* Not what we're looking for, reset and keep looking.  */\n\t  saw_digit = NULL;\n\t  saw_pointer = 0;\n\t  continue;\n\t}\n      if (current_is_digit && p[1] == '_')\n\t{\n\t  /* Possible start of method \"this\" [sic] type.  */\n\t  saw_digit = p;\n\t  continue;\n\t}\n    }\n\n  if (method_type != NULL\n      /* Ensure not something like \"..foo\".  */\n      && (method_type > buf && method_type[-1] != '.'))\n    {\n      unpack_package_and_object (saw_digit + 2,\n\t\t\t\t method_type_packagep, method_type_objectp);\n      *method_type = '\\0';\n      *method_type_is_pointerp = saw_pointer;\n    }\n\n  unpack_package_and_object (buf, packagep, objectp);\n  return buf;\n}",
+      "fn_code_pos": [
+        [
+          181,
+          0
+        ],
+        [
+          319,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "unpack_mangled_go_symbol",
+        "parameters": {
+          "mangled_name": "char",
+          "packagep": "char",
+          "objectp": "char",
+          "method_type_packagep": "char",
+          "method_type_objectp": "char",
+          "method_type_is_pointerp": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "char *\ngo_demangle (const char *mangled_name, int options)\n{\n  struct obstack tempbuf;\n  char *result;\n  char *name_buf;\n  const char *package_name;\n  const char *object_name;\n  const char *method_type_package_name;\n  const char *method_type_object_name;\n  int method_type_is_pointer;\n\n  if (mangled_name == NULL)\n    return NULL;\n\n  name_buf = unpack_mangled_go_symbol (mangled_name,\n\t\t\t\t       &package_name, &object_name,\n\t\t\t\t       &method_type_package_name,\n\t\t\t\t       &method_type_object_name,\n\t\t\t\t       &method_type_is_pointer);\n  if (name_buf == NULL)\n    return NULL;\n\n  obstack_init (&tempbuf);\n\n  /* Print methods as they appear in \"method expressions\".  */\n  if (method_type_package_name != NULL)\n    {\n      /* FIXME: Seems like we should include package_name here somewhere.  */\n      if (method_type_is_pointer)\n\t  obstack_grow_str (&tempbuf, \"(*\");\n      obstack_grow_str (&tempbuf, method_type_package_name);\n      obstack_grow_str (&tempbuf, \".\");\n      obstack_grow_str (&tempbuf, method_type_object_name);\n      if (method_type_is_pointer)\n\tobstack_grow_str (&tempbuf, \")\");\n      obstack_grow_str (&tempbuf, \".\");\n      obstack_grow_str (&tempbuf, object_name);\n    }\n  else\n    {\n      obstack_grow_str (&tempbuf, package_name);\n      obstack_grow_str (&tempbuf, \".\");\n      obstack_grow_str (&tempbuf, object_name);\n    }\n  obstack_grow_str0 (&tempbuf, \"\");\n\n  result = xstrdup ((const char *) obstack_finish (&tempbuf));\n  obstack_free (&tempbuf, NULL);\n  xfree (name_buf);\n  return result;\n}",
+      "fn_code_pos": [
+        [
+          334,
+          0
+        ],
+        [
+          385,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "go_demangle",
+        "parameters": {
+          "mangled_name": "char",
+          "options": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static int\ngo_sniff_from_mangled_name (const char *mangled, char **demangled)\n{\n  *demangled = go_demangle (mangled, 0);\n  return *demangled != NULL;\n}",
+      "fn_code_pos": [
+        [
+          389,
+          0
+        ],
+        [
+          394,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "go_sniff_from_mangled_name",
+        "parameters": {
+          "mangled": "char",
+          "demangled": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "char *\ngo_symbol_package_name (const struct symbol *sym)\n{\n  const char *mangled_name = SYMBOL_LINKAGE_NAME (sym);\n  const char *package_name;\n  const char *object_name;\n  const char *method_type_package_name;\n  const char *method_type_object_name;\n  int method_type_is_pointer;\n  char *name_buf;\n  char *result;\n\n  gdb_assert (SYMBOL_LANGUAGE (sym) == language_go);\n  name_buf = unpack_mangled_go_symbol (mangled_name,\n\t\t\t\t       &package_name, &object_name,\n\t\t\t\t       &method_type_package_name,\n\t\t\t\t       &method_type_object_name,\n\t\t\t\t       &method_type_is_pointer);\n  /* Some Go symbols don't have mangled form we interpret (yet).  */\n  if (name_buf == NULL)\n    return NULL;\n  result = xstrdup (package_name);\n  xfree (name_buf);\n  return result;\n}",
+      "fn_code_pos": [
+        [
+          399,
+          0
+        ],
+        [
+          423,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "go_symbol_package_name",
+        "parameters": {
+          "sym": "struct symbol"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "char *\ngo_block_package_name (const struct block *block)\n{\n  while (block != NULL)\n    {\n      struct symbol *function = BLOCK_FUNCTION (block);\n\n      if (function != NULL)\n\t{\n\t  char *package_name = go_symbol_package_name (function);\n\n\t  if (package_name != NULL)\n\t    return package_name;\n\n\t  /* Stop looking if we find a function without a package name.\n\t     We're most likely outside of Go and thus the concept of the\n\t     \"current\" package is gone.  */\n\t  return NULL;\n\t}\n\n      block = BLOCK_SUPERBLOCK (block);\n    }\n\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          428,
+          0
+        ],
+        [
+          452,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "go_block_package_name",
+        "parameters": {
+          "block": "struct block"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\ngo_language_arch_info (struct gdbarch *gdbarch,\n\t\t       struct language_arch_info *lai)\n{\n  const struct builtin_go_type *builtin = builtin_go_type (gdbarch);\n\n  lai->string_char_type = builtin->builtin_char;\n\n  lai->primitive_type_vector\n    = GDBARCH_OBSTACK_CALLOC (gdbarch, nr_go_primitive_types + 1,\n\t\t\t      struct type *);\n\n  lai->primitive_type_vector [go_primitive_type_void]\n    = builtin->builtin_void;\n  lai->primitive_type_vector [go_primitive_type_char]\n    = builtin->builtin_char;\n  lai->primitive_type_vector [go_primitive_type_bool]\n    = builtin->builtin_bool;\n  lai->primitive_type_vector [go_primitive_type_int]\n    = builtin->builtin_int;\n  lai->primitive_type_vector [go_primitive_type_uint]\n    = builtin->builtin_uint;\n  lai->primitive_type_vector [go_primitive_type_uintptr]\n    = builtin->builtin_uintptr;\n  lai->primitive_type_vector [go_primitive_type_int8]\n    = builtin->builtin_int8;\n  lai->primitive_type_vector [go_primitive_type_int16]\n    = builtin->builtin_int16;\n  lai->primitive_type_vector [go_primitive_type_int32]\n    = builtin->builtin_int32;\n  lai->primitive_type_vector [go_primitive_type_int64]\n    = builtin->builtin_int64;\n  lai->primitive_type_vector [go_primitive_type_uint8]\n    = builtin->builtin_uint8;\n  lai->primitive_type_vector [go_primitive_type_uint16]\n    = builtin->builtin_uint16;\n  lai->primitive_type_vector [go_primitive_type_uint32]\n    = builtin->builtin_uint32;\n  lai->primitive_type_vector [go_primitive_type_uint64]\n    = builtin->builtin_uint64;\n  lai->primitive_type_vector [go_primitive_type_float32]\n    = builtin->builtin_float32;\n  lai->primitive_type_vector [go_primitive_type_float64]\n    = builtin->builtin_float64;\n  lai->primitive_type_vector [go_primitive_type_complex64]\n    = builtin->builtin_complex64;\n  lai->primitive_type_vector [go_primitive_type_complex128]\n    = builtin->builtin_complex128;\n\n  lai->bool_type_symbol = \"bool\";\n  lai->bool_type_default = builtin->builtin_bool;\n}",
+      "fn_code_pos": [
+        [
+          514,
+          0
+        ],
+        [
+          565,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "go_language_arch_info",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "lai": "struct language_arch_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void *\nbuild_go_types (struct gdbarch *gdbarch)\n{\n  struct builtin_go_type *builtin_go_type\n    = GDBARCH_OBSTACK_ZALLOC (gdbarch, struct builtin_go_type);\n\n  builtin_go_type->builtin_void\n    = arch_type (gdbarch, TYPE_CODE_VOID, 1, \"void\");\n  builtin_go_type->builtin_char\n    = arch_character_type (gdbarch, 8, 1, \"char\");\n  builtin_go_type->builtin_bool\n    = arch_boolean_type (gdbarch, 8, 0, \"bool\");\n  builtin_go_type->builtin_int\n    = arch_integer_type (gdbarch, gdbarch_int_bit (gdbarch), 0, \"int\");\n  builtin_go_type->builtin_uint\n    = arch_integer_type (gdbarch, gdbarch_int_bit (gdbarch), 1, \"uint\");\n  builtin_go_type->builtin_uintptr\n    = arch_integer_type (gdbarch, gdbarch_ptr_bit (gdbarch), 1, \"uintptr\");\n  builtin_go_type->builtin_int8\n    = arch_integer_type (gdbarch, 8, 0, \"int8\");\n  builtin_go_type->builtin_int16\n    = arch_integer_type (gdbarch, 16, 0, \"int16\");\n  builtin_go_type->builtin_int32\n    = arch_integer_type (gdbarch, 32, 0, \"int32\");\n  builtin_go_type->builtin_int64\n    = arch_integer_type (gdbarch, 64, 0, \"int64\");\n  builtin_go_type->builtin_uint8\n    = arch_integer_type (gdbarch, 8, 1, \"uint8\");\n  builtin_go_type->builtin_uint16\n    = arch_integer_type (gdbarch, 16, 1, \"uint16\");\n  builtin_go_type->builtin_uint32\n    = arch_integer_type (gdbarch, 32, 1, \"uint32\");\n  builtin_go_type->builtin_uint64\n    = arch_integer_type (gdbarch, 64, 1, \"uint64\");\n  builtin_go_type->builtin_float32\n    = arch_float_type (gdbarch, 32, \"float32\", floatformats_ieee_single);\n  builtin_go_type->builtin_float64\n    = arch_float_type (gdbarch, 64, \"float64\", floatformats_ieee_double);\n  builtin_go_type->builtin_complex64\n    = arch_complex_type (gdbarch, \"complex64\",\n\t\t\t builtin_go_type->builtin_float32);\n  builtin_go_type->builtin_complex128\n    = arch_complex_type (gdbarch, \"complex128\",\n\t\t\t builtin_go_type->builtin_float64);\n\n  return builtin_go_type;\n}",
+      "fn_code_pos": [
+        [
+          616,
+          0
+        ],
+        [
+          662,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "build_go_types",
+        "parameters": {
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "const struct builtin_go_type *\nbuiltin_go_type (struct gdbarch *gdbarch)\n{\n  return (const struct builtin_go_type *) gdbarch_data (gdbarch, go_type_data);\n}",
+      "fn_code_pos": [
+        [
+          666,
+          0
+        ],
+        [
+          670,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "builtin_go_type",
+        "parameters": {
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_go_language (void)\n{\n  go_type_data = gdbarch_data_register_post_init (build_go_types);\n\n  add_language (&go_language_defn);\n}",
+      "fn_code_pos": [
+        [
+          674,
+          0
+        ],
+        [
+          680,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_go_language",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "go_main_name (void)",
+      "fn_dec_pos": [
+        [
+          54,
+          0
+        ],
+        [
+          54,
+          19
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "go_main_name",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "unpack_mangled_go_symbol (const char *mangled_name,\n\t\t\t  const char **packagep,\n\t\t\t  const char **objectp,\n\t\t\t  const char **method_type_packagep,\n\t\t\t  const char **method_type_objectp,\n\t\t\t  int *method_type_is_pointerp)",
+      "fn_dec_pos": [
+        [
+          182,
+          0
+        ],
+        [
+          187,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "unpack_mangled_go_symbol",
+        "parameters": {
+          "mangled_name": "char",
+          "packagep": "char",
+          "objectp": "char",
+          "method_type_packagep": "char",
+          "method_type_objectp": "char",
+          "method_type_is_pointerp": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "go_demangle (const char *mangled_name, int options)",
+      "fn_dec_pos": [
+        [
+          335,
+          0
+        ],
+        [
+          335,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "go_demangle",
+        "parameters": {
+          "mangled_name": "char",
+          "options": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "go_symbol_package_name (const struct symbol *sym)",
+      "fn_dec_pos": [
+        [
+          400,
+          0
+        ],
+        [
+          400,
+          49
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "go_symbol_package_name",
+        "parameters": {
+          "sym": "struct symbol"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "go_block_package_name (const struct block *block)",
+      "fn_dec_pos": [
+        [
+          429,
+          0
+        ],
+        [
+          429,
+          49
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "go_block_package_name",
+        "parameters": {
+          "block": "struct block"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "build_go_types (struct gdbarch *gdbarch)",
+      "fn_dec_pos": [
+        [
+          617,
+          0
+        ],
+        [
+          617,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "build_go_types",
+        "parameters": {
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "builtin_go_type (struct gdbarch *gdbarch)",
+      "fn_dec_pos": [
+        [
+          667,
+          0
+        ],
+        [
+          667,
+          41
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "builtin_go_type",
+        "parameters": {
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct bound_minimal_symbol",
+      {},
+      "",
+      [
+        56,
+        2
+      ],
+      [
+        56,
+        29
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        70,
+        16
+      ],
+      [
+        70,
+        27
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        76,
+        6
+      ],
+      [
+        76,
+        17
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        77,
+        6
+      ],
+      [
+        77,
+        17
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        87,
+        3
+      ],
+      [
+        87,
+        14
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        105,
+        15
+      ],
+      [
+        105,
+        26
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        119,
+        25
+      ],
+      [
+        119,
+        36
+      ]
+    ],
+    [
+      "struct obstack",
+      {},
+      "",
+      [
+        337,
+        2
+      ],
+      [
+        337,
+        16
+      ]
+    ],
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        400,
+        30
+      ],
+      [
+        400,
+        43
+      ]
+    ],
+    [
+      "struct block",
+      {},
+      "",
+      [
+        429,
+        29
+      ],
+      [
+        429,
+        41
+      ]
+    ],
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        433,
+        6
+      ],
+      [
+        433,
+        19
+      ]
+    ],
+    [
+      "struct op_print",
+      {},
+      "",
+      [
+        458,
+        13
+      ],
+      [
+        458,
+        28
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        515,
+        23
+      ],
+      [
+        515,
+        37
+      ]
+    ],
+    [
+      "struct language_arch_info",
+      {},
+      "",
+      [
+        516,
+        9
+      ],
+      [
+        516,
+        34
+      ]
+    ],
+    [
+      "struct builtin_go_type",
+      {},
+      "",
+      [
+        518,
+        8
+      ],
+      [
+        518,
+        30
+      ]
+    ],
+    [
+      "struct language_defn",
+      {},
+      "",
+      [
+        567,
+        13
+      ],
+      [
+        567,
+        33
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        617,
+        16
+      ],
+      [
+        617,
+        30
+      ]
+    ],
+    [
+      "struct builtin_go_type",
+      {},
+      "",
+      [
+        619,
+        2
+      ],
+      [
+        619,
+        24
+      ]
+    ],
+    [
+      "struct gdbarch_data",
+      {},
+      "",
+      [
+        664,
+        7
+      ],
+      [
+        664,
+        26
+      ]
+    ],
+    [
+      "struct builtin_go_type",
+      {},
+      "",
+      [
+        666,
+        6
+      ],
+      [
+        666,
+        28
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        667,
+        17
+      ],
+      [
+        667,
+        31
+      ]
+    ],
+    [
+      "struct builtin_go_type",
+      {},
+      "",
+      [
+        669,
+        16
+      ],
+      [
+        669,
+        38
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_obstack.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"block.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"language.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"varobj.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include \"go-lang.h\"\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"c-lang.h\"\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include \"parser-defs.h\"\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum go_type",
+      {},
+      "",
+      [
+        118,
+        0
+      ],
+      [
+        118,
+        12
+      ]
+    ],
+    [
+      "enum go_primitive_types {\n  go_primitive_type_void,\n  go_primitive_type_char,\n  go_primitive_type_bool,\n  go_primitive_type_int,\n  go_primitive_type_uint,\n  go_primitive_type_uintptr,\n  go_primitive_type_int8,\n  go_primitive_type_int16,\n  go_primitive_type_int32,\n  go_primitive_type_int64,\n  go_primitive_type_uint8,\n  go_primitive_type_uint16,\n  go_primitive_type_uint32,\n  go_primitive_type_uint64,\n  go_primitive_type_float32,\n  go_primitive_type_float64,\n  go_primitive_type_complex64,\n  go_primitive_type_complex128,\n  nr_go_primitive_types\n}",
+      {
+        "go_primitive_type_void": "",
+        "go_primitive_type_char": "",
+        "go_primitive_type_bool": "",
+        "go_primitive_type_int": "",
+        "go_primitive_type_uint": "",
+        "go_primitive_type_uintptr": "",
+        "go_primitive_type_int8": "",
+        "go_primitive_type_int16": "",
+        "go_primitive_type_int32": "",
+        "go_primitive_type_int64": "",
+        "go_primitive_type_uint8": "",
+        "go_primitive_type_uint16": "",
+        "go_primitive_type_uint32": "",
+        "go_primitive_type_uint64": "",
+        "go_primitive_type_float32": "",
+        "go_primitive_type_float64": "",
+        "go_primitive_type_complex64": "",
+        "go_primitive_type_complex128": "",
+        "nr_go_primitive_types": ""
+      },
+      "go_primitive_types",
+      [
+        492,
+        0
+      ],
+      [
+        512,
+        1
+      ]
+    ]
+  ]
+}

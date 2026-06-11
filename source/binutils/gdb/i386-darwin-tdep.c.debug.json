@@ -1,0 +1,629 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static CORE_ADDR\ni386_darwin_sigcontext_addr (struct frame_info *this_frame)\n{\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  CORE_ADDR bp;\n  CORE_ADDR si;\n  gdb_byte buf[4];\n\n  get_frame_register (this_frame, I386_EBP_REGNUM, buf);\n  bp = extract_unsigned_integer (buf, 4, byte_order);\n\n  /* A pointer to the ucontext is passed as the fourth argument\n     to the signal handler.  */\n  read_memory (bp + 24, buf, 4);\n  si = extract_unsigned_integer (buf, 4, byte_order);\n\n  /* The pointer to mcontext is at offset 28.  */\n  read_memory (si + 28, buf, 4);\n\n  /* First register (eax) is at offset 12.  */\n  return extract_unsigned_integer (buf, 4, byte_order) + 12;\n}",
+      "fn_code_pos": [
+        [
+          68,
+          0
+        ],
+        [
+          90,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_darwin_sigcontext_addr",
+        "parameters": {
+          "this_frame": "struct frame_info"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "int\ndarwin_dwarf_signal_frame_p (struct gdbarch *gdbarch,\n\t\t\t     struct frame_info *this_frame)\n{\n  return i386_sigtramp_p (this_frame);\n}",
+      "fn_code_pos": [
+        [
+          100,
+          0
+        ],
+        [
+          105,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "darwin_dwarf_signal_frame_p",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "this_frame": "struct frame_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ni386_m128_p (struct type *type)\n{\n  return (TYPE_CODE (type) == TYPE_CODE_ARRAY && TYPE_VECTOR (type)\n          && TYPE_LENGTH (type) == 16);\n}",
+      "fn_code_pos": [
+        [
+          109,
+          0
+        ],
+        [
+          114,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_m128_p",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ni386_darwin_arg_type_alignment (struct type *type)\n{\n  type = check_typedef (type);\n  /* According to Mac OS X ABI document (passing arguments):\n     6.  The caller places 64-bit vectors (__m64) on the parameter area,\n         aligned to 8-byte boundaries.\n     7.  [...]  The caller aligns 128-bit vectors in the parameter area to\n         16-byte boundaries.  */\n  if (TYPE_CODE (type) == TYPE_CODE_ARRAY && TYPE_VECTOR (type))\n    return TYPE_LENGTH (type);\n  /* 4.  The caller places all the fields of structures (or unions) with no\n         vector elements in the parameter area.  These structures are 4-byte\n         aligned.\n     5.  The caller places structures with vector elements on the stack,\n         16-byte aligned.  */\n  if (TYPE_CODE (type) == TYPE_CODE_STRUCT\n      || TYPE_CODE (type) == TYPE_CODE_UNION)\n    {\n      int i;\n      int res = 4;\n      for (i = 0; i < TYPE_NFIELDS (type); i++)\n\t{\n\t  int align\n\t    = i386_darwin_arg_type_alignment (TYPE_FIELD_TYPE (type, i));\n\n\t  res = std::max (res, align);\n\t}\n      return res;\n    }\n  /* 2.  The caller aligns nonvector arguments to 4-byte boundaries.  */\n  return 4;\n}",
+      "fn_code_pos": [
+        [
+          118,
+          0
+        ],
+        [
+          150,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_darwin_arg_type_alignment",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\ni386_darwin_push_dummy_call (struct gdbarch *gdbarch, struct value *function,\n\t\t\t     struct regcache *regcache, CORE_ADDR bp_addr,\n\t\t\t     int nargs, struct value **args, CORE_ADDR sp,\n\t\t\t     int struct_return, CORE_ADDR struct_addr)\n{\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  gdb_byte buf[4];\n  int i;\n  int write_pass;\n\n  /* Determine the total space required for arguments and struct\n     return address in a first pass, then push arguments in a second pass.  */\n\n  for (write_pass = 0; write_pass < 2; write_pass++)\n    {\n      int args_space = 0;\n      int num_m128 = 0;\n\n      if (struct_return)\n\t{\n\t  if (write_pass)\n\t    {\n\t      /* Push value address.  */\n\t      store_unsigned_integer (buf, 4, byte_order, struct_addr);\n\t      write_memory (sp, buf, 4);\n\t    }\n          args_space += 4;\n\t}\n\n      for (i = 0; i < nargs; i++)\n\t{\n          struct type *arg_type = value_enclosing_type (args[i]);\n\n          if (i386_m128_p (arg_type) && num_m128 < 4)\n            {\n              if (write_pass)\n                {\n                  const gdb_byte *val = value_contents_all (args[i]);\n                  regcache_raw_write\n                    (regcache, I387_MM0_REGNUM(tdep) + num_m128, val);\n                }\n              num_m128++;\n            }\n          else\n            {\n              args_space = align_up (args_space,\n\t\t\t\t     i386_darwin_arg_type_alignment (arg_type));\n              if (write_pass)\n                write_memory (sp + args_space,\n                              value_contents_all (args[i]),\n\t\t\t      TYPE_LENGTH (arg_type));\n\n              /* The System V ABI says that:\n                 \n                 \"An argument's size is increased, if necessary, to make it a\n                 multiple of [32-bit] words.  This may require tail padding,\n                 depending on the size of the argument.\"\n                 \n                 This makes sure the stack stays word-aligned.  */\n              args_space += align_up (TYPE_LENGTH (arg_type), 4);\n            }\n        }\n\n      /* Darwin i386 ABI:\n\t 1.  The caller ensures that the stack is 16-byte aligned at the point\n\t     of the function call.  */\n      if (!write_pass)\n\tsp = align_down (sp - args_space, 16);\n    }\n\n  /* Store return address.  */\n  sp -= 4;\n  store_unsigned_integer (buf, 4, byte_order, bp_addr);\n  write_memory (sp, buf, 4);\n\n  /* Finally, update the stack pointer...  */\n  store_unsigned_integer (buf, 4, byte_order, sp);\n  regcache_cooked_write (regcache, I386_ESP_REGNUM, buf);\n\n  /* ...and fake a frame pointer.  */\n  regcache_cooked_write (regcache, I386_EBP_REGNUM, buf);\n\n  /* MarkK wrote: This \"+ 8\" is all over the place:\n     (i386_frame_this_id, i386_sigtramp_frame_this_id,\n     i386_dummy_id).  It's there, since all frame unwinders for\n     a given target have to agree (within a certain margin) on the\n     definition of the stack address of a frame.  Otherwise frame id\n     comparison might not work correctly.  Since DWARF2/GCC uses the\n     stack address *before* the function call as a frame's CFA.  On\n     the i386, when %ebp is used as a frame pointer, the offset\n     between the contents %ebp and the CFA as defined by GCC.  */\n  return sp + 8;\n}",
+      "fn_code_pos": [
+        [
+          152,
+          0
+        ],
+        [
+          246,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_darwin_push_dummy_call",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "function": "struct value",
+          "regcache": "struct regcache",
+          "bp_addr": "CORE_ADDR",
+          "nargs": "int",
+          "args": "struct value",
+          "sp": "CORE_ADDR",
+          "struct_return": "int",
+          "struct_addr": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static void\ni386_darwin_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)\n{\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n\n  /* We support the SSE registers.  */\n  tdep->num_xmm_regs = I386_NUM_XREGS - 1;\n  set_gdbarch_num_regs (gdbarch, I386_SSE_NUM_REGS);\n\n  dwarf2_frame_set_signal_frame_p (gdbarch, darwin_dwarf_signal_frame_p);\n  set_gdbarch_push_dummy_call (gdbarch, i386_darwin_push_dummy_call);\n\n  tdep->struct_return = reg_struct_return;\n\n  tdep->sigtramp_p = i386_sigtramp_p;\n  tdep->sigcontext_addr = i386_darwin_sigcontext_addr;\n  tdep->sc_reg_offset = i386_darwin_thread_state_reg_offset;\n  tdep->sc_num_regs = i386_darwin_thread_state_num_regs;\n\n  tdep->jb_pc_offset = 48;\n\n  /* Although the i387 extended floating-point has only 80 significant\n     bits, a `long double' actually takes up 128, probably to enforce\n     alignment.  */\n  set_gdbarch_long_double_bit (gdbarch, 128);\n\n  set_solib_ops (gdbarch, &darwin_so_ops);\n}",
+      "fn_code_pos": [
+        [
+          248,
+          0
+        ],
+        [
+          275,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_darwin_init_abi",
+        "parameters": {
+          "info": "struct gdbarch_info",
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static enum gdb_osabi\ni386_mach_o_osabi_sniffer (bfd *abfd)\n{\n  if (!bfd_check_format (abfd, bfd_object))\n    return GDB_OSABI_UNKNOWN;\n  \n  if (bfd_get_arch (abfd) == bfd_arch_i386)\n    return GDB_OSABI_DARWIN;\n\n  return GDB_OSABI_UNKNOWN;\n}",
+      "fn_code_pos": [
+        [
+          277,
+          0
+        ],
+        [
+          287,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_mach_o_osabi_sniffer",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_i386_darwin_tdep (void)\n{\n  gdbarch_register_osabi_sniffer (bfd_arch_unknown, bfd_target_mach_o_flavour,\n                                  i386_mach_o_osabi_sniffer);\n\n  gdbarch_register_osabi (bfd_arch_i386, bfd_mach_i386_i386,\n\t\t\t  GDB_OSABI_DARWIN, i386_darwin_init_abi);\n}",
+      "fn_code_pos": [
+        [
+          292,
+          0
+        ],
+        [
+          300,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_i386_darwin_tdep",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        69,
+        29
+      ],
+      [
+        69,
+        46
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        71,
+        2
+      ],
+      [
+        71,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        101,
+        29
+      ],
+      [
+        101,
+        43
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        102,
+        8
+      ],
+      [
+        102,
+        25
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        110,
+        13
+      ],
+      [
+        110,
+        24
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        119,
+        32
+      ],
+      [
+        119,
+        43
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        153,
+        29
+      ],
+      [
+        153,
+        43
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        153,
+        54
+      ],
+      [
+        153,
+        66
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        154,
+        8
+      ],
+      [
+        154,
+        23
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        155,
+        19
+      ],
+      [
+        155,
+        31
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        158,
+        2
+      ],
+      [
+        158,
+        21
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        185,
+        10
+      ],
+      [
+        185,
+        21
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        249,
+        22
+      ],
+      [
+        249,
+        41
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        249,
+        48
+      ],
+      [
+        249,
+        62
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        251,
+        2
+      ],
+      [
+        251,
+        21
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"frame.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"target.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"floatformat.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"objfiles.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"i387-tdep.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"i386-tdep.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"osabi.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"ui-out.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"i386-darwin-tdep.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"solib.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"solib-darwin.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"dwarf2-frame.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <algorithm>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        72,
+        2
+      ],
+      [
+        72,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        159,
+        2
+      ],
+      [
+        159,
+        17
+      ]
+    ],
+    [
+      "enum gdb_osabi",
+      {},
+      "",
+      [
+        277,
+        7
+      ],
+      [
+        277,
+        21
+      ]
+    ]
+  ]
+}

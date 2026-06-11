@@ -1,0 +1,446 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int jpc_getcommacode(jpc_bitstream_t *in)\n{\n\tint n;\n\tint v;\n\n\tn = 0;\n\tfor (;;) {\n\t\tif ((v = jpc_bitstream_getbit(in)) < 0) {\n\t\t\treturn -1;\n\t\t}\n\t\tif (jpc_bitstream_eof(in)) {\n\t\t\treturn -1;\n\t\t}\n\t\tif (!v) {\n\t\t\tbreak;\n\t\t}\n\t\t++n;\n\t}\n\n\treturn n;\n}",
+      "fn_code_pos": [
+        [
+          106,
+          0
+        ],
+        [
+          126,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_getcommacode",
+        "parameters": {
+          "in": "jpc_bitstream_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int jpc_getnumnewpasses(jpc_bitstream_t *in)\n{\n\tint n;\n\n\tif ((n = jpc_bitstream_getbit(in)) > 0) {\n\t\tif ((n = jpc_bitstream_getbit(in)) > 0) {\n\t\t\tif ((n = jpc_bitstream_getbits(in, 2)) == 3) {\n\t\t\t\tif ((n = jpc_bitstream_getbits(in, 5)) == 31) {\n\t\t\t\t\tif ((n = jpc_bitstream_getbits(in, 7)) >= 0) {\n\t\t\t\t\t\tn += 36 + 1;\n\t\t\t\t\t}\n\t\t\t\t} else if (n >= 0) {\n\t\t\t\t\tn += 5 + 1;\n\t\t\t\t}\n\t\t\t} else if (n >= 0) {\n\t\t\t\tn += 2 + 1;\n\t\t\t}\n\t\t} else if (!n) {\n\t\t\tn += 2;\n\t\t}\n\t} else if (!n) {\n\t\t++n;\n\t}\n\n\treturn n;\n}",
+      "fn_code_pos": [
+        [
+          128,
+          0
+        ],
+        [
+          153,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_getnumnewpasses",
+        "parameters": {
+          "in": "jpc_bitstream_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int jpc_dec_decodepkt(jpc_dec_t *dec, jas_stream_t *pkthdrstream, jas_stream_t *in, int compno, int rlvlno,\n  int prcno, int lyrno)\n{\n\tjpc_bitstream_t *inb;\n\tjpc_dec_tcomp_t *tcomp;\n\tjpc_dec_rlvl_t *rlvl;\n\tjpc_dec_band_t *band;\n\tjpc_dec_cblk_t *cblk;\n\tint n;\n\tint m;\n\tint i;\n\tjpc_tagtreenode_t *leaf;\n\tint included;\n\tint ret;\n\tint numnewpasses;\n\tjpc_dec_seg_t *seg;\n\tint len;\n\tint present;\n\tint savenumnewpasses;\n\tint mycounter;\n\tjpc_ms_t *ms;\n\tjpc_dec_tile_t *tile;\n\tjpc_dec_ccp_t *ccp;\n\tjpc_dec_cp_t *cp;\n\tint bandno;\n\tjpc_dec_prc_t *prc;\n\tint usedcblkcnt;\n\tint cblkno;\n\tuint_fast32_t bodylen;\n\tbool discard;\n\tint passno;\n\tint maxpasses;\n\tint hdrlen;\n\tint hdroffstart;\n\tint hdroffend;\n\n\t/* Avoid compiler warning about possible use of uninitialized\n\t  variable. */\n\tbodylen = 0;\n\n\tdiscard = (lyrno >= dec->maxlyrs);\n\n\ttile = dec->curtile;\n\tcp = tile->cp;\n\tccp = &cp->ccps[compno];\n\n\t/*\n\t * Decode the packet header.\n\t */\n\n\t/* Decode the SOP marker segment if present. */\n\tif (cp->csty & JPC_COD_SOP) {\n\t\tif (jpc_dec_lookahead(in) == JPC_MS_SOP) {\n\t\t\tif (!(ms = jpc_getms(in, dec->cstate))) {\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tif (jpc_ms_gettype(ms) != JPC_MS_SOP) {\n\t\t\t\tjpc_ms_destroy(ms);\n\t\t\t\tjas_eprintf(\"missing SOP marker segment\\n\");\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tjpc_ms_destroy(ms);\n\t\t}\n\t}\n\nhdroffstart = jas_stream_getrwcount(pkthdrstream);\n\n\tif (!(inb = jpc_bitstream_sopen(pkthdrstream, \"r\"))) {\n\t\treturn -1;\n\t}\n\n\tif ((present = jpc_bitstream_getbit(inb)) < 0) {\n\t\treturn 1;\n\t}\n\tJAS_DBGLOG(10, (\"\\n\", present));\n\tJAS_DBGLOG(10, (\"present=%d \", present));\n\n\t/* Is the packet non-empty? */\n\tif (present) {\n\t\t/* The packet is non-empty. */\n\t\ttcomp = &tile->tcomps[compno];\n\t\trlvl = &tcomp->rlvls[rlvlno];\n\t\tbodylen = 0;\n\t\tfor (bandno = 0, band = rlvl->bands; bandno < rlvl->numbands;\n\t\t  ++bandno, ++band) {\n\t\t\tif (!band->data) {\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tprc = &band->prcs[prcno];\n\t\t\tif (!prc->cblks) {\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tusedcblkcnt = 0;\n\t\t\tfor (cblkno = 0, cblk = prc->cblks; cblkno < prc->numcblks;\n\t\t\t  ++cblkno, ++cblk) {\n\t\t\t\t++usedcblkcnt;\n\t\t\t\tif (!cblk->numpasses) {\n\t\t\t\t\tleaf = jpc_tagtree_getleaf(prc->incltagtree, usedcblkcnt - 1);\n\t\t\t\t\tif ((included = jpc_tagtree_decode(prc->incltagtree, leaf, lyrno + 1, inb)) < 0) {\n\t\t\t\t\t\treturn -1;\n\t\t\t\t\t}\n\t\t\t\t} else {\n\t\t\t\t\tif ((included = jpc_bitstream_getbit(inb)) < 0) {\n\t\t\t\t\t\treturn -1;\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\tJAS_DBGLOG(10, (\"\\n\"));\n\t\t\t\tJAS_DBGLOG(10, (\"included=%d \", included));\n\t\t\t\tif (!included) {\n\t\t\t\t\tcontinue;\n\t\t\t\t}\n\t\t\t\tif (!cblk->numpasses) {\n\t\t\t\t\ti = 1;\n\t\t\t\t\tleaf = jpc_tagtree_getleaf(prc->numimsbstagtree, usedcblkcnt - 1);\n\t\t\t\t\tfor (;;) {\n\t\t\t\t\t\tif ((ret = jpc_tagtree_decode(prc->numimsbstagtree, leaf, i, inb)) < 0) {\n\t\t\t\t\t\t\treturn -1;\n\t\t\t\t\t\t}\n\t\t\t\t\t\tif (ret) {\n\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\t}\n\t\t\t\t\t\t++i;\n\t\t\t\t\t}\n\t\t\t\t\tcblk->numimsbs = i - 1;\n\t\t\t\t\tcblk->firstpassno = cblk->numimsbs * 3;\n\t\t\t\t}\n\t\t\t\tif ((numnewpasses = jpc_getnumnewpasses(inb)) < 0) {\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\t\t\t\tJAS_DBGLOG(10, (\"numnewpasses=%d \", numnewpasses));\n\t\t\t\tseg = cblk->curseg;\n\t\t\t\tsavenumnewpasses = numnewpasses;\n\t\t\t\tmycounter = 0;\n\t\t\t\tif (numnewpasses > 0) {\n\t\t\t\t\tif ((m = jpc_getcommacode(inb)) < 0) {\n\t\t\t\t\t\treturn -1;\n\t\t\t\t\t}\n\t\t\t\t\tcblk->numlenbits += m;\n\t\t\t\t\tJAS_DBGLOG(10, (\"increment=%d \", m));\n\t\t\t\t\twhile (numnewpasses > 0) {\n\t\t\t\t\t\tpassno = cblk->firstpassno + cblk->numpasses + mycounter;\n\t/* XXX - the maxpasses is not set precisely but this doesn't matter... */\n\t\t\t\t\t\tmaxpasses = JPC_SEGPASSCNT(passno, cblk->firstpassno, 10000, (ccp->cblkctx & JPC_COX_LAZY) != 0, (ccp->cblkctx & JPC_COX_TERMALL) != 0);\n\t\t\t\t\t\tif (!discard && !seg) {\n\t\t\t\t\t\t\tif (!(seg = jpc_seg_alloc())) {\n\t\t\t\t\t\t\t\treturn -1;\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tjpc_seglist_insert(&cblk->segs, cblk->segs.tail, seg);\n\t\t\t\t\t\t\tif (!cblk->curseg) {\n\t\t\t\t\t\t\t\tcblk->curseg = seg;\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\tseg->passno = passno;\n\t\t\t\t\t\t\tseg->type = JPC_SEGTYPE(seg->passno, cblk->firstpassno, (ccp->cblkctx & JPC_COX_LAZY) != 0);\n\t\t\t\t\t\t\tseg->maxpasses = maxpasses;\n\t\t\t\t\t\t}\n\t\t\t\t\t\tn = JAS_MIN(numnewpasses, maxpasses);\n\t\t\t\t\t\tmycounter += n;\n\t\t\t\t\t\tnumnewpasses -= n;\n\t\t\t\t\t\tif ((len = jpc_bitstream_getbits(inb, cblk->numlenbits + jpc_floorlog2(n))) < 0) {\n\t\t\t\t\t\t\treturn -1;\n\t\t\t\t\t\t}\n\t\t\t\t\t\tJAS_DBGLOG(10, (\"len=%d \", len));\n\t\t\t\t\t\tif (!discard) {\n\t\t\t\t\t\t\tseg->lyrno = lyrno;\n\t\t\t\t\t\t\tseg->numpasses += n;\n\t\t\t\t\t\t\tseg->cnt = len;\n\t\t\t\t\t\t\tseg = seg->next;\n\t\t\t\t\t\t}\n\t\t\t\t\t\tbodylen += len;\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\tcblk->numpasses += savenumnewpasses;\n\t\t\t}\n\t\t}\n\n\t\tjpc_bitstream_inalign(inb, 0, 0);\n\n\t} else {\n\t\tif (jpc_bitstream_inalign(inb, 0x7f, 0)) {\n\t\t\tjas_eprintf(\"alignment failed\\n\");\n\t\t\treturn -1;\n\t\t}\n\t}\n\tjpc_bitstream_close(inb);\n\n\thdroffend = jas_stream_getrwcount(pkthdrstream);\n\thdrlen = hdroffend - hdroffstart;\n\tif (jas_getdbglevel() >= 5) {\n\t\tjas_eprintf(\"hdrlen=%lu bodylen=%lu \\n\", (unsigned long) hdrlen,\n\t\t  (unsigned long) bodylen);\n\t}\n\n\tif (cp->csty & JPC_COD_EPH) {\n\t\tif (jpc_dec_lookahead(pkthdrstream) == JPC_MS_EPH) {\n\t\t\tif (!(ms = jpc_getms(pkthdrstream, dec->cstate))) {\n\t\t\t\tjas_eprintf(\"cannot get (EPH) marker segment\\n\");\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tif (jpc_ms_gettype(ms) != JPC_MS_EPH) {\n\t\t\t\tjpc_ms_destroy(ms);\n\t\t\t\tjas_eprintf(\"missing EPH marker segment\\n\");\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tjpc_ms_destroy(ms);\n\t\t}\n\t}\n\n\t/* decode the packet body. */\n\n\tif (jas_getdbglevel() >= 1) {\n\t\tjas_eprintf(\"packet body offset=%06ld\\n\", (long) jas_stream_getrwcount(in));\n\t}\n\n\tif (!discard) {\n\t\ttcomp = &tile->tcomps[compno];\n\t\trlvl = &tcomp->rlvls[rlvlno];\n\t\tfor (bandno = 0, band = rlvl->bands; bandno < rlvl->numbands;\n\t\t  ++bandno, ++band) {\n\t\t\tif (!band->data) {\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tprc = &band->prcs[prcno];\n\t\t\tif (!prc->cblks) {\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tfor (cblkno = 0, cblk = prc->cblks; cblkno < prc->numcblks;\n\t\t\t  ++cblkno, ++cblk) {\n\t\t\t\tseg = cblk->curseg;\n\t\t\t\twhile (seg) {\n\t\t\t\t\tif (!seg->stream) {\n\t\t\t\t\t\tif (!(seg->stream = jas_stream_memopen(0, 0))) {\n\t\t\t\t\t\t\treturn -1;\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n#if 0\njas_eprintf(\"lyrno=%02d, compno=%02d, lvlno=%02d, prcno=%02d, bandno=%02d, cblkno=%02d, passno=%02d numpasses=%02d cnt=%d numbps=%d, numimsbs=%d\\n\", lyrno, compno, rlvlno, prcno, band - rlvl->bands, cblk - prc->cblks, seg->passno, seg->numpasses, seg->cnt, band->numbps, cblk->numimsbs);\n#endif\n\t\t\t\t\tif (seg->cnt > 0) {\n\t\t\t\t\t\tif (jpc_getdata(in, seg->stream, seg->cnt) < 0) {\n\t\t\t\t\t\t\treturn -1;\n\t\t\t\t\t\t}\n\t\t\t\t\t\tseg->cnt = 0;\n\t\t\t\t\t}\n\t\t\t\t\tif (seg->numpasses >= seg->maxpasses) {\n\t\t\t\t\t\tcblk->curseg = seg->next;\n\t\t\t\t\t}\n\t\t\t\t\tseg = seg->next;\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t} else {\n\t\tif (jas_stream_gobble(in, bodylen) != JAS_CAST(int, bodylen)) {\n\t\t\treturn -1;\n\t\t}\n\t}\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          155,
+          0
+        ],
+        [
+          411,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_dec_decodepkt",
+        "parameters": {
+          "dec": "jpc_dec_t",
+          "pkthdrstream": "jas_stream_t",
+          "in": "jas_stream_t",
+          "compno": "int",
+          "rlvlno": "int",
+          "prcno": "int",
+          "lyrno": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int jpc_dec_decodepkts(jpc_dec_t *dec, jas_stream_t *pkthdrstream, jas_stream_t *in)\n{\n\tjpc_dec_tile_t *tile;\n\tjpc_pi_t *pi;\n\tint ret;\n\n\ttile = dec->curtile;\n\tpi = tile->pi;\n\tfor (;;) {\nif (!tile->pkthdrstream || jas_stream_peekc(tile->pkthdrstream) == EOF) {\n\t\tswitch (jpc_dec_lookahead(in)) {\n\t\tcase JPC_MS_EOC:\n\t\tcase JPC_MS_SOT:\n\t\t\treturn 0;\n\t\t\tbreak;\n\t\tcase JPC_MS_SOP:\n\t\tcase JPC_MS_EPH:\n\t\tcase 0:\n\t\t\tbreak;\n\t\tdefault:\n\t\t\treturn -1;\n\t\t\tbreak;\n\t\t}\n}\n\t\tif ((ret = jpc_pi_next(pi))) {\n\t\t\treturn ret;\n\t\t}\nif (dec->maxpkts >= 0 && dec->numpkts >= dec->maxpkts) {\n\tjas_eprintf(\"warning: stopping decode prematurely as requested\\n\");\n\treturn 0;\n}\n\t\tif (jas_getdbglevel() >= 1) {\n\t\t\tjas_eprintf(\"packet offset=%08ld prg=%d cmptno=%02d \"\n\t\t\t  \"rlvlno=%02d prcno=%03d lyrno=%02d\\n\", (long)\n\t\t\t  jas_stream_getrwcount(in), jpc_pi_prg(pi), jpc_pi_cmptno(pi),\n\t\t\t  jpc_pi_rlvlno(pi), jpc_pi_prcno(pi), jpc_pi_lyrno(pi));\n\t\t}\n\t\tif (jpc_dec_decodepkt(dec, pkthdrstream, in, jpc_pi_cmptno(pi), jpc_pi_rlvlno(pi),\n\t\t  jpc_pi_prcno(pi), jpc_pi_lyrno(pi))) {\n\t\t\treturn -1;\n\t\t}\n++dec->numpkts;\n\t}\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          416,
+          0
+        ],
+        [
+          461,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_dec_decodepkts",
+        "parameters": {
+          "dec": "jpc_dec_t",
+          "pkthdrstream": "jas_stream_t",
+          "in": "jas_stream_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "jpc_pi_t *jpc_dec_pi_create(jpc_dec_t *dec, jpc_dec_tile_t *tile)\n{\n\tjpc_pi_t *pi;\n\tint compno;\n\tjpc_picomp_t *picomp;\n\tjpc_pirlvl_t *pirlvl;\n\tjpc_dec_tcomp_t *tcomp;\n\tint rlvlno;\n\tjpc_dec_rlvl_t *rlvl;\n\tint prcno;\n\tint *prclyrno;\n\tjpc_dec_cmpt_t *cmpt;\n\n\tif (!(pi = jpc_pi_create0())) {\n\t\treturn 0;\n\t}\n\tpi->numcomps = dec->numcomps;\n\tif (!(pi->picomps = jas_malloc(pi->numcomps * sizeof(jpc_picomp_t)))) {\n\t\tjpc_pi_destroy(pi);\n\t\treturn 0;\n\t}\n\tfor (compno = 0, picomp = pi->picomps; compno < pi->numcomps; ++compno,\n\t  ++picomp) {\n\t\tpicomp->pirlvls = 0;\n\t}\n\n\tfor (compno = 0, tcomp = tile->tcomps, picomp = pi->picomps;\n\t  compno < pi->numcomps; ++compno, ++tcomp, ++picomp) {\n\t\tpicomp->numrlvls = tcomp->numrlvls;\n\t\tif (!(picomp->pirlvls = jas_malloc(picomp->numrlvls *\n\t\t  sizeof(jpc_pirlvl_t)))) {\n\t\t\tjpc_pi_destroy(pi);\n\t\t\treturn 0;\n\t\t}\n\t\tfor (rlvlno = 0, pirlvl = picomp->pirlvls; rlvlno <\n\t\t  picomp->numrlvls; ++rlvlno, ++pirlvl) {\n\t\t\tpirlvl->prclyrnos = 0;\n\t\t}\n\t\tfor (rlvlno = 0, pirlvl = picomp->pirlvls, rlvl = tcomp->rlvls;\n\t\t  rlvlno < picomp->numrlvls; ++rlvlno, ++pirlvl, ++rlvl) {\n/* XXX sizeof(long) should be sizeof different type */\n\t\t\tpirlvl->numprcs = rlvl->numprcs;\n\t\t\tif (!(pirlvl->prclyrnos = jas_malloc(pirlvl->numprcs *\n\t\t\t  sizeof(long)))) {\n\t\t\t\tjpc_pi_destroy(pi);\n\t\t\t\treturn 0;\n\t\t\t}\n\t\t}\n\t}\n\n\tpi->maxrlvls = 0;\n\tfor (compno = 0, tcomp = tile->tcomps, picomp = pi->picomps, cmpt =\n\t  dec->cmpts; compno < pi->numcomps; ++compno, ++tcomp, ++picomp,\n\t  ++cmpt) {\n\t\tpicomp->hsamp = cmpt->hstep;\n\t\tpicomp->vsamp = cmpt->vstep;\n\t\tfor (rlvlno = 0, pirlvl = picomp->pirlvls, rlvl = tcomp->rlvls;\n\t\t  rlvlno < picomp->numrlvls; ++rlvlno, ++pirlvl, ++rlvl) {\n\t\t\tpirlvl->prcwidthexpn = rlvl->prcwidthexpn;\n\t\t\tpirlvl->prcheightexpn = rlvl->prcheightexpn;\n\t\t\tfor (prcno = 0, prclyrno = pirlvl->prclyrnos;\n\t\t\t  prcno < pirlvl->numprcs; ++prcno, ++prclyrno) {\n\t\t\t\t*prclyrno = 0;\n\t\t\t}\n\t\t\tpirlvl->numhprcs = rlvl->numhprcs;\n\t\t}\n\t\tif (pi->maxrlvls < tcomp->numrlvls) {\n\t\t\tpi->maxrlvls = tcomp->numrlvls;\n\t\t}\n\t}\n\n\tpi->numlyrs = tile->cp->numlyrs;\n\tpi->xstart = tile->xstart;\n\tpi->ystart = tile->ystart;\n\tpi->xend = tile->xend;\n\tpi->yend = tile->yend;\n\n\tpi->picomp = 0;\n\tpi->pirlvl = 0;\n\tpi->x = 0;\n\tpi->y = 0;\n\tpi->compno = 0;\n\tpi->rlvlno = 0;\n\tpi->prcno = 0;\n\tpi->lyrno = 0;\n\tpi->xstep = 0;\n\tpi->ystep = 0;\n\n\tpi->pchgno = -1;\n\n\tpi->defaultpchg.prgord = tile->cp->prgord;\n\tpi->defaultpchg.compnostart = 0;\n\tpi->defaultpchg.compnoend = pi->numcomps;\n\tpi->defaultpchg.rlvlnostart = 0;\n\tpi->defaultpchg.rlvlnoend = pi->maxrlvls;\n\tpi->defaultpchg.lyrnoend = pi->numlyrs;\n\tpi->pchg = 0;\n\n\tpi->valid = 0;\n\n\treturn pi;\n}",
+      "fn_code_pos": [
+        [
+          463,
+          0
+        ],
+        [
+          564,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_dec_pi_create",
+        "parameters": {
+          "dec": "jpc_dec_t",
+          "tile": "jpc_dec_tile_t"
+        },
+        "return_type": "jpc_pi_t"
+      }
+    },
+    {
+      "fn_code": "long jpc_dec_lookahead(jas_stream_t *in)\n{\n\tuint_fast16_t x;\n\tif (jpc_getuint16(in, &x)) {\n\t\treturn -1;\n\t}\n\tif (jas_stream_ungetc(in, x & 0xff) == EOF ||\n\t  jas_stream_ungetc(in, x >> 8) == EOF) {\n\t\treturn -1;\n\t}\n\tif (x >= JPC_MS_INMIN && x <= JPC_MS_INMAX) {\n\t\treturn x;\n\t}\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          566,
+          0
+        ],
+        [
+          580,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_dec_lookahead",
+        "parameters": {
+          "in": "jas_stream_t"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "jpc_dec_lookahead(jas_stream_t *in)",
+      "fn_dec_pos": [
+        [
+          96,
+          5
+        ],
+        [
+          96,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_dec_lookahead",
+        "parameters": {
+          "in": "jas_stream_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "jpc_getcommacode(jpc_bitstream_t *in)",
+      "fn_dec_pos": [
+        [
+          97,
+          11
+        ],
+        [
+          97,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_getcommacode",
+        "parameters": {
+          "in": "jpc_bitstream_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "jpc_getnumnewpasses(jpc_bitstream_t *in)",
+      "fn_dec_pos": [
+        [
+          98,
+          11
+        ],
+        [
+          98,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_getnumnewpasses",
+        "parameters": {
+          "in": "jpc_bitstream_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "jpc_dec_decodepkt(jpc_dec_t *dec, jas_stream_t *pkthdrstream, jas_stream_t *in, int compno, int lvlno,\n  int prcno, int lyrno)",
+      "fn_dec_pos": [
+        [
+          99,
+          11
+        ],
+        [
+          100,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_dec_decodepkt",
+        "parameters": {
+          "dec": "jpc_dec_t",
+          "pkthdrstream": "jas_stream_t",
+          "in": "jas_stream_t",
+          "compno": "int",
+          "lvlno": "int",
+          "prcno": "int",
+          "lyrno": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "jpc_dec_pi_create(jpc_dec_t *dec, jpc_dec_tile_t *tile)",
+      "fn_dec_pos": [
+        [
+          463,
+          10
+        ],
+        [
+          463,
+          65
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jpc_dec_pi_create",
+        "parameters": {
+          "dec": "jpc_dec_t",
+          "tile": "jpc_dec_tile_t"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include <stdio.h>\n",
+      [
+        73,
+        0
+      ],
+      [
+        74,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        74,
+        0
+      ],
+      [
+        75,
+        0
+      ]
+    ],
+    [
+      "#include <assert.h>\n",
+      [
+        75,
+        0
+      ],
+      [
+        76,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_types.h\"\n",
+      [
+        77,
+        0
+      ],
+      [
+        78,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_fix.h\"\n",
+      [
+        78,
+        0
+      ],
+      [
+        79,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_malloc.h\"\n",
+      [
+        79,
+        0
+      ],
+      [
+        80,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_math.h\"\n",
+      [
+        80,
+        0
+      ],
+      [
+        81,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_stream.h\"\n",
+      [
+        81,
+        0
+      ],
+      [
+        82,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_debug.h\"\n",
+      [
+        82,
+        0
+      ],
+      [
+        83,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_bs.h\"\n",
+      [
+        84,
+        0
+      ],
+      [
+        85,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_dec.h\"\n",
+      [
+        85,
+        0
+      ],
+      [
+        86,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_cs.h\"\n",
+      [
+        86,
+        0
+      ],
+      [
+        87,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_mqdec.h\"\n",
+      [
+        87,
+        0
+      ],
+      [
+        88,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_t2dec.h\"\n",
+      [
+        88,
+        0
+      ],
+      [
+        89,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_t1cod.h\"\n",
+      [
+        89,
+        0
+      ],
+      [
+        90,
+        0
+      ]
+    ],
+    [
+      "#include \"jpc_math.h\"\n",
+      [
+        90,
+        0
+      ],
+      [
+        91,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

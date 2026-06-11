@@ -1,0 +1,301 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int\ncb_get_string (host_callback *cb, CB_SYSCALL *sc, char *buf, int buflen,\n\t       TADDR addr)\n{\n  char *p, *pend;\n\n  for (p = buf, pend = buf + buflen; p < pend; ++p, ++addr)\n    {\n      /* No, it isn't expected that this would cause one transaction with\n\t the remote target for each byte.  The target could send the\n\t path name along with the syscall request, and cache the file\n\t name somewhere (or otherwise tweak this as desired).  */\n      unsigned int count = (*sc->read_mem) (cb, sc, addr, p, 1);\n\n      if (count != 1)\n\treturn EINVAL;\n      if (*p == 0)\n\tbreak;\n    }\n  if (p == pend)\n    return ENAMETOOLONG;\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          77,
+          0
+        ],
+        [
+          99,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cb_get_string",
+        "parameters": {
+          "cb": "host_callback",
+          "sc": "CB_SYSCALL",
+          "buf": "char",
+          "buflen": "int",
+          "addr": "TADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_path (host_callback *cb, CB_SYSCALL *sc, TADDR addr, char **bufp)\n{\n  char *buf = xmalloc (MAX_PATH_LEN);\n  int result;\n  int sysroot_len = strlen (simulator_sysroot);\n\n  result = cb_get_string (cb, sc, buf, MAX_PATH_LEN - sysroot_len, addr);\n  if (result == 0)\n    {\n      /* Prepend absolute paths with simulator_sysroot.  Relative paths\n\t are supposed to be relative to a chdir within that path, but at\n\t this point unknown where.  */\n      if (simulator_sysroot[0] != '\\0' && *buf == '/')\n\t{\n\t  /* Considering expected rareness of syscalls with absolute\n\t     file paths (compared to relative file paths and insn\n\t     execution), it does not seem worthwhile to rearrange things\n\t     to get rid of the string moves here; we'd need at least an\n\t     extra call to check the initial '/' in the path.  */\n\t  memmove (buf + sysroot_len, buf, sysroot_len);\n\t  memcpy (buf, simulator_sysroot, sysroot_len);\n\t}\n\n      *bufp = buf;\n    }\n  else\n    free (buf);\n  return result;\n}",
+      "fn_code_pos": [
+        [
+          107,
+          0
+        ],
+        [
+          136,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_path",
+        "parameters": {
+          "cb": "host_callback",
+          "sc": "CB_SYSCALL",
+          "addr": "TADDR",
+          "bufp": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "CB_RC\ncb_syscall (host_callback *cb, CB_SYSCALL *sc)\n{\n  TWORD result = 0, errcode = 0;\n\n  if (sc->magic != CB_SYSCALL_MAGIC)\n    abort ();\n\n  switch (cb_target_to_host_syscall (cb, sc->func))\n    {\n#if 0 /* FIXME: wip */\n    case CB_SYS_argvlen :\n      {\n\t/* Compute how much space is required to store the argv,envp\n\t   strings so that the program can allocate the space and then\n\t   call SYS_argv to fetch the values.  */\n\tint addr_size = cb->addr_size;\n\tint argc,envc,arglen,envlen;\n\tconst char **argv = cb->init_argv;\n\tconst char **envp = cb->init_envp;\n\n\targc = arglen = 0;\n\tif (argv)\n\t  {\n\t    for ( ; argv[argc]; ++argc)\n\t      arglen += strlen (argv[argc]) + 1;\n\t  }\n\tenvc = envlen = 0;\n\tif (envp)\n\t  {\n\t    for ( ; envp[envc]; ++envc)\n\t      envlen += strlen (envp[envc]) + 1;\n\t  }\n\tresult = arglen + envlen;\n\tbreak;\n      }\n\n    case CB_SYS_argv :\n      {\n\t/* Pointer to target's buffer.  */\n\tTADDR tbuf = sc->arg1;\n\t/* Buffer size.  */\n\tint bufsize = sc->arg2;\n\t/* Q is the target address of where all the strings go.  */\n\tTADDR q;\n\tint word_size = cb->word_size;\n\tint i,argc,envc,len;\n\tconst char **argv = cb->init_argv;\n\tconst char **envp = cb->init_envp;\n\n\targc = 0;\n\tif (argv)\n\t  {\n\t    for ( ; argv[argc]; ++argc)\n\t      {\n\t\tint len = strlen (argv[argc]);\n\t\tint written = (*sc->write_mem) (cb, sc, tbuf, argv[argc], len + 1);\n\t\tif (written != len)\n\t\t  {\n\t\t    result = -1;\n\t\t    errcode = EINVAL;\n\t\t    goto FinishSyscall;\n\t\t  }\n\t\ttbuf = len + 1;\n\t      }\n\t  }\n\tif ((*sc->write_mem) (cb, sc, tbuf, \"\", 1) != 1)\n\t  {\n\t    result = -1;\n\t    errcode = EINVAL;\n\t    goto FinishSyscall;\n\t  }\n\ttbuf++;\n\tenvc = 0;\n\tif (envp)\n\t  {\n\t    for ( ; envp[envc]; ++envc)\n\t      {\n\t\tint len = strlen (envp[envc]);\n\t\tint written = (*sc->write_mem) (cb, sc, tbuf, envp[envc], len + 1);\n\t\tif (written != len)\n\t\t  {\n\t\t    result = -1;\n\t\t    errcode = EINVAL;\n\t\t    goto FinishSyscall;\n\t\t  }\n\t\ttbuf = len + 1;\n\t      }\n\t  }\n\tif ((*sc->write_mem) (cb, sc, tbuf, \"\", 1) != 1)\n\t  {\n\t    result = -1;\n\t    errcode = EINVAL;\n\t    goto FinishSyscall;\n\t  }\n\tresult = argc;\n\tsc->result2 = envc;\n\tbreak;\n      }\n#endif /* wip */\n\n    case CB_SYS_exit :\n      /* Caller must catch and handle; see sim_syscall as an example.  */\n      break;\n\n    case CB_SYS_open :\n      {\n\tchar *path;\n\n\terrcode = get_path (cb, sc, sc->arg1, &path);\n\tif (errcode != 0)\n\t  {\n\t    result = -1;\n\t    goto FinishSyscall;\n\t  }\n\tresult = (*cb->open) (cb, path, sc->arg2 /*, sc->arg3*/);\n\tfree (path);\n\tif (result < 0)\n\t  goto ErrorFinish;\n      }\n      break;\n\n    case CB_SYS_close :\n      result = (*cb->close) (cb, sc->arg1);\n      if (result < 0)\n\tgoto ErrorFinish;\n      break;\n\n    case CB_SYS_read :\n      {\n\t/* ??? Perfect handling of error conditions may require only one\n\t   call to cb->read.  One can't assume all the data is\n\t   contiguously stored in host memory so that would require\n\t   malloc'ing/free'ing the space.  Maybe later.  */\n\tchar buf[FILE_XFR_SIZE];\n\tint fd = sc->arg1;\n\tTADDR addr = sc->arg2;\n\tsize_t count = sc->arg3;\n\tsize_t bytes_read = 0;\n\tint bytes_written;\n\n\twhile (count > 0)\n\t  {\n\t    if (cb_is_stdin (cb, fd))\n\t      result = (int) (*cb->read_stdin) (cb, buf,\n\t\t\t\t\t\t(count < FILE_XFR_SIZE\n\t\t\t\t\t\t ? count : FILE_XFR_SIZE));\n\t    else\n\t      result = (int) (*cb->read) (cb, fd, buf,\n\t\t\t\t\t  (count < FILE_XFR_SIZE\n\t\t\t\t\t   ? count : FILE_XFR_SIZE));\n\t    if (result == -1)\n\t      goto ErrorFinish;\n\t    if (result == 0)\t/* EOF */\n\t      break;\n\t    bytes_written = (*sc->write_mem) (cb, sc, addr, buf, result);\n\t    if (bytes_written != result)\n\t      {\n\t\tresult = -1;\n\t\terrcode = EINVAL;\n\t\tgoto FinishSyscall;\n\t      }\n\t    bytes_read += result;\n\t    count -= result;\n\t    addr += result;\n\t    /* If this is a short read, don't go back for more */\n\t    if (result != FILE_XFR_SIZE)\n\t      break;\n\t  }\n\tresult = bytes_read;\n      }\n      break;\n\n    case CB_SYS_write :\n      {\n\t/* ??? Perfect handling of error conditions may require only one\n\t   call to cb->write.  One can't assume all the data is\n\t   contiguously stored in host memory so that would require\n\t   malloc'ing/free'ing the space.  Maybe later.  */\n\tchar buf[FILE_XFR_SIZE];\n\tint fd = sc->arg1;\n\tTADDR addr = sc->arg2;\n\tsize_t count = sc->arg3;\n\tint bytes_read;\n\tsize_t bytes_written = 0;\n\n\twhile (count > 0)\n\t  {\n\t    int bytes_to_read = count < FILE_XFR_SIZE ? count : FILE_XFR_SIZE;\n\t    bytes_read = (*sc->read_mem) (cb, sc, addr, buf, bytes_to_read);\n\t    if (bytes_read != bytes_to_read)\n\t      {\n\t\tresult = -1;\n\t\terrcode = EINVAL;\n\t\tgoto FinishSyscall;\n\t      }\n\t    if (cb_is_stdout (cb, fd))\n\t      {\n\t\tresult = (int) (*cb->write_stdout) (cb, buf, bytes_read);\n\t\t(*cb->flush_stdout) (cb);\n\t      }\n\t    else if (cb_is_stderr (cb, fd))\n\t      {\n\t\tresult = (int) (*cb->write_stderr) (cb, buf, bytes_read);\n\t\t(*cb->flush_stderr) (cb);\n\t      }\n\t    else\n\t      result = (int) (*cb->write) (cb, fd, buf, bytes_read);\n\t    if (result == -1)\n\t      goto ErrorFinish;\n\t    bytes_written += result;\n\t    count -= result;\n\t    addr += result;\n\t  }\n\tresult = bytes_written;\n      }\n      break;\n\n    case CB_SYS_lseek :\n      {\n\tint fd = sc->arg1;\n\tunsigned long offset = sc->arg2;\n\tint whence = sc->arg3;\n\n\tresult = (*cb->lseek) (cb, fd, offset, whence);\n\tif (result < 0)\n\t  goto ErrorFinish;\n      }\n      break;\n\n    case CB_SYS_unlink :\n      {\n\tchar *path;\n\n\terrcode = get_path (cb, sc, sc->arg1, &path);\n\tif (errcode != 0)\n\t  {\n\t    result = -1;\n\t    goto FinishSyscall;\n\t  }\n\tresult = (*cb->unlink) (cb, path);\n\tfree (path);\n\tif (result < 0)\n\t  goto ErrorFinish;\n      }\n      break;\n\n    case CB_SYS_truncate :\n      {\n\tchar *path;\n\tlong len = sc->arg2;\n\n\terrcode = get_path (cb, sc, sc->arg1, &path);\n\tif (errcode != 0)\n\t  {\n\t    result = -1;\n\t    errcode = EFAULT;\n\t    goto FinishSyscall;\n\t  }\n\tresult = (*cb->truncate) (cb, path, len);\n\tfree (path);\n\tif (result < 0)\n\t  goto ErrorFinish;\n      }\n      break;\n\n    case CB_SYS_ftruncate :\n      {\n\tint fd = sc->arg1;\n\tlong len = sc->arg2;\n\n\tresult = (*cb->ftruncate) (cb, fd, len);\n\tif (result < 0)\n\t  goto ErrorFinish;\n      }\n      break;\n\n    case CB_SYS_rename :\n      {\n\tchar *path1, *path2;\n\n\terrcode = get_path (cb, sc, sc->arg1, &path1);\n\tif (errcode != 0)\n\t  {\n\t    result = -1;\n\t    errcode = EFAULT;\n\t    goto FinishSyscall;\n\t  }\n\terrcode = get_path (cb, sc, sc->arg2, &path2);\n\tif (errcode != 0)\n\t  {\n\t    result = -1;\n\t    errcode = EFAULT;\n\t    free (path1);\n\t    goto FinishSyscall;\n\t  }\n\tresult = (*cb->rename) (cb, path1, path2);\n\tfree (path1);\n\tfree (path2);\n\tif (result < 0)\n\t  goto ErrorFinish;\n      }\n      break;\n\n    case CB_SYS_stat :\n      {\n\tchar *path,*buf;\n\tint buflen;\n\tstruct stat statbuf;\n\tTADDR addr = sc->arg2;\n\n\terrcode = get_path (cb, sc, sc->arg1, &path);\n\tif (errcode != 0)\n\t  {\n\t    result = -1;\n\t    goto FinishSyscall;\n\t  }\n\tresult = (*cb->to_stat) (cb, path, &statbuf);\n\tfree (path);\n\tif (result < 0)\n\t  goto ErrorFinish;\n\tbuflen = cb_host_to_target_stat (cb, NULL, NULL);\n\tbuf = xmalloc (buflen);\n\tif (cb_host_to_target_stat (cb, &statbuf, buf) != buflen)\n\t  {\n\t    /* The translation failed.  This is due to an internal\n\t       host program error, not the target's fault.  */\n\t    free (buf);\n\t    errcode = ENOSYS;\n\t    result = -1;\n\t    goto FinishSyscall;\n\t  }\n\tif ((*sc->write_mem) (cb, sc, addr, buf, buflen) != buflen)\n\t  {\n\t    free (buf);\n\t    errcode = EINVAL;\n\t    result = -1;\n\t    goto FinishSyscall;\n\t  }\n\tfree (buf);\n      }\n      break;\n\n    case CB_SYS_fstat :\n      {\n\tchar *buf;\n\tint buflen;\n\tstruct stat statbuf;\n\tTADDR addr = sc->arg2;\n\n\tresult = (*cb->to_fstat) (cb, sc->arg1, &statbuf);\n\tif (result < 0)\n\t  goto ErrorFinish;\n\tbuflen = cb_host_to_target_stat (cb, NULL, NULL);\n\tbuf = xmalloc (buflen);\n\tif (cb_host_to_target_stat (cb, &statbuf, buf) != buflen)\n\t  {\n\t    /* The translation failed.  This is due to an internal\n\t       host program error, not the target's fault.  */\n\t    free (buf);\n\t    errcode = ENOSYS;\n\t    result = -1;\n\t    goto FinishSyscall;\n\t  }\n\tif ((*sc->write_mem) (cb, sc, addr, buf, buflen) != buflen)\n\t  {\n\t    free (buf);\n\t    errcode = EINVAL;\n\t    result = -1;\n\t    goto FinishSyscall;\n\t  }\n\tfree (buf);\n      }\n      break;\n\n    case CB_SYS_lstat :\n      {\n\tchar *path, *buf;\n\tint buflen;\n\tstruct stat statbuf;\n\tTADDR addr = sc->arg2;\n\n\terrcode = get_path (cb, sc, sc->arg1, &path);\n\tif (errcode != 0)\n\t  {\n\t    result = -1;\n\t    goto FinishSyscall;\n\t  }\n\tresult = (*cb->to_lstat) (cb, path, &statbuf);\n\tfree (path);\n\tif (result < 0)\n\t  goto ErrorFinish;\n\n\tbuflen = cb_host_to_target_stat (cb, NULL, NULL);\n\tbuf = xmalloc (buflen);\n\tif (cb_host_to_target_stat (cb, &statbuf, buf) != buflen)\n\t  {\n\t    /* The translation failed.  This is due to an internal\n\t       host program error, not the target's fault.\n\t       Unfortunately, it's hard to test this case, so there's no\n\t       test-case for this execution path.  */\n\t    free (buf);\n\t    errcode = ENOSYS;\n\t    result = -1;\n\t    goto FinishSyscall;\n\t  }\n\n\tif ((*sc->write_mem) (cb, sc, addr, buf, buflen) != buflen)\n\t  {\n\t    free (buf);\n\t    errcode = EINVAL;\n\t    result = -1;\n\t    goto FinishSyscall;\n\t  }\n\n\tfree (buf);\n      }\n      break;\n\n    case CB_SYS_pipe :\n      {\n\tint p[2];\n\tchar *target_p = xcalloc (1, cb->target_sizeof_int * 2);\n\n\tresult = (*cb->pipe) (cb, p);\n\tif (result != 0)\n\t  goto ErrorFinish;\n\n\tcb_store_target_endian (cb, target_p, cb->target_sizeof_int, p[0]);\n\tcb_store_target_endian (cb, target_p + cb->target_sizeof_int,\n\t\t\t\tcb->target_sizeof_int, p[1]);\n\tif ((*sc->write_mem) (cb, sc, sc->arg1, target_p,\n\t\t\t      cb->target_sizeof_int * 2)\n\t    != cb->target_sizeof_int * 2)\n\t  {\n\t    /* Close the pipe fd:s.  */\n\t    (*cb->close) (cb, p[0]);\n\t    (*cb->close) (cb, p[1]);\n\t    errcode = EFAULT;\n\t    result = -1;\n\t  }\n\n\tfree (target_p);\n      }\n      break;\n\n    case CB_SYS_time :\n      {\n\t/* FIXME: May wish to change CB_SYS_time to something else.\n\t   We might also want gettimeofday or times, but if system calls\n\t   can be built on others, we can keep the number we have to support\n\t   here down.  */\n\ttime_t t = (*cb->time) (cb, (time_t *) 0);\n\tresult = t;\n\t/* It is up to target code to process the argument to time().  */\n      }\n      break;\n\n    case CB_SYS_chdir :\n    case CB_SYS_chmod :\n    case CB_SYS_utime :\n      /* fall through for now */\n\n    default :\n      result = -1;\n      errcode = ENOSYS;\n      break;\n    }\n\n FinishSyscall:\n  sc->result = result;\n  if (errcode == 0)\n    sc->errcode = 0;\n  else\n    sc->errcode = cb_host_to_target_errno (cb, errcode);\n  return CB_RC_OK;\n\n ErrorFinish:\n  sc->result = result;\n  sc->errcode = (*cb->get_errno) (cb);\n  return CB_RC_OK;\n}",
+      "fn_code_pos": [
+        [
+          140,
+          0
+        ],
+        [
+          621,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cb_syscall",
+        "parameters": {
+          "cb": "host_callback",
+          "sc": "CB_SYSCALL"
+        },
+        "return_type": "CB_RC"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        448,
+        1
+      ],
+      [
+        448,
+        12
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        487,
+        1
+      ],
+      [
+        487,
+        12
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        519,
+        1
+      ],
+      [
+        519,
+        12
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"ansidecl.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <stdarg.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <strings.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include <time.h>\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        46,
+        0
+      ],
+      [
+        47,
+        0
+      ]
+    ],
+    [
+      "#include <sys/stat.h>\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb/callback.h\"\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include \"targ-vals.h\"\n",
+      [
+        49,
+        0
+      ],
+      [
+        50,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

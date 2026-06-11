@@ -1,0 +1,1916 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "void\nhandle_exception (int exceptionVector)\n{\n  int sigval, stepping;\n  int addr, length, i;\n  unsigned char *ptr;\n  unsigned char buf[16];\n  int binary;\n\n  if (!finish_from_step ())\n    return;\t\t\t/* \"false step\": let the target continue */\n\n  gdb_m32r_vector = exceptionVector;\n\n  if (remote_debug)\n    {\n      mem2hex ((unsigned char *) &exceptionVector, buf, 4, 0);\n      gdb_error (\"Handle exception %s, \", buf);\n      mem2hex ((unsigned char *) &registers[PC], buf, 4, 0);\n      gdb_error (\"PC == 0x%s\\n\", buf);\n    }\n\n  /* reply to host that an exception has occurred */\n  sigval = computeSignal (exceptionVector);\n\n  ptr = remcomOutBuffer;\n\n  *ptr++ = 'T';\t\t\t/* notify gdb with signo, PC, FP and SP */\n  *ptr++ = hexchars[sigval >> 4];\n  *ptr++ = hexchars[sigval & 0xf];\n\n  *ptr++ = hexchars[PC >> 4];\n  *ptr++ = hexchars[PC & 0xf];\n  *ptr++ = ':';\n  ptr = mem2hex ((unsigned char *) &registers[PC], ptr, 4, 0);\t/* PC */\n  *ptr++ = ';';\n\n  *ptr++ = hexchars[R13 >> 4];\n  *ptr++ = hexchars[R13 & 0xf];\n  *ptr++ = ':';\n  ptr = mem2hex ((unsigned char *) &registers[R13], ptr, 4, 0);\t/* FP */\n  *ptr++ = ';';\n\n  *ptr++ = hexchars[R15 >> 4];\n  *ptr++ = hexchars[R15 & 0xf];\n  *ptr++ = ':';\n  ptr = mem2hex ((unsigned char *) &registers[R15], ptr, 4, 0);\t/* SP */\n  *ptr++ = ';';\n  *ptr++ = 0;\n\n  if (exceptionVector == 0)\t/* simulated SYS call stuff */\n    {\n      mem2hex ((unsigned char *) &registers[PC], buf, 4, 0);\n      switch (registers[R0])\n\t{\n\tcase SYS_exit:\n\t  gdb_error (\"Target program has exited at %s\\n\", buf);\n\t  ptr = remcomOutBuffer;\n\t  *ptr++ = 'W';\n\t  sigval = registers[R1] & 0xff;\n\t  *ptr++ = hexchars[sigval >> 4];\n\t  *ptr++ = hexchars[sigval & 0xf];\n\t  *ptr++ = 0;\n\t  break;\n\tcase SYS_open:\n\t  gdb_error (\"Target attempts SYS_open call at %s\\n\", buf);\n\t  break;\n\tcase SYS_close:\n\t  gdb_error (\"Target attempts SYS_close call at %s\\n\", buf);\n\t  break;\n\tcase SYS_read:\n\t  gdb_error (\"Target attempts SYS_read call at %s\\n\", buf);\n\t  break;\n\tcase SYS_write:\n\t  if (registers[R1] == 1 ||\t/* write to stdout  */\n\t      registers[R1] == 2)\t/* write to stderr  */\n\t    {\t\t\t/* (we can do that) */\n\t      registers[R0] =\n\t\tgdb_write ((void *) registers[R2], registers[R3]);\n\t      return;\n\t    }\n\t  else\n\t    gdb_error (\"Target attempts SYS_write call at %s\\n\", buf);\n\t  break;\n\tcase SYS_lseek:\n\t  gdb_error (\"Target attempts SYS_lseek call at %s\\n\", buf);\n\t  break;\n\tcase SYS_unlink:\n\t  gdb_error (\"Target attempts SYS_unlink call at %s\\n\", buf);\n\t  break;\n\tcase SYS_getpid:\n\t  gdb_error (\"Target attempts SYS_getpid call at %s\\n\", buf);\n\t  break;\n\tcase SYS_kill:\n\t  gdb_error (\"Target attempts SYS_kill call at %s\\n\", buf);\n\t  break;\n\tcase SYS_fstat:\n\t  gdb_error (\"Target attempts SYS_fstat call at %s\\n\", buf);\n\t  break;\n\tdefault:\n\t  gdb_error (\"Target attempts unknown SYS call at %s\\n\", buf);\n\t  break;\n\t}\n    }\n\n  putpacket (remcomOutBuffer);\n\n  stepping = 0;\n\n  while (1 == 1)\n    {\n      remcomOutBuffer[0] = 0;\n      ptr = getpacket ();\n      binary = 0;\n      switch (*ptr++)\n\t{\n\tdefault:\t\t/* Unknown code.  Return an empty reply message. */\n\t  break;\n\tcase 'R':\n\t  if (hexToInt (&ptr, &addr))\n\t    registers[PC] = addr;\n\t  strcpy (remcomOutBuffer, \"OK\");\n\t  break;\n\tcase '!':\n\t  strcpy (remcomOutBuffer, \"OK\");\n\t  break;\n\tcase 'X':\t\t/* XAA..AA,LLLL:<binary data>#cs */\n\t  binary = 1;\n\tcase 'M':\t\t/* MAA..AA,LLLL: Write LLLL bytes at address AA.AA return OK */\n\t  /* TRY TO READ '%x,%x:'.  IF SUCCEED, SET PTR = 0 */\n\t  {\n\t    if (hexToInt (&ptr, &addr))\n\t      if (*(ptr++) == ',')\n\t\tif (hexToInt (&ptr, &length))\n\t\t  if (*(ptr++) == ':')\n\t\t    {\n\t\t      mem_err = 0;\n\t\t      if (binary)\n\t\t\tbin2mem (ptr, (unsigned char *) addr, length, 1);\n\t\t      else\n\t\t\thex2mem (ptr, (unsigned char *) addr, length, 1);\n\t\t      if (mem_err)\n\t\t\t{\n\t\t\t  strcpy (remcomOutBuffer, \"E03\");\n\t\t\t  gdb_error (\"memory fault\", \"\");\n\t\t\t}\n\t\t      else\n\t\t\t{\n\t\t\t  strcpy (remcomOutBuffer, \"OK\");\n\t\t\t}\n\t\t      ptr = 0;\n\t\t    }\n\t    if (ptr)\n\t      {\n\t\tstrcpy (remcomOutBuffer, \"E02\");\n\t      }\n\t  }\n\t  break;\n\tcase 'm':\t\t/* mAA..AA,LLLL  Read LLLL bytes at address AA..AA */\n\t  /* TRY TO READ %x,%x.  IF SUCCEED, SET PTR = 0 */\n\t  if (hexToInt (&ptr, &addr))\n\t    if (*(ptr++) == ',')\n\t      if (hexToInt (&ptr, &length))\n\t\t{\n\t\t  ptr = 0;\n\t\t  mem_err = 0;\n\t\t  mem2hex ((unsigned char *) addr, remcomOutBuffer, length,\n\t\t\t   1);\n\t\t  if (mem_err)\n\t\t    {\n\t\t      strcpy (remcomOutBuffer, \"E03\");\n\t\t      gdb_error (\"memory fault\", \"\");\n\t\t    }\n\t\t}\n\t  if (ptr)\n\t    {\n\t      strcpy (remcomOutBuffer, \"E01\");\n\t    }\n\t  break;\n\tcase '?':\n\t  remcomOutBuffer[0] = 'S';\n\t  remcomOutBuffer[1] = hexchars[sigval >> 4];\n\t  remcomOutBuffer[2] = hexchars[sigval % 16];\n\t  remcomOutBuffer[3] = 0;\n\t  break;\n\tcase 'd':\n\t  remote_debug = !(remote_debug);\t/* toggle debug flag */\n\t  break;\n\tcase 'g':\t\t/* return the value of the CPU registers */\n\t  mem2hex ((unsigned char *) registers, remcomOutBuffer, NUMREGBYTES,\n\t\t   0);\n\t  break;\n\tcase 'P':\t\t/* set the value of a single CPU register - return OK */\n\t  {\n\t    int regno;\n\n\t    if (hexToInt (&ptr, &regno) && *ptr++ == '=')\n\t      if (regno >= 0 && regno < NUMREGS)\n\t\t{\n\t\t  int stackmode;\n\n\t\t  hex2mem (ptr, (unsigned char *) &registers[regno], 4, 0);\n\t\t  /*\n\t\t   * Since we just changed a single CPU register, let's\n\t\t   * make sure to keep the several stack pointers consistant.\n\t\t   */\n\t\t  stackmode = registers[PSW] & 0x80;\n\t\t  if (regno == R15)\t/* stack pointer changed */\n\t\t    {\t\t/* need to change SPI or SPU */\n\t\t      if (stackmode == 0)\n\t\t\tregisters[SPI] = registers[R15];\n\t\t      else\n\t\t\tregisters[SPU] = registers[R15];\n\t\t    }\n\t\t  else if (regno == SPU)\t/* \"user\" stack pointer changed */\n\t\t    {\n\t\t      if (stackmode != 0)\t/* stack in user mode: copy SP */\n\t\t\tregisters[R15] = registers[SPU];\n\t\t    }\n\t\t  else if (regno == SPI)\t/* \"interrupt\" stack pointer changed */\n\t\t    {\n\t\t      if (stackmode == 0)\t/* stack in interrupt mode: copy SP */\n\t\t\tregisters[R15] = registers[SPI];\n\t\t    }\n\t\t  else if (regno == PSW)\t/* stack mode may have changed! */\n\t\t    {\t\t/* force SP to either SPU or SPI */\n\t\t      if (stackmode == 0)\t/* stack in user mode */\n\t\t\tregisters[R15] = registers[SPI];\n\t\t      else\t/* stack in interrupt mode */\n\t\t\tregisters[R15] = registers[SPU];\n\t\t    }\n\t\t  strcpy (remcomOutBuffer, \"OK\");\n\t\t  break;\n\t\t}\n\t    strcpy (remcomOutBuffer, \"E01\");\n\t    break;\n\t  }\n\tcase 'G':\t\t/* set the value of the CPU registers - return OK */\n\t  hex2mem (ptr, (unsigned char *) registers, NUMREGBYTES, 0);\n\t  strcpy (remcomOutBuffer, \"OK\");\n\t  break;\n\tcase 's':\t\t/* sAA..AA      Step one instruction from AA..AA(optional) */\n\t  stepping = 1;\n\tcase 'c':\t\t/* cAA..AA      Continue from address AA..AA(optional) */\n\t  /* try to read optional parameter, pc unchanged if no parm */\n\t  if (hexToInt (&ptr, &addr))\n\t    registers[PC] = addr;\n\n\t  if (stepping)\t\t/* single-stepping */\n\t    {\n\t      if (!prepare_to_step (0))\t/* set up for single-step */\n\t\t{\n\t\t  /* prepare_to_step has already emulated the target insn:\n\t\t     Send SIGTRAP to gdb, don't resume the target at all.  */\n\t\t  ptr = remcomOutBuffer;\n\t\t  *ptr++ = 'T';\t/* Simulate stopping with SIGTRAP */\n\t\t  *ptr++ = '0';\n\t\t  *ptr++ = '5';\n\n\t\t  *ptr++ = hexchars[PC >> 4];\t/* send PC */\n\t\t  *ptr++ = hexchars[PC & 0xf];\n\t\t  *ptr++ = ':';\n\t\t  ptr = mem2hex ((unsigned char *) &registers[PC], ptr, 4, 0);\n\t\t  *ptr++ = ';';\n\n\t\t  *ptr++ = hexchars[R13 >> 4];\t/* send FP */\n\t\t  *ptr++ = hexchars[R13 & 0xf];\n\t\t  *ptr++ = ':';\n\t\t  ptr =\n\t\t    mem2hex ((unsigned char *) &registers[R13], ptr, 4, 0);\n\t\t  *ptr++ = ';';\n\n\t\t  *ptr++ = hexchars[R15 >> 4];\t/* send SP */\n\t\t  *ptr++ = hexchars[R15 & 0xf];\n\t\t  *ptr++ = ':';\n\t\t  ptr =\n\t\t    mem2hex ((unsigned char *) &registers[R15], ptr, 4, 0);\n\t\t  *ptr++ = ';';\n\t\t  *ptr++ = 0;\n\n\t\t  break;\n\t\t}\n\t    }\n\t  else\t\t\t/* continuing, not single-stepping */\n\t    {\n\t      /* OK, about to do a \"continue\".  First check to see if the \n\t         target pc is on an odd boundary (second instruction in the \n\t         word).  If so, we must do a single-step first, because \n\t         ya can't jump or return back to an odd boundary!  */\n\t      if ((registers[PC] & 2) != 0)\n\t\tprepare_to_step (1);\n\t    }\n\n\t  return;\n\n\tcase 'D':\t\t/* Detach */\n#if 0\n\t  /* I am interpreting this to mean, release the board from control \n\t     by the remote stub.  To do this, I am restoring the original\n\t     (or at least previous) exception vectors.\n\t   */\n\t  for (i = 0; i < 18; i++)\n\t    exceptionHandler (i, save_vectors[i]);\n\t  putpacket (\"OK\");\n\t  return;\t\t/* continue the inferior */\n#else\n\t  strcpy (remcomOutBuffer, \"OK\");\n\t  break;\n#endif\n\tcase 'q':\n\t  if (*ptr++ == 'C' &&\n\t      *ptr++ == 'R' && *ptr++ == 'C' && *ptr++ == ':')\n\t    {\n\t      unsigned long start, len, our_crc;\n\n\t      if (hexToInt (&ptr, (int *) &start) &&\n\t\t  *ptr++ == ',' && hexToInt (&ptr, (int *) &len))\n\t\t{\n\t\t  remcomOutBuffer[0] = 'C';\n\t\t  our_crc = crc32 ((unsigned char *) start, len, 0xffffffff);\n\t\t  mem2hex ((char *) &our_crc,\n\t\t\t   &remcomOutBuffer[1], sizeof (long), 0);\n\t\t}\t\t/* else do nothing */\n\t    }\t\t\t/* else do nothing */\n\t  break;\n\n\tcase 'k':\t\t/* kill the program */\n\t  continue;\n\t}\t\t\t/* switch */\n\n      /* reply to the request */\n      putpacket (remcomOutBuffer);\n    }\n}",
+      "fn_code_pos": [
+        [
+          207,
+          0
+        ],
+        [
+          540,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "handle_exception",
+        "parameters": {
+          "exceptionVector": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned long\ncrc32 (unsigned char *buf, int len, unsigned long crc)\n{\n  if (!crc32_table[1])\n    {\n      /* Initialize the CRC table and the decoding table. */\n      int i, j;\n      unsigned long c;\n\n      for (i = 0; i < 256; i++)\n\t{\n\t  for (c = i << 24, j = 8; j > 0; --j)\n\t    c = c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : (c << 1);\n\t  crc32_table[i] = c;\n\t}\n    }\n\n  while (len--)\n    {\n      crc = (crc << 8) ^ crc32_table[((crc >> 24) ^ *buf) & 255];\n      buf++;\n    }\n  return crc;\n}",
+      "fn_code_pos": [
+        [
+          547,
+          0
+        ],
+        [
+          570,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "crc32",
+        "parameters": {
+          "buf": "unsigned char",
+          "len": "int",
+          "crc": "unsigned long"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nhex (unsigned char ch)\n{\n  if ((ch >= 'a') && (ch <= 'f'))\n    return (ch - 'a' + 10);\n  if ((ch >= '0') && (ch <= '9'))\n    return (ch - '0');\n  if ((ch >= 'A') && (ch <= 'F'))\n    return (ch - 'A' + 10);\n  return (-1);\n}",
+      "fn_code_pos": [
+        [
+          572,
+          0
+        ],
+        [
+          582,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hex",
+        "parameters": {
+          "ch": "unsigned char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "unsigned char *\ngetpacket (void)\n{\n  unsigned char *buffer = &remcomInBuffer[0];\n  unsigned char checksum;\n  unsigned char xmitcsum;\n  int count;\n  char ch;\n\n  while (1)\n    {\n      /* wait around for the start character, ignore all other characters */\n      while ((ch = getDebugChar ()) != '$')\n\t;\n\n    retry:\n      checksum = 0;\n      xmitcsum = -1;\n      count = 0;\n\n      /* now, read until a # or end of buffer is found */\n      while (count < BUFMAX - 1)\n\t{\n\t  ch = getDebugChar ();\n\t  if (ch == '$')\n\t    goto retry;\n\t  if (ch == '#')\n\t    break;\n\t  checksum = checksum + ch;\n\t  buffer[count] = ch;\n\t  count = count + 1;\n\t}\n      buffer[count] = 0;\n\n      if (ch == '#')\n\t{\n\t  ch = getDebugChar ();\n\t  xmitcsum = hex (ch) << 4;\n\t  ch = getDebugChar ();\n\t  xmitcsum += hex (ch);\n\n\t  if (checksum != xmitcsum)\n\t    {\n\t      if (remote_debug)\n\t\t{\n\t\t  unsigned char buf[16];\n\n\t\t  mem2hex ((unsigned char *) &checksum, buf, 4, 0);\n\t\t  gdb_error (\"Bad checksum: my count = %s, \", buf);\n\t\t  mem2hex ((unsigned char *) &xmitcsum, buf, 4, 0);\n\t\t  gdb_error (\"sent count = %s\\n\", buf);\n\t\t  gdb_error (\" -- Bad buffer: \\\"%s\\\"\\n\", buffer);\n\t\t}\n\t      putDebugChar ('-');\t/* failed checksum */\n\t    }\n\t  else\n\t    {\n\t      putDebugChar ('+');\t/* successful transfer */\n\n\t      /* if a sequence char is present, reply the sequence ID */\n\t      if (buffer[2] == ':')\n\t\t{\n\t\t  putDebugChar (buffer[0]);\n\t\t  putDebugChar (buffer[1]);\n\n\t\t  return &buffer[3];\n\t\t}\n\n\t      return &buffer[0];\n\t    }\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          586,
+          0
+        ],
+        [
+          658,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "getpacket",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nputpacket (unsigned char *buffer)\n{\n  unsigned char checksum;\n  int count;\n  char ch;\n\n  /*  $<packet info>#<checksum>. */\n  do\n    {\n      putDebugChar ('$');\n      checksum = 0;\n      count = 0;\n\n      while (ch = buffer[count])\n\t{\n\t  putDebugChar (ch);\n\t  checksum += ch;\n\t  count += 1;\n\t}\n      putDebugChar ('#');\n      putDebugChar (hexchars[checksum >> 4]);\n      putDebugChar (hexchars[checksum % 16]);\n    }\n  while (getDebugChar () != '+');\n}",
+      "fn_code_pos": [
+        [
+          662,
+          0
+        ],
+        [
+          687,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "putpacket",
+        "parameters": {
+          "buffer": "unsigned char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nset_mem_err (void)\n{\n  mem_err = 1;\n}",
+      "fn_code_pos": [
+        [
+          693,
+          0
+        ],
+        [
+          697,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "set_mem_err",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nmem_safe (unsigned char *addr)\n{\n#define BAD_RANGE_ONE_START\t((unsigned char *) 0x600000)\n#define BAD_RANGE_ONE_END\t((unsigned char *) 0xa00000)\n#define BAD_RANGE_TWO_START\t((unsigned char *) 0xff680000)\n#define BAD_RANGE_TWO_END\t((unsigned char *) 0xff800000)\n\n  if (addr < BAD_RANGE_ONE_START)\n    return 1;\t\t\t/* safe */\n  if (addr < BAD_RANGE_ONE_END)\n    return 0;\t\t\t/* unsafe */\n  if (addr < BAD_RANGE_TWO_START)\n    return 1;\t\t\t/* safe */\n  if (addr < BAD_RANGE_TWO_END)\n    return 0;\t\t\t/* unsafe */\n}",
+      "fn_code_pos": [
+        [
+          704,
+          0
+        ],
+        [
+          720,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mem_safe",
+        "parameters": {
+          "addr": "unsigned char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_char (unsigned char *addr)\n{\n#if 1\n  if (mem_fault_routine && !mem_safe (addr))\n    {\n      mem_fault_routine ();\n      return 0;\n    }\n#endif\n  return *addr;\n}",
+      "fn_code_pos": [
+        [
+          726,
+          0
+        ],
+        [
+          737,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_char",
+        "parameters": {
+          "addr": "unsigned char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nset_char (unsigned char *addr, unsigned char val)\n{\n#if 1\n  if (mem_fault_routine && !mem_safe (addr))\n    {\n      mem_fault_routine ();\n      return;\n    }\n#endif\n  *addr = val;\n}",
+      "fn_code_pos": [
+        [
+          739,
+          0
+        ],
+        [
+          750,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "set_char",
+        "parameters": {
+          "addr": "unsigned char",
+          "val": "unsigned char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned char *\nmem2hex (unsigned char *mem, unsigned char *buf, int count, int may_fault)\n{\n  int i;\n  unsigned char ch;\n\n  if (may_fault)\n    mem_fault_routine = set_mem_err;\n  for (i = 0; i < count; i++)\n    {\n      ch = get_char (mem++);\n      if (may_fault && mem_err)\n\treturn (buf);\n      *buf++ = hexchars[ch >> 4];\n      *buf++ = hexchars[ch % 16];\n    }\n  *buf = 0;\n  if (may_fault)\n    mem_fault_routine = 0;\n  return (buf);\n}",
+      "fn_code_pos": [
+        [
+          757,
+          0
+        ],
+        [
+          777,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mem2hex",
+        "parameters": {
+          "mem": "unsigned char",
+          "buf": "unsigned char",
+          "count": "int",
+          "may_fault": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned char *\nhex2mem (unsigned char *buf, unsigned char *mem, int count, int may_fault)\n{\n  int i;\n  unsigned char ch;\n\n  if (may_fault)\n    mem_fault_routine = set_mem_err;\n  for (i = 0; i < count; i++)\n    {\n      ch = hex (*buf++) << 4;\n      ch = ch + hex (*buf++);\n      set_char (mem++, ch);\n      if (may_fault && mem_err)\n\treturn (mem);\n    }\n  if (may_fault)\n    mem_fault_routine = 0;\n  return (mem);\n}",
+      "fn_code_pos": [
+        [
+          782,
+          0
+        ],
+        [
+          801,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hex2mem",
+        "parameters": {
+          "buf": "unsigned char",
+          "mem": "unsigned char",
+          "count": "int",
+          "may_fault": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned char *\nbin2mem (unsigned char *buf, unsigned char *mem, int count, int may_fault)\n{\n  int i;\n  unsigned char ch;\n\n  if (may_fault)\n    mem_fault_routine = set_mem_err;\n  for (i = 0; i < count; i++)\n    {\n      /* Check for any escaped characters. Be paranoid and\n         only unescape chars that should be escaped. */\n      if (*buf == 0x7d)\n\t{\n\t  switch (*(buf + 1))\n\t    {\n\t    case 0x3:\t\t/* # */\n\t    case 0x4:\t\t/* $ */\n\t    case 0x5d:\t\t/* escape char */\n\t      buf++;\n\t      *buf |= 0x20;\n\t      break;\n\t    default:\n\t      /* nothing */\n\t      break;\n\t    }\n\t}\n\n      set_char (mem++, *buf++);\n\n      if (may_fault && mem_err)\n\treturn mem;\n    }\n\n  if (may_fault)\n    mem_fault_routine = 0;\n  return mem;\n}",
+      "fn_code_pos": [
+        [
+          808,
+          0
+        ],
+        [
+          845,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bin2mem",
+        "parameters": {
+          "buf": "unsigned char",
+          "mem": "unsigned char",
+          "count": "int",
+          "may_fault": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\ncomputeSignal (int exceptionVector)\n{\n  int sigval;\n  switch (exceptionVector)\n    {\n    case 0:\n      sigval = 23;\n      break;\t\t\t/* I/O trap                    */\n    case 1:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 2:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 3:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 4:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 5:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 6:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 7:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 8:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 9:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 10:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 11:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 12:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 13:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 14:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 15:\n      sigval = 5;\n      break;\t\t\t/* breakpoint                  */\n    case 16:\n      sigval = 10;\n      break;\t\t\t/* BUS ERROR (alignment)       */\n    case 17:\n      sigval = 2;\n      break;\t\t\t/* INTerrupt                   */\n    default:\n      sigval = 7;\n      break;\t\t\t/* \"software generated\"        */\n    }\n  return (sigval);\n}",
+      "fn_code_pos": [
+        [
+          850,
+          0
+        ],
+        [
+          915,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "computeSignal",
+        "parameters": {
+          "exceptionVector": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nhexToInt (unsigned char **ptr, int *intValue)\n{\n  int numChars = 0;\n  int hexValue;\n\n  *intValue = 0;\n  while (**ptr)\n    {\n      hexValue = hex (**ptr);\n      if (hexValue >= 0)\n\t{\n\t  *intValue = (*intValue << 4) | hexValue;\n\t  numChars++;\n\t}\n      else\n\tbreak;\n      (*ptr)++;\n    }\n  return (numChars);\n}",
+      "fn_code_pos": [
+        [
+          921,
+          0
+        ],
+        [
+          941,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hexToInt",
+        "parameters": {
+          "ptr": "unsigned char",
+          "intValue": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nisShortBranch (unsigned char *instr)\n{\n  unsigned char instr0 = instr[0] & 0x7F;\t/* mask off high bit */\n\n  if (instr0 == 0x10 && instr[1] == 0xB6)\t/* RTE */\n    return 1;\t\t\t/* return from trap or exception */\n\n  if (instr0 == 0x1E || instr0 == 0x1F)\t/* JL or JMP */\n    if ((instr[1] & 0xF0) == 0xC0)\n      return 2;\t\t\t/* jump thru a register */\n\n  if (instr0 == 0x7C || instr0 == 0x7D ||\t/* BC, BNC, BL, BRA */\n      instr0 == 0x7E || instr0 == 0x7F)\n    return 3;\t\t\t/* eight bit PC offset */\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          967,
+          0
+        ],
+        [
+          984,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "isShortBranch",
+        "parameters": {
+          "instr": "unsigned char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nisLongBranch (unsigned char *instr)\n{\n  if (instr[0] == 0xFC || instr[0] == 0xFD ||\t/* BRA, BNC, BL, BC */\n      instr[0] == 0xFE || instr[0] == 0xFF)\t/* 24 bit relative */\n    return 4;\n  if ((instr[0] & 0xF0) == 0xB0)\t/* 16 bit relative */\n    {\n      if ((instr[1] & 0xF0) == 0x00 ||\t/* BNE, BEQ */\n\t  (instr[1] & 0xF0) == 0x10)\n\treturn 5;\n      if (instr[0] == 0xB0)\t/* BNEZ, BLTZ, BLEZ, BGTZ, BGEZ, BEQZ */\n\tif ((instr[1] & 0xF0) == 0x80 || (instr[1] & 0xF0) == 0x90 ||\n\t    (instr[1] & 0xF0) == 0xA0 || (instr[1] & 0xF0) == 0xB0 ||\n\t    (instr[1] & 0xF0) == 0xC0 || (instr[1] & 0xF0) == 0xD0)\n\t  return 6;\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          986,
+          0
+        ],
+        [
+          1004,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "isLongBranch",
+        "parameters": {
+          "instr": "unsigned char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nisBranch (unsigned char *instr)\n{\n  if (INSTRUCTION_SIZE (instr) == 2)\n    return isShortBranch (instr);\n  else\n    return isLongBranch (instr);\n}",
+      "fn_code_pos": [
+        [
+          1012,
+          0
+        ],
+        [
+          1019,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "isBranch",
+        "parameters": {
+          "instr": "unsigned char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nwillBranch (unsigned char *instr, int branchCode)\n{\n  switch (branchCode)\n    {\n    case 0:\n      return 0;\t\t\t/* not a branch */\n    case 1:\n      return 1;\t\t\t/* RTE */\n    case 2:\n      return 1;\t\t\t/* JL or JMP    */\n    case 3:\t\t\t/* BC, BNC, BL, BRA (short) */\n    case 4:\t\t\t/* BC, BNC, BL, BRA (long) */\n      switch (instr[0] & 0x0F)\n\t{\n\tcase 0xC:\t\t/* Branch if Condition Register */\n\t  return (registers[CBR] != 0);\n\tcase 0xD:\t\t/* Branch if NOT Condition Register */\n\t  return (registers[CBR] == 0);\n\tcase 0xE:\t\t/* Branch and Link */\n\tcase 0xF:\t\t/* Branch (unconditional) */\n\t  return 1;\n\tdefault:\t\t/* oops? */\n\t  return 0;\n\t}\n    case 5:\t\t\t/* BNE, BEQ */\n      switch (instr[1] & 0xF0)\n\t{\n\tcase 0x00:\t\t/* Branch if r1 equal to r2 */\n\t  return (registers[instr[0] & 0x0F] == registers[instr[1] & 0x0F]);\n\tcase 0x10:\t\t/* Branch if r1 NOT equal to r2 */\n\t  return (registers[instr[0] & 0x0F] != registers[instr[1] & 0x0F]);\n\tdefault:\t\t/* oops? */\n\t  return 0;\n\t}\n    case 6:\t\t\t/* BNEZ, BLTZ, BLEZ, BGTZ, BGEZ ,BEQZ */\n      switch (instr[1] & 0xF0)\n\t{\n\tcase 0x80:\t\t/* Branch if reg equal to zero */\n\t  return (registers[instr[1] & 0x0F] == 0);\n\tcase 0x90:\t\t/* Branch if reg NOT equal to zero */\n\t  return (registers[instr[1] & 0x0F] != 0);\n\tcase 0xA0:\t\t/* Branch if reg less than zero */\n\t  return (registers[instr[1] & 0x0F] < 0);\n\tcase 0xB0:\t\t/* Branch if reg greater or equal to zero */\n\t  return (registers[instr[1] & 0x0F] >= 0);\n\tcase 0xC0:\t\t/* Branch if reg less than or equal to zero */\n\t  return (registers[instr[1] & 0x0F] <= 0);\n\tcase 0xD0:\t\t/* Branch if reg greater than zero */\n\t  return (registers[instr[1] & 0x0F] > 0);\n\tdefault:\t\t/* oops? */\n\t  return 0;\n\t}\n    default:\t\t\t/* oops? */\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1021,
+          0
+        ],
+        [
+          1077,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "willBranch",
+        "parameters": {
+          "instr": "unsigned char",
+          "branchCode": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbranchDestination (unsigned char *instr, int branchCode)\n{\n  switch (branchCode)\n    {\n    default:\n    case 0:\t\t\t/* not a branch */\n      return 0;\n    case 1:\t\t\t/* RTE */\n      return registers[BPC] & ~3;\t/* pop BPC into PC */\n    case 2:\t\t\t/* JL or JMP */\n      return registers[instr[1] & 0x0F] & ~3;\t/* jump thru a register */\n    case 3:\t\t\t/* BC, BNC, BL, BRA (short, 8-bit relative offset) */\n      return (((int) instr) & ~3) + ((char) instr[1] << 2);\n    case 4:\t\t\t/* BC, BNC, BL, BRA (long, 24-bit relative offset) */\n      return ((int) instr +\n\t      ((((char) instr[1] << 16) | (instr[2] << 8) | (instr[3])) <<\n\t       2));\n    case 5:\t\t\t/* BNE, BEQ (16-bit relative offset) */\n    case 6:\t\t\t/* BNEZ, BLTZ, BLEZ, BGTZ, BGEZ ,BEQZ (ditto) */\n      return ((int) instr + ((((char) instr[2] << 8) | (instr[3])) << 2));\n    }\n\n  /* An explanatory note: in the last three return expressions, I have\n     cast the most-significant byte of the return offset to char.\n     What this accomplishes is sign extension.  If the other\n     less-significant bytes were signed as well, they would get sign\n     extended too and, if negative, their leading bits would clobber\n     the bits of the more-significant bytes ahead of them.  There are\n     other ways I could have done this, but sign extension from\n     odd-sized integers is always a pain. */\n}",
+      "fn_code_pos": [
+        [
+          1079,
+          0
+        ],
+        [
+          1110,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "branchDestination",
+        "parameters": {
+          "instr": "unsigned char",
+          "branchCode": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nbranchSideEffects (unsigned char *instr, int branchCode)\n{\n  switch (branchCode)\n    {\n    case 1:\t\t\t/* RTE */\n      return;\t\t\t/* I <THINK> this is already handled... */\n    case 2:\t\t\t/* JL (or JMP) */\n    case 3:\t\t\t/* BL (or BC, BNC, BRA) */\n    case 4:\n      if ((instr[0] & 0x0F) == 0x0E)\t/* branch/jump and link */\n\tregisters[R14] = (registers[PC] & ~3) + 4;\n      return;\n    default:\t\t\t/* any other branch has no side effects */\n      return;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1112,
+          0
+        ],
+        [
+          1128,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "branchSideEffects",
+        "parameters": {
+          "instr": "unsigned char",
+          "branchCode": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nfinish_from_step (void)\n{\n  if (stepping.stepping)\t/* anything to do? */\n    {\n      int continue_p = stepping.continue_p;\n      unsigned char *p;\n\n      if (stepping.noop_addr)\t/* replace instr \"under\" our no-op */\n\t*(unsigned short *) stepping.noop_addr = stepping.noop_save;\n      if (stepping.trap1_addr)\t/* replace instr \"under\" our trap  */\n\t*(unsigned short *) stepping.trap1_addr = stepping.trap1_save;\n      if (stepping.trap2_addr)\t/* ditto our other trap, if any    */\n\t*(unsigned short *) stepping.trap2_addr = stepping.trap2_save;\n\n      for (p = (unsigned char *) &stepping;\t/* zero out the stepping context */\n\t   p < ((unsigned char *) &stepping) + sizeof (stepping); p++)\n\t*p = 0;\n\n      return !(continue_p);\n    }\n  else\t\t\t\t/* we didn't single-step, therefore this must be a legitimate stop */\n    return 1;\n}",
+      "fn_code_pos": [
+        [
+          1222,
+          0
+        ],
+        [
+          1245,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "finish_from_step",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ncleanup_stash (void)\n{\n  psw = (struct PSWreg *) &registers[PSW];\t/* fields of PSW register */\n  psw->sm = psw->bsm;\t\t/* fix up pre-trap values of psw fields */\n  psw->ie = psw->bie;\n  psw->c = psw->bc;\n  registers[CBR] = psw->bc;\t/* fix up pre-trap \"C\" register */\n\n#if 0\t\t\t\t/* FIXME: Was in previous version.  Necessary?\n\t\t\t\t   (Remember that we use the \"rte\" insn to return from the\n\t\t\t\t   trap/interrupt so the values of bsm, bie, bc are important.  */\n  psw->bsm = psw->bie = psw->bc = 0;\t/* zero post-trap values */\n#endif\n\n  /* FIXME: Copied from previous version.  This can probably be deleted\n     since methinks stash_registers has already done this.  */\n  registers[PC] = registers[BPC];\t/* pre-trap PC */\n\n  /* FIXME: Copied from previous version.  Necessary?  */\n  if (psw->sm)\t\t\t/* copy R15 into (psw->sm ? SPU : SPI) */\n    registers[SPU] = registers[R15];\n  else\n    registers[SPI] = registers[R15];\n}",
+      "fn_code_pos": [
+        [
+          1313,
+          0
+        ],
+        [
+          1337,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cleanup_stash",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nprocess_exception (int num)\n{\n  cleanup_stash ();\n  asm volatile (\"\\n\\\n\tseth r1, #shigh(stackPtr)\\n\\\n\tadd3 r1, r1, #low(stackPtr)\\n\\\n\tld r15, @r1\t\t; setup local stack (protect user stack)\\n\\\n\tmv r0, %0\\n\\\n\tbl handle_exception\\n\\\n\tbl restore_and_return\"::\"r\" (num):\"r0\", \"r1\");\n}",
+      "fn_code_pos": [
+        [
+          1381,
+          0
+        ],
+        [
+          1392,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "process_exception",
+        "parameters": {
+          "num": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nset_debug_traps (void)\n{\n  /*  extern void remcomHandler(); */\n  int i;\n\n  for (i = 0; i < 18; i++)\t/* keep a copy of old vectors */\n    if (save_vectors[i] == 0)\t/* only copy them the first time */\n      save_vectors[i] = getExceptionHandler (i);\n\n  stackPtr = &remcomStack[STACKSIZE / sizeof (int) - 1];\n\n  exceptionHandler (0, _catchException0);\n  exceptionHandler (1, _catchException1);\n  exceptionHandler (2, _catchException2);\n  exceptionHandler (3, _catchException3);\n  exceptionHandler (4, _catchException4);\n  exceptionHandler (5, _catchException5);\n  exceptionHandler (6, _catchException6);\n  exceptionHandler (7, _catchException7);\n  exceptionHandler (8, _catchException8);\n  exceptionHandler (9, _catchException9);\n  exceptionHandler (10, _catchException10);\n  exceptionHandler (11, _catchException11);\n  exceptionHandler (12, _catchException12);\n  exceptionHandler (13, _catchException13);\n  exceptionHandler (14, _catchException14);\n  exceptionHandler (15, _catchException15);\n  exceptionHandler (16, _catchException16);\n  /*  exceptionHandler (17, _catchException17); */\n\n  initialized = 1;\n}",
+      "fn_code_pos": [
+        [
+          1587,
+          0
+        ],
+        [
+          1619,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "set_debug_traps",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nbreakpoint (void)\n{\n  if (initialized)\n    BREAKPOINT ();\n}",
+      "fn_code_pos": [
+        [
+          1628,
+          0
+        ],
+        [
+          1633,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "breakpoint",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ngdb_putchar (int ch)\n{\n  char buf[4];\n\n  buf[0] = 'O';\n  buf[1] = hexchars[ch >> 4];\n  buf[2] = hexchars[ch & 0x0F];\n  buf[3] = 0;\n  putpacket (buf);\n  return ch;\n}",
+      "fn_code_pos": [
+        [
+          1647,
+          0
+        ],
+        [
+          1658,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdb_putchar",
+        "parameters": {
+          "ch": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ngdb_write (char *data, int len)\n{\n  char *buf, *cpy;\n  int i;\n\n  buf = remcomOutBuffer;\n  buf[0] = 'O';\n  i = 0;\n  while (i < len)\n    {\n      for (cpy = buf + 1;\n\t   i < len && cpy < buf + sizeof (remcomOutBuffer) - 3; i++)\n\t{\n\t  *cpy++ = hexchars[data[i] >> 4];\n\t  *cpy++ = hexchars[data[i] & 0x0F];\n\t}\n      *cpy = 0;\n      putpacket (buf);\n    }\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          1664,
+          0
+        ],
+        [
+          1685,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdb_write",
+        "parameters": {
+          "data": "char",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ngdb_puts (char *str)\n{\n  return gdb_write (str, strlen (str));\n}",
+      "fn_code_pos": [
+        [
+          1691,
+          0
+        ],
+        [
+          1695,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdb_puts",
+        "parameters": {
+          "str": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ngdb_error (char *format, char *parm)\n{\n  char buf[400], *cpy;\n  int len;\n\n  if (remote_debug)\n    {\n      if (format && *format)\n\tlen = strlen (format);\n      else\n\treturn;\t\t\t/* empty input */\n\n      if (parm && *parm)\n\tlen += strlen (parm);\n\n      for (cpy = buf; *format;)\n\t{\n\t  if (format[0] == '%' && format[1] == 's')\t/* include second string */\n\t    {\n\t      format += 2;\t/* advance two chars instead of just one */\n\t      while (parm && *parm)\n\t\t*cpy++ = *parm++;\n\t    }\n\t  else\n\t    *cpy++ = *format++;\n\t}\n      *cpy = '\\0';\n      gdb_puts (buf);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1702,
+          0
+        ],
+        [
+          1732,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdb_error",
+        "parameters": {
+          "format": "char",
+          "parm": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned char *\nstrcpy (unsigned char *dest, const unsigned char *src)\n{\n  unsigned char *ret = dest;\n\n  if (dest && src)\n    {\n      while (*src)\n\t*dest++ = *src++;\n      *dest = 0;\n    }\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          1734,
+          0
+        ],
+        [
+          1746,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "strcpy",
+        "parameters": {
+          "dest": "unsigned char",
+          "src": "unsigned char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nstrlen (const unsigned char *src)\n{\n  int ret;\n\n  for (ret = 0; *src; src++)\n    ret++;\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          1748,
+          0
+        ],
+        [
+          1757,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "strlen",
+        "parameters": {
+          "src": "unsigned char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\natexit (void *p)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1767,
+          0
+        ],
+        [
+          1771,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "atexit",
+        "parameters": {
+          "p": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nabort (void)\n{\n  _exit (1);\n}",
+      "fn_code_pos": [
+        [
+          1773,
+          0
+        ],
+        [
+          1777,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "abort",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "putDebugChar ()",
+      "fn_dec_pos": [
+        [
+          98,
+          12
+        ],
+        [
+          98,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "putDebugChar",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "getDebugChar ()",
+      "fn_dec_pos": [
+        [
+          99,
+          11
+        ],
+        [
+          99,
+          26
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "getDebugChar",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "exceptionHandler ()",
+      "fn_dec_pos": [
+        [
+          100,
+          12
+        ],
+        [
+          100,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "exceptionHandler",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "handle_exception (int)",
+      "fn_dec_pos": [
+        [
+          176,
+          12
+        ],
+        [
+          176,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "handle_exception",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "set_debug_traps (void)",
+      "fn_dec_pos": [
+        [
+          177,
+          12
+        ],
+        [
+          177,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "set_debug_traps",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "breakpoint (void)",
+      "fn_dec_pos": [
+        [
+          178,
+          12
+        ],
+        [
+          178,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "breakpoint",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "computeSignal (int)",
+      "fn_dec_pos": [
+        [
+          183,
+          11
+        ],
+        [
+          183,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "computeSignal",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "putpacket (unsigned char *)",
+      "fn_dec_pos": [
+        [
+          184,
+          12
+        ],
+        [
+          184,
+          39
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "putpacket",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "getpacket (void)",
+      "fn_dec_pos": [
+        [
+          185,
+          22
+        ],
+        [
+          185,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "getpacket",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "mem2hex (unsigned char *, unsigned char *, int, int)",
+      "fn_dec_pos": [
+        [
+          187,
+          22
+        ],
+        [
+          187,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mem2hex",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "hex2mem (unsigned char *, unsigned char *, int, int)",
+      "fn_dec_pos": [
+        [
+          188,
+          22
+        ],
+        [
+          188,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hex2mem",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "hexToInt (unsigned char **, int *)",
+      "fn_dec_pos": [
+        [
+          189,
+          11
+        ],
+        [
+          189,
+          45
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hexToInt",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "bin2mem (unsigned char *, unsigned char *, int, int)",
+      "fn_dec_pos": [
+        [
+          190,
+          22
+        ],
+        [
+          190,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bin2mem",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "stash_registers (void)",
+      "fn_dec_pos": [
+        [
+          191,
+          12
+        ],
+        [
+          191,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "stash_registers",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "restore_registers (void)",
+      "fn_dec_pos": [
+        [
+          192,
+          12
+        ],
+        [
+          192,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "restore_registers",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "prepare_to_step (int)",
+      "fn_dec_pos": [
+        [
+          193,
+          11
+        ],
+        [
+          193,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "prepare_to_step",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "finish_from_step (void)",
+      "fn_dec_pos": [
+        [
+          194,
+          11
+        ],
+        [
+          194,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "finish_from_step",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "crc32 (unsigned char *, int, unsigned long)",
+      "fn_dec_pos": [
+        [
+          195,
+          21
+        ],
+        [
+          195,
+          64
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "crc32",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "gdb_error (char *, char *)",
+      "fn_dec_pos": [
+        [
+          197,
+          12
+        ],
+        [
+          197,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdb_error",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "gdb_putchar (int)",
+      "fn_dec_pos": [
+        [
+          198,
+          11
+        ],
+        [
+          198,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdb_write",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "gdb_puts (char *)",
+      "fn_dec_pos": [
+        [
+          198,
+          30
+        ],
+        [
+          198,
+          47
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdb_write",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "gdb_write (char *, int)",
+      "fn_dec_pos": [
+        [
+          198,
+          49
+        ],
+        [
+          198,
+          72
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdb_write",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "strcpy (unsigned char *, const unsigned char *)",
+      "fn_dec_pos": [
+        [
+          200,
+          22
+        ],
+        [
+          200,
+          69
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "strcpy",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "strlen (const unsigned char *)",
+      "fn_dec_pos": [
+        [
+          201,
+          11
+        ],
+        [
+          201,
+          41
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "strlen",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "getpacket (void)",
+      "fn_dec_pos": [
+        [
+          587,
+          0
+        ],
+        [
+          587,
+          16
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "getpacket",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*volatile mem_fault_routine) ()",
+      "fn_dec_pos": [
+        [
+          691,
+          12
+        ],
+        [
+          691,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "mem2hex (unsigned char *mem, unsigned char *buf, int count, int may_fault)",
+      "fn_dec_pos": [
+        [
+          758,
+          0
+        ],
+        [
+          758,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mem2hex",
+        "parameters": {
+          "mem": "unsigned char",
+          "buf": "unsigned char",
+          "count": "int",
+          "may_fault": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "hex2mem (unsigned char *buf, unsigned char *mem, int count, int may_fault)",
+      "fn_dec_pos": [
+        [
+          783,
+          0
+        ],
+        [
+          783,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hex2mem",
+        "parameters": {
+          "buf": "unsigned char",
+          "mem": "unsigned char",
+          "count": "int",
+          "may_fault": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "bin2mem (unsigned char *buf, unsigned char *mem, int count, int may_fault)",
+      "fn_dec_pos": [
+        [
+          809,
+          0
+        ],
+        [
+          809,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bin2mem",
+        "parameters": {
+          "buf": "unsigned char",
+          "mem": "unsigned char",
+          "count": "int",
+          "may_fault": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "_catchException0 ()",
+      "fn_dec_pos": [
+        [
+          1394,
+          5
+        ],
+        [
+          1394,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException0",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException1 ()",
+      "fn_dec_pos": [
+        [
+          1404,
+          5
+        ],
+        [
+          1404,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException1",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException2 ()",
+      "fn_dec_pos": [
+        [
+          1424,
+          5
+        ],
+        [
+          1424,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException2",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException3 ()",
+      "fn_dec_pos": [
+        [
+          1434,
+          5
+        ],
+        [
+          1434,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException3",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException4 ()",
+      "fn_dec_pos": [
+        [
+          1444,
+          5
+        ],
+        [
+          1444,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException4",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException5 ()",
+      "fn_dec_pos": [
+        [
+          1454,
+          5
+        ],
+        [
+          1454,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException5",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException6 ()",
+      "fn_dec_pos": [
+        [
+          1464,
+          5
+        ],
+        [
+          1464,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException6",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException7 ()",
+      "fn_dec_pos": [
+        [
+          1474,
+          5
+        ],
+        [
+          1474,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException7",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException8 ()",
+      "fn_dec_pos": [
+        [
+          1484,
+          5
+        ],
+        [
+          1484,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException8",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException9 ()",
+      "fn_dec_pos": [
+        [
+          1494,
+          5
+        ],
+        [
+          1494,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException9",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException10 ()",
+      "fn_dec_pos": [
+        [
+          1504,
+          5
+        ],
+        [
+          1504,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException10",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException11 ()",
+      "fn_dec_pos": [
+        [
+          1514,
+          5
+        ],
+        [
+          1514,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException11",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException12 ()",
+      "fn_dec_pos": [
+        [
+          1524,
+          5
+        ],
+        [
+          1524,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException12",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException13 ()",
+      "fn_dec_pos": [
+        [
+          1534,
+          5
+        ],
+        [
+          1534,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException13",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException14 ()",
+      "fn_dec_pos": [
+        [
+          1544,
+          5
+        ],
+        [
+          1544,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException14",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException15 ()",
+      "fn_dec_pos": [
+        [
+          1554,
+          5
+        ],
+        [
+          1554,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException15",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException16 ()",
+      "fn_dec_pos": [
+        [
+          1564,
+          5
+        ],
+        [
+          1564,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException16",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_catchException17 ()",
+      "fn_dec_pos": [
+        [
+          1574,
+          5
+        ],
+        [
+          1574,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_catchException17",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "strcpy (unsigned char *dest, const unsigned char *src)",
+      "fn_dec_pos": [
+        [
+          1735,
+          0
+        ],
+        [
+          1735,
+          54
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "strcpy",
+        "parameters": {
+          "dest": "unsigned char",
+          "src": "unsigned char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct STEPPING_CONTEXT\n{\n  int stepping;\t\t\t/* true when we've started a single-step */\n  unsigned long target_addr;\t/* the instr we're trying to execute */\n  unsigned long target_size;\t/* the size of the target instr */\n  unsigned long noop_addr;\t/* where we've inserted a no-op, if any */\n  unsigned long trap1_addr;\t/* the trap following the target instr */\n  unsigned long trap2_addr;\t/* the trap at a branch destination, if any */\n  unsigned short noop_save;\t/* instruction overwritten by our no-op */\n  unsigned short trap1_save;\t/* instruction overwritten by trap1 */\n  unsigned short trap2_save;\t/* instruction overwritten by trap2 */\n  unsigned short continue_p;\t/* true if NOT returning to gdb after step */\n}",
+      {
+        "stepping": "int",
+        "target_addr": "unsigned long",
+        "target_size": "unsigned long",
+        "noop_addr": "unsigned long",
+        "trap1_addr": "unsigned long",
+        "trap2_addr": "unsigned long",
+        "noop_save": "unsigned short",
+        "trap1_save": "unsigned short",
+        "trap2_save": "unsigned short",
+        "continue_p": "unsigned short"
+      },
+      "STEPPING_CONTEXT",
+      [
+        1130,
+        7
+      ],
+      [
+        1142,
+        1
+      ]
+    ],
+    [
+      "struct PSWreg\n{\t\t\t\t/* separate out the bit flags in the PSW register */\n  int pad1:16;\n  int bsm:1;\n  int bie:1;\n  int pad2:5;\n  int bc:1;\n  int sm:1;\n  int ie:1;\n  int pad3:5;\n  int c:1;\n}",
+      {
+        "pad1": "int",
+        "bsm": "int",
+        "bie": "int",
+        "pad2": "int",
+        "bc": "int",
+        "sm": "int",
+        "ie": "int",
+        "pad3": "int",
+        "c": "int"
+      },
+      "PSWreg",
+      [
+        1247,
+        0
+      ],
+      [
+        1258,
+        1
+      ]
+    ],
+    [
+      "struct STEPPING_CONTEXT\n{\n  int stepping;\t\t\t/* true when we've started a single-step */\n  unsigned long target_addr;\t/* the instr we're trying to execute */\n  unsigned long target_size;\t/* the size of the target instr */\n  unsigned long noop_addr;\t/* where we've inserted a no-op, if any */\n  unsigned long trap1_addr;\t/* the trap following the target instr */\n  unsigned long trap2_addr;\t/* the trap at a branch destination, if any */\n  unsigned short noop_save;\t/* instruction overwritten by our no-op */\n  unsigned short trap1_save;\t/* instruction overwritten by trap1 */\n  unsigned short trap2_save;\t/* instruction overwritten by trap2 */\n  unsigned short continue_p;\t/* true if NOT returning to gdb after step */\n}",
+      {
+        "stepping": "int",
+        "target_addr": "unsigned long",
+        "target_size": "unsigned long",
+        "noop_addr": "unsigned long",
+        "trap1_addr": "unsigned long",
+        "trap2_addr": "unsigned long",
+        "noop_save": "unsigned short",
+        "trap1_save": "unsigned short",
+        "trap2_save": "unsigned short",
+        "continue_p": "unsigned short"
+      },
+      "STEPPING_CONTEXT",
+      [
+        1130,
+        7
+      ],
+      [
+        1142,
+        1
+      ]
+    ],
+    [
+      "struct PSWreg\n{\t\t\t\t/* separate out the bit flags in the PSW register */\n  int pad1:16;\n  int bsm:1;\n  int bie:1;\n  int pad2:5;\n  int bc:1;\n  int sm:1;\n  int ie:1;\n  int pad3:5;\n  int c:1;\n}",
+      {
+        "pad1": "int",
+        "bsm": "int",
+        "bie": "int",
+        "pad2": "int",
+        "bc": "int",
+        "sm": "int",
+        "ie": "int",
+        "pad3": "int",
+        "c": "int"
+      },
+      "PSWreg",
+      [
+        1247,
+        0
+      ],
+      [
+        1258,
+        1
+      ]
+    ],
+    [
+      "struct PSWreg",
+      {},
+      "",
+      [
+        1316,
+        9
+      ],
+      [
+        1316,
+        22
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"syscall.h\"\t\t/* for SYS_exit, SYS_write etc. */\n",
+      [
+        170,
+        0
+      ],
+      [
+        171,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum regnames\n{ R0, R1, R2, R3, R4, R5, R6, R7,\n  R8, R9, R10, R11, R12, R13, R14, R15,\n  PSW, CBR, SPI, SPU, BPC, PC, ACCL, ACCH\n}",
+      {
+        "R0": "",
+        "R1": "",
+        "R2": "",
+        "R3": "",
+        "R4": "",
+        "R5": "",
+        "R6": "",
+        "R7": "",
+        "R8": "",
+        "R9": "",
+        "R10": "",
+        "R11": "",
+        "R12": "",
+        "R13": "",
+        "R14": "",
+        "R15": "",
+        "PSW": "",
+        "CBR": "",
+        "SPI": "",
+        "SPU": "",
+        "BPC": "",
+        "PC": "",
+        "ACCL": "",
+        "ACCH": ""
+      },
+      "regnames",
+      [
+        119,
+        0
+      ],
+      [
+        123,
+        1
+      ]
+    ],
+    [
+      "enum SYS_calls\n{\n  SYS_null,\n  SYS_exit,\n  SYS_open,\n  SYS_close,\n  SYS_read,\n  SYS_write,\n  SYS_lseek,\n  SYS_unlink,\n  SYS_getpid,\n  SYS_kill,\n  SYS_fstat,\n  SYS_sbrk,\n  SYS_fork,\n  SYS_execve,\n  SYS_wait4,\n  SYS_link,\n  SYS_chdir,\n  SYS_stat,\n  SYS_utime,\n  SYS_chown,\n  SYS_chmod,\n  SYS_time,\n  SYS_pipe\n}",
+      {
+        "SYS_null": "",
+        "SYS_exit": "",
+        "SYS_open": "",
+        "SYS_close": "",
+        "SYS_read": "",
+        "SYS_write": "",
+        "SYS_lseek": "",
+        "SYS_unlink": "",
+        "SYS_getpid": "",
+        "SYS_kill": "",
+        "SYS_fstat": "",
+        "SYS_sbrk": "",
+        "SYS_fork": "",
+        "SYS_execve": "",
+        "SYS_wait4": "",
+        "SYS_link": "",
+        "SYS_chdir": "",
+        "SYS_stat": "",
+        "SYS_utime": "",
+        "SYS_chown": "",
+        "SYS_chmod": "",
+        "SYS_time": "",
+        "SYS_pipe": ""
+      },
+      "SYS_calls",
+      [
+        125,
+        0
+      ],
+      [
+        150,
+        1
+      ]
+    ]
+  ]
+}

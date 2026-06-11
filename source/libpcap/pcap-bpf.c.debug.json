@@ -1,0 +1,2149 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\npcap_getnonblock_bpf(pcap_t *p)\n{\n#ifdef HAVE_ZEROCOPY_BPF\n\tstruct pcap_bpf *pb = p->priv;\n\n\tif (pb->zerocopy)\n\t\treturn (pb->nonblock);\n#endif\n\treturn (pcap_getnonblock_fd(p));\n}",
+      "fn_code_pos": [
+        [
+          257,
+          0
+        ],
+        [
+          267,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_getnonblock_bpf",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_setnonblock_bpf(pcap_t *p, int nonblock)\n{\n#ifdef HAVE_ZEROCOPY_BPF\n\tstruct pcap_bpf *pb = p->priv;\n\n\tif (pb->zerocopy) {\n\t\tpb->nonblock = nonblock;\n\t\treturn (0);\n\t}\n#endif\n\treturn (pcap_setnonblock_fd(p, nonblock));\n}",
+      "fn_code_pos": [
+        [
+          269,
+          0
+        ],
+        [
+          281,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setnonblock_bpf",
+        "parameters": {
+          "p": "pcap_t",
+          "nonblock": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_next_zbuf_shm(pcap_t *p, int *cc)\n{\n\tstruct pcap_bpf *pb = p->priv;\n\tstruct bpf_zbuf_header *bzh;\n\n\tif (pb->zbuffer == pb->zbuf2 || pb->zbuffer == NULL) {\n\t\tbzh = (struct bpf_zbuf_header *)pb->zbuf1;\n\t\tif (bzh->bzh_user_gen !=\n\t\t    atomic_load_acq_int(&bzh->bzh_kernel_gen)) {\n\t\t\tpb->bzh = bzh;\n\t\t\tpb->zbuffer = (u_char *)pb->zbuf1;\n\t\t\tp->buffer = pb->zbuffer + sizeof(*bzh);\n\t\t\t*cc = bzh->bzh_kernel_len;\n\t\t\treturn (1);\n\t\t}\n\t} else if (pb->zbuffer == pb->zbuf1) {\n\t\tbzh = (struct bpf_zbuf_header *)pb->zbuf2;\n\t\tif (bzh->bzh_user_gen !=\n\t\t    atomic_load_acq_int(&bzh->bzh_kernel_gen)) {\n\t\t\tpb->bzh = bzh;\n\t\t\tpb->zbuffer = (u_char *)pb->zbuf2;\n  \t\t\tp->buffer = pb->zbuffer + sizeof(*bzh);\n\t\t\t*cc = bzh->bzh_kernel_len;\n\t\t\treturn (1);\n\t\t}\n\t}\n\t*cc = 0;\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          293,
+          0
+        ],
+        [
+          322,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_next_zbuf_shm",
+        "parameters": {
+          "p": "pcap_t",
+          "cc": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_next_zbuf(pcap_t *p, int *cc)\n{\n\tstruct pcap_bpf *pb = p->priv;\n\tstruct bpf_zbuf bz;\n\tstruct timeval tv;\n\tstruct timespec cur;\n\tfd_set r_set;\n\tint data, r;\n\tint expire, tmout;\n\n#define TSTOMILLI(ts) (((ts)->tv_sec * 1000) + ((ts)->tv_nsec / 1000000))\n\t/*\n\t * Start out by seeing whether anything is waiting by checking the\n\t * next shared memory buffer for data.\n\t */\n\tdata = pcap_next_zbuf_shm(p, cc);\n\tif (data)\n\t\treturn (data);\n\t/*\n\t * If a previous sleep was interrupted due to signal delivery, make\n\t * sure that the timeout gets adjusted accordingly.  This requires\n\t * that we analyze when the timeout should be been expired, and\n\t * subtract the current time from that.  If after this operation,\n\t * our timeout is less then or equal to zero, handle it like a\n\t * regular timeout.\n\t */\n\ttmout = p->opt.timeout;\n\tif (tmout)\n\t\t(void) clock_gettime(CLOCK_MONOTONIC, &cur);\n\tif (pb->interrupted && p->opt.timeout) {\n\t\texpire = TSTOMILLI(&pb->firstsel) + p->opt.timeout;\n\t\ttmout = expire - TSTOMILLI(&cur);\n#undef TSTOMILLI\n\t\tif (tmout <= 0) {\n\t\t\tpb->interrupted = 0;\n\t\t\tdata = pcap_next_zbuf_shm(p, cc);\n\t\t\tif (data)\n\t\t\t\treturn (data);\n\t\t\tif (ioctl(p->fd, BIOCROTZBUF, &bz) < 0) {\n\t\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno, \"BIOCROTZBUF\");\n\t\t\t\treturn (PCAP_ERROR);\n\t\t\t}\n\t\t\treturn (pcap_next_zbuf_shm(p, cc));\n\t\t}\n\t}\n\t/*\n\t * No data in the buffer, so must use select() to wait for data or\n\t * the next timeout.  Note that we only call select if the handle\n\t * is in blocking mode.\n\t */\n\tif (!pb->nonblock) {\n\t\tFD_ZERO(&r_set);\n\t\tFD_SET(p->fd, &r_set);\n\t\tif (tmout != 0) {\n\t\t\ttv.tv_sec = tmout / 1000;\n\t\t\ttv.tv_usec = (tmout * 1000) % 1000000;\n\t\t}\n\t\tr = select(p->fd + 1, &r_set, NULL, NULL,\n\t\t    p->opt.timeout != 0 ? &tv : NULL);\n\t\tif (r < 0 && errno == EINTR) {\n\t\t\tif (!pb->interrupted && p->opt.timeout) {\n\t\t\t\tpb->interrupted = 1;\n\t\t\t\tpb->firstsel = cur;\n\t\t\t}\n\t\t\treturn (0);\n\t\t} else if (r < 0) {\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"select\");\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\t}\n\tpb->interrupted = 0;\n\t/*\n\t * Check again for data, which may exist now that we've either been\n\t * woken up as a result of data or timed out.  Try the \"there's data\"\n\t * case first since it doesn't require a system call.\n\t */\n\tdata = pcap_next_zbuf_shm(p, cc);\n\tif (data)\n\t\treturn (data);\n\t/*\n\t * Try forcing a buffer rotation to dislodge timed out or immediate\n\t * data.\n\t */\n\tif (ioctl(p->fd, BIOCROTZBUF, &bz) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"BIOCROTZBUF\");\n\t\treturn (PCAP_ERROR);\n\t}\n\treturn (pcap_next_zbuf_shm(p, cc));\n}",
+      "fn_code_pos": [
+        [
+          331,
+          0
+        ],
+        [
+          423,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_next_zbuf",
+        "parameters": {
+          "p": "pcap_t",
+          "cc": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_ack_zbuf(pcap_t *p)\n{\n\tstruct pcap_bpf *pb = p->priv;\n\n\tatomic_store_rel_int(&pb->bzh->bzh_user_gen,\n\t    pb->bzh->bzh_kernel_gen);\n\tpb->bzh = NULL;\n\tp->buffer = NULL;\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          429,
+          0
+        ],
+        [
+          439,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_ack_zbuf",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\npcap_create_interface(const char *device _U_, char *ebuf)\n{\n\tpcap_t *p;\n\n\tp = pcap_create_common(ebuf, sizeof (struct pcap_bpf));\n\tif (p == NULL)\n\t\treturn (NULL);\n\n\tp->activate_op = pcap_activate_bpf;\n\tp->can_set_rfmon_op = pcap_can_set_rfmon_bpf;\n#ifdef BIOCSTSTAMP\n\t/*\n\t * We claim that we support microsecond and nanosecond time\n\t * stamps.\n\t */\n\tp->tstamp_precision_count = 2;\n\tp->tstamp_precision_list = malloc(2 * sizeof(u_int));\n\tif (p->tstamp_precision_list == NULL) {\n\t\tpcap_fmt_errmsg_for_errno(ebuf, PCAP_ERRBUF_SIZE, errno,\n\t\t    \"malloc\");\n\t\tfree(p);\n\t\treturn (NULL);\n\t}\n\tp->tstamp_precision_list[0] = PCAP_TSTAMP_PRECISION_MICRO;\n\tp->tstamp_precision_list[1] = PCAP_TSTAMP_PRECISION_NANO;\n#endif /* BIOCSTSTAMP */\n\treturn (p);\n}",
+      "fn_code_pos": [
+        [
+          442,
+          0
+        ],
+        [
+          470,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "static int\nbpf_open(char *errbuf)\n{\n\tint fd = -1;\n\tstatic const char cloning_device[] = \"/dev/bpf\";\n\tint n = 0;\n\tchar device[sizeof \"/dev/bpf0000000000\"];\n\tstatic int no_cloning_bpf = 0;\n\n#ifdef _AIX\n\t/*\n\t * Load the bpf driver, if it isn't already loaded,\n\t * and create the BPF device entries, if they don't\n\t * already exist.\n\t */\n\tif (bpf_load(errbuf) == PCAP_ERROR)\n\t\treturn (PCAP_ERROR);\n#endif\n\n\t/*\n\t * First, unless we've already tried opening /dev/bpf and\n\t * gotten ENOENT, try opening /dev/bpf.\n\t * If it fails with ENOENT, remember that, so we don't try\n\t * again, and try /dev/bpfN.\n\t */\n\tif (!no_cloning_bpf &&\n\t    (fd = open(cloning_device, O_RDWR)) == -1 &&\n\t    ((errno != EACCES && errno != ENOENT) ||\n\t     (fd = open(cloning_device, O_RDONLY)) == -1)) {\n\t\tif (errno != ENOENT) {\n\t\t\tif (errno == EACCES)\n\t\t\t\tfd = PCAP_ERROR_PERM_DENIED;\n\t\t\telse\n\t\t\t\tfd = PCAP_ERROR;\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"(cannot open device) %s\", cloning_device);\n\t\t\treturn (fd);\n\t\t}\n\t\tno_cloning_bpf = 1;\n\t}\n\n\tif (no_cloning_bpf) {\n\t\t/*\n\t\t * We don't have /dev/bpf.\n\t\t * Go through all the /dev/bpfN minors and find one\n\t\t * that isn't in use.\n\t\t */\n\t\tdo {\n\t\t\t(void)pcap_snprintf(device, sizeof(device), \"/dev/bpf%d\", n++);\n\t\t\t/*\n\t\t\t * Initially try a read/write open (to allow the inject\n\t\t\t * method to work).  If that fails due to permission\n\t\t\t * issues, fall back to read-only.  This allows a\n\t\t\t * non-root user to be granted specific access to pcap\n\t\t\t * capabilities via file permissions.\n\t\t\t *\n\t\t\t * XXX - we should have an API that has a flag that\n\t\t\t * controls whether to open read-only or read-write,\n\t\t\t * so that denial of permission to send (or inability\n\t\t\t * to send, if sending packets isn't supported on\n\t\t\t * the device in question) can be indicated at open\n\t\t\t * time.\n\t\t\t */\n\t\t\tfd = open(device, O_RDWR);\n\t\t\tif (fd == -1 && errno == EACCES)\n\t\t\t\tfd = open(device, O_RDONLY);\n\t\t} while (fd < 0 && errno == EBUSY);\n\t}\n\n\t/*\n\t * XXX better message for all minors used\n\t */\n\tif (fd < 0) {\n\t\tswitch (errno) {\n\n\t\tcase ENOENT:\n\t\t\tfd = PCAP_ERROR;\n\t\t\tif (n == 1) {\n\t\t\t\t/*\n\t\t\t\t * /dev/bpf0 doesn't exist, which\n\t\t\t\t * means we probably have no BPF\n\t\t\t\t * devices.\n\t\t\t\t */\n\t\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"(there are no BPF devices)\");\n\t\t\t} else {\n\t\t\t\t/*\n\t\t\t\t * We got EBUSY on at least one\n\t\t\t\t * BPF device, so we have BPF\n\t\t\t\t * devices, but all the ones\n\t\t\t\t * that exist are busy.\n\t\t\t\t */\n\t\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"(all BPF devices are busy)\");\n\t\t\t}\n\t\t\tbreak;\n\n\t\tcase EACCES:\n\t\t\t/*\n\t\t\t * Got EACCES on the last device we tried,\n\t\t\t * and EBUSY on all devices before that,\n\t\t\t * if any.\n\t\t\t */\n\t\t\tfd = PCAP_ERROR_PERM_DENIED;\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"(cannot open BPF device) %s\", device);\n\t\t\tbreak;\n\n\t\tdefault:\n\t\t\t/*\n\t\t\t * Some other problem.\n\t\t\t */\n\t\t\tfd = PCAP_ERROR;\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"(cannot open BPF device) %s\", device);\n\t\t\tbreak;\n\t\t}\n\t}\n\n\treturn (fd);\n}",
+      "fn_code_pos": [
+        [
+          476,
+          0
+        ],
+        [
+          596,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bpf_open",
+        "parameters": {
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbpf_open_and_bind(const char *name, char *errbuf)\n{\n\tint fd;\n\tstruct ifreq ifr;\n\n\t/*\n\t * First, open a BPF device.\n\t */\n\tfd = bpf_open(errbuf);\n\tif (fd < 0)\n\t\treturn (fd);\t/* fd is the appropriate error code */\n\n\t/*\n\t * Now bind to the device.\n\t */\n\t(void)strncpy(ifr.ifr_name, name, sizeof(ifr.ifr_name));\n\tif (ioctl(fd, BIOCSETIF, (caddr_t)&ifr) < 0) {\n\t\tswitch (errno) {\n\n\t\tcase ENXIO:\n\t\t\t/*\n\t\t\t * There's no such device.\n\t\t\t */\n\t\t\tclose(fd);\n\t\t\treturn (PCAP_ERROR_NO_SUCH_DEVICE);\n\n\t\tcase ENETDOWN:\n\t\t\t/*\n\t\t\t * Return a \"network down\" indication, so that\n\t\t\t * the application can report that rather than\n\t\t\t * saying we had a mysterious failure and\n\t\t\t * suggest that they report a problem to the\n\t\t\t * libpcap developers.\n\t\t\t */\n\t\t\tclose(fd);\n\t\t\treturn (PCAP_ERROR_IFACE_NOT_UP);\n\n\t\tdefault:\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"BIOCSETIF: %s\", name);\n\t\t\tclose(fd);\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\t}\n\n\t/*\n\t * Success.\n\t */\n\treturn (fd);\n}",
+      "fn_code_pos": [
+        [
+          606,
+          0
+        ],
+        [
+          656,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bpf_open_and_bind",
+        "parameters": {
+          "name": "char",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_dlt_list(int fd, int v, struct bpf_dltlist *bdlp, char *ebuf)\n{\n\tmemset(bdlp, 0, sizeof(*bdlp));\n\tif (ioctl(fd, BIOCGDLTLIST, (caddr_t)bdlp) == 0) {\n\t\tu_int i;\n\t\tint is_ethernet;\n\n\t\tbdlp->bfl_list = (u_int *) malloc(sizeof(u_int) * (bdlp->bfl_len + 1));\n\t\tif (bdlp->bfl_list == NULL) {\n\t\t\tpcap_fmt_errmsg_for_errno(ebuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"malloc\");\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\n\t\tif (ioctl(fd, BIOCGDLTLIST, (caddr_t)bdlp) < 0) {\n\t\t\tpcap_fmt_errmsg_for_errno(ebuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"BIOCGDLTLIST\");\n\t\t\tfree(bdlp->bfl_list);\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\n\t\t/*\n\t\t * OK, for real Ethernet devices, add DLT_DOCSIS to the\n\t\t * list, so that an application can let you choose it,\n\t\t * in case you're capturing DOCSIS traffic that a Cisco\n\t\t * Cable Modem Termination System is putting out onto\n\t\t * an Ethernet (it doesn't put an Ethernet header onto\n\t\t * the wire, it puts raw DOCSIS frames out on the wire\n\t\t * inside the low-level Ethernet framing).\n\t\t *\n\t\t * A \"real Ethernet device\" is defined here as a device\n\t\t * that has a link-layer type of DLT_EN10MB and that has\n\t\t * no alternate link-layer types; that's done to exclude\n\t\t * 802.11 interfaces (which might or might not be the\n\t\t * right thing to do, but I suspect it is - Ethernet <->\n\t\t * 802.11 bridges would probably badly mishandle frames\n\t\t * that don't have Ethernet headers).\n\t\t *\n\t\t * On Solaris with BPF, Ethernet devices also offer\n\t\t * DLT_IPNET, so we, if DLT_IPNET is defined, we don't\n\t\t * treat it as an indication that the device isn't an\n\t\t * Ethernet.\n\t\t */\n\t\tif (v == DLT_EN10MB) {\n\t\t\tis_ethernet = 1;\n\t\t\tfor (i = 0; i < bdlp->bfl_len; i++) {\n\t\t\t\tif (bdlp->bfl_list[i] != DLT_EN10MB\n#ifdef DLT_IPNET\n\t\t\t\t    && bdlp->bfl_list[i] != DLT_IPNET\n#endif\n\t\t\t\t    ) {\n\t\t\t\t\tis_ethernet = 0;\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\t\t\t}\n\t\t\tif (is_ethernet) {\n\t\t\t\t/*\n\t\t\t\t * We reserved one more slot at the end of\n\t\t\t\t * the list.\n\t\t\t\t */\n\t\t\t\tbdlp->bfl_list[bdlp->bfl_len] = DLT_DOCSIS;\n\t\t\t\tbdlp->bfl_len++;\n\t\t\t}\n\t\t}\n\t} else {\n\t\t/*\n\t\t * EINVAL just means \"we don't support this ioctl on\n\t\t * this device\"; don't treat it as an error.\n\t\t */\n\t\tif (errno != EINVAL) {\n\t\t\tpcap_fmt_errmsg_for_errno(ebuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"BIOCGDLTLIST\");\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\t}\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          659,
+          0
+        ],
+        [
+          736,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_dlt_list",
+        "parameters": {
+          "fd": "int",
+          "v": "int",
+          "bdlp": "struct bpf_dltlist",
+          "ebuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_can_set_rfmon_bpf(pcap_t *p)\n{\n#if defined(__APPLE__)\n\tstruct utsname osinfo;\n\tstruct ifreq ifr;\n\tint fd;\n#ifdef BIOCGDLTLIST\n\tstruct bpf_dltlist bdl;\n#endif\n\n\t/*\n\t * The joys of monitor mode on Mac OS X/OS X/macOS.\n\t *\n\t * Prior to 10.4, it's not supported at all.\n\t *\n\t * In 10.4, if adapter enN supports monitor mode, there's a\n\t * wltN adapter corresponding to it; you open it, instead of\n\t * enN, to get monitor mode.  You get whatever link-layer\n\t * headers it supplies.\n\t *\n\t * In 10.5, and, we assume, later releases, if adapter enN\n\t * supports monitor mode, it offers, among its selectable\n\t * DLT_ values, values that let you get the 802.11 header;\n\t * selecting one of those values puts the adapter into monitor\n\t * mode (i.e., you can't get 802.11 headers except in monitor\n\t * mode, and you can't get Ethernet headers in monitor mode).\n\t */\n\tif (uname(&osinfo) == -1) {\n\t\t/*\n\t\t * Can't get the OS version; just say \"no\".\n\t\t */\n\t\treturn (0);\n\t}\n\t/*\n\t * We assume osinfo.sysname is \"Darwin\", because\n\t * __APPLE__ is defined.  We just check the version.\n\t */\n\tif (osinfo.release[0] < '8' && osinfo.release[1] == '.') {\n\t\t/*\n\t\t * 10.3 (Darwin 7.x) or earlier.\n\t\t * Monitor mode not supported.\n\t\t */\n\t\treturn (0);\n\t}\n\tif (osinfo.release[0] == '8' && osinfo.release[1] == '.') {\n\t\t/*\n\t\t * 10.4 (Darwin 8.x).  s/en/wlt/, and check\n\t\t * whether the device exists.\n\t\t */\n\t\tif (strncmp(p->opt.device, \"en\", 2) != 0) {\n\t\t\t/*\n\t\t\t * Not an enN device; no monitor mode.\n\t\t\t */\n\t\t\treturn (0);\n\t\t}\n\t\tfd = socket(AF_INET, SOCK_DGRAM, 0);\n\t\tif (fd == -1) {\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"socket\");\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\t\tstrlcpy(ifr.ifr_name, \"wlt\", sizeof(ifr.ifr_name));\n\t\tstrlcat(ifr.ifr_name, p->opt.device + 2, sizeof(ifr.ifr_name));\n\t\tif (ioctl(fd, SIOCGIFFLAGS, (char *)&ifr) < 0) {\n\t\t\t/*\n\t\t\t * No such device?\n\t\t\t */\n\t\t\tclose(fd);\n\t\t\treturn (0);\n\t\t}\n\t\tclose(fd);\n\t\treturn (1);\n\t}\n\n#ifdef BIOCGDLTLIST\n\t/*\n\t * Everything else is 10.5 or later; for those,\n\t * we just open the enN device, and check whether\n\t * we have any 802.11 devices.\n\t *\n\t * First, open a BPF device.\n\t */\n\tfd = bpf_open(p->errbuf);\n\tif (fd < 0)\n\t\treturn (fd);\t/* fd is the appropriate error code */\n\n\t/*\n\t * Now bind to the device.\n\t */\n\t(void)strncpy(ifr.ifr_name, p->opt.device, sizeof(ifr.ifr_name));\n\tif (ioctl(fd, BIOCSETIF, (caddr_t)&ifr) < 0) {\n\t\tswitch (errno) {\n\n\t\tcase ENXIO:\n\t\t\t/*\n\t\t\t * There's no such device.\n\t\t\t */\n\t\t\tclose(fd);\n\t\t\treturn (PCAP_ERROR_NO_SUCH_DEVICE);\n\n\t\tcase ENETDOWN:\n\t\t\t/*\n\t\t\t * Return a \"network down\" indication, so that\n\t\t\t * the application can report that rather than\n\t\t\t * saying we had a mysterious failure and\n\t\t\t * suggest that they report a problem to the\n\t\t\t * libpcap developers.\n\t\t\t */\n\t\t\tclose(fd);\n\t\t\treturn (PCAP_ERROR_IFACE_NOT_UP);\n\n\t\tdefault:\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"BIOCSETIF: %s\", p->opt.device);\n\t\t\tclose(fd);\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\t}\n\n\t/*\n\t * We know the default link type -- now determine all the DLTs\n\t * this interface supports.  If this fails with EINVAL, it's\n\t * not fatal; we just don't get to use the feature later.\n\t * (We don't care about DLT_DOCSIS, so we pass DLT_NULL\n\t * as the default DLT for this adapter.)\n\t */\n\tif (get_dlt_list(fd, DLT_NULL, &bdl, p->errbuf) == PCAP_ERROR) {\n\t\tclose(fd);\n\t\treturn (PCAP_ERROR);\n\t}\n\tif (find_802_11(&bdl) != -1) {\n\t\t/*\n\t\t * We have an 802.11 DLT, so we can set monitor mode.\n\t\t */\n\t\tfree(bdl.bfl_list);\n\t\tclose(fd);\n\t\treturn (1);\n\t}\n\tfree(bdl.bfl_list);\n\tclose(fd);\n#endif /* BIOCGDLTLIST */\n\treturn (0);\n#elif defined(HAVE_BSD_IEEE80211)\n\tint ret;\n\n\tret = monitor_mode(p, 0);\n\tif (ret == PCAP_ERROR_RFMON_NOTSUP)\n\t\treturn (0);\t/* not an error, just a \"can't do\" */\n\tif (ret == 0)\n\t\treturn (1);\t/* success */\n\treturn (ret);\n#else\n\treturn (0);\n#endif\n}",
+      "fn_code_pos": [
+        [
+          739,
+          0
+        ],
+        [
+          894,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_can_set_rfmon_bpf",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_stats_bpf(pcap_t *p, struct pcap_stat *ps)\n{\n\tstruct bpf_stat s;\n\n\t/*\n\t * \"ps_recv\" counts packets handed to the filter, not packets\n\t * that passed the filter.  This includes packets later dropped\n\t * because we ran out of buffer space.\n\t *\n\t * \"ps_drop\" counts packets dropped inside the BPF device\n\t * because we ran out of buffer space.  It doesn't count\n\t * packets dropped by the interface driver.  It counts\n\t * only packets that passed the filter.\n\t *\n\t * Both statistics include packets not yet read from the kernel\n\t * by libpcap, and thus not yet seen by the application.\n\t */\n\tif (ioctl(p->fd, BIOCGSTATS, (caddr_t)&s) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"BIOCGSTATS\");\n\t\treturn (PCAP_ERROR);\n\t}\n\n\tps->ps_recv = s.bs_recv;\n\tps->ps_drop = s.bs_drop;\n\tps->ps_ifdrop = 0;\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          896,
+          0
+        ],
+        [
+          924,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stats_bpf",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_read_bpf(pcap_t *p, int cnt, pcap_handler callback, u_char *user)\n{\n\tstruct pcap_bpf *pb = p->priv;\n\tint cc;\n\tint n = 0;\n\tregister u_char *bp, *ep;\n\tu_char *datap;\n#ifdef PCAP_FDDIPAD\n\tregister u_int pad;\n#endif\n#ifdef HAVE_ZEROCOPY_BPF\n\tint i;\n#endif\n\n again:\n\t/*\n\t * Has \"pcap_breakloop()\" been called?\n\t */\n\tif (p->break_loop) {\n\t\t/*\n\t\t * Yes - clear the flag that indicates that it\n\t\t * has, and return PCAP_ERROR_BREAK to indicate\n\t\t * that we were told to break out of the loop.\n\t\t */\n\t\tp->break_loop = 0;\n\t\treturn (PCAP_ERROR_BREAK);\n\t}\n\tcc = p->cc;\n\tif (p->cc == 0) {\n\t\t/*\n\t\t * When reading without zero-copy from a file descriptor, we\n\t\t * use a single buffer and return a length of data in the\n\t\t * buffer.  With zero-copy, we update the p->buffer pointer\n\t\t * to point at whatever underlying buffer contains the next\n\t\t * data and update cc to reflect the data found in the\n\t\t * buffer.\n\t\t */\n#ifdef HAVE_ZEROCOPY_BPF\n\t\tif (pb->zerocopy) {\n\t\t\tif (p->buffer != NULL)\n\t\t\t\tpcap_ack_zbuf(p);\n\t\t\ti = pcap_next_zbuf(p, &cc);\n\t\t\tif (i == 0)\n\t\t\t\tgoto again;\n\t\t\tif (i < 0)\n\t\t\t\treturn (PCAP_ERROR);\n\t\t} else\n#endif\n\t\t{\n\t\t\tcc = read(p->fd, p->buffer, p->bufsize);\n\t\t}\n\t\tif (cc < 0) {\n\t\t\t/* Don't choke when we get ptraced */\n\t\t\tswitch (errno) {\n\n\t\t\tcase EINTR:\n\t\t\t\tgoto again;\n\n#ifdef _AIX\n\t\t\tcase EFAULT:\n\t\t\t\t/*\n\t\t\t\t * Sigh.  More AIX wonderfulness.\n\t\t\t\t *\n\t\t\t\t * For some unknown reason the uiomove()\n\t\t\t\t * operation in the bpf kernel extension\n\t\t\t\t * used to copy the buffer into user\n\t\t\t\t * space sometimes returns EFAULT. I have\n\t\t\t\t * no idea why this is the case given that\n\t\t\t\t * a kernel debugger shows the user buffer\n\t\t\t\t * is correct. This problem appears to\n\t\t\t\t * be mostly mitigated by the memset of\n\t\t\t\t * the buffer before it is first used.\n\t\t\t\t * Very strange.... Shaun Clowes\n\t\t\t\t *\n\t\t\t\t * In any case this means that we shouldn't\n\t\t\t\t * treat EFAULT as a fatal error; as we\n\t\t\t\t * don't have an API for returning\n\t\t\t\t * a \"some packets were dropped since\n\t\t\t\t * the last packet you saw\" indication,\n\t\t\t\t * we just ignore EFAULT and keep reading.\n\t\t\t\t */\n\t\t\t\tgoto again;\n#endif\n\n\t\t\tcase EWOULDBLOCK:\n\t\t\t\treturn (0);\n\n\t\t\tcase ENXIO:\n\t\t\t\t/*\n\t\t\t\t * The device on which we're capturing\n\t\t\t\t * went away.\n\t\t\t\t *\n\t\t\t\t * XXX - we should really return\n\t\t\t\t * PCAP_ERROR_IFACE_NOT_UP, but\n\t\t\t\t * pcap_dispatch() etc. aren't\n\t\t\t\t * defined to retur that.\n\t\t\t\t */\n\t\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"The interface went down\");\n\t\t\t\treturn (PCAP_ERROR);\n\n#if defined(sun) && !defined(BSD) && !defined(__svr4__) && !defined(__SVR4)\n\t\t\t/*\n\t\t\t * Due to a SunOS bug, after 2^31 bytes, the kernel\n\t\t\t * file offset overflows and read fails with EINVAL.\n\t\t\t * The lseek() to 0 will fix things.\n\t\t\t */\n\t\t\tcase EINVAL:\n\t\t\t\tif (lseek(p->fd, 0L, SEEK_CUR) +\n\t\t\t\t    p->bufsize < 0) {\n\t\t\t\t\t(void)lseek(p->fd, 0L, SEEK_SET);\n\t\t\t\t\tgoto again;\n\t\t\t\t}\n\t\t\t\t/* fall through */\n#endif\n\t\t\t}\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"read\");\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\t\tbp = (u_char *)p->buffer;\n\t} else\n\t\tbp = p->bp;\n\n\t/*\n\t * Loop through each packet.\n\t */\n#ifdef BIOCSTSTAMP\n#define bhp ((struct bpf_xhdr *)bp)\n#else\n#define bhp ((struct bpf_hdr *)bp)\n#endif\n\tep = bp + cc;\n#ifdef PCAP_FDDIPAD\n\tpad = p->fddipad;\n#endif\n\twhile (bp < ep) {\n\t\tregister u_int caplen, hdrlen;\n\n\t\t/*\n\t\t * Has \"pcap_breakloop()\" been called?\n\t\t * If so, return immediately - if we haven't read any\n\t\t * packets, clear the flag and return PCAP_ERROR_BREAK\n\t\t * to indicate that we were told to break out of the loop,\n\t\t * otherwise leave the flag set, so that the *next* call\n\t\t * will break out of the loop without having read any\n\t\t * packets, and return the number of packets we've\n\t\t * processed so far.\n\t\t */\n\t\tif (p->break_loop) {\n\t\t\tp->bp = bp;\n\t\t\tp->cc = ep - bp;\n\t\t\t/*\n\t\t\t * ep is set based on the return value of read(),\n\t\t\t * but read() from a BPF device doesn't necessarily\n\t\t\t * return a value that's a multiple of the alignment\n\t\t\t * value for BPF_WORDALIGN().  However, whenever we\n\t\t\t * increment bp, we round up the increment value by\n\t\t\t * a value rounded up by BPF_WORDALIGN(), so we\n\t\t\t * could increment bp past ep after processing the\n\t\t\t * last packet in the buffer.\n\t\t\t *\n\t\t\t * We treat ep < bp as an indication that this\n\t\t\t * happened, and just set p->cc to 0.\n\t\t\t */\n\t\t\tif (p->cc < 0)\n\t\t\t\tp->cc = 0;\n\t\t\tif (n == 0) {\n\t\t\t\tp->break_loop = 0;\n\t\t\t\treturn (PCAP_ERROR_BREAK);\n\t\t\t} else\n\t\t\t\treturn (n);\n\t\t}\n\n\t\tcaplen = bhp->bh_caplen;\n\t\thdrlen = bhp->bh_hdrlen;\n\t\tdatap = bp + hdrlen;\n\t\t/*\n\t\t * Short-circuit evaluation: if using BPF filter\n\t\t * in kernel, no need to do it now - we already know\n\t\t * the packet passed the filter.\n\t\t *\n#ifdef PCAP_FDDIPAD\n\t\t * Note: the filter code was generated assuming\n\t\t * that p->fddipad was the amount of padding\n\t\t * before the header, as that's what's required\n\t\t * in the kernel, so we run the filter before\n\t\t * skipping that padding.\n#endif\n\t\t */\n\t\tif (pb->filtering_in_kernel ||\n\t\t    bpf_filter(p->fcode.bf_insns, datap, bhp->bh_datalen, caplen)) {\n\t\t\tstruct pcap_pkthdr pkthdr;\n#ifdef BIOCSTSTAMP\n\t\t\tstruct bintime bt;\n\n\t\t\tbt.sec = bhp->bh_tstamp.bt_sec;\n\t\t\tbt.frac = bhp->bh_tstamp.bt_frac;\n\t\t\tif (p->opt.tstamp_precision == PCAP_TSTAMP_PRECISION_NANO) {\n\t\t\t\tstruct timespec ts;\n\n\t\t\t\tbintime2timespec(&bt, &ts);\n\t\t\t\tpkthdr.ts.tv_sec = ts.tv_sec;\n\t\t\t\tpkthdr.ts.tv_usec = ts.tv_nsec;\n\t\t\t} else {\n\t\t\t\tstruct timeval tv;\n\n\t\t\t\tbintime2timeval(&bt, &tv);\n\t\t\t\tpkthdr.ts.tv_sec = tv.tv_sec;\n\t\t\t\tpkthdr.ts.tv_usec = tv.tv_usec;\n\t\t\t}\n#else\n\t\t\tpkthdr.ts.tv_sec = bhp->bh_tstamp.tv_sec;\n#ifdef _AIX\n\t\t\t/*\n\t\t\t * AIX's BPF returns seconds/nanoseconds time\n\t\t\t * stamps, not seconds/microseconds time stamps.\n\t\t\t */\n\t\t\tpkthdr.ts.tv_usec = bhp->bh_tstamp.tv_usec/1000;\n#else\n\t\t\tpkthdr.ts.tv_usec = bhp->bh_tstamp.tv_usec;\n#endif\n#endif /* BIOCSTSTAMP */\n#ifdef PCAP_FDDIPAD\n\t\t\tif (caplen > pad)\n\t\t\t\tpkthdr.caplen = caplen - pad;\n\t\t\telse\n\t\t\t\tpkthdr.caplen = 0;\n\t\t\tif (bhp->bh_datalen > pad)\n\t\t\t\tpkthdr.len = bhp->bh_datalen - pad;\n\t\t\telse\n\t\t\t\tpkthdr.len = 0;\n\t\t\tdatap += pad;\n#else\n\t\t\tpkthdr.caplen = caplen;\n\t\t\tpkthdr.len = bhp->bh_datalen;\n#endif\n\t\t\t(*callback)(user, &pkthdr, datap);\n\t\t\tbp += BPF_WORDALIGN(caplen + hdrlen);\n\t\t\tif (++n >= cnt && !PACKET_COUNT_IS_UNLIMITED(cnt)) {\n\t\t\t\tp->bp = bp;\n\t\t\t\tp->cc = ep - bp;\n\t\t\t\t/*\n\t\t\t\t * See comment above about p->cc < 0.\n\t\t\t\t */\n\t\t\t\tif (p->cc < 0)\n\t\t\t\t\tp->cc = 0;\n\t\t\t\treturn (n);\n\t\t\t}\n\t\t} else {\n\t\t\t/*\n\t\t\t * Skip this packet.\n\t\t\t */\n\t\t\tbp += BPF_WORDALIGN(caplen + hdrlen);\n\t\t}\n\t}\n#undef bhp\n\tp->cc = 0;\n\treturn (n);\n}",
+      "fn_code_pos": [
+        [
+          926,
+          0
+        ],
+        [
+          1186,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_read_bpf",
+        "parameters": {
+          "p": "pcap_t",
+          "cnt": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_inject_bpf(pcap_t *p, const void *buf, size_t size)\n{\n\tint ret;\n\n\tret = write(p->fd, buf, size);\n#ifdef __APPLE__\n\tif (ret == -1 && errno == EAFNOSUPPORT) {\n\t\t/*\n\t\t * In some versions of macOS, there's a bug wherein setting\n\t\t * the BIOCSHDRCMPLT flag causes writes to fail; see, for\n\t\t * example:\n\t\t *\n\t\t *\thttp://cerberus.sourcefire.com/~jeff/archives/patches/macosx/BIOCSHDRCMPLT-10.3.3.patch\n\t\t *\n\t\t * So, if, on macOS, we get EAFNOSUPPORT from the write, we\n\t\t * assume it's due to that bug, and turn off that flag\n\t\t * and try again.  If we succeed, it either means that\n\t\t * somebody applied the fix from that URL, or other patches\n\t\t * for that bug from\n\t\t *\n\t\t *\thttp://cerberus.sourcefire.com/~jeff/archives/patches/macosx/\n\t\t *\n\t\t * and are running a Darwin kernel with those fixes, or\n\t\t * that Apple fixed the problem in some macOS release.\n\t\t */\n\t\tu_int spoof_eth_src = 0;\n\n\t\tif (ioctl(p->fd, BIOCSHDRCMPLT, &spoof_eth_src) == -1) {\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"send: can't turn off BIOCSHDRCMPLT\");\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\n\t\t/*\n\t\t * Now try the write again.\n\t\t */\n\t\tret = write(p->fd, buf, size);\n\t}\n#endif /* __APPLE__ */\n\tif (ret == -1) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"send\");\n\t\treturn (PCAP_ERROR);\n\t}\n\treturn (ret);\n}",
+      "fn_code_pos": [
+        [
+          1188,
+          0
+        ],
+        [
+          1234,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_inject_bpf",
+        "parameters": {
+          "p": "pcap_t",
+          "buf": "void",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbpf_odminit(char *errbuf)\n{\n\tchar *errstr;\n\n\tif (odm_initialize() == -1) {\n\t\tif (odm_err_msg(odmerrno, &errstr) == -1)\n\t\t\terrstr = \"Unknown error\";\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"bpf_load: odm_initialize failed: %s\",\n\t\t    errstr);\n\t\treturn (PCAP_ERROR);\n\t}\n\n\tif ((odmlockid = odm_lock(\"/etc/objrepos/config_lock\", ODM_WAIT)) == -1) {\n\t\tif (odm_err_msg(odmerrno, &errstr) == -1)\n\t\t\terrstr = \"Unknown error\";\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"bpf_load: odm_lock of /etc/objrepos/config_lock failed: %s\",\n\t\t    errstr);\n\t\t(void)odm_terminate();\n\t\treturn (PCAP_ERROR);\n\t}\n\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          1237,
+          0
+        ],
+        [
+          1262,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bpf_odminit",
+        "parameters": {
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbpf_odmcleanup(char *errbuf)\n{\n\tchar *errstr;\n\n\tif (odm_unlock(odmlockid) == -1) {\n\t\tif (errbuf != NULL) {\n\t\t\tif (odm_err_msg(odmerrno, &errstr) == -1)\n\t\t\t\terrstr = \"Unknown error\";\n\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"bpf_load: odm_unlock failed: %s\",\n\t\t\t    errstr);\n\t\t}\n\t\treturn (PCAP_ERROR);\n\t}\n\n\tif (odm_terminate() == -1) {\n\t\tif (errbuf != NULL) {\n\t\t\tif (odm_err_msg(odmerrno, &errstr) == -1)\n\t\t\t\terrstr = \"Unknown error\";\n\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"bpf_load: odm_terminate failed: %s\",\n\t\t\t    errstr);\n\t\t}\n\t\treturn (PCAP_ERROR);\n\t}\n\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          1264,
+          0
+        ],
+        [
+          1292,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bpf_odmcleanup",
+        "parameters": {
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbpf_load(char *errbuf)\n{\n\tlong major;\n\tint *minors;\n\tint numminors, i, rc;\n\tchar buf[1024];\n\tstruct stat sbuf;\n\tstruct bpf_config cfg_bpf;\n\tstruct cfg_load cfg_ld;\n\tstruct cfg_kmod cfg_km;\n\n\t/*\n\t * This is very very close to what happens in the real implementation\n\t * but I've fixed some (unlikely) bug situations.\n\t */\n\tif (bpfloadedflag)\n\t\treturn (0);\n\n\tif (bpf_odminit(errbuf) == PCAP_ERROR)\n\t\treturn (PCAP_ERROR);\n\n\tmajor = genmajor(BPF_NAME);\n\tif (major == -1) {\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"bpf_load: genmajor failed\");\n\t\t(void)bpf_odmcleanup(NULL);\n\t\treturn (PCAP_ERROR);\n\t}\n\n\tminors = getminor(major, &numminors, BPF_NAME);\n\tif (!minors) {\n\t\tminors = genminor(\"bpf\", major, 0, BPF_MINORS, 1, 1);\n\t\tif (!minors) {\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"bpf_load: genminor failed\");\n\t\t\t(void)bpf_odmcleanup(NULL);\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\t}\n\n\tif (bpf_odmcleanup(errbuf) == PCAP_ERROR)\n\t\treturn (PCAP_ERROR);\n\n\trc = stat(BPF_NODE \"0\", &sbuf);\n\tif (rc == -1 && errno != ENOENT) {\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"bpf_load: can't stat %s\", BPF_NODE \"0\");\n\t\treturn (PCAP_ERROR);\n\t}\n\n\tif (rc == -1 || getmajor(sbuf.st_rdev) != major) {\n\t\tfor (i = 0; i < BPF_MINORS; i++) {\n\t\t\tpcap_snprintf(buf, sizeof(buf), \"%s%d\", BPF_NODE, i);\n\t\t\tunlink(buf);\n\t\t\tif (mknod(buf, S_IRUSR | S_IFCHR, domakedev(major, i)) == -1) {\n\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"bpf_load: can't mknod %s\", buf);\n\t\t\t\treturn (PCAP_ERROR);\n\t\t\t}\n\t\t}\n\t}\n\n\t/* Check if the driver is loaded */\n\tmemset(&cfg_ld, 0x0, sizeof(cfg_ld));\n\tcfg_ld.path = buf;\n\tpcap_snprintf(cfg_ld.path, sizeof(cfg_ld.path), \"%s/%s\", DRIVER_PATH, BPF_NAME);\n\tif ((sysconfig(SYS_QUERYLOAD, (void *)&cfg_ld, sizeof(cfg_ld)) == -1) ||\n\t    (cfg_ld.kmid == 0)) {\n\t\t/* Driver isn't loaded, load it now */\n\t\tif (sysconfig(SYS_SINGLELOAD, (void *)&cfg_ld, sizeof(cfg_ld)) == -1) {\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"bpf_load: could not load driver\");\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\t}\n\n\t/* Configure the driver */\n\tcfg_km.cmd = CFG_INIT;\n\tcfg_km.kmid = cfg_ld.kmid;\n\tcfg_km.mdilen = sizeof(cfg_bpf);\n\tcfg_km.mdiptr = (void *)&cfg_bpf;\n\tfor (i = 0; i < BPF_MINORS; i++) {\n\t\tcfg_bpf.devno = domakedev(major, i);\n\t\tif (sysconfig(SYS_CFGKMOD, (void *)&cfg_km, sizeof(cfg_km)) == -1) {\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"bpf_load: could not configure driver\");\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\t}\n\n\tbpfloadedflag = 1;\n\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          1294,
+          0
+        ],
+        [
+          1389,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bpf_load",
+        "parameters": {
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\npcap_cleanup_bpf(pcap_t *p)\n{\n\tstruct pcap_bpf *pb = p->priv;\n#ifdef HAVE_BSD_IEEE80211\n\tint sock;\n\tstruct ifmediareq req;\n\tstruct ifreq ifr;\n#endif\n\n\tif (pb->must_do_on_close != 0) {\n\t\t/*\n\t\t * There's something we have to do when closing this\n\t\t * pcap_t.\n\t\t */\n#ifdef HAVE_BSD_IEEE80211\n\t\tif (pb->must_do_on_close & MUST_CLEAR_RFMON) {\n\t\t\t/*\n\t\t\t * We put the interface into rfmon mode;\n\t\t\t * take it out of rfmon mode.\n\t\t\t *\n\t\t\t * XXX - if somebody else wants it in rfmon\n\t\t\t * mode, this code cannot know that, so it'll take\n\t\t\t * it out of rfmon mode.\n\t\t\t */\n\t\t\tsock = socket(AF_INET, SOCK_DGRAM, 0);\n\t\t\tif (sock == -1) {\n\t\t\t\tfprintf(stderr,\n\t\t\t\t    \"Can't restore interface flags (socket() failed: %s).\\n\"\n\t\t\t\t    \"Please adjust manually.\\n\",\n\t\t\t\t    strerror(errno));\n\t\t\t} else {\n\t\t\t\tmemset(&req, 0, sizeof(req));\n\t\t\t\tstrncpy(req.ifm_name, pb->device,\n\t\t\t\t    sizeof(req.ifm_name));\n\t\t\t\tif (ioctl(sock, SIOCGIFMEDIA, &req) < 0) {\n\t\t\t\t\tfprintf(stderr,\n\t\t\t\t\t    \"Can't restore interface flags (SIOCGIFMEDIA failed: %s).\\n\"\n\t\t\t\t\t    \"Please adjust manually.\\n\",\n\t\t\t\t\t    strerror(errno));\n\t\t\t\t} else {\n\t\t\t\t\tif (req.ifm_current & IFM_IEEE80211_MONITOR) {\n\t\t\t\t\t\t/*\n\t\t\t\t\t\t * Rfmon mode is currently on;\n\t\t\t\t\t\t * turn it off.\n\t\t\t\t\t\t */\n\t\t\t\t\t\tmemset(&ifr, 0, sizeof(ifr));\n\t\t\t\t\t\t(void)strncpy(ifr.ifr_name,\n\t\t\t\t\t\t    pb->device,\n\t\t\t\t\t\t    sizeof(ifr.ifr_name));\n\t\t\t\t\t\tifr.ifr_media =\n\t\t\t\t\t\t    req.ifm_current & ~IFM_IEEE80211_MONITOR;\n\t\t\t\t\t\tif (ioctl(sock, SIOCSIFMEDIA,\n\t\t\t\t\t\t    &ifr) == -1) {\n\t\t\t\t\t\t\tfprintf(stderr,\n\t\t\t\t\t\t\t    \"Can't restore interface flags (SIOCSIFMEDIA failed: %s).\\n\"\n\t\t\t\t\t\t\t    \"Please adjust manually.\\n\",\n\t\t\t\t\t\t\t    strerror(errno));\n\t\t\t\t\t\t}\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\tclose(sock);\n\t\t\t}\n\t\t}\n#endif /* HAVE_BSD_IEEE80211 */\n\n#if defined(__FreeBSD__) && defined(SIOCIFCREATE2)\n\t\t/*\n\t\t * Attempt to destroy the usbusN interface that we created.\n\t\t */\n\t\tif (pb->must_do_on_close & MUST_DESTROY_USBUS) {\n\t\t\tif (if_nametoindex(pb->device) > 0) {\n\t\t\t\tint s;\n\n\t\t\t\ts = socket(AF_LOCAL, SOCK_DGRAM, 0);\n\t\t\t\tif (s >= 0) {\n\t\t\t\t\tstrlcpy(ifr.ifr_name, pb->device,\n\t\t\t\t\t    sizeof(ifr.ifr_name));\n\t\t\t\t\tioctl(s, SIOCIFDESTROY, &ifr);\n\t\t\t\t\tclose(s);\n\t\t\t\t}\n\t\t\t}\n\t\t}\n#endif /* defined(__FreeBSD__) && defined(SIOCIFCREATE2) */\n\t\t/*\n\t\t * Take this pcap out of the list of pcaps for which we\n\t\t * have to take the interface out of some mode.\n\t\t */\n\t\tpcap_remove_from_pcaps_to_close(p);\n\t\tpb->must_do_on_close = 0;\n\t}\n\n#ifdef HAVE_ZEROCOPY_BPF\n\tif (pb->zerocopy) {\n\t\t/*\n\t\t * Delete the mappings.  Note that p->buffer gets\n\t\t * initialized to one of the mmapped regions in\n\t\t * this case, so do not try and free it directly;\n\t\t * null it out so that pcap_cleanup_live_common()\n\t\t * doesn't try to free it.\n\t\t */\n\t\tif (pb->zbuf1 != MAP_FAILED && pb->zbuf1 != NULL)\n\t\t\t(void) munmap(pb->zbuf1, pb->zbufsize);\n\t\tif (pb->zbuf2 != MAP_FAILED && pb->zbuf2 != NULL)\n\t\t\t(void) munmap(pb->zbuf2, pb->zbufsize);\n\t\tp->buffer = NULL;\n\t}\n#endif\n\tif (pb->device != NULL) {\n\t\tfree(pb->device);\n\t\tpb->device = NULL;\n\t}\n\tpcap_cleanup_live_common(p);\n}",
+      "fn_code_pos": [
+        [
+          1395,
+          0
+        ],
+        [
+          1508,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_cleanup_bpf",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ncheck_setif_failure(pcap_t *p, int error)\n{\n#ifdef __APPLE__\n\tint fd;\n\tstruct ifreq ifr;\n\tint err;\n#endif\n\n\tif (error == ENXIO) {\n\t\t/*\n\t\t * No such device exists.\n\t\t */\n#ifdef __APPLE__\n\t\tif (p->opt.rfmon && strncmp(p->opt.device, \"wlt\", 3) == 0) {\n\t\t\t/*\n\t\t\t * Monitor mode was requested, and we're trying\n\t\t\t * to open a \"wltN\" device.  Assume that this\n\t\t\t * is 10.4 and that we were asked to open an\n\t\t\t * \"enN\" device; if that device exists, return\n\t\t\t * \"monitor mode not supported on the device\".\n\t\t\t */\n\t\t\tfd = socket(AF_INET, SOCK_DGRAM, 0);\n\t\t\tif (fd != -1) {\n\t\t\t\tstrlcpy(ifr.ifr_name, \"en\",\n\t\t\t\t    sizeof(ifr.ifr_name));\n\t\t\t\tstrlcat(ifr.ifr_name, p->opt.device + 3,\n\t\t\t\t    sizeof(ifr.ifr_name));\n\t\t\t\tif (ioctl(fd, SIOCGIFFLAGS, (char *)&ifr) < 0) {\n\t\t\t\t\t/*\n\t\t\t\t\t * We assume this failed because\n\t\t\t\t\t * the underlying device doesn't\n\t\t\t\t\t * exist.\n\t\t\t\t\t */\n\t\t\t\t\terr = PCAP_ERROR_NO_SUCH_DEVICE;\n\t\t\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf,\n\t\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t\t    \"SIOCGIFFLAGS on %s failed\",\n\t\t\t\t\t    ifr.ifr_name);\n\t\t\t\t} else {\n\t\t\t\t\t/*\n\t\t\t\t\t * The underlying \"enN\" device\n\t\t\t\t\t * exists, but there's no\n\t\t\t\t\t * corresponding \"wltN\" device;\n\t\t\t\t\t * that means that the \"enN\"\n\t\t\t\t\t * device doesn't support\n\t\t\t\t\t * monitor mode, probably because\n\t\t\t\t\t * it's an Ethernet device rather\n\t\t\t\t\t * than a wireless device.\n\t\t\t\t\t */\n\t\t\t\t\terr = PCAP_ERROR_RFMON_NOTSUP;\n\t\t\t\t}\n\t\t\t\tclose(fd);\n\t\t\t} else {\n\t\t\t\t/*\n\t\t\t\t * We can't find out whether there's\n\t\t\t\t * an underlying \"enN\" device, so\n\t\t\t\t * just report \"no such device\".\n\t\t\t\t */\n\t\t\t\terr = PCAP_ERROR_NO_SUCH_DEVICE;\n\t\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf,\n\t\t\t\t    errno, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"socket() failed\");\n\t\t\t}\n\t\t\treturn (err);\n\t\t}\n#endif\n\t\t/*\n\t\t * No such device.\n\t\t */\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"BIOCSETIF failed\");\n\t\treturn (PCAP_ERROR_NO_SUCH_DEVICE);\n\t} else if (errno == ENETDOWN) {\n\t\t/*\n\t\t * Return a \"network down\" indication, so that\n\t\t * the application can report that rather than\n\t\t * saying we had a mysterious failure and\n\t\t * suggest that they report a problem to the\n\t\t * libpcap developers.\n\t\t */\n\t\treturn (PCAP_ERROR_IFACE_NOT_UP);\n\t} else {\n\t\t/*\n\t\t * Some other error; fill in the error string, and\n\t\t * return PCAP_ERROR.\n\t\t */\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"BIOCSETIF: %s\", p->opt.device);\n\t\treturn (PCAP_ERROR);\n\t}\n}",
+      "fn_code_pos": [
+        [
+          1510,
+          0
+        ],
+        [
+          1601,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "check_setif_failure",
+        "parameters": {
+          "p": "pcap_t",
+          "error": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ncheck_bpf_bindable(const char *name)\n{\n\tint fd;\n\tchar errbuf[PCAP_ERRBUF_SIZE];\n\n\t/*\n\t * On macOS, we don't do this check if the device name begins\n\t * with \"wlt\"; at least some versions of macOS (actually, it\n\t * was called \"Mac OS X\" then...) offer monitor mode capturing\n\t * by having a separate \"monitor mode\" device for each wireless\n\t * adapter, rather than by implementing the ioctls that\n\t * {Free,Net,Open,DragonFly}BSD provide. Opening that device\n\t * puts the adapter into monitor mode, which, at least for\n\t * some adapters, causes them to deassociate from the network\n\t * with which they're associated.\n\t *\n\t * Instead, we try to open the corresponding \"en\" device (so\n\t * that we don't end up with, for users without sufficient\n\t * privilege to open capture devices, a list of adapters that\n\t * only includes the wlt devices).\n\t */\n#ifdef __APPLE__\n\tif (strncmp(name, \"wlt\", 3) == 0) {\n\t\tchar *en_name;\n\t\tsize_t en_name_len;\n\n\t\t/*\n\t\t * Try to allocate a buffer for the \"en\"\n\t\t * device's name.\n\t\t */\n\t\ten_name_len = strlen(name) - 1;\n\t\ten_name = malloc(en_name_len + 1);\n\t\tif (en_name == NULL) {\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"malloc\");\n\t\t\treturn (-1);\n\t\t}\n\t\tstrcpy(en_name, \"en\");\n\t\tstrcat(en_name, name + 3);\n\t\tfd = bpf_open_and_bind(en_name, errbuf);\n\t\tfree(en_name);\n\t} else\n#endif /* __APPLE */\n\tfd = bpf_open_and_bind(name, errbuf);\n\tif (fd < 0) {\n\t\t/*\n\t\t * Error - was it PCAP_ERROR_NO_SUCH_DEVICE?\n\t\t */\n\t\tif (fd == PCAP_ERROR_NO_SUCH_DEVICE) {\n\t\t\t/*\n\t\t\t * Yes, so we can't bind to this because it's\n\t\t\t * not something supported by BPF.\n\t\t\t */\n\t\t\treturn (0);\n\t\t}\n\t\t/*\n\t\t * No, so we don't know whether it's supported or not;\n\t\t * say it is, so that the user can at least try to\n\t\t * open it and report the error (which is probably\n\t\t * \"you don't have permission to open BPF devices\";\n\t\t * reporting those interfaces means users will ask\n\t\t * \"why am I getting a permissions error when I try\n\t\t * to capture\" rather than \"why am I not seeing any\n\t\t * interfaces\", making the underlying problem clearer).\n\t\t */\n\t\treturn (1);\n\t}\n\n\t/*\n\t * Success.\n\t */\n\tclose(fd);\n\treturn (1);\n}",
+      "fn_code_pos": [
+        [
+          2565,
+          0
+        ],
+        [
+          2639,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "check_bpf_bindable",
+        "parameters": {
+          "name": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_usb_if_flags(const char *name _U_, bpf_u_int32 *flags _U_, char *errbuf _U_)\n{\n\t/*\n\t * XXX - if there's a way to determine whether there's something\n\t * plugged into a given USB bus, use that to determine whether\n\t * this device is \"connected\" or not.\n\t */\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          2642,
+          0
+        ],
+        [
+          2651,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_usb_if_flags",
+        "parameters": {
+          "name": "char",
+          "flags": "bpf_u_int32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nfinddevs_usb(pcap_if_list_t *devlistp, char *errbuf)\n{\n\tDIR *usbdir;\n\tstruct dirent *usbitem;\n\tsize_t name_max;\n\tchar *name;\n\n\t/*\n\t * We might have USB sniffing support, so try looking for USB\n\t * interfaces.\n\t *\n\t * We want to report a usbusN device for each USB bus, but\n\t * usbusN interfaces might, or might not, exist for them -\n\t * we create one if there isn't already one.\n\t *\n\t * So, instead, we look in /dev/usb for all buses and create\n\t * a \"usbusN\" device for each one.\n\t */\n\tusbdir = opendir(\"/dev/usb\");\n\tif (usbdir == NULL) {\n\t\t/*\n\t\t * Just punt.\n\t\t */\n\t\treturn (0);\n\t}\n\n\t/*\n\t * Leave enough room for a 32-bit (10-digit) bus number.\n\t * Yes, that's overkill, but we won't be using\n\t * the buffer very long.\n\t */\n\tname_max = USBUS_PREFIX_LEN + 10 + 1;\n\tname = malloc(name_max);\n\tif (name == NULL) {\n\t\tclosedir(usbdir);\n\t\treturn (0);\n\t}\n\twhile ((usbitem = readdir(usbdir)) != NULL) {\n\t\tchar *p;\n\t\tsize_t busnumlen;\n\n\t\tif (strcmp(usbitem->d_name, \".\") == 0 ||\n\t\t    strcmp(usbitem->d_name, \"..\") == 0) {\n\t\t\t/*\n\t\t\t * Ignore these.\n\t\t\t */\n\t\t\tcontinue;\n\t\t}\n\t\tp = strchr(usbitem->d_name, '.');\n\t\tif (p == NULL)\n\t\t\tcontinue;\n\t\tbusnumlen = p - usbitem->d_name;\n\t\tmemcpy(name, usbus_prefix, USBUS_PREFIX_LEN);\n\t\tmemcpy(name + USBUS_PREFIX_LEN, usbitem->d_name, busnumlen);\n\t\t*(name + USBUS_PREFIX_LEN + busnumlen) = '\\0';\n\t\t/*\n\t\t * There's an entry in this directory for every USB device,\n\t\t * not for every bus; if there's more than one device on\n\t\t * the bus, there'll be more than one entry for that bus,\n\t\t * so we need to avoid adding multiple capture devices\n\t\t * for each bus.\n\t\t */\n\t\tif (find_or_add_dev(devlistp, name, PCAP_IF_UP,\n\t\t    get_usb_if_flags, NULL, errbuf) == NULL) {\n\t\t\tfree(name);\n\t\t\tclosedir(usbdir);\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\t}\n\tfree(name);\n\tclosedir(usbdir);\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          2653,
+          0
+        ],
+        [
+          2726,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "finddevs_usb",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_if_flags(const char *name, bpf_u_int32 *flags, char *errbuf)\n{\n\tint sock;\n\tstruct ifmediareq req;\n\n\tsock = socket(AF_INET, SOCK_DGRAM, 0);\n\tif (sock == -1) {\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE, errno,\n\t\t    \"Can't create socket to get media information for %s\",\n\t\t    name);\n\t\treturn (-1);\n\t}\n\tmemset(&req, 0, sizeof(req));\n\tstrncpy(req.ifm_name, name, sizeof(req.ifm_name));\n\tif (ioctl(sock, SIOCGIFMEDIA, &req) < 0) {\n\t\tif (errno == EOPNOTSUPP || errno == EINVAL || errno == ENOTTY ||\n\t\t    errno == ENODEV) {\n\t\t\t/*\n\t\t\t * Not supported, so we can't provide any\n\t\t\t * additional information.  Assume that\n\t\t\t * this means that \"connected\" vs.\n\t\t\t * \"disconnected\" doesn't apply.\n\t\t\t */\n\t\t\t*flags |= PCAP_IF_CONNECTION_STATUS_NOT_APPLICABLE;\n\t\t\tclose(sock);\n\t\t\treturn (0);\n\t\t}\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE, errno,\n\t\t    \"SIOCGIFMEDIA on %s failed\", name);\n\t\tclose(sock);\n\t\treturn (-1);\n\t}\n\tclose(sock);\n\n\t/*\n\t * OK, what type of network is this?\n\t */\n\tswitch (IFM_TYPE(req.ifm_active)) {\n\n\tcase IFM_IEEE80211:\n\t\t/*\n\t\t * Wireless.\n\t\t */\n\t\t*flags |= PCAP_IF_WIRELESS;\n\t\tbreak;\n\t}\n\n\t/*\n\t * Do we know whether it's connected?\n\t */\n\tif (req.ifm_status & IFM_AVALID) {\n\t\t/*\n\t\t * Yes.\n\t\t */\n\t\tif (req.ifm_status & IFM_ACTIVE) {\n\t\t\t/*\n\t\t\t * It's connected.\n\t\t\t */\n\t\t\t*flags |= PCAP_IF_CONNECTION_STATUS_CONNECTED;\n\t\t} else {\n\t\t\t/*\n\t\t\t * It's disconnected.\n\t\t\t */\n\t\t\t*flags |= PCAP_IF_CONNECTION_STATUS_DISCONNECTED;\n\t\t}\n\t}\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          2733,
+          0
+        ],
+        [
+          2801,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_if_flags",
+        "parameters": {
+          "name": "char",
+          "flags": "bpf_u_int32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_if_flags(const char *name _U_, bpf_u_int32 *flags _U_, char *errbuf _U_)\n{\n\t/*\n\t * Nothing we can do other than mark loopback devices as \"the\n\t * connected/disconnected status doesn't apply\".\n\t *\n\t * XXX - on Solaris, can we do what the dladm command does,\n\t * i.e. get a connected/disconnected indication from a kstat?\n\t * (Note that you can also get the link speed, and possibly\n\t * other information, from a kstat as well.)\n\t */\n\tif (*flags & PCAP_IF_LOOPBACK) {\n\t\t/*\n\t\t * Loopback devices aren't wireless, and \"connected\"/\n\t\t * \"disconnected\" doesn't apply to them.\n\t\t */\n\t\t*flags |= PCAP_IF_CONNECTION_STATUS_NOT_APPLICABLE;\n\t\treturn (0);\n\t}\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          2803,
+          0
+        ],
+        [
+          2824,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_if_flags",
+        "parameters": {
+          "name": "char",
+          "flags": "bpf_u_int32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npcap_platform_finddevs(pcap_if_list_t *devlistp, char *errbuf)\n{\n\t/*\n\t * Get the list of regular interfaces first.\n\t */\n\tif (pcap_findalldevs_interfaces(devlistp, errbuf, check_bpf_bindable,\n\t    get_if_flags) == -1)\n\t\treturn (-1);\t/* failure */\n\n#if defined(__FreeBSD__) && defined(SIOCIFCREATE2)\n\tif (finddevs_usb(devlistp, errbuf) == -1)\n\t\treturn (-1);\n#endif\n\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          2827,
+          0
+        ],
+        [
+          2843,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_platform_finddevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nmonitor_mode(pcap_t *p, int set)\n{\n\tstruct pcap_bpf *pb = p->priv;\n\tint sock;\n\tstruct ifmediareq req;\n\tIFM_ULIST_TYPE *media_list;\n\tint i;\n\tint can_do;\n\tstruct ifreq ifr;\n\n\tsock = socket(AF_INET, SOCK_DGRAM, 0);\n\tif (sock == -1) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"can't open socket\");\n\t\treturn (PCAP_ERROR);\n\t}\n\n\tmemset(&req, 0, sizeof req);\n\tstrncpy(req.ifm_name, p->opt.device, sizeof req.ifm_name);\n\n\t/*\n\t * Find out how many media types we have.\n\t */\n\tif (ioctl(sock, SIOCGIFMEDIA, &req) < 0) {\n\t\t/*\n\t\t * Can't get the media types.\n\t\t */\n\t\tswitch (errno) {\n\n\t\tcase ENXIO:\n\t\t\t/*\n\t\t\t * There's no such device.\n\t\t\t */\n\t\t\tclose(sock);\n\t\t\treturn (PCAP_ERROR_NO_SUCH_DEVICE);\n\n\t\tcase EINVAL:\n\t\t\t/*\n\t\t\t * Interface doesn't support SIOC{G,S}IFMEDIA.\n\t\t\t */\n\t\t\tclose(sock);\n\t\t\treturn (PCAP_ERROR_RFMON_NOTSUP);\n\n\t\tdefault:\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"SIOCGIFMEDIA 1\");\n\t\t\tclose(sock);\n\t\t\treturn (PCAP_ERROR);\n\t\t}\n\t}\n\tif (req.ifm_count == 0) {\n\t\t/*\n\t\t * No media types.\n\t\t */\n\t\tclose(sock);\n\t\treturn (PCAP_ERROR_RFMON_NOTSUP);\n\t}\n\n\t/*\n\t * Allocate a buffer to hold all the media types, and\n\t * get the media types.\n\t */\n\tmedia_list = malloc(req.ifm_count * sizeof(*media_list));\n\tif (media_list == NULL) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"malloc\");\n\t\tclose(sock);\n\t\treturn (PCAP_ERROR);\n\t}\n\treq.ifm_ulist = media_list;\n\tif (ioctl(sock, SIOCGIFMEDIA, &req) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"SIOCGIFMEDIA\");\n\t\tfree(media_list);\n\t\tclose(sock);\n\t\treturn (PCAP_ERROR);\n\t}\n\n\t/*\n\t * Look for an 802.11 \"automatic\" media type.\n\t * We assume that all 802.11 adapters have that media type,\n\t * and that it will carry the monitor mode supported flag.\n\t */\n\tcan_do = 0;\n\tfor (i = 0; i < req.ifm_count; i++) {\n\t\tif (IFM_TYPE(media_list[i]) == IFM_IEEE80211\n\t\t    && IFM_SUBTYPE(media_list[i]) == IFM_AUTO) {\n\t\t\t/* OK, does it do monitor mode? */\n\t\t\tif (media_list[i] & IFM_IEEE80211_MONITOR) {\n\t\t\t\tcan_do = 1;\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}\n\t}\n\tfree(media_list);\n\tif (!can_do) {\n\t\t/*\n\t\t * This adapter doesn't support monitor mode.\n\t\t */\n\t\tclose(sock);\n\t\treturn (PCAP_ERROR_RFMON_NOTSUP);\n\t}\n\n\tif (set) {\n\t\t/*\n\t\t * Don't just check whether we can enable monitor mode,\n\t\t * do so, if it's not already enabled.\n\t\t */\n\t\tif ((req.ifm_current & IFM_IEEE80211_MONITOR) == 0) {\n\t\t\t/*\n\t\t\t * Monitor mode isn't currently on, so turn it on,\n\t\t\t * and remember that we should turn it off when the\n\t\t\t * pcap_t is closed.\n\t\t\t */\n\n\t\t\t/*\n\t\t\t * If we haven't already done so, arrange to have\n\t\t\t * \"pcap_close_all()\" called when we exit.\n\t\t\t */\n\t\t\tif (!pcap_do_addexit(p)) {\n\t\t\t\t/*\n\t\t\t\t * \"atexit()\" failed; don't put the interface\n\t\t\t\t * in monitor mode, just give up.\n\t\t\t\t */\n\t\t\t\tclose(sock);\n\t\t\t\treturn (PCAP_ERROR);\n\t\t\t}\n\t\t\tmemset(&ifr, 0, sizeof(ifr));\n\t\t\t(void)strncpy(ifr.ifr_name, p->opt.device,\n\t\t\t    sizeof(ifr.ifr_name));\n\t\t\tifr.ifr_media = req.ifm_current | IFM_IEEE80211_MONITOR;\n\t\t\tif (ioctl(sock, SIOCSIFMEDIA, &ifr) == -1) {\n\t\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno, \"SIOCSIFMEDIA\");\n\t\t\t\tclose(sock);\n\t\t\t\treturn (PCAP_ERROR);\n\t\t\t}\n\n\t\t\tpb->must_do_on_close |= MUST_CLEAR_RFMON;\n\n\t\t\t/*\n\t\t\t * Add this to the list of pcaps to close when we exit.\n\t\t\t */\n\t\t\tpcap_add_to_pcaps_to_close(p);\n\t\t}\n\t}\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          2846,
+          0
+        ],
+        [
+          2994,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "monitor_mode",
+        "parameters": {
+          "p": "pcap_t",
+          "set": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nfind_802_11(struct bpf_dltlist *bdlp)\n{\n\tint new_dlt;\n\tu_int i;\n\n\t/*\n\t * Scan the list of DLT_ values, looking for 802.11 values,\n\t * and, if we find any, choose the best of them.\n\t */\n\tnew_dlt = -1;\n\tfor (i = 0; i < bdlp->bfl_len; i++) {\n\t\tswitch (bdlp->bfl_list[i]) {\n\n\t\tcase DLT_IEEE802_11:\n\t\t\t/*\n\t\t\t * 802.11, but no radio.\n\t\t\t *\n\t\t\t * Offer this, and select it as the new mode\n\t\t\t * unless we've already found an 802.11\n\t\t\t * header with radio information.\n\t\t\t */\n\t\t\tif (new_dlt == -1)\n\t\t\t\tnew_dlt = bdlp->bfl_list[i];\n\t\t\tbreak;\n\n\t\tcase DLT_PRISM_HEADER:\n\t\tcase DLT_AIRONET_HEADER:\n\t\tcase DLT_IEEE802_11_RADIO_AVS:\n\t\t\t/*\n\t\t\t * 802.11 with radio, but not radiotap.\n\t\t\t *\n\t\t\t * Offer this, and select it as the new mode\n\t\t\t * unless we've already found the radiotap DLT_.\n\t\t\t */\n\t\t\tif (new_dlt != DLT_IEEE802_11_RADIO)\n\t\t\t\tnew_dlt = bdlp->bfl_list[i];\n\t\t\tbreak;\n\n\t\tcase DLT_IEEE802_11_RADIO:\n\t\t\t/*\n\t\t\t * 802.11 with radiotap.\n\t\t\t *\n\t\t\t * Offer this, and select it as the new mode.\n\t\t\t */\n\t\t\tnew_dlt = bdlp->bfl_list[i];\n\t\t\tbreak;\n\n\t\tdefault:\n\t\t\t/*\n\t\t\t * Not 802.11.\n\t\t\t */\n\t\t\tbreak;\n\t\t}\n\t}\n\n\treturn (new_dlt);\n}",
+      "fn_code_pos": [
+        [
+          3008,
+          0
+        ],
+        [
+          3065,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_802_11",
+        "parameters": {
+          "bdlp": "struct bpf_dltlist"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nremove_en(pcap_t *p)\n{\n\tint i, j;\n\n\t/*\n\t * Scan the list of DLT_ values and discard DLT_EN10MB.\n\t */\n\tj = 0;\n\tfor (i = 0; i < p->dlt_count; i++) {\n\t\tswitch (p->dlt_list[i]) {\n\n\t\tcase DLT_EN10MB:\n\t\t\t/*\n\t\t\t * Don't offer this one.\n\t\t\t */\n\t\t\tcontinue;\n\n\t\tdefault:\n\t\t\t/*\n\t\t\t * Just copy this mode over.\n\t\t\t */\n\t\t\tbreak;\n\t\t}\n\n\t\t/*\n\t\t * Copy this DLT_ value to its new position.\n\t\t */\n\t\tp->dlt_list[j] = p->dlt_list[i];\n\t\tj++;\n\t}\n\n\t/*\n\t * Set the DLT_ count to the number of entries we copied.\n\t */\n\tp->dlt_count = j;\n}",
+      "fn_code_pos": [
+        [
+          3073,
+          0
+        ],
+        [
+          3109,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remove_en",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nremove_802_11(pcap_t *p)\n{\n\tint i, j;\n\n\t/*\n\t * Scan the list of DLT_ values and discard 802.11 values.\n\t */\n\tj = 0;\n\tfor (i = 0; i < p->dlt_count; i++) {\n\t\tswitch (p->dlt_list[i]) {\n\n\t\tcase DLT_IEEE802_11:\n\t\tcase DLT_PRISM_HEADER:\n\t\tcase DLT_AIRONET_HEADER:\n\t\tcase DLT_IEEE802_11_RADIO:\n\t\tcase DLT_IEEE802_11_RADIO_AVS:\n\t\t\t/*\n\t\t\t * 802.11.  Don't offer this one.\n\t\t\t */\n\t\t\tcontinue;\n\n\t\tdefault:\n\t\t\t/*\n\t\t\t * Just copy this mode over.\n\t\t\t */\n\t\t\tbreak;\n\t\t}\n\n\t\t/*\n\t\t * Copy this DLT_ value to its new position.\n\t\t */\n\t\tp->dlt_list[j] = p->dlt_list[i];\n\t\tj++;\n\t}\n\n\t/*\n\t * Set the DLT_ count to the number of entries we copied.\n\t */\n\tp->dlt_count = j;\n}",
+      "fn_code_pos": [
+        [
+          3116,
+          0
+        ],
+        [
+          3156,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remove_802_11",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_setfilter_bpf(pcap_t *p, struct bpf_program *fp)\n{\n\tstruct pcap_bpf *pb = p->priv;\n\n\t/*\n\t * Free any user-mode filter we might happen to have installed.\n\t */\n\tpcap_freecode(&p->fcode);\n\n\t/*\n\t * Try to install the kernel filter.\n\t */\n\tif (ioctl(p->fd, BIOCSETF, (caddr_t)fp) == 0) {\n\t\t/*\n\t\t * It worked.\n\t\t */\n\t\tpb->filtering_in_kernel = 1;\t/* filtering in the kernel */\n\n\t\t/*\n\t\t * Discard any previously-received packets, as they might\n\t\t * have passed whatever filter was formerly in effect, but\n\t\t * might not pass this filter (BIOCSETF discards packets\n\t\t * buffered in the kernel, so you can lose packets in any\n\t\t * case).\n\t\t */\n\t\tp->cc = 0;\n\t\treturn (0);\n\t}\n\n\t/*\n\t * We failed.\n\t *\n\t * If it failed with EINVAL, that's probably because the program\n\t * is invalid or too big.  Validate it ourselves; if we like it\n\t * (we currently allow backward branches, to support protochain),\n\t * run it in userland.  (There's no notion of \"too big\" for\n\t * userland.)\n\t *\n\t * Otherwise, just give up.\n\t * XXX - if the copy of the program into the kernel failed,\n\t * we will get EINVAL rather than, say, EFAULT on at least\n\t * some kernels.\n\t */\n\tif (errno != EINVAL) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"BIOCSETF\");\n\t\treturn (-1);\n\t}\n\n\t/*\n\t * install_bpf_program() validates the program.\n\t *\n\t * XXX - what if we already have a filter in the kernel?\n\t */\n\tif (install_bpf_program(p, fp) < 0)\n\t\treturn (-1);\n\tpb->filtering_in_kernel = 0;\t/* filtering in userland */\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          3159,
+          0
+        ],
+        [
+          3218,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setfilter_bpf",
+        "parameters": {
+          "p": "pcap_t",
+          "fp": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_setdirection_bpf(pcap_t *p, pcap_direction_t d)\n{\n#if defined(BIOCSDIRECTION)\n\tu_int direction;\n\n\tdirection = (d == PCAP_D_IN) ? BPF_D_IN :\n\t    ((d == PCAP_D_OUT) ? BPF_D_OUT : BPF_D_INOUT);\n\tif (ioctl(p->fd, BIOCSDIRECTION, &direction) == -1) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, sizeof(p->errbuf),\n\t\t    errno, \"Cannot set direction to %s\",\n\t\t        (d == PCAP_D_IN) ? \"PCAP_D_IN\" :\n\t\t\t((d == PCAP_D_OUT) ? \"PCAP_D_OUT\" : \"PCAP_D_INOUT\"));\n\t\treturn (-1);\n\t}\n\treturn (0);\n#elif defined(BIOCSSEESENT)\n\tu_int seesent;\n\n\t/*\n\t * We don't support PCAP_D_OUT.\n\t */\n\tif (d == PCAP_D_OUT) {\n\t\tpcap_snprintf(p->errbuf, sizeof(p->errbuf),\n\t\t    \"Setting direction to PCAP_D_OUT is not supported on BPF\");\n\t\treturn -1;\n\t}\n\n\tseesent = (d == PCAP_D_INOUT);\n\tif (ioctl(p->fd, BIOCSSEESENT, &seesent) == -1) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, sizeof(p->errbuf),\n\t\t    errno, \"Cannot set direction to %s\",\n\t\t    (d == PCAP_D_INOUT) ? \"PCAP_D_INOUT\" : \"PCAP_D_IN\");\n\t\treturn (-1);\n\t}\n\treturn (0);\n#else\n\t(void) pcap_snprintf(p->errbuf, sizeof(p->errbuf),\n\t    \"This system doesn't support BIOCSSEESENT, so the direction can't be set\");\n\treturn (-1);\n#endif\n}",
+      "fn_code_pos": [
+        [
+          3224,
+          0
+        ],
+        [
+          3265,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setdirection_bpf",
+        "parameters": {
+          "p": "pcap_t",
+          "d": "pcap_direction_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_set_datalink_bpf(pcap_t *p, int dlt)\n{\n#ifdef BIOCSDLT\n\tif (ioctl(p->fd, BIOCSDLT, &dlt) == -1) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, sizeof(p->errbuf),\n\t\t    errno, \"Cannot set DLT %d\", dlt);\n\t\treturn (-1);\n\t}\n#endif\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          3267,
+          0
+        ],
+        [
+          3278,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_set_datalink_bpf",
+        "parameters": {
+          "p": "pcap_t",
+          "dlt": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "const char *\npcap_lib_version(void)\n{\n#ifdef HAVE_ZEROCOPY_BPF\n\treturn (PCAP_VERSION_STRING \" (with zerocopy support)\");\n#else\n\treturn (PCAP_VERSION_STRING);\n#endif\n}",
+      "fn_code_pos": [
+        [
+          3283,
+          0
+        ],
+        [
+          3291,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "bpf_load(char *errbuf)",
+      "fn_dec_pos": [
+        [
+          109,
+          11
+        ],
+        [
+          109,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bpf_load",
+        "parameters": {
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "find_802_11(struct bpf_dltlist *)",
+      "fn_dec_pos": [
+        [
+          201,
+          11
+        ],
+        [
+          201,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_802_11",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "monitor_mode(pcap_t *, int)",
+      "fn_dec_pos": [
+        [
+          204,
+          11
+        ],
+        [
+          204,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "monitor_mode",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "remove_en(pcap_t *)",
+      "fn_dec_pos": [
+        [
+          208,
+          12
+        ],
+        [
+          208,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remove_en",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "remove_802_11(pcap_t *)",
+      "fn_dec_pos": [
+        [
+          209,
+          12
+        ],
+        [
+          209,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remove_802_11",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pcap_can_set_rfmon_bpf(pcap_t *p)",
+      "fn_dec_pos": [
+        [
+          246,
+          11
+        ],
+        [
+          246,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_can_set_rfmon_bpf",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_activate_bpf(pcap_t *p)",
+      "fn_dec_pos": [
+        [
+          247,
+          11
+        ],
+        [
+          247,
+          39
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_activate_bpf",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_setfilter_bpf(pcap_t *p, struct bpf_program *fp)",
+      "fn_dec_pos": [
+        [
+          248,
+          11
+        ],
+        [
+          248,
+          64
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setfilter_bpf",
+        "parameters": {
+          "p": "pcap_t",
+          "fp": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_setdirection_bpf(pcap_t *, pcap_direction_t)",
+      "fn_dec_pos": [
+        [
+          249,
+          11
+        ],
+        [
+          249,
+          60
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setdirection_bpf",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_set_datalink_bpf(pcap_t *p, int dlt)",
+      "fn_dec_pos": [
+        [
+          250,
+          11
+        ],
+        [
+          250,
+          52
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_set_datalink_bpf",
+        "parameters": {
+          "p": "pcap_t",
+          "dlt": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_create_interface(const char *device _U_, char *ebuf)",
+      "fn_dec_pos": [
+        [
+          443,
+          0
+        ],
+        [
+          443,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_activate_bpf(pcap_t *p)",
+      "fn_dec_pos": [
+        [
+          1619,
+          0
+        ],
+        [
+          1619,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_activate_bpf",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_lib_version(void)",
+      "fn_dec_pos": [
+        [
+          3284,
+          0
+        ],
+        [
+          3284,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_bpf {\n#ifdef HAVE_ZEROCOPY_BPF\n\t/*\n\t * Zero-copy read buffer -- for zero-copy BPF.  'buffer' above will\n\t * alternative between these two actual mmap'd buffers as required.\n\t * As there is a header on the front size of the mmap'd buffer, only\n\t * some of the buffer is exposed to libpcap as a whole via bufsize;\n\t * zbufsize is the true size.  zbuffer tracks the current zbuf\n\t * assocated with buffer so that it can be used to decide which the\n\t * next buffer to read will be.\n\t */\n\tu_char *zbuf1, *zbuf2, *zbuffer;\n\tu_int zbufsize;\n\tu_int zerocopy;\n\tu_int interrupted;\n\tstruct timespec firstsel;\n\t/*\n\t * If there's currently a buffer being actively processed, then it is\n\t * referenced here; 'buffer' is also pointed at it, but offset by the\n\t * size of the header.\n\t */\n\tstruct bpf_zbuf_header *bzh;\n\tint nonblock;\t\t/* true if in nonblocking mode */\n#endif /* HAVE_ZEROCOPY_BPF */\n\n\tchar *device;\t\t/* device name */\n\tint filtering_in_kernel; /* using kernel filter */\n\tint must_do_on_close;\t/* stuff we must do when we close */\n}",
+      {
+        "*zbuf1": "u_char",
+        "zbufsize": "u_int",
+        "zerocopy": "u_int",
+        "interrupted": "u_int",
+        "firstsel": "struct timespec",
+        "*bzh": "struct bpf_zbuf_header",
+        "nonblock": "int",
+        "*device": "char",
+        "filtering_in_kernel": "int",
+        "must_do_on_close": "int"
+      },
+      "pcap_bpf",
+      [
+        147,
+        0
+      ],
+      [
+        175,
+        1
+      ]
+    ],
+    [
+      "struct pcap_bpf {\n#ifdef HAVE_ZEROCOPY_BPF\n\t/*\n\t * Zero-copy read buffer -- for zero-copy BPF.  'buffer' above will\n\t * alternative between these two actual mmap'd buffers as required.\n\t * As there is a header on the front size of the mmap'd buffer, only\n\t * some of the buffer is exposed to libpcap as a whole via bufsize;\n\t * zbufsize is the true size.  zbuffer tracks the current zbuf\n\t * assocated with buffer so that it can be used to decide which the\n\t * next buffer to read will be.\n\t */\n\tu_char *zbuf1, *zbuf2, *zbuffer;\n\tu_int zbufsize;\n\tu_int zerocopy;\n\tu_int interrupted;\n\tstruct timespec firstsel;\n\t/*\n\t * If there's currently a buffer being actively processed, then it is\n\t * referenced here; 'buffer' is also pointed at it, but offset by the\n\t * size of the header.\n\t */\n\tstruct bpf_zbuf_header *bzh;\n\tint nonblock;\t\t/* true if in nonblocking mode */\n#endif /* HAVE_ZEROCOPY_BPF */\n\n\tchar *device;\t\t/* device name */\n\tint filtering_in_kernel; /* using kernel filter */\n\tint must_do_on_close;\t/* stuff we must do when we close */\n}",
+      {
+        "*zbuf1": "u_char",
+        "zbufsize": "u_int",
+        "zerocopy": "u_int",
+        "interrupted": "u_int",
+        "firstsel": "struct timespec",
+        "*bzh": "struct bpf_zbuf_header",
+        "nonblock": "int",
+        "*device": "char",
+        "filtering_in_kernel": "int",
+        "must_do_on_close": "int"
+      },
+      "pcap_bpf",
+      [
+        147,
+        0
+      ],
+      [
+        175,
+        1
+      ]
+    ],
+    [
+      "struct timespec",
+      {},
+      "",
+      [
+        162,
+        1
+      ],
+      [
+        162,
+        16
+      ]
+    ],
+    [
+      "struct bpf_zbuf_header",
+      {},
+      "",
+      [
+        168,
+        1
+      ],
+      [
+        168,
+        23
+      ]
+    ],
+    [
+      "struct bpf_dltlist",
+      {},
+      "",
+      [
+        201,
+        23
+      ],
+      [
+        201,
+        41
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        248,
+        41
+      ],
+      [
+        248,
+        59
+      ]
+    ],
+    [
+      "struct pcap_bpf",
+      {},
+      "",
+      [
+        261,
+        1
+      ],
+      [
+        261,
+        16
+      ]
+    ],
+    [
+      "struct pcap_bpf",
+      {},
+      "",
+      [
+        273,
+        1
+      ],
+      [
+        273,
+        16
+      ]
+    ],
+    [
+      "struct pcap_bpf",
+      {},
+      "",
+      [
+        296,
+        1
+      ],
+      [
+        296,
+        16
+      ]
+    ],
+    [
+      "struct bpf_zbuf_header",
+      {},
+      "",
+      [
+        297,
+        1
+      ],
+      [
+        297,
+        23
+      ]
+    ],
+    [
+      "struct bpf_zbuf_header",
+      {},
+      "",
+      [
+        300,
+        9
+      ],
+      [
+        300,
+        31
+      ]
+    ],
+    [
+      "struct bpf_zbuf_header",
+      {},
+      "",
+      [
+        310,
+        9
+      ],
+      [
+        310,
+        31
+      ]
+    ],
+    [
+      "struct pcap_bpf",
+      {},
+      "",
+      [
+        334,
+        1
+      ],
+      [
+        334,
+        16
+      ]
+    ],
+    [
+      "struct bpf_zbuf",
+      {},
+      "",
+      [
+        335,
+        1
+      ],
+      [
+        335,
+        16
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        336,
+        1
+      ],
+      [
+        336,
+        15
+      ]
+    ],
+    [
+      "struct timespec",
+      {},
+      "",
+      [
+        337,
+        1
+      ],
+      [
+        337,
+        16
+      ]
+    ],
+    [
+      "struct pcap_bpf",
+      {},
+      "",
+      [
+        432,
+        1
+      ],
+      [
+        432,
+        16
+      ]
+    ],
+    [
+      "struct pcap_bpf",
+      {},
+      "",
+      [
+        447,
+        38
+      ],
+      [
+        447,
+        53
+      ]
+    ],
+    [
+      "struct ifreq",
+      {},
+      "",
+      [
+        610,
+        1
+      ],
+      [
+        610,
+        13
+      ]
+    ],
+    [
+      "struct bpf_dltlist",
+      {},
+      "",
+      [
+        660,
+        28
+      ],
+      [
+        660,
+        46
+      ]
+    ],
+    [
+      "struct utsname",
+      {},
+      "",
+      [
+        743,
+        1
+      ],
+      [
+        743,
+        15
+      ]
+    ],
+    [
+      "struct ifreq",
+      {},
+      "",
+      [
+        744,
+        1
+      ],
+      [
+        744,
+        13
+      ]
+    ],
+    [
+      "struct bpf_dltlist",
+      {},
+      "",
+      [
+        747,
+        1
+      ],
+      [
+        747,
+        19
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        897,
+        26
+      ],
+      [
+        897,
+        42
+      ]
+    ],
+    [
+      "struct bpf_stat",
+      {},
+      "",
+      [
+        899,
+        1
+      ],
+      [
+        899,
+        16
+      ]
+    ],
+    [
+      "struct pcap_bpf",
+      {},
+      "",
+      [
+        929,
+        1
+      ],
+      [
+        929,
+        16
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        1119,
+        3
+      ],
+      [
+        1119,
+        21
+      ]
+    ],
+    [
+      "struct bintime",
+      {},
+      "",
+      [
+        1121,
+        3
+      ],
+      [
+        1121,
+        17
+      ]
+    ],
+    [
+      "struct timespec",
+      {},
+      "",
+      [
+        1126,
+        4
+      ],
+      [
+        1126,
+        19
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        1132,
+        4
+      ],
+      [
+        1132,
+        18
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        1301,
+        1
+      ],
+      [
+        1301,
+        12
+      ]
+    ],
+    [
+      "struct bpf_config",
+      {},
+      "",
+      [
+        1302,
+        1
+      ],
+      [
+        1302,
+        18
+      ]
+    ],
+    [
+      "struct cfg_load",
+      {},
+      "",
+      [
+        1303,
+        1
+      ],
+      [
+        1303,
+        16
+      ]
+    ],
+    [
+      "struct cfg_kmod",
+      {},
+      "",
+      [
+        1304,
+        1
+      ],
+      [
+        1304,
+        16
+      ]
+    ],
+    [
+      "struct pcap_bpf",
+      {},
+      "",
+      [
+        1398,
+        1
+      ],
+      [
+        1398,
+        16
+      ]
+    ],
+    [
+      "struct ifmediareq",
+      {},
+      "",
+      [
+        1401,
+        1
+      ],
+      [
+        1401,
+        18
+      ]
+    ],
+    [
+      "struct ifreq",
+      {},
+      "",
+      [
+        1402,
+        1
+      ],
+      [
+        1402,
+        13
+      ]
+    ],
+    [
+      "struct ifreq",
+      {},
+      "",
+      [
+        1515,
+        1
+      ],
+      [
+        1515,
+        13
+      ]
+    ],
+    [
+      "struct pcap_bpf",
+      {},
+      "",
+      [
+        1621,
+        1
+      ],
+      [
+        1621,
+        16
+      ]
+    ],
+    [
+      "struct lifreq",
+      {},
+      "",
+      [
+        1629,
+        1
+      ],
+      [
+        1629,
+        14
+      ]
+    ],
+    [
+      "struct ifreq",
+      {},
+      "",
+      [
+        1633,
+        1
+      ],
+      [
+        1633,
+        13
+      ]
+    ],
+    [
+      "struct bpf_version",
+      {},
+      "",
+      [
+        1637,
+        1
+      ],
+      [
+        1637,
+        19
+      ]
+    ],
+    [
+      "struct bpf_dltlist",
+      {},
+      "",
+      [
+        1643,
+        1
+      ],
+      [
+        1643,
+        19
+      ]
+    ],
+    [
+      "struct bpf_insn",
+      {},
+      "",
+      [
+        1652,
+        1
+      ],
+      [
+        1652,
+        16
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        1653,
+        1
+      ],
+      [
+        1653,
+        19
+      ]
+    ],
+    [
+      "struct utsname",
+      {},
+      "",
+      [
+        1654,
+        1
+      ],
+      [
+        1654,
+        15
+      ]
+    ],
+    [
+      "struct bpf_zbuf",
+      {},
+      "",
+      [
+        1657,
+        1
+      ],
+      [
+        1657,
+        16
+      ]
+    ],
+    [
+      "struct bpf_zbuf_header",
+      {},
+      "",
+      [
+        1992,
+        28
+      ],
+      [
+        1992,
+        50
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        2354,
+        2
+      ],
+      [
+        2354,
+        16
+      ]
+    ],
+    [
+      "struct BPF_TIMEVAL",
+      {},
+      "",
+      [
+        2356,
+        2
+      ],
+      [
+        2356,
+        20
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        2358,
+        43
+      ],
+      [
+        2358,
+        57
+      ]
+    ],
+    [
+      "struct dirent",
+      {},
+      "",
+      [
+        2657,
+        1
+      ],
+      [
+        2657,
+        14
+      ]
+    ],
+    [
+      "struct ifmediareq",
+      {},
+      "",
+      [
+        2737,
+        1
+      ],
+      [
+        2737,
+        18
+      ]
+    ],
+    [
+      "struct pcap_bpf",
+      {},
+      "",
+      [
+        2849,
+        1
+      ],
+      [
+        2849,
+        16
+      ]
+    ],
+    [
+      "struct ifmediareq",
+      {},
+      "",
+      [
+        2851,
+        1
+      ],
+      [
+        2851,
+        18
+      ]
+    ],
+    [
+      "struct ifreq",
+      {},
+      "",
+      [
+        2855,
+        1
+      ],
+      [
+        2855,
+        13
+      ]
+    ],
+    [
+      "struct bpf_dltlist",
+      {},
+      "",
+      [
+        3009,
+        12
+      ],
+      [
+        3009,
+        30
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        3160,
+        30
+      ],
+      [
+        3160,
+        48
+      ]
+    ],
+    [
+      "struct pcap_bpf",
+      {},
+      "",
+      [
+        3162,
+        1
+      ],
+      [
+        3162,
+        16
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <sys/param.h>\t\t\t/* optionally get BSD define */\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <time.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ioctl.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ioccom.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include <sys/utsname.h>\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <dirent.h>\n",
+      [
+        53,
+        0
+      ],
+      [
+        54,
+        0
+      ]
+    ],
+    [
+      "#include <net/if.h>\n",
+      [
+        56,
+        0
+      ],
+      [
+        57,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        66,
+        0
+      ],
+      [
+        67,
+        0
+      ]
+    ],
+    [
+      "#include <net/bpf.h>\n",
+      [
+        74,
+        0
+      ],
+      [
+        75,
+        0
+      ]
+    ],
+    [
+      "#include <sys/mman.h>\n",
+      [
+        83,
+        2
+      ],
+      [
+        84,
+        0
+      ]
+    ],
+    [
+      "#include <machine/atomic.h>\n",
+      [
+        84,
+        2
+      ],
+      [
+        85,
+        0
+      ]
+    ],
+    [
+      "#include <net/if_types.h>\t\t/* for IFT_ values */\n",
+      [
+        87,
+        0
+      ],
+      [
+        88,
+        0
+      ]
+    ],
+    [
+      "#include <sys/sysconfig.h>\n",
+      [
+        88,
+        0
+      ],
+      [
+        89,
+        0
+      ]
+    ],
+    [
+      "#include <sys/device.h>\n",
+      [
+        89,
+        0
+      ],
+      [
+        90,
+        0
+      ]
+    ],
+    [
+      "#include <sys/cfgodm.h>\n",
+      [
+        90,
+        0
+      ],
+      [
+        91,
+        0
+      ]
+    ],
+    [
+      "#include <cf.h>\n",
+      [
+        91,
+        0
+      ],
+      [
+        92,
+        0
+      ]
+    ],
+    [
+      "#include <net/bpf.h>\n",
+      [
+        113,
+        0
+      ],
+      [
+        114,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        117,
+        0
+      ],
+      [
+        118,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        118,
+        0
+      ],
+      [
+        119,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        119,
+        0
+      ],
+      [
+        120,
+        0
+      ]
+    ],
+    [
+      "#include <netdb.h>\n",
+      [
+        120,
+        0
+      ],
+      [
+        121,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        121,
+        0
+      ],
+      [
+        122,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        122,
+        0
+      ],
+      [
+        123,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        123,
+        0
+      ],
+      [
+        124,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        124,
+        0
+      ],
+      [
+        125,
+        0
+      ]
+    ],
+    [
+      "# include <net/if_media.h>\n",
+      [
+        127,
+        0
+      ],
+      [
+        128,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        130,
+        0
+      ],
+      [
+        131,
+        0
+      ]
+    ],
+    [
+      "#include \"os-proto.h\"\n",
+      [
+        133,
+        0
+      ],
+      [
+        134,
+        0
+      ]
+    ],
+    [
+      "#include <zone.h>\n",
+      [
+        217,
+        0
+      ],
+      [
+        218,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

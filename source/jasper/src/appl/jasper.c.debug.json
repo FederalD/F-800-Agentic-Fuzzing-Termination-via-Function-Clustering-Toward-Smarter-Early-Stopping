@@ -1,0 +1,497 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int main(int argc, char **argv)\n{\n\tjas_image_t *image;\n\tcmdopts_t *cmdopts;\n\tjas_stream_t *in;\n\tjas_stream_t *out;\n\tjas_tmr_t dectmr;\n\tjas_tmr_t enctmr;\n\tdouble dectime;\n\tdouble enctime;\n\tint_fast16_t numcmpts;\n\tint i;\n\n\t/* Determine the base name of this command. */\n\tif ((cmdname = strrchr(argv[0], '/'))) {\n\t\t++cmdname;\n\t} else {\n\t\tcmdname = argv[0];\n\t}\n\n\tif (jas_init()) {\n\t\tabort();\n\t}\n\n\t/* Parse the command line options. */\n\tif (!(cmdopts = cmdopts_parse(argc, argv))) {\n\t\tfprintf(stderr, \"error: cannot parse command line\\n\");\n\t\texit(EXIT_FAILURE);\n\t}\n\n\tif (cmdopts->version) {\n\t\tprintf(\"%s\\n\", JAS_VERSION);\n\t\tfprintf(stderr, \"libjasper %s\\n\", jas_getversion());\n\t\texit(EXIT_SUCCESS);\n\t}\n\n\tjas_setdbglevel(cmdopts->debug);\n\n\tif (cmdopts->verbose) {\n\t\tcmdinfo();\n\t}\n\n\t/* Open the input image file. */\n\tif (cmdopts->infile) {\n\t\t/* The input image is to be read from a file. */\n\t\tif (!(in = jas_stream_fopen(cmdopts->infile, \"rb\"))) {\n\t\t\tfprintf(stderr, \"error: cannot open input image file %s\\n\",\n\t\t\t  cmdopts->infile);\n\t\t\texit(EXIT_FAILURE);\n\t\t}\n\t} else {\n\t\t/* The input image is to be read from standard input. */\n\t\tif (!(in = jas_stream_fdopen(0, \"rb\"))) {\n\t\t\tfprintf(stderr, \"error: cannot open standard input\\n\");\n\t\t\texit(EXIT_FAILURE);\n\t\t}\n\t}\n\n\t/* Open the output image file. */\n\tif (cmdopts->outfile) {\n\t\t/* The output image is to be written to a file. */\n\t\tif (!(out = jas_stream_fopen(cmdopts->outfile, \"w+b\"))) {\n\t\t\tfprintf(stderr, \"error: cannot open output image file %s\\n\",\n\t\t\t  cmdopts->outfile);\n\t\t\texit(EXIT_FAILURE);\n\t\t}\n\t} else {\n\t\t/* The output image is to be written to standard output. */\n\t\tif (!(out = jas_stream_fdopen(1, \"w+b\"))) {\n\t\t\tfprintf(stderr, \"error: cannot open standard output\\n\");\n\t\t\texit(EXIT_FAILURE);\n\t\t}\n\t}\n\n\tif (cmdopts->infmt < 0) {\n\t\tif ((cmdopts->infmt = jas_image_getfmt(in)) < 0) {\n\t\t\tfprintf(stderr, \"error: input image has unknown format\\n\");\n\t\t\texit(EXIT_FAILURE);\n\t\t}\n\t}\n\n\t/* Get the input image data. */\n\tjas_tmr_start(&dectmr);\n\tif (!(image = jas_image_decode(in, cmdopts->infmt, cmdopts->inopts))) {\n\t\tfprintf(stderr, \"error: cannot load image data\\n\");\n\t\texit(EXIT_FAILURE);\n\t}\n\tjas_tmr_stop(&dectmr);\n\tdectime = jas_tmr_get(&dectmr);\n\n\t/* If requested, throw away all of the components except one.\n\t  Why might this be desirable?  It is a hack, really.\n\t  None of the image formats other than the JPEG-2000 ones support\n\t  images with two, four, five, or more components.  This hack\n\t  allows such images to be decoded with the non-JPEG-2000 decoders,\n\t  one component at a time. */\n\tnumcmpts = jas_image_numcmpts(image);\n\tif (cmdopts->cmptno >= 0 && cmdopts->cmptno < numcmpts) {\n\t\tfor (i = numcmpts - 1; i >= 0; --i) {\n\t\t\tif (i != cmdopts->cmptno) {\n\t\t\t\tjas_image_delcmpt(image, i);\n\t\t\t}\n\t\t}\n\t}\n\n\tif (cmdopts->srgb) {\n\t\tjas_image_t *newimage;\n\t\tjas_cmprof_t *outprof;\n\t\tjas_eprintf(\"forcing conversion to sRGB\\n\");\n\t\tif (!(outprof = jas_cmprof_createfromclrspc(JAS_CLRSPC_SRGB))) {\n\t\t\tjas_eprintf(\"cannot create sRGB profile\\n\");\n\t\t\texit(EXIT_FAILURE);\n\t\t}\n\t\tif (!(newimage = jas_image_chclrspc(image, outprof, JAS_CMXFORM_INTENT_PER))) {\n\t\t\tjas_eprintf(\"cannot convert to sRGB\\n\");\n\t\t\texit(EXIT_FAILURE);\n\t\t}\n\t\tjas_image_destroy(image);\n\t\tjas_cmprof_destroy(outprof);\n\t\timage = newimage;\n\t}\n\n\t/* Generate the output image data. */\n\tjas_tmr_start(&enctmr);\n\tif (jas_image_encode(image, out, cmdopts->outfmt, cmdopts->outopts)) {\n\t\tfprintf(stderr, \"error: cannot encode image\\n\");\n\t\texit(EXIT_FAILURE);\n\t}\n\tjas_stream_flush(out);\n\tjas_tmr_stop(&enctmr);\n\tenctime = jas_tmr_get(&enctmr);\n\n\tif (cmdopts->verbose) {\n\t\tfprintf(stderr, \"decoding time = %f\\n\", dectime);\n\t\tfprintf(stderr, \"encoding time = %f\\n\", enctime);\n\t}\n\n\t/* If this fails, we don't care. */\n\t(void) jas_stream_close(in);\n\n\t/* Close the output image stream. */\n\tif (jas_stream_close(out)) {\n\t\tfprintf(stderr, \"error: cannot close output image file\\n\");\n\t\texit(EXIT_FAILURE);\n\t}\n\n\tcmdopts_destroy(cmdopts);\n\tjas_image_destroy(image);\n\tjas_image_clearfmts();\n\n\t/* Success at last! :-) */\n\treturn EXIT_SUCCESS;\n}",
+      "fn_code_pos": [
+        [
+          145,
+          0
+        ],
+        [
+          297,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "cmdopts_t *cmdopts_parse(int argc, char **argv)\n{\n\n\ttypedef enum {\n\t\tCMDOPT_HELP = 0,\n\t\tCMDOPT_VERBOSE,\n\t\tCMDOPT_INFILE,\n\t\tCMDOPT_INFMT,\n\t\tCMDOPT_INOPT,\n\t\tCMDOPT_OUTFILE,\n\t\tCMDOPT_OUTFMT,\n\t\tCMDOPT_OUTOPT,\n\t\tCMDOPT_VERSION,\n\t\tCMDOPT_DEBUG,\n\t\tCMDOPT_CMPTNO,\n\t\tCMDOPT_SRGB\n\t} cmdoptid_t;\n\n\tstatic jas_opt_t cmdoptions[] = {\n\t\t{CMDOPT_HELP, \"help\", 0},\n\t\t{CMDOPT_VERBOSE, \"verbose\", 0},\n\t\t{CMDOPT_INFILE, \"input\", JAS_OPT_HASARG},\n\t\t{CMDOPT_INFILE, \"f\", JAS_OPT_HASARG},\n\t\t{CMDOPT_INFMT, \"input-format\", JAS_OPT_HASARG},\n\t\t{CMDOPT_INFMT, \"t\", JAS_OPT_HASARG},\n\t\t{CMDOPT_INOPT, \"input-option\", JAS_OPT_HASARG},\n\t\t{CMDOPT_INOPT, \"o\", JAS_OPT_HASARG},\n\t\t{CMDOPT_OUTFILE, \"output\", JAS_OPT_HASARG},\n\t\t{CMDOPT_OUTFILE, \"F\", JAS_OPT_HASARG},\n\t\t{CMDOPT_OUTFMT, \"output-format\", JAS_OPT_HASARG},\n\t\t{CMDOPT_OUTFMT, \"T\", JAS_OPT_HASARG},\n\t\t{CMDOPT_OUTOPT, \"output-option\", JAS_OPT_HASARG},\n\t\t{CMDOPT_OUTOPT, \"O\", JAS_OPT_HASARG},\n\t\t{CMDOPT_VERSION, \"version\", 0},\n\t\t{CMDOPT_DEBUG, \"debug-level\", JAS_OPT_HASARG},\n\t\t{CMDOPT_CMPTNO, \"cmptno\", JAS_OPT_HASARG},\n\t\t{CMDOPT_SRGB, \"force-srgb\", 0},\n\t\t{CMDOPT_SRGB, \"S\", 0},\n\t\t{-1, 0, 0}\n\t};\n\n\tcmdopts_t *cmdopts;\n\tint c;\n\n\tif (!(cmdopts = malloc(sizeof(cmdopts_t)))) {\n\t\tfprintf(stderr, \"error: insufficient memory\\n\");\n\t\texit(EXIT_FAILURE);\n\t}\n\n\tcmdopts->infile = 0;\n\tcmdopts->infmt = -1;\n\tcmdopts->inopts = 0;\n\tcmdopts->inoptsbuf[0] = '\\0';\n\tcmdopts->outfile = 0;\n\tcmdopts->outfmt = -1;\n\tcmdopts->outopts = 0;\n\tcmdopts->outoptsbuf[0] = '\\0';\n\tcmdopts->verbose = 0;\n\tcmdopts->version = 0;\n\tcmdopts->cmptno = -1;\n\tcmdopts->debug = 0;\n\tcmdopts->srgb = 0;\n\n\twhile ((c = jas_getopt(argc, argv, cmdoptions)) != EOF) {\n\t\tswitch (c) {\n\t\tcase CMDOPT_HELP:\n\t\t\tcmdusage();\n\t\t\tbreak;\n\t\tcase CMDOPT_VERBOSE:\n\t\t\tcmdopts->verbose = 1;\n\t\t\tbreak;\n\t\tcase CMDOPT_VERSION:\n\t\t\tcmdopts->version = 1;\n\t\t\tbreak;\n\t\tcase CMDOPT_DEBUG:\n\t\t\tcmdopts->debug = atoi(jas_optarg);\n\t\t\tbreak;\n\t\tcase CMDOPT_INFILE:\n\t\t\tcmdopts->infile = jas_optarg;\n\t\t\tbreak;\n\t\tcase CMDOPT_INFMT:\n\t\t\tif ((cmdopts->infmt = jas_image_strtofmt(jas_optarg)) < 0) {\n\t\t\t\tfprintf(stderr, \"warning: ignoring invalid input format %s\\n\",\n\t\t\t\t  jas_optarg);\n\t\t\t\tcmdopts->infmt = -1;\n\t\t\t}\n\t\t\tbreak;\n\t\tcase CMDOPT_INOPT:\n\t\t\taddopt(cmdopts->inoptsbuf, OPTSMAX, jas_optarg);\n\t\t\tcmdopts->inopts = cmdopts->inoptsbuf;\n\t\t\tbreak;\n\t\tcase CMDOPT_OUTFILE:\n\t\t\tcmdopts->outfile = jas_optarg;\n\t\t\tbreak;\n\t\tcase CMDOPT_OUTFMT:\n\t\t\tif ((cmdopts->outfmt = jas_image_strtofmt(jas_optarg)) < 0) {\n\t\t\t\tfprintf(stderr, \"error: invalid output format %s\\n\", jas_optarg);\n\t\t\t\tbadusage();\n\t\t\t}\n\t\t\tbreak;\n\t\tcase CMDOPT_OUTOPT:\n\t\t\taddopt(cmdopts->outoptsbuf, OPTSMAX, jas_optarg);\n\t\t\tcmdopts->outopts = cmdopts->outoptsbuf;\n\t\t\tbreak;\n\t\tcase CMDOPT_CMPTNO:\n\t\t\tcmdopts->cmptno = atoi(jas_optarg);\n\t\t\tbreak;\n\t\tcase CMDOPT_SRGB:\n\t\t\tcmdopts->srgb = 1;\n\t\t\tbreak;\n\t\tdefault:\n\t\t\tbadusage();\n\t\t\tbreak;\n\t\t}\n\t}\n\n\twhile (jas_optind < argc) {\n\t\tfprintf(stderr,\n\t\t  \"warning: ignoring bogus command line argument %s\\n\",\n\t\t  argv[jas_optind]);\n\t\t++jas_optind;\n\t}\n\n\tif (cmdopts->version) {\n\t\tgoto done;\n\t}\n\n\tif (cmdopts->outfmt < 0 && cmdopts->outfile) {\n\t\tif ((cmdopts->outfmt = jas_image_fmtfromname(cmdopts->outfile)) < 0) {\n\t\t\tfprintf(stderr,\n\t\t\t  \"error: cannot guess image format from output file name\\n\");\n\t\t}\n\t}\n\n\tif (cmdopts->outfmt < 0) {\n\t\tfprintf(stderr, \"error: no output format specified\\n\");\n\t\tbadusage();\n\t}\n\ndone:\n\treturn cmdopts;\n}",
+      "fn_code_pos": [
+        [
+          299,
+          0
+        ],
+        [
+          440,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdopts_parse",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "cmdopts_t"
+      }
+    },
+    {
+      "fn_code": "void cmdopts_destroy(cmdopts_t *cmdopts)\n{\n\tfree(cmdopts);\n}",
+      "fn_code_pos": [
+        [
+          442,
+          0
+        ],
+        [
+          445,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdopts_destroy",
+        "parameters": {
+          "cmdopts": "cmdopts_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int addopt(char *optstr, int maxlen, char *s)\n{\n\tint n;\n\tint m;\n\n\tn = strlen(optstr);\n\tm = n + strlen(s) + 1;\n\tif (m > maxlen) {\n\t\treturn 1;\n\t}\n\tif (n > 0) {\n\t\tstrcat(optstr, \"\\n\");\n\t}\n\tstrcat(optstr, s);\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          447,
+          0
+        ],
+        [
+          462,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "addopt",
+        "parameters": {
+          "optstr": "char",
+          "maxlen": "int",
+          "s": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void cmdinfo()\n{\n\tfprintf(stderr, \"JasPer Transcoder (Version %s).\\n\",\n\t  JAS_VERSION);\n\tfprintf(stderr, \"%s\\n\", JAS_COPYRIGHT);\n\tfprintf(stderr, \"%s\\n\", JAS_NOTES);\n}",
+      "fn_code_pos": [
+        [
+          464,
+          0
+        ],
+        [
+          470,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdinfo",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void cmdusage()\n{\n\tint fmtid;\n\tjas_image_fmtinfo_t *fmtinfo;\n\tchar *s;\n\tint i;\n\tcmdinfo();\n\tfprintf(stderr, \"usage: %s [options]\\n\", cmdname);\n\tfor (i = 0, s = helpinfo[i]; s; ++i, s = helpinfo[i]) {\n\t\tfprintf(stderr, \"%s\", s);\n\t}\n\tfprintf(stderr, \"The following formats are supported:\\n\");\n\tfor (fmtid = 0;; ++fmtid) {\n\t\tif (!(fmtinfo = jas_image_lookupfmtbyid(fmtid))) {\n\t\t\tbreak;\n\t\t}\n\t\tfprintf(stderr, \"    %-5s    %s\\n\", fmtinfo->name,\n\t\t  fmtinfo->desc);\n\t}\n\texit(EXIT_FAILURE);\n}",
+      "fn_code_pos": [
+        [
+          495,
+          0
+        ],
+        [
+          515,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdusage",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void badusage()\n{\n\tfprintf(stderr,\n\t  \"For more information on how to use this command, type:\\n\");\n\tfprintf(stderr, \"    %s --help\\n\", cmdname);\n\texit(EXIT_FAILURE);\n}",
+      "fn_code_pos": [
+        [
+          517,
+          0
+        ],
+        [
+          523,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "badusage",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "jas_image_t *converttosrgb(jas_image_t *inimage)\n{\n\tjas_image_t *outimage;\n\tjas_cmpixmap_t inpixmap;\n\tjas_cmpixmap_t outpixmap;\n\tjas_cmcmptfmt_t incmptfmts[16];\n\tjas_cmcmptfmt_t outcmptfmts[16];\n\n\toutprof = jas_cmprof_createfromclrspc(JAS_CLRSPC_SRGB);\n\tassert(outprof);\n\txform = jas_cmxform_create(jas_image_cmprof(inimage), outprof, 0, JAS_CMXFORM_FWD, JAS_CMXFORM_INTENT_PER, 0);\n\tassert(xform);\n\n\tinpixmap.numcmpts = jas_image_numcmpts(oldimage);\n\toutpixmap.numcmpts = 3;\n\tfor (i = 0; i < inpixmap.numcmpts; ++i) {\n\t\tinpixmap.cmptfmts[i] = &incmptfmts[i];\n\t}\n\tfor (i = 0; i < outpixmap.numcmpts; ++i)\n\t\toutpixmap.cmptfmts[i] = &outcmptfmts[i];\n\tif (jas_cmxform_apply(xform, &inpixmap, &outpixmap))\n\t\tabort();\n\n\tjas_xform_destroy(xform);\n\tjas_cmprof_destroy(outprof);\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          526,
+          0
+        ],
+        [
+          552,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "converttosrgb",
+        "parameters": {
+          "inimage": "jas_image_t"
+        },
+        "return_type": "jas_image_t"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "cmdopts_parse(int argc, char **argv)",
+      "fn_dec_pos": [
+        [
+          128,
+          11
+        ],
+        [
+          128,
+          47
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdopts_parse",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "cmdopts_destroy(cmdopts_t *cmdopts)",
+      "fn_dec_pos": [
+        [
+          129,
+          5
+        ],
+        [
+          129,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdopts_destroy",
+        "parameters": {
+          "cmdopts": "cmdopts_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "cmdusage(void)",
+      "fn_dec_pos": [
+        [
+          130,
+          5
+        ],
+        [
+          130,
+          19
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdusage",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "badusage(void)",
+      "fn_dec_pos": [
+        [
+          131,
+          5
+        ],
+        [
+          131,
+          19
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "badusage",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "cmdinfo(void)",
+      "fn_dec_pos": [
+        [
+          132,
+          5
+        ],
+        [
+          132,
+          18
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdinfo",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "addopt(char *optstr, int maxlen, char *s)",
+      "fn_dec_pos": [
+        [
+          133,
+          4
+        ],
+        [
+          133,
+          45
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "addopt",
+        "parameters": {
+          "optstr": "char",
+          "maxlen": "int",
+          "s": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "cmdopts_parse(int argc, char **argv)",
+      "fn_dec_pos": [
+        [
+          299,
+          11
+        ],
+        [
+          299,
+          47
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdopts_parse",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "converttosrgb(jas_image_t *inimage)",
+      "fn_dec_pos": [
+        [
+          526,
+          13
+        ],
+        [
+          526,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "converttosrgb",
+        "parameters": {
+          "inimage": "jas_image_t"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct {\n\n\tchar *infile;\n\t/* The input image file. */\n\n\tint infmt;\n\t/* The input image file format. */\n\n\tchar *inopts;\n\tchar inoptsbuf[OPTSMAX + 1];\n\n\tchar *outfile;\n\t/* The output image file. */\n\n\tint outfmt;\n\n\tchar *outopts;\n\tchar outoptsbuf[OPTSMAX + 1];\n\n\tint verbose;\n\t/* Verbose mode. */\n\n\tint debug;\n\n\tint version;\n\n\tint_fast32_t cmptno;\n\n\tint srgb;\n\n} cmdopts_t;",
+      {
+        "*infile": "char",
+        "infmt": "int",
+        "*inopts": "char",
+        "inoptsbuf[OPTSMAX + 1]": "char",
+        "*outfile": "char",
+        "outfmt": "int",
+        "*outopts": "char",
+        "outoptsbuf[OPTSMAX + 1]": "char",
+        "verbose": "int",
+        "debug": "int",
+        "version": "int",
+        "cmptno": "int_fast32_t",
+        "srgb": "int"
+      },
+      "cmdopts_t",
+      [
+        92,
+        0
+      ],
+      [
+        122,
+        12
+      ]
+    ],
+    [
+      "typedef struct {\n\n\tchar *infile;\n\t/* The input image file. */\n\n\tint infmt;\n\t/* The input image file format. */\n\n\tchar *inopts;\n\tchar inoptsbuf[OPTSMAX + 1];\n\n\tchar *outfile;\n\t/* The output image file. */\n\n\tint outfmt;\n\n\tchar *outopts;\n\tchar outoptsbuf[OPTSMAX + 1];\n\n\tint verbose;\n\t/* Verbose mode. */\n\n\tint debug;\n\n\tint version;\n\n\tint_fast32_t cmptno;\n\n\tint srgb;\n\n} cmdopts_t;",
+      {
+        "*infile": "char",
+        "infmt": "int",
+        "*inopts": "char",
+        "inoptsbuf[OPTSMAX + 1]": "char",
+        "*outfile": "char",
+        "outfmt": "int",
+        "*outopts": "char",
+        "outoptsbuf[OPTSMAX + 1]": "char",
+        "verbose": "int",
+        "debug": "int",
+        "version": "int",
+        "cmptno": "int_fast32_t",
+        "srgb": "int"
+      },
+      "cmdopts_t",
+      [
+        92,
+        0
+      ],
+      [
+        122,
+        12
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <stdio.h>\n",
+      [
+        73,
+        0
+      ],
+      [
+        74,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        74,
+        0
+      ],
+      [
+        75,
+        0
+      ]
+    ],
+    [
+      "#include <assert.h>\n",
+      [
+        75,
+        0
+      ],
+      [
+        76,
+        0
+      ]
+    ],
+    [
+      "#include <time.h>\n",
+      [
+        76,
+        0
+      ],
+      [
+        77,
+        0
+      ]
+    ],
+    [
+      "#include <jasper/jasper.h>\n",
+      [
+        78,
+        0
+      ],
+      [
+        79,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "typedef enum {\n\t\tCMDOPT_HELP = 0,\n\t\tCMDOPT_VERBOSE,\n\t\tCMDOPT_INFILE,\n\t\tCMDOPT_INFMT,\n\t\tCMDOPT_INOPT,\n\t\tCMDOPT_OUTFILE,\n\t\tCMDOPT_OUTFMT,\n\t\tCMDOPT_OUTOPT,\n\t\tCMDOPT_VERSION,\n\t\tCMDOPT_DEBUG,\n\t\tCMDOPT_CMPTNO,\n\t\tCMDOPT_SRGB\n\t} cmdoptid_t;",
+      {
+        "CMDOPT_HELP": "",
+        "CMDOPT_VERBOSE": "",
+        "CMDOPT_INFILE": "",
+        "CMDOPT_INFMT": "",
+        "CMDOPT_INOPT": "",
+        "CMDOPT_OUTFILE": "",
+        "CMDOPT_OUTFMT": "",
+        "CMDOPT_OUTOPT": "",
+        "CMDOPT_VERSION": "",
+        "CMDOPT_DEBUG": "",
+        "CMDOPT_CMPTNO": "",
+        "CMDOPT_SRGB": ""
+      },
+      "cmdoptid_t",
+      [
+        302,
+        1
+      ],
+      [
+        315,
+        14
+      ]
+    ]
+  ]
+}

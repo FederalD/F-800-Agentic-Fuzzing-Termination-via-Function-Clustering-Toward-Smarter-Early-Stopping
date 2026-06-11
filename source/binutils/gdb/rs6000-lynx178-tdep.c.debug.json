@@ -1,0 +1,507 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static CORE_ADDR\nrs6000_lynx178_push_dummy_call (struct gdbarch *gdbarch,\n\t\t\t\tstruct value *function,\n\t\t\t\tstruct regcache *regcache, CORE_ADDR bp_addr,\n\t\t\t\tint nargs, struct value **args, CORE_ADDR sp,\n\t\t\t\tint struct_return, CORE_ADDR struct_addr)\n{\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  int ii;\n  int len = 0;\n  int argno;\t\t\t/* current argument number */\n  int argbytes;\t\t\t/* current argument byte */\n  gdb_byte tmp_buffer[50];\n  int f_argno = 0;\t\t/* current floating point argno */\n  int wordsize = gdbarch_tdep (gdbarch)->wordsize;\n  CORE_ADDR func_addr = find_function_addr (function, NULL);\n\n  struct value *arg = 0;\n  struct type *type;\n\n  ULONGEST saved_sp;\n\n  /* The calling convention this function implements assumes the\n     processor has floating-point registers.  We shouldn't be using it\n     on PPC variants that lack them.  */\n  gdb_assert (ppc_floating_point_unit_p (gdbarch));\n\n  /* The first eight words of ther arguments are passed in registers.\n     Copy them appropriately.  */\n  ii = 0;\n\n  /* If the function is returning a `struct', then the first word\n     (which will be passed in r3) is used for struct return address.\n     In that case we should advance one word and start from r4\n     register to copy parameters.  */\n  if (struct_return)\n    {\n      regcache_raw_write_unsigned (regcache, tdep->ppc_gp0_regnum + 3,\n\t\t\t\t   struct_addr);\n      ii++;\n    }\n\n  /* Effectively indirect call... gcc does...\n\n     return_val example( float, int);\n\n     eabi:\n     float in fp0, int in r3\n     offset of stack on overflow 8/16\n     for varargs, must go by type.\n     power open:\n     float in r3&r4, int in r5\n     offset of stack on overflow different\n     both:\n     return in r3 or f0.  If no float, must study how gcc emulates floats;\n     pay attention to arg promotion.\n     User may have to cast\\args to handle promotion correctly\n     since gdb won't know if prototype supplied or not.  */\n\n  for (argno = 0, argbytes = 0; argno < nargs && ii < 8; ++ii)\n    {\n      int reg_size = register_size (gdbarch, ii + 3);\n\n      arg = args[argno];\n      type = check_typedef (value_type (arg));\n      len = TYPE_LENGTH (type);\n\n      if (TYPE_CODE (type) == TYPE_CODE_FLT)\n\t{\n\n\t  /* Floating point arguments are passed in fpr's, as well as gpr's.\n\t     There are 13 fpr's reserved for passing parameters.  At this point\n\t     there is no way we would run out of them.\n\n\t     Always store the floating point value using the register's\n\t     floating-point format.  */\n\t  const int fp_regnum = tdep->ppc_fp0_regnum + 1 + f_argno;\n\t  gdb_byte reg_val[PPC_MAX_REGISTER_SIZE];\n\t  struct type *reg_type = register_type (gdbarch, fp_regnum);\n\n\t  gdb_assert (len <= 8);\n\n\t  convert_typed_floating (value_contents (arg), type,\n\t\t\t\t  reg_val, reg_type);\n\t  regcache_cooked_write (regcache, fp_regnum, reg_val);\n\t  ++f_argno;\n\t}\n\n      if (len > reg_size)\n\t{\n\n\t  /* Argument takes more than one register.  */\n\t  while (argbytes < len)\n\t    {\n\t      gdb_byte word[PPC_MAX_REGISTER_SIZE];\n\t      memset (word, 0, reg_size);\n\t      memcpy (word,\n\t\t      ((char *) value_contents (arg)) + argbytes,\n\t\t      (len - argbytes) > reg_size\n\t\t        ? reg_size : len - argbytes);\n\t      regcache_cooked_write (regcache,\n\t                            tdep->ppc_gp0_regnum + 3 + ii,\n\t\t\t\t    word);\n\t      ++ii, argbytes += reg_size;\n\n\t      if (ii >= 8)\n\t\tgoto ran_out_of_registers_for_arguments;\n\t    }\n\t  argbytes = 0;\n\t  --ii;\n\t}\n      else\n\t{\n\t  /* Argument can fit in one register.  No problem.  */\n\t  gdb_byte word[PPC_MAX_REGISTER_SIZE];\n\n\t  memset (word, 0, reg_size);\n\t  memcpy (word, value_contents (arg), len);\n\t  regcache_cooked_write (regcache, tdep->ppc_gp0_regnum + 3 +ii, word);\n\t}\n      ++argno;\n    }\n\nran_out_of_registers_for_arguments:\n\n  regcache_cooked_read_unsigned (regcache,\n\t\t\t\t gdbarch_sp_regnum (gdbarch),\n\t\t\t\t &saved_sp);\n\n  /* Location for 8 parameters are always reserved.  */\n  sp -= wordsize * 8;\n\n  /* Another six words for back chain, TOC register, link register, etc.  */\n  sp -= wordsize * 6;\n\n  /* Stack pointer must be quadword aligned.  */\n  sp = align_down (sp, 16);\n\n  /* If there are more arguments, allocate space for them in\n     the stack, then push them starting from the ninth one.  */\n\n  if ((argno < nargs) || argbytes)\n    {\n      int space = 0, jj;\n\n      if (argbytes)\n\t{\n\t  space += align_up (len - argbytes, 4);\n\t  jj = argno + 1;\n\t}\n      else\n\tjj = argno;\n\n      for (; jj < nargs; ++jj)\n\t{\n\t  struct value *val = args[jj];\n\n\t  space += align_up (TYPE_LENGTH (value_type (val)), 4);\n\t}\n\n      /* Add location required for the rest of the parameters.  */\n      space = align_up (space, 16);\n      sp -= space;\n\n      /* This is another instance we need to be concerned about\n         securing our stack space.  If we write anything underneath %sp\n         (r1), we might conflict with the kernel who thinks he is free\n         to use this area.  So, update %sp first before doing anything\n         else.  */\n\n      regcache_raw_write_signed (regcache,\n\t\t\t\t gdbarch_sp_regnum (gdbarch), sp);\n\n      /* If the last argument copied into the registers didn't fit there\n         completely, push the rest of it into stack.  */\n\n      if (argbytes)\n\t{\n\t  write_memory (sp + 24 + (ii * 4),\n\t\t\tvalue_contents (arg) + argbytes,\n\t\t\tlen - argbytes);\n\t  ++argno;\n\t  ii += align_up (len - argbytes, 4) / 4;\n\t}\n\n      /* Push the rest of the arguments into stack.  */\n      for (; argno < nargs; ++argno)\n\t{\n\n\t  arg = args[argno];\n\t  type = check_typedef (value_type (arg));\n\t  len = TYPE_LENGTH (type);\n\n\n\t  /* Float types should be passed in fpr's, as well as in the\n             stack.  */\n\t  if (TYPE_CODE (type) == TYPE_CODE_FLT && f_argno < 13)\n\t    {\n\n\t      gdb_assert (len <= 8);\n\n\t      regcache_cooked_write (regcache,\n\t\t\t\t     tdep->ppc_fp0_regnum + 1 + f_argno,\n\t\t\t\t     value_contents (arg));\n\t      ++f_argno;\n\t    }\n\n\t  write_memory (sp + 24 + (ii * 4), value_contents (arg), len);\n\t  ii += align_up (len, 4) / 4;\n\t}\n    }\n\n  /* Set the stack pointer.  According to the ABI, the SP is meant to\n     be set _before_ the corresponding stack space is used.  On AIX,\n     this even applies when the target has been completely stopped!\n     Not doing this can lead to conflicts with the kernel which thinks\n     that it still has control over this not-yet-allocated stack\n     region.  */\n  regcache_raw_write_signed (regcache, gdbarch_sp_regnum (gdbarch), sp);\n\n  /* Set back chain properly.  */\n  store_unsigned_integer (tmp_buffer, wordsize, byte_order, saved_sp);\n  write_memory (sp, tmp_buffer, wordsize);\n\n  /* Point the inferior function call's return address at the dummy's\n     breakpoint.  */\n  regcache_raw_write_signed (regcache, tdep->ppc_lr_regnum, bp_addr);\n\n  target_store_registers (regcache, -1);\n  return sp;\n}",
+      "fn_code_pos": [
+        [
+          29,
+          0
+        ],
+        [
+          260,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_lynx178_push_dummy_call",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "function": "struct value",
+          "regcache": "struct regcache",
+          "bp_addr": "CORE_ADDR",
+          "nargs": "int",
+          "args": "struct value",
+          "sp": "CORE_ADDR",
+          "struct_return": "int",
+          "struct_addr": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static enum return_value_convention\nrs6000_lynx178_return_value (struct gdbarch *gdbarch, struct value *function,\n\t\t\t     struct type *valtype, struct regcache *regcache,\n\t\t\t     gdb_byte *readbuf, const gdb_byte *writebuf)\n{\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n\n  /* The calling convention this function implements assumes the\n     processor has floating-point registers.  We shouldn't be using it\n     on PowerPC variants that lack them.  */\n  gdb_assert (ppc_floating_point_unit_p (gdbarch));\n\n  /* AltiVec extension: Functions that declare a vector data type as a\n     return value place that return value in VR2.  */\n  if (TYPE_CODE (valtype) == TYPE_CODE_ARRAY && TYPE_VECTOR (valtype)\n      && TYPE_LENGTH (valtype) == 16)\n    {\n      if (readbuf)\n\tregcache_cooked_read (regcache, tdep->ppc_vr0_regnum + 2, readbuf);\n      if (writebuf)\n\tregcache_cooked_write (regcache, tdep->ppc_vr0_regnum + 2, writebuf);\n\n      return RETURN_VALUE_REGISTER_CONVENTION;\n    }\n\n  /* If the called subprogram returns an aggregate, there exists an\n     implicit first argument, whose value is the address of a caller-\n     allocated buffer into which the callee is assumed to store its\n     return value.  All explicit parameters are appropriately\n     relabeled.  */\n  if (TYPE_CODE (valtype) == TYPE_CODE_STRUCT\n      || TYPE_CODE (valtype) == TYPE_CODE_UNION\n      || TYPE_CODE (valtype) == TYPE_CODE_ARRAY)\n    return RETURN_VALUE_STRUCT_CONVENTION;\n\n  /* Scalar floating-point values are returned in FPR1 for float or\n     double, and in FPR1:FPR2 for quadword precision.  Fortran\n     complex*8 and complex*16 are returned in FPR1:FPR2, and\n     complex*32 is returned in FPR1:FPR4.  */\n  if (TYPE_CODE (valtype) == TYPE_CODE_FLT\n      && (TYPE_LENGTH (valtype) == 4 || TYPE_LENGTH (valtype) == 8))\n    {\n      struct type *regtype = register_type (gdbarch, tdep->ppc_fp0_regnum);\n      gdb_byte regval[8];\n\n      /* FIXME: kettenis/2007-01-01: Add support for quadword\n\t precision and complex.  */\n\n      if (readbuf)\n\t{\n\t  regcache_cooked_read (regcache, tdep->ppc_fp0_regnum + 1, regval);\n\t  convert_typed_floating (regval, regtype, readbuf, valtype);\n\t}\n      if (writebuf)\n\t{\n\t  convert_typed_floating (writebuf, valtype, regval, regtype);\n\t  regcache_cooked_write (regcache, tdep->ppc_fp0_regnum + 1, regval);\n\t}\n\n      return RETURN_VALUE_REGISTER_CONVENTION;\n  }\n\n  /* Values of the types int, long, short, pointer, and char (length\n     is less than or equal to four bytes), as well as bit values of\n     lengths less than or equal to 32 bits, must be returned right\n     justified in GPR3 with signed values sign extended and unsigned\n     values zero extended, as necessary.  */\n  if (TYPE_LENGTH (valtype) <= tdep->wordsize)\n    {\n      if (readbuf)\n\t{\n\t  ULONGEST regval;\n\n\t  /* For reading we don't have to worry about sign extension.  */\n\t  regcache_cooked_read_unsigned (regcache, tdep->ppc_gp0_regnum + 3,\n\t\t\t\t\t &regval);\n\t  store_unsigned_integer (readbuf, TYPE_LENGTH (valtype), byte_order,\n\t\t\t\t  regval);\n\t}\n      if (writebuf)\n\t{\n\t  /* For writing, use unpack_long since that should handle any\n\t     required sign extension.  */\n\t  regcache_cooked_write_unsigned (regcache, tdep->ppc_gp0_regnum + 3,\n\t\t\t\t\t  unpack_long (valtype, writebuf));\n\t}\n\n      return RETURN_VALUE_REGISTER_CONVENTION;\n    }\n\n  /* Eight-byte non-floating-point scalar values must be returned in\n     GPR3:GPR4.  */\n\n  if (TYPE_LENGTH (valtype) == 8)\n    {\n      gdb_assert (TYPE_CODE (valtype) != TYPE_CODE_FLT);\n      gdb_assert (tdep->wordsize == 4);\n\n      if (readbuf)\n\t{\n\t  gdb_byte regval[8];\n\n\t  regcache_cooked_read (regcache, tdep->ppc_gp0_regnum + 3, regval);\n\t  regcache_cooked_read (regcache, tdep->ppc_gp0_regnum + 4,\n\t\t\t\tregval + 4);\n\t  memcpy (readbuf, regval, 8);\n\t}\n      if (writebuf)\n\t{\n\t  regcache_cooked_write (regcache, tdep->ppc_gp0_regnum + 3, writebuf);\n\t  regcache_cooked_write (regcache, tdep->ppc_gp0_regnum + 4,\n\t\t\t\t writebuf + 4);\n\t}\n\n      return RETURN_VALUE_REGISTER_CONVENTION;\n    }\n\n  return RETURN_VALUE_STRUCT_CONVENTION;\n}",
+      "fn_code_pos": [
+        [
+          264,
+          0
+        ],
+        [
+          383,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_lynx178_return_value",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "function": "struct value",
+          "valtype": "struct type",
+          "regcache": "struct regcache",
+          "readbuf": "gdb_byte",
+          "writebuf": "gdb_byte"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static enum gdb_osabi\nrs6000_lynx178_osabi_sniffer (bfd *abfd)\n{\n  if (bfd_get_flavour (abfd) != bfd_target_xcoff_flavour)\n    return GDB_OSABI_UNKNOWN;\n\n  /* The only noticeable difference between Lynx178 XCOFF files and\n     AIX XCOFF files comes from the fact that there are no shared\n     libraries on Lynx178.  So if the number of import files is\n     different from zero, it cannot be a Lynx178 binary.  */\n  if (xcoff_get_n_import_files (abfd) != 0)\n    return GDB_OSABI_UNKNOWN;\n\n  return GDB_OSABI_LYNXOS178;\n}",
+      "fn_code_pos": [
+        [
+          387,
+          0
+        ],
+        [
+          401,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_lynx178_osabi_sniffer",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nrs6000_lynx178_init_osabi (struct gdbarch_info info, struct gdbarch *gdbarch)\n{\n  set_gdbarch_push_dummy_call (gdbarch, rs6000_lynx178_push_dummy_call);\n  set_gdbarch_return_value (gdbarch, rs6000_lynx178_return_value);\n  set_gdbarch_long_double_bit (gdbarch, 8 * TARGET_CHAR_BIT);\n}",
+      "fn_code_pos": [
+        [
+          405,
+          0
+        ],
+        [
+          411,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_lynx178_init_osabi",
+        "parameters": {
+          "info": "struct gdbarch_info",
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_rs6000_lynx178_tdep (void)\n{\n  gdbarch_register_osabi_sniffer (bfd_arch_rs6000,\n                                  bfd_target_xcoff_flavour,\n                                  rs6000_lynx178_osabi_sniffer);\n  gdbarch_register_osabi (bfd_arch_rs6000, 0, GDB_OSABI_LYNXOS178,\n                          rs6000_lynx178_init_osabi);\n}",
+      "fn_code_pos": [
+        [
+          416,
+          0
+        ],
+        [
+          424,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_rs6000_lynx178_tdep",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        30,
+        32
+      ],
+      [
+        30,
+        46
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        31,
+        4
+      ],
+      [
+        31,
+        16
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        32,
+        4
+      ],
+      [
+        32,
+        19
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        33,
+        15
+      ],
+      [
+        33,
+        27
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        36,
+        2
+      ],
+      [
+        36,
+        21
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        47,
+        2
+      ],
+      [
+        47,
+        14
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        48,
+        2
+      ],
+      [
+        48,
+        13
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        108,
+        3
+      ],
+      [
+        108,
+        14
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        185,
+        3
+      ],
+      [
+        185,
+        15
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        265,
+        29
+      ],
+      [
+        265,
+        43
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        265,
+        54
+      ],
+      [
+        265,
+        66
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        266,
+        8
+      ],
+      [
+        266,
+        19
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        266,
+        30
+      ],
+      [
+        266,
+        45
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        269,
+        2
+      ],
+      [
+        269,
+        21
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        307,
+        6
+      ],
+      [
+        307,
+        17
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        406,
+        27
+      ],
+      [
+        406,
+        46
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        406,
+        53
+      ],
+      [
+        406,
+        67
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        17,
+        0
+      ],
+      [
+        18,
+        0
+      ]
+    ],
+    [
+      "#include \"osabi.h\"\n",
+      [
+        18,
+        0
+      ],
+      [
+        19,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbtypes.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"infcall.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"ppc-tdep.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"value.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"xcoffread.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        37,
+        2
+      ],
+      [
+        37,
+        17
+      ]
+    ],
+    [
+      "enum return_value_convention",
+      {},
+      "",
+      [
+        264,
+        7
+      ],
+      [
+        264,
+        35
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        270,
+        2
+      ],
+      [
+        270,
+        17
+      ]
+    ],
+    [
+      "enum gdb_osabi",
+      {},
+      "",
+      [
+        387,
+        7
+      ],
+      [
+        387,
+        21
+      ]
+    ]
+  ]
+}

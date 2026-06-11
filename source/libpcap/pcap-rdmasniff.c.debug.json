@@ -1,0 +1,755 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nrdmasniff_stats(pcap_t *handle, struct pcap_stat *stat)\n{\n\tstruct pcap_rdmasniff *priv = handle->priv;\n\n\tstat->ps_recv = priv->packets_recv;\n\tstat->ps_drop = 0;\n\tstat->ps_ifdrop = 0;\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          64,
+          0
+        ],
+        [
+          74,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rdmasniff_stats",
+        "parameters": {
+          "handle": "pcap_t",
+          "stat": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nrdmasniff_cleanup(pcap_t *handle)\n{\n\tstruct pcap_rdmasniff *priv = handle->priv;\n\n\tibv_dereg_mr(priv->mr);\n\tibv_destroy_flow(priv->flow);\n\tibv_destroy_qp(priv->qp);\n\tibv_destroy_cq(priv->cq);\n\tibv_dealloc_pd(priv->pd);\n\tibv_destroy_comp_channel(priv->channel);\n\tibv_close_device(priv->context);\n\tfree(priv->oneshot_buffer);\n\n\tpcap_cleanup_live_common(handle);\n}",
+      "fn_code_pos": [
+        [
+          76,
+          0
+        ],
+        [
+          91,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rdmasniff_cleanup",
+        "parameters": {
+          "handle": "pcap_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nrdmasniff_post_recv(pcap_t *handle, uint64_t wr_id)\n{\n\tstruct pcap_rdmasniff *priv = handle->priv;\n\tstruct ibv_sge sg_entry;\n\tstruct ibv_recv_wr wr, *bad_wr;\n\n\tsg_entry.length = RDMASNIFF_RECEIVE_SIZE;\n\tsg_entry.addr = (uintptr_t) handle->buffer + RDMASNIFF_RECEIVE_SIZE * wr_id;\n\tsg_entry.lkey = priv->mr->lkey;\n\n\twr.wr_id = wr_id;\n\twr.num_sge = 1;\n\twr.sg_list = &sg_entry;\n\twr.next = NULL;\n\n\tibv_post_recv(priv->qp, &wr, &bad_wr);\n}",
+      "fn_code_pos": [
+        [
+          93,
+          0
+        ],
+        [
+          110,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rdmasniff_post_recv",
+        "parameters": {
+          "handle": "pcap_t",
+          "wr_id": "uint64_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nrdmasniff_read(pcap_t *handle, int max_packets, pcap_handler callback, u_char *user)\n{\n\tstruct pcap_rdmasniff *priv = handle->priv;\n\tstruct ibv_cq *ev_cq;\n\tvoid *ev_ctx;\n\tstruct ibv_wc wc;\n\tstruct pcap_pkthdr pkth;\n\tu_char *pktd;\n\tint count = 0;\n\n\tif (!priv->cq_event) {\n\t\twhile (ibv_get_cq_event(priv->channel, &ev_cq, &ev_ctx) < 0) {\n\t\t\tif (errno != EINTR) {\n\t\t\t\treturn PCAP_ERROR;\n\t\t\t}\n\t\t\tif (handle->break_loop) {\n\t\t\t\thandle->break_loop = 0;\n\t\t\t\treturn PCAP_ERROR_BREAK;\n\t\t\t}\n\t\t}\n\t\tibv_ack_cq_events(priv->cq, 1);\n\t\tibv_req_notify_cq(priv->cq, 0);\n\t\tpriv->cq_event = 1;\n\t}\n\n\twhile (count < max_packets || PACKET_COUNT_IS_UNLIMITED(max_packets)) {\n\t\tif (ibv_poll_cq(priv->cq, 1, &wc) != 1) {\n\t\t\tpriv->cq_event = 0;\n\t\t\tbreak;\n\t\t}\n\n\t\tif (wc.status != IBV_WC_SUCCESS) {\n\t\t\tfprintf(stderr, \"failed WC wr_id %lld status %d/%s\\n\",\n\t\t\t\t(unsigned long long) wc.wr_id,\n\t\t\t\twc.status, ibv_wc_status_str(wc.status));\n\t\t\tcontinue;\n\t\t}\n\n\t\tpkth.len = wc.byte_len;\n\t\tpkth.caplen = min(pkth.len, (u_int)handle->snapshot);\n\t\tgettimeofday(&pkth.ts, NULL);\n\n\t\tpktd = (u_char *) handle->buffer + wc.wr_id * RDMASNIFF_RECEIVE_SIZE;\n\n\t\tif (handle->fcode.bf_insns == NULL ||\n\t\t    bpf_filter(handle->fcode.bf_insns, pktd, pkth.len, pkth.caplen)) {\n\t\t\tcallback(user, &pkth, pktd);\n\t\t\t++priv->packets_recv;\n\t\t\t++count;\n\t\t}\n\n\t\trdmasniff_post_recv(handle, wc.wr_id);\n\n\t\tif (handle->break_loop) {\n\t\t\thandle->break_loop = 0;\n\t\t\treturn PCAP_ERROR_BREAK;\n\t\t}\n\t}\n\n\treturn count;\n}",
+      "fn_code_pos": [
+        [
+          112,
+          0
+        ],
+        [
+          173,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rdmasniff_read",
+        "parameters": {
+          "handle": "pcap_t",
+          "max_packets": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nrdmasniff_oneshot(u_char *user, const struct pcap_pkthdr *h, const u_char *bytes)\n{\n\tstruct oneshot_userdata *sp = (struct oneshot_userdata *) user;\n\tpcap_t *handle = sp->pd;\n\tstruct pcap_rdmasniff *priv = handle->priv;\n\n\t*sp->hdr = *h;\n\tmemcpy(priv->oneshot_buffer, bytes, h->caplen);\n\t*sp->pkt = priv->oneshot_buffer;\n}",
+      "fn_code_pos": [
+        [
+          175,
+          0
+        ],
+        [
+          185,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rdmasniff_oneshot",
+        "parameters": {
+          "user": "u_char",
+          "h": "struct pcap_pkthdr",
+          "bytes": "u_char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nrdmasniff_activate(pcap_t *handle)\n{\n\tstruct pcap_rdmasniff *priv = handle->priv;\n\tstruct ibv_qp_init_attr qp_init_attr;\n\tstruct ibv_qp_attr qp_attr;\n\tstruct ibv_flow_attr flow_attr;\n\tstruct ibv_port_attr port_attr;\n\tint i;\n\n\tpriv->context = ibv_open_device(priv->rdma_device);\n\tif (!priv->context) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t      \"Failed to open device %s\", handle->opt.device);\n\t\tgoto error;\n\t}\n\n\tpriv->pd = ibv_alloc_pd(priv->context);\n\tif (!priv->pd) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t      \"Failed to alloc PD for device %s\", handle->opt.device);\n\t\tgoto error;\n\t}\n\n\tpriv->channel = ibv_create_comp_channel(priv->context);\n\tif (!priv->channel) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t      \"Failed to create comp channel for device %s\", handle->opt.device);\n\t\tgoto error;\n\t}\n\n\tpriv->cq = ibv_create_cq(priv->context, RDMASNIFF_NUM_RECEIVES,\n\t\t\t\t NULL, priv->channel, 0);\n\tif (!priv->cq) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t      \"Failed to create CQ for device %s\", handle->opt.device);\n\t\tgoto error;\n\t}\n\n\tibv_req_notify_cq(priv->cq, 0);\n\n\tmemset(&qp_init_attr, 0, sizeof qp_init_attr);\n\tqp_init_attr.send_cq = qp_init_attr.recv_cq = priv->cq;\n\tqp_init_attr.cap.max_recv_wr = RDMASNIFF_NUM_RECEIVES;\n\tqp_init_attr.cap.max_recv_sge = 1;\n\tqp_init_attr.qp_type = IBV_QPT_RAW_PACKET;\n\tpriv->qp = ibv_create_qp(priv->pd, &qp_init_attr);\n\tif (!priv->qp) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t      \"Failed to create QP for device %s\", handle->opt.device);\n\t\tgoto error;\n\t}\n\n\tmemset(&qp_attr, 0, sizeof qp_attr);\n\tqp_attr.qp_state = IBV_QPS_INIT;\n\tqp_attr.port_num = priv->port_num;\n\tif (ibv_modify_qp(priv->qp, &qp_attr, IBV_QP_STATE | IBV_QP_PORT)) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t      \"Failed to modify QP to INIT for device %s\", handle->opt.device);\n\t\tgoto error;\n\t}\n\n\tmemset(&qp_attr, 0, sizeof qp_attr);\n\tqp_attr.qp_state = IBV_QPS_RTR;\n\tif (ibv_modify_qp(priv->qp, &qp_attr, IBV_QP_STATE)) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t      \"Failed to modify QP to RTR for device %s\", handle->opt.device);\n\t\tgoto error;\n\t}\n\n\tmemset(&flow_attr, 0, sizeof flow_attr);\n\tflow_attr.type = IBV_FLOW_ATTR_SNIFFER;\n\tflow_attr.size = sizeof flow_attr;\n\tflow_attr.port = priv->port_num;\n\tpriv->flow = ibv_create_flow(priv->qp, &flow_attr);\n\tif (!priv->flow) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t      \"Failed to create flow for device %s\", handle->opt.device);\n\t\tgoto error;\n\t}\n\n\thandle->bufsize = RDMASNIFF_NUM_RECEIVES * RDMASNIFF_RECEIVE_SIZE;\n\thandle->buffer = malloc(handle->bufsize);\n\tif (!handle->buffer) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t      \"Failed to allocate receive buffer for device %s\", handle->opt.device);\n\t\tgoto error;\n\t}\n\n\tpriv->oneshot_buffer = malloc(RDMASNIFF_RECEIVE_SIZE);\n\tif (!priv->oneshot_buffer) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t      \"Failed to allocate oneshot buffer for device %s\", handle->opt.device);\n\t\tgoto error;\n\t}\n\n\tpriv->mr = ibv_reg_mr(priv->pd, handle->buffer, handle->bufsize, IBV_ACCESS_LOCAL_WRITE);\n\tif (!priv->mr) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t      \"Failed to register MR for device %s\", handle->opt.device);\n\t\tgoto error;\n\t}\n\n\n\tfor (i = 0; i < RDMASNIFF_NUM_RECEIVES; ++i) {\n\t\trdmasniff_post_recv(handle, i);\n\t}\n\n\tif (!ibv_query_port(priv->context, priv->port_num, &port_attr) &&\n\t    port_attr.link_layer == IBV_LINK_LAYER_INFINIBAND) {\n\t\thandle->linktype = DLT_INFINIBAND;\n\t} else {\n\t\thandle->linktype = DLT_EN10MB;\n\t}\n\n\tif (handle->snapshot <= 0 || handle->snapshot > RDMASNIFF_RECEIVE_SIZE)\n\t\thandle->snapshot = RDMASNIFF_RECEIVE_SIZE;\n\n\thandle->offset = 0;\n\thandle->read_op = rdmasniff_read;\n\thandle->stats_op = rdmasniff_stats;\n\thandle->cleanup_op = rdmasniff_cleanup;\n\thandle->setfilter_op = install_bpf_program;\n\thandle->setdirection_op = NULL;\n\thandle->set_datalink_op = NULL;\n\thandle->getnonblock_op = pcap_getnonblock_fd;\n\thandle->setnonblock_op = pcap_setnonblock_fd;\n\thandle->oneshot_callback = rdmasniff_oneshot;\n\thandle->selectable_fd = priv->channel->fd;\n\n\treturn 0;\n\nerror:\n\tif (priv->mr) {\n\t\tibv_dereg_mr(priv->mr);\n\t}\n\n\tif (priv->flow) {\n\t\tibv_destroy_flow(priv->flow);\n\t}\n\n\tif (priv->qp) {\n\t\tibv_destroy_qp(priv->qp);\n\t}\n\n\tif (priv->cq) {\n\t\tibv_destroy_cq(priv->cq);\n\t}\n\n\tif (priv->channel) {\n\t\tibv_destroy_comp_channel(priv->channel);\n\t}\n\n\tif (priv->pd) {\n\t\tibv_dealloc_pd(priv->pd);\n\t}\n\n\tif (priv->context) {\n\t\tibv_close_device(priv->context);\n\t}\n\n\tif (priv->oneshot_buffer) {\n\t\tfree(priv->oneshot_buffer);\n\t}\n\n\treturn PCAP_ERROR;\n}",
+      "fn_code_pos": [
+        [
+          187,
+          0
+        ],
+        [
+          353,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rdmasniff_activate",
+        "parameters": {
+          "handle": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\nrdmasniff_create(const char *device, char *ebuf, int *is_ours)\n{\n\tstruct pcap_rdmasniff *priv;\n\tstruct ibv_device **dev_list;\n\tint numdev;\n\tsize_t namelen;\n\tconst char *port;\n\tunsigned port_num;\n\tint i;\n\tpcap_t *p = NULL;\n\n\t*is_ours = 0;\n\n\tdev_list = ibv_get_device_list(&numdev);\n\tif (!dev_list || !numdev) {\n\t\treturn NULL;\n\t}\n\n\tnamelen = strlen(device);\n\n\tport = strchr(device, ':');\n\tif (port) {\n\t\tport_num = strtoul(port + 1, NULL, 10);\n\t\tif (port_num > 0) {\n\t\t\tnamelen = port - device;\n\t\t} else {\n\t\t\tport_num = 1;\n\t\t}\n\t} else {\n\t\tport_num = 1;\n\t}\n\n\tfor (i = 0; i < numdev; ++i) {\n\t\tif (strlen(dev_list[i]->name) == namelen &&\n\t\t    !strncmp(device, dev_list[i]->name, namelen)) {\n\t\t\t*is_ours = 1;\n\n\t\t\tp = pcap_create_common(ebuf, sizeof (struct pcap_rdmasniff));\n\t\t\tif (p) {\n\t\t\t\tp->activate_op = rdmasniff_activate;\n\t\t\t\tpriv = p->priv;\n\t\t\t\tpriv->rdma_device = dev_list[i];\n\t\t\t\tpriv->port_num = port_num;\n\t\t\t}\n\t\t\tbreak;\n\t\t}\n\t}\n\n\tibv_free_device_list(dev_list);\n\treturn p;\n}",
+      "fn_code_pos": [
+        [
+          355,
+          0
+        ],
+        [
+          406,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rdmasniff_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "int\nrdmasniff_findalldevs(pcap_if_list_t *devlistp, char *err_str)\n{\n\tstruct ibv_device **dev_list;\n\tint numdev;\n\tint i;\n\tint ret = 0;\n\n\tdev_list = ibv_get_device_list(&numdev);\n\tif (!dev_list || !numdev) {\n\t\treturn 0;\n\t}\n\n\tfor (i = 0; i < numdev; ++i) {\n\t\t/*\n\t\t * XXX - do the notions of \"up\", \"running\", or\n\t\t * \"connected\" apply here?\n\t\t */\n\t\tif (!add_dev(devlistp, dev_list[i]->name, 0, \"RDMA sniffer\", err_str)) {\n\t\t\tret = -1;\n\t\t\tgoto out;\n\t\t}\n\t}\n\nout:\n\tibv_free_device_list(dev_list);\n\treturn ret;\n}",
+      "fn_code_pos": [
+        [
+          408,
+          0
+        ],
+        [
+          435,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rdmasniff_findalldevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "err_str": "char"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "rdmasniff_create(const char *device, char *ebuf, int *is_ours)",
+      "fn_dec_pos": [
+        [
+          356,
+          0
+        ],
+        [
+          356,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rdmasniff_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_rdmasniff {\n\tstruct ibv_device *\t\trdma_device;\n\tstruct ibv_context *\t\tcontext;\n\tstruct ibv_comp_channel *\tchannel;\n\tstruct ibv_pd *\t\t\tpd;\n\tstruct ibv_cq *\t\t\tcq;\n\tstruct ibv_qp *\t\t\tqp;\n\tstruct ibv_flow *               flow;\n\tstruct ibv_mr *\t\t\tmr;\n\tu_char *\t\t\toneshot_buffer;\n\tunsigned\t\t\tport_num;\n\tint                             cq_event;\n\tu_int                           packets_recv;\n}",
+      {
+        "*\t\trdma_device": "struct ibv_device",
+        "*\t\tcontext": "struct ibv_context",
+        "*\tchannel": "struct ibv_comp_channel",
+        "*\t\t\tpd": "struct ibv_pd",
+        "*\t\t\tcq": "struct ibv_cq",
+        "*\t\t\tqp": "struct ibv_qp",
+        "*               flow": "struct ibv_flow",
+        "*\t\t\tmr": "struct ibv_mr",
+        "*\t\t\toneshot_buffer": "u_char",
+        "port_num": "unsigned",
+        "cq_event": "int",
+        "packets_recv": "u_int"
+      },
+      "pcap_rdmasniff",
+      [
+        49,
+        0
+      ],
+      [
+        62,
+        1
+      ]
+    ],
+    [
+      "struct pcap_rdmasniff {\n\tstruct ibv_device *\t\trdma_device;\n\tstruct ibv_context *\t\tcontext;\n\tstruct ibv_comp_channel *\tchannel;\n\tstruct ibv_pd *\t\t\tpd;\n\tstruct ibv_cq *\t\t\tcq;\n\tstruct ibv_qp *\t\t\tqp;\n\tstruct ibv_flow *               flow;\n\tstruct ibv_mr *\t\t\tmr;\n\tu_char *\t\t\toneshot_buffer;\n\tunsigned\t\t\tport_num;\n\tint                             cq_event;\n\tu_int                           packets_recv;\n}",
+      {
+        "*\t\trdma_device": "struct ibv_device",
+        "*\t\tcontext": "struct ibv_context",
+        "*\tchannel": "struct ibv_comp_channel",
+        "*\t\t\tpd": "struct ibv_pd",
+        "*\t\t\tcq": "struct ibv_cq",
+        "*\t\t\tqp": "struct ibv_qp",
+        "*               flow": "struct ibv_flow",
+        "*\t\t\tmr": "struct ibv_mr",
+        "*\t\t\toneshot_buffer": "u_char",
+        "port_num": "unsigned",
+        "cq_event": "int",
+        "packets_recv": "u_int"
+      },
+      "pcap_rdmasniff",
+      [
+        49,
+        0
+      ],
+      [
+        62,
+        1
+      ]
+    ],
+    [
+      "struct ibv_device",
+      {},
+      "",
+      [
+        50,
+        1
+      ],
+      [
+        50,
+        18
+      ]
+    ],
+    [
+      "struct ibv_context",
+      {},
+      "",
+      [
+        51,
+        1
+      ],
+      [
+        51,
+        19
+      ]
+    ],
+    [
+      "struct ibv_comp_channel",
+      {},
+      "",
+      [
+        52,
+        1
+      ],
+      [
+        52,
+        24
+      ]
+    ],
+    [
+      "struct ibv_pd",
+      {},
+      "",
+      [
+        53,
+        1
+      ],
+      [
+        53,
+        14
+      ]
+    ],
+    [
+      "struct ibv_cq",
+      {},
+      "",
+      [
+        54,
+        1
+      ],
+      [
+        54,
+        14
+      ]
+    ],
+    [
+      "struct ibv_qp",
+      {},
+      "",
+      [
+        55,
+        1
+      ],
+      [
+        55,
+        14
+      ]
+    ],
+    [
+      "struct ibv_flow",
+      {},
+      "",
+      [
+        56,
+        1
+      ],
+      [
+        56,
+        16
+      ]
+    ],
+    [
+      "struct ibv_mr",
+      {},
+      "",
+      [
+        57,
+        1
+      ],
+      [
+        57,
+        14
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        65,
+        32
+      ],
+      [
+        65,
+        48
+      ]
+    ],
+    [
+      "struct pcap_rdmasniff",
+      {},
+      "",
+      [
+        67,
+        1
+      ],
+      [
+        67,
+        22
+      ]
+    ],
+    [
+      "struct pcap_rdmasniff",
+      {},
+      "",
+      [
+        79,
+        1
+      ],
+      [
+        79,
+        22
+      ]
+    ],
+    [
+      "struct pcap_rdmasniff",
+      {},
+      "",
+      [
+        96,
+        1
+      ],
+      [
+        96,
+        22
+      ]
+    ],
+    [
+      "struct ibv_sge",
+      {},
+      "",
+      [
+        97,
+        1
+      ],
+      [
+        97,
+        15
+      ]
+    ],
+    [
+      "struct ibv_recv_wr",
+      {},
+      "",
+      [
+        98,
+        1
+      ],
+      [
+        98,
+        19
+      ]
+    ],
+    [
+      "struct pcap_rdmasniff",
+      {},
+      "",
+      [
+        115,
+        1
+      ],
+      [
+        115,
+        22
+      ]
+    ],
+    [
+      "struct ibv_cq",
+      {},
+      "",
+      [
+        116,
+        1
+      ],
+      [
+        116,
+        14
+      ]
+    ],
+    [
+      "struct ibv_wc",
+      {},
+      "",
+      [
+        118,
+        1
+      ],
+      [
+        118,
+        14
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        119,
+        1
+      ],
+      [
+        119,
+        19
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        176,
+        38
+      ],
+      [
+        176,
+        56
+      ]
+    ],
+    [
+      "struct oneshot_userdata",
+      {},
+      "",
+      [
+        178,
+        1
+      ],
+      [
+        178,
+        24
+      ]
+    ],
+    [
+      "struct oneshot_userdata",
+      {},
+      "",
+      [
+        178,
+        32
+      ],
+      [
+        178,
+        55
+      ]
+    ],
+    [
+      "struct pcap_rdmasniff",
+      {},
+      "",
+      [
+        180,
+        1
+      ],
+      [
+        180,
+        22
+      ]
+    ],
+    [
+      "struct pcap_rdmasniff",
+      {},
+      "",
+      [
+        190,
+        1
+      ],
+      [
+        190,
+        22
+      ]
+    ],
+    [
+      "struct ibv_qp_init_attr",
+      {},
+      "",
+      [
+        191,
+        1
+      ],
+      [
+        191,
+        24
+      ]
+    ],
+    [
+      "struct ibv_qp_attr",
+      {},
+      "",
+      [
+        192,
+        1
+      ],
+      [
+        192,
+        19
+      ]
+    ],
+    [
+      "struct ibv_flow_attr",
+      {},
+      "",
+      [
+        193,
+        1
+      ],
+      [
+        193,
+        21
+      ]
+    ],
+    [
+      "struct ibv_port_attr",
+      {},
+      "",
+      [
+        194,
+        1
+      ],
+      [
+        194,
+        21
+      ]
+    ],
+    [
+      "struct pcap_rdmasniff",
+      {},
+      "",
+      [
+        358,
+        1
+      ],
+      [
+        358,
+        22
+      ]
+    ],
+    [
+      "struct ibv_device",
+      {},
+      "",
+      [
+        359,
+        1
+      ],
+      [
+        359,
+        18
+      ]
+    ],
+    [
+      "struct pcap_rdmasniff",
+      {},
+      "",
+      [
+        393,
+        40
+      ],
+      [
+        393,
+        61
+      ]
+    ],
+    [
+      "struct ibv_device",
+      {},
+      "",
+      [
+        411,
+        1
+      ],
+      [
+        411,
+        18
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-rdmasniff.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <infiniband/verbs.h>\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

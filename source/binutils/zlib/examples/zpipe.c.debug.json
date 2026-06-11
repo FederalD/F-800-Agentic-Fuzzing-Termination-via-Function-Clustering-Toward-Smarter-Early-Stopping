@@ -1,0 +1,169 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int def(FILE *source, FILE *dest, int level)\n{\n    int ret, flush;\n    unsigned have;\n    z_stream strm;\n    unsigned char in[CHUNK];\n    unsigned char out[CHUNK];\n\n    /* allocate deflate state */\n    strm.zalloc = Z_NULL;\n    strm.zfree = Z_NULL;\n    strm.opaque = Z_NULL;\n    ret = deflateInit(&strm, level);\n    if (ret != Z_OK)\n        return ret;\n\n    /* compress until end of file */\n    do {\n        strm.avail_in = fread(in, 1, CHUNK, source);\n        if (ferror(source)) {\n            (void)deflateEnd(&strm);\n            return Z_ERRNO;\n        }\n        flush = feof(source) ? Z_FINISH : Z_NO_FLUSH;\n        strm.next_in = in;\n\n        /* run deflate() on input until output buffer not full, finish\n           compression if all of source has been read in */\n        do {\n            strm.avail_out = CHUNK;\n            strm.next_out = out;\n            ret = deflate(&strm, flush);    /* no bad return value */\n            assert(ret != Z_STREAM_ERROR);  /* state not clobbered */\n            have = CHUNK - strm.avail_out;\n            if (fwrite(out, 1, have, dest) != have || ferror(dest)) {\n                (void)deflateEnd(&strm);\n                return Z_ERRNO;\n            }\n        } while (strm.avail_out == 0);\n        assert(strm.avail_in == 0);     /* all input will be used */\n\n        /* done when last data in file processed */\n    } while (flush != Z_FINISH);\n    assert(ret == Z_STREAM_END);        /* stream will be complete */\n\n    /* clean up and return */\n    (void)deflateEnd(&strm);\n    return Z_OK;\n}",
+      "fn_code_pos": [
+        [
+          35,
+          0
+        ],
+        [
+          83,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "def",
+        "parameters": {
+          "source": "FILE",
+          "dest": "FILE",
+          "level": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int inf(FILE *source, FILE *dest)\n{\n    int ret;\n    unsigned have;\n    z_stream strm;\n    unsigned char in[CHUNK];\n    unsigned char out[CHUNK];\n\n    /* allocate inflate state */\n    strm.zalloc = Z_NULL;\n    strm.zfree = Z_NULL;\n    strm.opaque = Z_NULL;\n    strm.avail_in = 0;\n    strm.next_in = Z_NULL;\n    ret = inflateInit(&strm);\n    if (ret != Z_OK)\n        return ret;\n\n    /* decompress until deflate stream ends or end of file */\n    do {\n        strm.avail_in = fread(in, 1, CHUNK, source);\n        if (ferror(source)) {\n            (void)inflateEnd(&strm);\n            return Z_ERRNO;\n        }\n        if (strm.avail_in == 0)\n            break;\n        strm.next_in = in;\n\n        /* run inflate() on input until output buffer not full */\n        do {\n            strm.avail_out = CHUNK;\n            strm.next_out = out;\n            ret = inflate(&strm, Z_NO_FLUSH);\n            assert(ret != Z_STREAM_ERROR);  /* state not clobbered */\n            switch (ret) {\n            case Z_NEED_DICT:\n                ret = Z_DATA_ERROR;     /* and fall through */\n            case Z_DATA_ERROR:\n            case Z_MEM_ERROR:\n                (void)inflateEnd(&strm);\n                return ret;\n            }\n            have = CHUNK - strm.avail_out;\n            if (fwrite(out, 1, have, dest) != have || ferror(dest)) {\n                (void)inflateEnd(&strm);\n                return Z_ERRNO;\n            }\n        } while (strm.avail_out == 0);\n\n        /* done when inflate() says it's done */\n    } while (ret != Z_STREAM_END);\n\n    /* clean up and return */\n    (void)inflateEnd(&strm);\n    return ret == Z_STREAM_END ? Z_OK : Z_DATA_ERROR;\n}",
+      "fn_code_pos": [
+        [
+          91,
+          0
+        ],
+        [
+          147,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inf",
+        "parameters": {
+          "source": "FILE",
+          "dest": "FILE"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void zerr(int ret)\n{\n    fputs(\"zpipe: \", stderr);\n    switch (ret) {\n    case Z_ERRNO:\n        if (ferror(stdin))\n            fputs(\"error reading stdin\\n\", stderr);\n        if (ferror(stdout))\n            fputs(\"error writing stdout\\n\", stderr);\n        break;\n    case Z_STREAM_ERROR:\n        fputs(\"invalid compression level\\n\", stderr);\n        break;\n    case Z_DATA_ERROR:\n        fputs(\"invalid or incomplete deflate data\\n\", stderr);\n        break;\n    case Z_MEM_ERROR:\n        fputs(\"out of memory\\n\", stderr);\n        break;\n    case Z_VERSION_ERROR:\n        fputs(\"zlib version mismatch!\\n\", stderr);\n    }\n}",
+      "fn_code_pos": [
+        [
+          150,
+          0
+        ],
+        [
+          172,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "zerr",
+        "parameters": {
+          "ret": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int main(int argc, char **argv)\n{\n    int ret;\n\n    /* avoid end-of-line conversions */\n    SET_BINARY_MODE(stdin);\n    SET_BINARY_MODE(stdout);\n\n    /* do compression if no arguments */\n    if (argc == 1) {\n        ret = def(stdin, stdout, Z_DEFAULT_COMPRESSION);\n        if (ret != Z_OK)\n            zerr(ret);\n        return ret;\n    }\n\n    /* do decompression if -d specified */\n    else if (argc == 2 && strcmp(argv[1], \"-d\") == 0) {\n        ret = inf(stdin, stdout);\n        if (ret != Z_OK)\n            zerr(ret);\n        return ret;\n    }\n\n    /* otherwise, report usage */\n    else {\n        fputs(\"zpipe usage: zpipe [-d] < source > dest\\n\", stderr);\n        return 1;\n    }\n}",
+      "fn_code_pos": [
+        [
+          175,
+          0
+        ],
+        [
+          204,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include <stdio.h>\n",
+      [
+        14,
+        0
+      ],
+      [
+        15,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        15,
+        0
+      ],
+      [
+        16,
+        0
+      ]
+    ],
+    [
+      "#include <assert.h>\n",
+      [
+        16,
+        0
+      ],
+      [
+        17,
+        0
+      ]
+    ],
+    [
+      "#include \"zlib.h\"\n",
+      [
+        17,
+        0
+      ],
+      [
+        18,
+        0
+      ]
+    ],
+    [
+      "#  include <fcntl.h>\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#  include <io.h>\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

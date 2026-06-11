@@ -1,0 +1,694 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\ntrace_file_writer_xfree (void *arg)\n{\n  struct trace_file_writer *writer = (struct trace_file_writer *) arg;\n\n  writer->ops->dtor (writer);\n  xfree (writer);\n}",
+      "fn_code_pos": [
+        [
+          40,
+          0
+        ],
+        [
+          47,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "trace_file_writer_xfree",
+        "parameters": {
+          "arg": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntrace_save (const char *filename, struct trace_file_writer *writer,\n\t    int target_does_save)\n{\n  struct trace_status *ts = current_trace_status ();\n  struct uploaded_tp *uploaded_tps = NULL, *utp;\n  struct uploaded_tsv *uploaded_tsvs = NULL, *utsv;\n\n  ULONGEST offset = 0;\n#define MAX_TRACE_UPLOAD 2000\n  gdb_byte buf[MAX_TRACE_UPLOAD];\n  enum bfd_endian byte_order = gdbarch_byte_order (target_gdbarch ());\n\n  /* If the target is to save the data to a file on its own, then just\n     send the command and be done with it.  */\n  if (target_does_save)\n    {\n      if (!writer->ops->target_save (writer, filename))\n\terror (_(\"Target failed to save trace data to '%s'.\"),\n\t       filename);\n      return;\n    }\n\n  /* Get the trace status first before opening the file, so if the\n     target is losing, we can get out without touching files.  Since\n     we're just calling this for side effects, we ignore the\n     result.  */\n  target_get_trace_status (ts);\n\n  writer->ops->start (writer, filename);\n\n  writer->ops->write_header (writer);\n\n  /* Write descriptive info.  */\n\n  /* Write out the size of a register block.  */\n  writer->ops->write_regblock_type (writer, trace_regblock_size);\n\n  /* Write out the target description info.  */\n  writer->ops->write_tdesc (writer);\n\n  /* Write out status of the tracing run (aka \"tstatus\" info).  */\n  writer->ops->write_status (writer, ts);\n\n  /* Note that we want to upload tracepoints and save those, rather\n     than simply writing out the local ones, because the user may have\n     changed tracepoints in GDB in preparation for a future tracing\n     run, or maybe just mass-deleted all types of breakpoints as part\n     of cleaning up.  So as not to contaminate the session, leave the\n     data in its uploaded form, don't make into real tracepoints.  */\n\n  /* Get trace state variables first, they may be checked when parsing\n     uploaded commands.  */\n\n  target_upload_trace_state_variables (&uploaded_tsvs);\n\n  for (utsv = uploaded_tsvs; utsv; utsv = utsv->next)\n    writer->ops->write_uploaded_tsv (writer, utsv);\n\n  free_uploaded_tsvs (&uploaded_tsvs);\n\n  target_upload_tracepoints (&uploaded_tps);\n\n  for (utp = uploaded_tps; utp; utp = utp->next)\n    target_get_tracepoint_status (NULL, utp);\n\n  for (utp = uploaded_tps; utp; utp = utp->next)\n    writer->ops->write_uploaded_tp (writer, utp);\n\n  free_uploaded_tps (&uploaded_tps);\n\n  /* Mark the end of the definition section.  */\n  writer->ops->write_definition_end (writer);\n\n  /* Get and write the trace data proper.  */\n  while (1)\n    {\n      LONGEST gotten = 0;\n\n      /* The writer supports writing the contents of trace buffer\n\t  directly to trace file.  Don't parse the contents of trace\n\t  buffer.  */\n      if (writer->ops->write_trace_buffer != NULL)\n\t{\n\t  /* We ask for big blocks, in the hopes of efficiency, but\n\t     will take less if the target has packet size limitations\n\t     or some such.  */\n\t  gotten = target_get_raw_trace_data (buf, offset,\n\t\t\t\t\t      MAX_TRACE_UPLOAD);\n\t  if (gotten < 0)\n\t    error (_(\"Failure to get requested trace buffer data\"));\n\t  /* No more data is forthcoming, we're done.  */\n\t  if (gotten == 0)\n\t    break;\n\n\t  writer->ops->write_trace_buffer (writer, buf, gotten);\n\n\t  offset += gotten;\n\t}\n      else\n\t{\n\t  uint16_t tp_num;\n\t  uint32_t tf_size;\n\t  /* Parse the trace buffers according to how data are stored\n\t     in trace buffer in GDBserver.  */\n\n\t  gotten = target_get_raw_trace_data (buf, offset, 6);\n\n\t  if (gotten == 0)\n\t    break;\n\n\t  /* Read the first six bytes in, which is the tracepoint\n\t     number and trace frame size.  */\n\t  tp_num = (uint16_t)\n\t    extract_unsigned_integer (&buf[0], 2, byte_order);\n\n\t  tf_size = (uint32_t)\n\t    extract_unsigned_integer (&buf[2], 4, byte_order);\n\n\t  writer->ops->frame_ops->start (writer, tp_num);\n\t  gotten = 6;\n\n\t  if (tf_size > 0)\n\t    {\n\t      unsigned int block;\n\n\t      offset += 6;\n\n\t      for (block = 0; block < tf_size; )\n\t\t{\n\t\t  gdb_byte block_type;\n\n\t\t  /* We'll fetch one block each time, in order to\n\t\t     handle the extremely large 'M' block.  We first\n\t\t     fetch one byte to get the type of the block.  */\n\t\t  gotten = target_get_raw_trace_data (buf, offset, 1);\n\t\t  if (gotten < 1)\n\t\t    error (_(\"Failure to get requested trace buffer data\"));\n\n\t\t  gotten = 1;\n\t\t  block += 1;\n\t\t  offset += 1;\n\n\t\t  block_type = buf[0];\n\t\t  switch (block_type)\n\t\t    {\n\t\t    case 'R':\n\t\t      gotten\n\t\t\t= target_get_raw_trace_data (buf, offset,\n\t\t\t\t\t\t     trace_regblock_size);\n\t\t      if (gotten < trace_regblock_size)\n\t\t\terror (_(\"Failure to get requested trace\"\n\t\t\t\t \" buffer data\"));\n\n\t\t      TRACE_WRITE_R_BLOCK (writer, buf,\n\t\t\t\t\t   trace_regblock_size);\n\t\t      break;\n\t\t    case 'M':\n\t\t      {\n\t\t\tunsigned short mlen;\n\t\t\tULONGEST addr;\n\t\t\tLONGEST t;\n\t\t\tint j;\n\n\t\t\tt = target_get_raw_trace_data (buf,offset, 10);\n\t\t\tif (t < 10)\n\t\t\t  error (_(\"Failure to get requested trace\"\n\t\t\t\t   \" buffer data\"));\n\n\t\t\toffset += 10;\n\t\t\tblock += 10;\n\n\t\t\tgotten = 0;\n\t\t\taddr = (ULONGEST)\n\t\t\t  extract_unsigned_integer (buf, 8,\n\t\t\t\t\t\t    byte_order);\n\t\t\tmlen = (unsigned short)\n\t\t\t  extract_unsigned_integer (&buf[8], 2,\n\t\t\t\t\t\t    byte_order);\n\n\t\t\tTRACE_WRITE_M_BLOCK_HEADER (writer, addr,\n\t\t\t\t\t\t    mlen);\n\n\t\t\t/* The memory contents in 'M' block may be\n\t\t\t   very large.  Fetch the data from the target\n\t\t\t   and write them into file one by one.  */\n\t\t\tfor (j = 0; j < mlen; )\n\t\t\t  {\n\t\t\t    unsigned int read_length;\n\n\t\t\t    if (mlen - j > MAX_TRACE_UPLOAD)\n\t\t\t      read_length = MAX_TRACE_UPLOAD;\n\t\t\t    else\n\t\t\t      read_length = mlen - j;\n\n\t\t\t    t = target_get_raw_trace_data (buf,\n\t\t\t\t\t\t\t   offset + j,\n\t\t\t\t\t\t\t   read_length);\n\t\t\t    if (t < read_length)\n\t\t\t      error (_(\"Failure to get requested\"\n\t\t\t\t       \" trace buffer data\"));\n\n\t\t\t    TRACE_WRITE_M_BLOCK_MEMORY (writer, buf,\n\t\t\t\t\t\t\tread_length);\n\n\t\t\t    j += read_length;\n\t\t\t    gotten += read_length;\n\t\t\t  }\n\n\t\t\tbreak;\n\t\t      }\n\t\t    case 'V':\n\t\t      {\n\t\t\tint vnum;\n\t\t\tLONGEST val;\n\n\t\t\tgotten\n\t\t\t  = target_get_raw_trace_data (buf, offset,\n\t\t\t\t\t\t       12);\n\t\t\tif (gotten < 12)\n\t\t\t  error (_(\"Failure to get requested\"\n\t\t\t\t   \" trace buffer data\"));\n\n\t\t\tvnum  = (int) extract_signed_integer (buf,\n\t\t\t\t\t\t\t      4,\n\t\t\t\t\t\t\t      byte_order);\n\t\t\tval\n\t\t\t  = extract_signed_integer (&buf[4], 8,\n\t\t\t\t\t\t    byte_order);\n\n\t\t\tTRACE_WRITE_V_BLOCK (writer, vnum, val);\n\t\t      }\n\t\t      break;\n\t\t    default:\n\t\t      error (_(\"Unknown block type '%c' (0x%x) in\"\n\t\t\t       \" trace frame\"),\n\t\t\t     block_type, block_type);\n\t\t    }\n\n\t\t  block += gotten;\n\t\t  offset += gotten;\n\t\t}\n\t    }\n\t  else\n\t    offset += gotten;\n\n\t  writer->ops->frame_ops->end (writer);\n\t}\n    }\n\n  writer->ops->end (writer);\n}",
+      "fn_code_pos": [
+        [
+          54,
+          0
+        ],
+        [
+          305,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "trace_save",
+        "parameters": {
+          "filename": "char",
+          "writer": "struct trace_file_writer",
+          "target_does_save": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntsave_command (char *args, int from_tty)\n{\n  int target_does_save = 0;\n  char **argv;\n  char *filename = NULL;\n  struct cleanup *back_to;\n  int generate_ctf = 0;\n  struct trace_file_writer *writer = NULL;\n\n  if (args == NULL)\n    error_no_arg (_(\"file in which to save trace data\"));\n\n  argv = gdb_buildargv (args);\n  back_to = make_cleanup_freeargv (argv);\n\n  for (; *argv; ++argv)\n    {\n      if (strcmp (*argv, \"-r\") == 0)\n\ttarget_does_save = 1;\n      else if (strcmp (*argv, \"-ctf\") == 0)\n\tgenerate_ctf = 1;\n      else if (**argv == '-')\n\terror (_(\"unknown option `%s'\"), *argv);\n      else\n\tfilename = *argv;\n    }\n\n  if (!filename)\n    error_no_arg (_(\"file in which to save trace data\"));\n\n  if (generate_ctf)\n    writer = ctf_trace_file_writer_new ();\n  else\n    writer = tfile_trace_file_writer_new ();\n\n  make_cleanup (trace_file_writer_xfree, writer);\n\n  trace_save (filename, writer, target_does_save);\n\n  if (from_tty)\n    printf_filtered (_(\"Trace data saved to %s '%s'.\\n\"),\n\t\t     generate_ctf ? \"directory\" : \"file\", filename);\n\n  do_cleanups (back_to);\n}",
+      "fn_code_pos": [
+        [
+          307,
+          0
+        ],
+        [
+          352,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tsave_command",
+        "parameters": {
+          "args": "char",
+          "from_tty": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\ntrace_save_tfile (const char *filename, int target_does_save)\n{\n  struct trace_file_writer *writer;\n  struct cleanup *back_to;\n\n  writer = tfile_trace_file_writer_new ();\n  back_to = make_cleanup (trace_file_writer_xfree, writer);\n  trace_save (filename, writer, target_does_save);\n  do_cleanups (back_to);\n}",
+      "fn_code_pos": [
+        [
+          356,
+          0
+        ],
+        [
+          366,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "trace_save_tfile",
+        "parameters": {
+          "filename": "char",
+          "target_does_save": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\ntrace_save_ctf (const char *dirname, int target_does_save)\n{\n  struct trace_file_writer *writer;\n  struct cleanup *back_to;\n\n  writer = ctf_trace_file_writer_new ();\n  back_to = make_cleanup (trace_file_writer_xfree, writer);\n\n  trace_save (dirname, writer, target_does_save);\n  do_cleanups (back_to);\n}",
+      "fn_code_pos": [
+        [
+          370,
+          0
+        ],
+        [
+          381,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "trace_save_ctf",
+        "parameters": {
+          "dirname": "char",
+          "target_does_save": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\ntracefile_fetch_registers (struct regcache *regcache, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct tracepoint *tp = get_tracepoint (get_tracepoint_number ());\n  int regn;\n\n  /* We get here if no register data has been found.  Mark registers\n     as unavailable.  */\n  for (regn = 0; regn < gdbarch_num_regs (gdbarch); regn++)\n    regcache_raw_supply (regcache, regn, NULL);\n\n  /* We can often usefully guess that the PC is going to be the same\n     as the address of the tracepoint.  */\n  if (tp == NULL || tp->loc == NULL)\n    return;\n\n  /* But don't try to guess if tracepoint is multi-location...  */\n  if (tp->loc->next)\n    {\n      warning (_(\"Tracepoint %d has multiple \"\n\t\t \"locations, cannot infer $pc\"),\n\t       tp->number);\n      return;\n    }\n  /* ... or does while-stepping.  */\n  else if (tp->step_count > 0)\n    {\n      warning (_(\"Tracepoint %d does while-stepping, \"\n\t\t \"cannot infer $pc\"),\n\t       tp->number);\n      return;\n    }\n\n  /* Guess what we can from the tracepoint location.  */\n  gdbarch_guess_tracepoint_registers (gdbarch, regcache,\n\t\t\t\t      tp->loc->address);\n}",
+      "fn_code_pos": [
+        [
+          386,
+          0
+        ],
+        [
+          423,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tracefile_fetch_registers",
+        "parameters": {
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ntracefile_has_all_memory (struct target_ops *ops)\n{\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          427,
+          0
+        ],
+        [
+          431,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tracefile_has_all_memory",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ntracefile_has_memory (struct target_ops *ops)\n{\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          435,
+          0
+        ],
+        [
+          439,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tracefile_has_memory",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ntracefile_has_stack (struct target_ops *ops)\n{\n  return get_traceframe_number () != -1;\n}",
+      "fn_code_pos": [
+        [
+          445,
+          0
+        ],
+        [
+          449,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tracefile_has_stack",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ntracefile_has_registers (struct target_ops *ops)\n{\n  return get_traceframe_number () != -1;\n}",
+      "fn_code_pos": [
+        [
+          455,
+          0
+        ],
+        [
+          459,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tracefile_has_registers",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ntracefile_thread_alive (struct target_ops *ops, ptid_t ptid)\n{\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          464,
+          0
+        ],
+        [
+          468,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tracefile_thread_alive",
+        "parameters": {
+          "ops": "struct target_ops",
+          "ptid": "ptid_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ntracefile_get_trace_status (struct target_ops *self, struct trace_status *ts)\n{\n  /* Other bits of trace status were collected as part of opening the\n     trace files, so nothing to do here.  */\n\n  return -1;\n}",
+      "fn_code_pos": [
+        [
+          473,
+          0
+        ],
+        [
+          480,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tracefile_get_trace_status",
+        "parameters": {
+          "self": "struct target_ops",
+          "ts": "struct trace_status"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\ninit_tracefile_ops (struct target_ops *ops)\n{\n  ops->to_stratum = process_stratum;\n  ops->to_get_trace_status = tracefile_get_trace_status;\n  ops->to_has_all_memory = tracefile_has_all_memory;\n  ops->to_has_memory = tracefile_has_memory;\n  ops->to_has_stack = tracefile_has_stack;\n  ops->to_has_registers = tracefile_has_registers;\n  ops->to_thread_alive = tracefile_thread_alive;\n  ops->to_magic = OPS_MAGIC;\n}",
+      "fn_code_pos": [
+        [
+          484,
+          0
+        ],
+        [
+          495,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "init_tracefile_ops",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_tracefile (void)\n{\n  add_com (\"tsave\", class_trace, tsave_command, _(\"\\\nSave the trace data to a file.\\n\\\nUse the '-ctf' option to save the data to CTF format.\\n\\\nUse the '-r' option to direct the target to save directly to the file,\\n\\\nusing its own filesystem.\"));\n}",
+      "fn_code_pos": [
+        [
+          499,
+          0
+        ],
+        [
+          507,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_tracefile",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct trace_file_writer",
+      {},
+      "",
+      [
+        43,
+        2
+      ],
+      [
+        43,
+        26
+      ]
+    ],
+    [
+      "struct trace_file_writer",
+      {},
+      "",
+      [
+        43,
+        38
+      ],
+      [
+        43,
+        62
+      ]
+    ],
+    [
+      "struct trace_file_writer",
+      {},
+      "",
+      [
+        55,
+        34
+      ],
+      [
+        55,
+        58
+      ]
+    ],
+    [
+      "struct trace_status",
+      {},
+      "",
+      [
+        58,
+        2
+      ],
+      [
+        58,
+        21
+      ]
+    ],
+    [
+      "struct uploaded_tp",
+      {},
+      "",
+      [
+        59,
+        2
+      ],
+      [
+        59,
+        20
+      ]
+    ],
+    [
+      "struct uploaded_tsv",
+      {},
+      "",
+      [
+        60,
+        2
+      ],
+      [
+        60,
+        21
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        313,
+        2
+      ],
+      [
+        313,
+        16
+      ]
+    ],
+    [
+      "struct trace_file_writer",
+      {},
+      "",
+      [
+        315,
+        2
+      ],
+      [
+        315,
+        26
+      ]
+    ],
+    [
+      "struct trace_file_writer",
+      {},
+      "",
+      [
+        359,
+        2
+      ],
+      [
+        359,
+        26
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        360,
+        2
+      ],
+      [
+        360,
+        16
+      ]
+    ],
+    [
+      "struct trace_file_writer",
+      {},
+      "",
+      [
+        373,
+        2
+      ],
+      [
+        373,
+        26
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        374,
+        2
+      ],
+      [
+        374,
+        16
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        387,
+        27
+      ],
+      [
+        387,
+        42
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        389,
+        2
+      ],
+      [
+        389,
+        16
+      ]
+    ],
+    [
+      "struct tracepoint",
+      {},
+      "",
+      [
+        390,
+        2
+      ],
+      [
+        390,
+        19
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        428,
+        26
+      ],
+      [
+        428,
+        43
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        436,
+        22
+      ],
+      [
+        436,
+        39
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        446,
+        21
+      ],
+      [
+        446,
+        38
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        456,
+        25
+      ],
+      [
+        456,
+        42
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        465,
+        24
+      ],
+      [
+        465,
+        41
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        474,
+        28
+      ],
+      [
+        474,
+        45
+      ]
+    ],
+    [
+      "struct trace_status",
+      {},
+      "",
+      [
+        474,
+        53
+      ],
+      [
+        474,
+        72
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        485,
+        20
+      ],
+      [
+        485,
+        37
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"tracefile.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"ctf.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"exec.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        65,
+        2
+      ],
+      [
+        65,
+        17
+      ]
+    ]
+  ]
+}

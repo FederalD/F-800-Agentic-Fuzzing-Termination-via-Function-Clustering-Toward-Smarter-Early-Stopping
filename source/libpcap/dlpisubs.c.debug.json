@@ -1,0 +1,493 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int\npcap_stats_dlpi(pcap_t *p, struct pcap_stat *ps)\n{\n\tstruct pcap_dlpi *pd = p->priv;\n\n\t/*\n\t * \"ps_recv\" counts packets handed to the filter, not packets\n\t * that passed the filter.  As filtering is done in userland,\n\t * this would not include packets dropped because we ran out\n\t * of buffer space; in order to make this more like other\n\t * platforms (Linux 2.4 and later, BSDs with BPF), where the\n\t * \"packets received\" count includes packets received but dropped\n\t * due to running out of buffer space, and to keep from confusing\n\t * applications that, for example, compute packet drop percentages,\n\t * we also make it count packets dropped by \"bufmod\" (otherwise we\n\t * might run the risk of the packet drop count being bigger than\n\t * the received-packet count).\n\t *\n\t * \"ps_drop\" counts packets dropped by \"bufmod\" because of\n\t * flow control requirements or resource exhaustion; it doesn't\n\t * count packets dropped by the interface driver, or packets\n\t * dropped upstream.  As filtering is done in userland, it counts\n\t * packets regardless of whether they would've passed the filter.\n\t *\n\t * These statistics don't include packets not yet read from\n\t * the kernel by libpcap, but they may include packets not\n\t * yet read from libpcap by the application.\n\t */\n\t*ps = pd->stat;\n\n\t/*\n\t * Add in the drop count, as per the above comment.\n\t */\n\tps->ps_recv += ps->ps_drop;\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          78,
+          0
+        ],
+        [
+          113,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stats_dlpi",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npcap_process_mactype(pcap_t *p, u_int mactype)\n{\n\tint retv = 0;\n\n\tswitch (mactype) {\n\n\tcase DL_CSMACD:\n\tcase DL_ETHER:\n\t\tp->linktype = DLT_EN10MB;\n\t\tp->offset = 2;\n\t\t/*\n\t\t * This is (presumably) a real Ethernet capture; give it a\n\t\t * link-layer-type list with DLT_EN10MB and DLT_DOCSIS, so\n\t\t * that an application can let you choose it, in case you're\n\t\t * capturing DOCSIS traffic that a Cisco Cable Modem\n\t\t * Termination System is putting out onto an Ethernet (it\n\t\t * doesn't put an Ethernet header onto the wire, it puts raw\n\t\t * DOCSIS frames out on the wire inside the low-level\n\t\t * Ethernet framing).\n\t\t */\n\t\tp->dlt_list = (u_int *)malloc(sizeof(u_int) * 2);\n\t\t/*\n\t\t * If that fails, just leave the list empty.\n\t\t */\n\t\tif (p->dlt_list != NULL) {\n\t\t\tp->dlt_list[0] = DLT_EN10MB;\n\t\t\tp->dlt_list[1] = DLT_DOCSIS;\n\t\t\tp->dlt_count = 2;\n\t\t}\n\t\tbreak;\n\n\tcase DL_FDDI:\n\t\tp->linktype = DLT_FDDI;\n\t\tp->offset = 3;\n\t\tbreak;\n\n\tcase DL_TPR:\n\t\t/* XXX - what about DL_TPB?  Is that Token Bus?  */\n\t\tp->linktype = DLT_IEEE802;\n\t\tp->offset = 2;\n\t\tbreak;\n\n#ifdef HAVE_SOLARIS\n\tcase DL_IPATM:\n\t\tp->linktype = DLT_SUNATM;\n\t\tp->offset = 0;  /* works for LANE and LLC encapsulation */\n\t\tbreak;\n#endif\n\n#ifdef DL_IPV4\n\tcase DL_IPV4:\n\t\tp->linktype = DLT_IPV4;\n\t\tp->offset = 0;\n\t\tbreak;\n#endif\n\n#ifdef DL_IPV6\n\tcase DL_IPV6:\n\t\tp->linktype = DLT_IPV6;\n\t\tp->offset = 0;\n\t\tbreak;\n#endif\n\n#ifdef DL_IPNET\n\tcase DL_IPNET:\n\t\t/*\n\t\t * XXX - DL_IPNET devices default to \"raw IP\" rather than\n\t\t * \"IPNET header\"; see\n\t\t *\n\t\t *    http://seclists.org/tcpdump/2009/q1/202\n\t\t *\n\t\t * We'd have to do DL_IOC_IPNET_INFO to enable getting\n\t\t * the IPNET header.\n\t\t */\n\t\tp->linktype = DLT_RAW;\n\t\tp->offset = 0;\n\t\tbreak;\n#endif\n\n\tdefault:\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE, \"unknown mactype 0x%x\",\n\t\t    mactype);\n\t\tretv = -1;\n\t}\n\n\treturn (retv);\n}",
+      "fn_code_pos": [
+        [
+          207,
+          0
+        ],
+        [
+          294,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_process_mactype",
+        "parameters": {
+          "p": "pcap_t",
+          "mactype": "u_int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npcap_conf_bufmod(pcap_t *p, int snaplen)\n{\n\tstruct timeval to;\n\tbpf_u_int32 ss, chunksize;\n\n\t/* Non-standard call to get the data nicely buffered. */\n\tif (ioctl(p->fd, I_PUSH, \"bufmod\") != 0) {\n\t\tpcap_stream_err(\"I_PUSH bufmod\", errno, p->errbuf);\n\t\treturn (-1);\n\t}\n\n\tss = snaplen;\n\tif (ss > 0 &&\n\t    strioctl(p->fd, SBIOCSSNAP, sizeof(ss), (char *)&ss) != 0) {\n\t\tpcap_stream_err(\"SBIOCSSNAP\", errno, p->errbuf);\n\t\treturn (-1);\n\t}\n\n\tif (p->opt.immediate) {\n\t\t/* Set the timeout to zero, for immediate delivery. */\n\t\tto.tv_sec = 0;\n\t\tto.tv_usec = 0;\n\t\tif (strioctl(p->fd, SBIOCSTIME, sizeof(to), (char *)&to) != 0) {\n\t\t\tpcap_stream_err(\"SBIOCSTIME\", errno, p->errbuf);\n\t\t\treturn (-1);\n\t\t}\n\t} else {\n\t\t/* Set up the bufmod timeout. */\n\t\tif (p->opt.timeout != 0) {\n\t\t\tto.tv_sec = p->opt.timeout / 1000;\n\t\t\tto.tv_usec = (p->opt.timeout * 1000) % 1000000;\n\t\t\tif (strioctl(p->fd, SBIOCSTIME, sizeof(to), (char *)&to) != 0) {\n\t\t\t\tpcap_stream_err(\"SBIOCSTIME\", errno, p->errbuf);\n\t\t\t\treturn (-1);\n\t\t\t}\n\t\t}\n\n\t\t/* Set the chunk length. */\n\t\tchunksize = CHUNKSIZE;\n\t\tif (strioctl(p->fd, SBIOCSCHUNK, sizeof(chunksize), (char *)&chunksize)\n\t\t    != 0) {\n\t\t\tpcap_stream_err(\"SBIOCSCHUNKP\", errno, p->errbuf);\n\t\t\treturn (-1);\n\t\t}\n\t}\n\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          300,
+          0
+        ],
+        [
+          348,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_conf_bufmod",
+        "parameters": {
+          "p": "pcap_t",
+          "snaplen": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npcap_alloc_databuf(pcap_t *p)\n{\n\tp->bufsize = PKTBUFSIZE;\n\tp->buffer = malloc(p->bufsize + p->offset);\n\tif (p->buffer == NULL) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"malloc\");\n\t\treturn (-1);\n\t}\n\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          354,
+          0
+        ],
+        [
+          366,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_alloc_databuf",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nstrioctl(int fd, int cmd, int len, char *dp)\n{\n\tstruct strioctl str;\n\tint retv;\n\n\tstr.ic_cmd = cmd;\n\tstr.ic_timout = -1;\n\tstr.ic_len = len;\n\tstr.ic_dp = dp;\n\tif ((retv = ioctl(fd, I_STR, &str)) < 0)\n\t\treturn (retv);\n\n\treturn (str.ic_len);\n}",
+      "fn_code_pos": [
+        [
+          372,
+          0
+        ],
+        [
+          386,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "strioctl",
+        "parameters": {
+          "fd": "int",
+          "cmd": "int",
+          "len": "int",
+          "dp": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\npcap_stream_err(const char *func, int err, char *errbuf)\n{\n\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE, err, \"%s\", func);\n}",
+      "fn_code_pos": [
+        [
+          392,
+          0
+        ],
+        [
+          396,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stream_err",
+        "parameters": {
+          "func": "char",
+          "err": "int",
+          "errbuf": "char"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "pcap_stream_err(const char *, int, char *)",
+      "fn_dec_pos": [
+        [
+          72,
+          12
+        ],
+        [
+          72,
+          54
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stream_err",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pcap_process_pkts(pcap_t *p, pcap_handler callback, u_char *user,\n\tint count, u_char *bufp, int len)",
+      "fn_dec_pos": [
+        [
+          120,
+          0
+        ],
+        [
+          121,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_process_pkts",
+        "parameters": {
+          "p": "pcap_t",
+          "callback": "pcap_handler",
+          "user": "u_char",
+          "count": "int",
+          "bufp": "u_char",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        79,
+        27
+      ],
+      [
+        79,
+        43
+      ]
+    ],
+    [
+      "struct pcap_dlpi",
+      {},
+      "",
+      [
+        81,
+        1
+      ],
+      [
+        81,
+        17
+      ]
+    ],
+    [
+      "struct pcap_dlpi",
+      {},
+      "",
+      [
+        123,
+        1
+      ],
+      [
+        123,
+        17
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        126,
+        1
+      ],
+      [
+        126,
+        19
+      ]
+    ],
+    [
+      "struct sb_hdr",
+      {},
+      "",
+      [
+        128,
+        1
+      ],
+      [
+        128,
+        14
+      ]
+    ],
+    [
+      "struct sb_hdr",
+      {},
+      "",
+      [
+        130,
+        1
+      ],
+      [
+        130,
+        14
+      ]
+    ],
+    [
+      "struct sb_hdr",
+      {},
+      "",
+      [
+        165,
+        10
+      ],
+      [
+        165,
+        23
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        303,
+        1
+      ],
+      [
+        303,
+        15
+      ]
+    ],
+    [
+      "struct strioctl",
+      {},
+      "",
+      [
+        375,
+        1
+      ],
+      [
+        375,
+        16
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        14,
+        0
+      ],
+      [
+        15,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\n",
+      [
+        49,
+        0
+      ],
+      [
+        50,
+        0
+      ]
+    ],
+    [
+      "#include <sys/bufmod.h>\n",
+      [
+        51,
+        0
+      ],
+      [
+        52,
+        0
+      ]
+    ],
+    [
+      "#include <sys/dlpi.h>\n",
+      [
+        53,
+        0
+      ],
+      [
+        54,
+        0
+      ]
+    ],
+    [
+      "#include <sys/stream.h>\n",
+      [
+        54,
+        0
+      ],
+      [
+        55,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        56,
+        0
+      ],
+      [
+        57,
+        0
+      ]
+    ],
+    [
+      "#include <memory.h>\n",
+      [
+        57,
+        0
+      ],
+      [
+        58,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        58,
+        0
+      ],
+      [
+        59,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        59,
+        0
+      ],
+      [
+        60,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        60,
+        0
+      ],
+      [
+        61,
+        0
+      ]
+    ],
+    [
+      "#include <stropts.h>\n",
+      [
+        61,
+        0
+      ],
+      [
+        62,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        62,
+        0
+      ],
+      [
+        63,
+        0
+      ]
+    ],
+    [
+      "#include <libdlpi.h>\n",
+      [
+        65,
+        0
+      ],
+      [
+        66,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        68,
+        0
+      ],
+      [
+        69,
+        0
+      ]
+    ],
+    [
+      "#include \"dlpisubs.h\"\n",
+      [
+        69,
+        0
+      ],
+      [
+        70,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

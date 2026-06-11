@@ -1,0 +1,264 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nhw_glue_init_address(device *me)\n{\n  hw_glue_device *glue = (hw_glue_device*)device_data(me);\n\n  /* attach to my parent */\n  generic_device_init_address(me);\n\n  /* establish the output registers */\n  if (glue->output != NULL) {\n    memset(glue->output, 0, glue->sizeof_output);\n  }\n  else {\n    reg_property_spec unit;\n    int reg_nr;\n    /* find a relevant reg entry */\n    reg_nr = 0;\n    while (device_find_reg_array_property(me, \"reg\", reg_nr, &unit)\n\t   && !device_size_to_attach_size(device_parent(me), &unit.size,\n\t\t\t\t\t  &glue->sizeof_output, me))\n      reg_nr++;\n    /* check out the size */\n    if (glue->sizeof_output == 0)\n      device_error(me, \"at least one reg property size must be nonzero\");\n    if (glue->sizeof_output % sizeof(unsigned_word) != 0)\n      device_error(me, \"reg property size must be %d aligned\", sizeof(unsigned_word));\n    /* and the address */\n    device_address_to_attach_address(device_parent(me),\n\t\t\t\t     &unit.address, &glue->space, &glue->address,\n\t\t\t\t     me);\n    if (glue->address % (sizeof(unsigned_word) * max_nr_interrupts) != 0)\n      device_error(me, \"reg property address must be %d aligned\",\n\t\t   sizeof(unsigned_word) * max_nr_interrupts);\n    glue->nr_outputs = glue->sizeof_output / sizeof(unsigned_word);\n    glue->output = zalloc(glue->sizeof_output);\n  }\n\n  /* establish the input interrupt ports */\n  if (glue->input != NULL) {\n    memset(glue->input, 0, glue->sizeof_input);\n  }\n  else {\n    const device_property *ranges = device_find_property(me, \"interrupt-ranges\");\n    if (ranges == NULL) {\n      glue->int_number = 0;\n      glue->nr_inputs = glue->nr_outputs;\n    }\n    else if (ranges->sizeof_array != sizeof(unsigned_cell) * 2) {\n      device_error(me, \"invalid interrupt-ranges property (incorrect size)\");\n    }\n    else {\n      const unsigned_cell *int_range = ranges->array;\n      glue->int_number = BE2H_cell(int_range[0]);\n      glue->nr_inputs = BE2H_cell(int_range[1]);\n    }\n    glue->sizeof_input = glue->nr_inputs * sizeof(unsigned);\n    glue->input = zalloc(glue->sizeof_input);\n  }\n\n  /* determine our type */\n  if (glue->type == glue_undefined) {\n    const char *name = device_name(me);\n    if (strcmp(name, \"glue\") == 0)\n      glue->type = glue_io;\n    else if (strcmp(name, \"glue-and\") == 0)\n      glue->type = glue_and;\n    else\n      device_error(me, \"unimplemented glue type\");\n  }\n\n  DTRACE(glue, (\"int-number %d, nr_inputs %d, nr_outputs %d\\n\",\n\t\tglue->int_number, glue->nr_inputs, glue->nr_outputs));\n}",
+      "fn_code_pos": [
+        [
+          170,
+          0
+        ],
+        [
+          242,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_glue_init_address",
+        "parameters": {
+          "me": "device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_glue_io_read_buffer_callback(device *me,\n\t\t\t\tvoid *dest,\n\t\t\t\tint space,\n\t\t\t\tunsigned_word addr,\n\t\t\t\tunsigned nr_bytes,\n\t\t\t\tcpu *processor,\n\t\t\t\tunsigned_word cia)\n{\n  hw_glue_device *glue = (hw_glue_device*)device_data(me);\n  int reg = ((addr - glue->address) / sizeof(unsigned_word)) % glue->nr_outputs;\n  if (nr_bytes != sizeof(unsigned_word)\n      || (addr % sizeof(unsigned_word)) != 0)\n     device_error(me, \"missaligned read access (%d:0x%lx:%d) not supported\",\n\t\t  space, (unsigned long)addr, nr_bytes);\n  *(unsigned_word*)dest = H2BE_4(glue->output[reg]);\n  DTRACE(glue, (\"read - interrupt %d (0x%lx), level %d\\n\",\n\t\treg, (unsigned long) addr, glue->output[reg]));\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          244,
+          0
+        ],
+        [
+          263,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_glue_io_read_buffer_callback",
+        "parameters": {
+          "me": "device",
+          "dest": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_glue_io_write_buffer_callback(device *me,\n\t\t\t\t const void *source,\n\t\t\t\t int space,\n\t\t\t\t unsigned_word addr,\n\t\t\t\t unsigned nr_bytes,\n\t\t\t\t cpu *processor,\n\t\t\t\t unsigned_word cia)\n{\n  hw_glue_device *glue = (hw_glue_device*)device_data(me);\n  int reg = ((addr - glue->address) / sizeof(unsigned_word)) % max_nr_interrupts;\n  if (nr_bytes != sizeof(unsigned_word)\n      || (addr % sizeof(unsigned_word)) != 0)\n    device_error(me, \"missaligned write access (%d:0x%lx:%d) not supported\",\n\t\t space, (unsigned long)addr, nr_bytes);\n  glue->output[reg] = H2BE_4(*(unsigned_word*)source);\n  DTRACE(glue, (\"write - interrupt %d (0x%lx), level %d\\n\",\n\t\treg, (unsigned long) addr, glue->output[reg]));\n  device_interrupt_event(me, reg, glue->output[reg], processor, cia);\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          266,
+          0
+        ],
+        [
+          286,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_glue_io_write_buffer_callback",
+        "parameters": {
+          "me": "device",
+          "source": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nhw_glue_interrupt_event(device *me,\n\t\t\tint my_port,\n\t\t\tdevice *source,\n\t\t\tint source_port,\n\t\t\tint level,\n\t\t\tcpu *processor,\n\t\t\tunsigned_word cia)\n{\n  hw_glue_device *glue = (hw_glue_device*)device_data(me);\n  int i;\n  if (my_port < glue->int_number\n      || my_port >= glue->int_number + glue->nr_inputs)\n    device_error(me, \"interrupt %d outside of valid range\", my_port);\n  glue->input[my_port - glue->int_number] = level;\n  switch (glue->type) {\n  case glue_io:\n    {\n      int port = my_port % glue->nr_outputs;\n      glue->output[port] = level;\n      DTRACE(glue, (\"input - interrupt %d (0x%lx), level %d\\n\",\n\t\t    my_port,\n\t\t    (unsigned long)glue->address + port * sizeof(unsigned_word),\n\t\t    level));\n      break;\n    }\n  case glue_and:\n    glue->output[0] = glue->input[0];\n    for (i = 1; i < glue->nr_inputs; i++)\n      glue->output[0] &= glue->input[i];\n    DTRACE(glue, (\"and - interrupt %d, level %d arrived - output %d\\n\",\n\t\t  my_port, level, glue->output[0]));\n    device_interrupt_event(me, 0, glue->output[0], processor, cia);\n    break;\n  default:\n    device_error(me, \"operator not implemented\");\n    break;\n  }\n}",
+      "fn_code_pos": [
+        [
+          288,
+          0
+        ],
+        [
+          326,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_glue_interrupt_event",
+        "parameters": {
+          "me": "device",
+          "my_port": "int",
+          "source": "device",
+          "source_port": "int",
+          "level": "int",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void *\nhw_glue_create(const char *name,\n\t      const device_unit *unit_address,\n\t      const char *args)\n{\n  /* create the descriptor */\n  hw_glue_device *glue = ZALLOC(hw_glue_device);\n  return glue;\n}",
+      "fn_code_pos": [
+        [
+          347,
+          0
+        ],
+        [
+          355,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_glue_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "hw_glue_create(const char *name,\n\t      const device_unit *unit_address,\n\t      const char *args)",
+      "fn_dec_pos": [
+        [
+          348,
+          0
+        ],
+        [
+          350,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_glue_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct _hw_glue_device {\n  hw_glue_type type;\n  int int_number;\n  int *input;\n  int nr_inputs;\n  unsigned sizeof_input;\n  /* our output registers */\n  int space;\n  unsigned_word address;\n  unsigned sizeof_output;\n  int *output;\n  int nr_outputs;\n} hw_glue_device;",
+      {
+        "type": "hw_glue_type",
+        "int_number": "int",
+        "*input": "int",
+        "nr_inputs": "int",
+        "sizeof_input": "unsigned",
+        "space": "int",
+        "address": "unsigned_word",
+        "sizeof_output": "unsigned",
+        "*output": "int",
+        "nr_outputs": "int"
+      },
+      "hw_glue_device",
+      [
+        155,
+        0
+      ],
+      [
+        167,
+        17
+      ]
+    ],
+    [
+      "typedef struct _hw_glue_device {\n  hw_glue_type type;\n  int int_number;\n  int *input;\n  int nr_inputs;\n  unsigned sizeof_input;\n  /* our output registers */\n  int space;\n  unsigned_word address;\n  unsigned sizeof_output;\n  int *output;\n  int nr_outputs;\n} hw_glue_device;",
+      {
+        "type": "hw_glue_type",
+        "int_number": "int",
+        "*input": "int",
+        "nr_inputs": "int",
+        "sizeof_input": "unsigned",
+        "space": "int",
+        "address": "unsigned_word",
+        "sizeof_output": "unsigned",
+        "*output": "int",
+        "nr_outputs": "int"
+      },
+      "hw_glue_device",
+      [
+        155,
+        0
+      ],
+      [
+        167,
+        17
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"device_table.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum {\n  max_nr_interrupts = 2048,\n}",
+      {
+        "max_nr_interrupts": ""
+      },
+      "",
+      [
+        140,
+        0
+      ],
+      [
+        142,
+        1
+      ]
+    ],
+    [
+      "typedef enum _hw_glue_type {\n  glue_undefined = 0,\n  glue_io,\n  glue_and,\n  glue_nand,\n  glue_or,\n  glue_xor,\n  glue_nor,\n  glue_not,\n} hw_glue_type;",
+      {
+        "glue_undefined": "",
+        "glue_io": "",
+        "glue_and": "",
+        "glue_nand": "",
+        "glue_or": "",
+        "glue_xor": "",
+        "glue_nor": "",
+        "glue_not": ""
+      },
+      "hw_glue_type",
+      [
+        144,
+        0
+      ],
+      [
+        153,
+        15
+      ]
+    ]
+  ]
+}

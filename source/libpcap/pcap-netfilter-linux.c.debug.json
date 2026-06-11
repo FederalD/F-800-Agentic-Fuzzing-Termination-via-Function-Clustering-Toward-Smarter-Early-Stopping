@@ -1,0 +1,1241 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nnetfilter_read_linux(pcap_t *handle, int max_packets, pcap_handler callback, u_char *user)\n{\n\tstruct pcap_netfilter *handlep = handle->priv;\n\tregister u_char *bp, *ep;\n\tint count = 0;\n\tint len;\n\n\t/*\n\t * Has \"pcap_breakloop()\" been called?\n\t */\n\tif (handle->break_loop) {\n\t\t/*\n\t\t * Yes - clear the flag that indicates that it\n\t\t * has, and return PCAP_ERROR_BREAK to indicate\n\t\t * that we were told to break out of the loop.\n\t\t */\n\t\thandle->break_loop = 0;\n\t\treturn PCAP_ERROR_BREAK;\n\t}\n\tlen = handle->cc;\n\tif (len == 0) {\n\t\t/*\n\t\t * The buffer is empty; refill it.\n\t\t *\n\t\t * We ignore EINTR, as that might just be due to a signal\n\t\t * being delivered - if the signal should interrupt the\n\t\t * loop, the signal handler should call pcap_breakloop()\n\t\t * to set handle->break_loop (we ignore it on other\n\t\t * platforms as well).\n\t\t */\n\t\tdo {\n\t\t\tlen = recv(handle->fd, handle->buffer, handle->bufsize, 0);\n\t\t\tif (handle->break_loop) {\n\t\t\t\thandle->break_loop = 0;\n\t\t\t\treturn PCAP_ERROR_BREAK;\n\t\t\t}\n\t\t\tif (errno == ENOBUFS)\n\t\t\t\thandlep->packets_nobufs++;\n\t\t} while ((len == -1) && (errno == EINTR || errno == ENOBUFS));\n\n\t\tif (len < 0) {\n\t\t\tpcap_fmt_errmsg_for_errno(handle->errbuf,\n\t\t\t    PCAP_ERRBUF_SIZE, errno, \"Can't receive packet\");\n\t\t\treturn PCAP_ERROR;\n\t\t}\n\n\t\tbp = (unsigned char *)handle->buffer;\n\t} else\n\t\tbp = handle->bp;\n\tep = bp + len;\n\twhile (bp < ep) {\n\t\tconst struct nlmsghdr *nlh = (const struct nlmsghdr *) bp;\n\t\tuint32_t msg_len;\n\t\tnftype_t type = OTHER;\n\t\t/*\n\t\t * Has \"pcap_breakloop()\" been called?\n\t\t * If so, return immediately - if we haven't read any\n\t\t * packets, clear the flag and return PCAP_ERROR_BREAK\n\t\t * to indicate that we were told to break out of the loop,\n\t\t * otherwise leave the flag set, so that the *next* call\n\t\t * will break out of the loop without having read any\n\t\t * packets, and return the number of packets we've\n\t\t * processed so far.\n\t\t */\n\t\tif (handle->break_loop) {\n\t\t\thandle->bp = bp;\n\t\t\thandle->cc = ep - bp;\n\t\t\tif (count == 0) {\n\t\t\t\thandle->break_loop = 0;\n\t\t\t\treturn PCAP_ERROR_BREAK;\n\t\t\t} else\n\t\t\t\treturn count;\n\t\t}\n\t\tif (ep - bp < NLMSG_SPACE(0)) {\n\t\t\t/*\n\t\t\t * There's less than one netlink message left\n\t\t\t * in the buffer.  Give up.\n\t\t\t */\n\t\t\tbreak;\n\t\t}\n\n\t\tif (nlh->nlmsg_len < sizeof(struct nlmsghdr) || (u_int)len < nlh->nlmsg_len) {\n\t\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE, \"Message truncated: (got: %d) (nlmsg_len: %u)\", len, nlh->nlmsg_len);\n\t\t\treturn -1;\n\t\t}\n\n\t\tif (NFNL_SUBSYS_ID(nlh->nlmsg_type) == NFNL_SUBSYS_ULOG &&\n\t\t    NFNL_MSG_TYPE(nlh->nlmsg_type) == NFULNL_MSG_PACKET)\n\t\t\ttype = NFLOG;\n\t\telse if (NFNL_SUBSYS_ID(nlh->nlmsg_type) == NFNL_SUBSYS_QUEUE &&\n\t\t         NFNL_MSG_TYPE(nlh->nlmsg_type) == NFQNL_MSG_PACKET)\n\t\t\ttype = NFQUEUE;\n\n\t\tif (type != OTHER) {\n\t\t\tconst unsigned char *payload = NULL;\n\t\t\tstruct pcap_pkthdr pkth;\n\n\t\t\tconst struct nfgenmsg *nfg = NULL;\n\t\t\tint id = 0;\n\n\t\t\tif (handle->linktype != DLT_NFLOG) {\n\t\t\t\tconst struct nfattr *payload_attr = NULL;\n\n\t\t\t\tif (nlh->nlmsg_len < HDR_LENGTH) {\n\t\t\t\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE, \"Malformed message: (nlmsg_len: %u)\", nlh->nlmsg_len);\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\n\t\t\t\tnfg = NLMSG_DATA(nlh);\n\t\t\t\tif (nlh->nlmsg_len > HDR_LENGTH) {\n\t\t\t\t\tstruct nfattr *attr = NFM_NFA(nfg);\n\t\t\t\t\tint attr_len = nlh->nlmsg_len - NLMSG_ALIGN(HDR_LENGTH);\n\n\t\t\t\t\twhile (NFA_OK(attr, attr_len)) {\n\t\t\t\t\t\tif (type == NFQUEUE) {\n\t\t\t\t\t\t\tswitch (NFA_TYPE(attr)) {\n\t\t\t\t\t\t\t\tcase NFQA_PACKET_HDR:\n\t\t\t\t\t\t\t\t\t{\n\t\t\t\t\t\t\t\t\t\tconst struct nfqnl_msg_packet_hdr *pkt_hdr = (const struct nfqnl_msg_packet_hdr *) NFA_DATA(attr);\n\n\t\t\t\t\t\t\t\t\t\tid = ntohl(pkt_hdr->packet_id);\n\t\t\t\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\t\t\t\t}\n\t\t\t\t\t\t\t\tcase NFQA_PAYLOAD:\n\t\t\t\t\t\t\t\t\tpayload_attr = attr;\n\t\t\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\t\t}\n\n\t\t\t\t\t\t} else if (type == NFLOG) {\n\t\t\t\t\t\t\tswitch (NFA_TYPE(attr)) {\n\t\t\t\t\t\t\t\tcase NFULA_PAYLOAD:\n\t\t\t\t\t\t\t\t\tpayload_attr = attr;\n\t\t\t\t\t\t\t\t\tbreak;\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t}\n\t\t\t\t\t\tattr = NFA_NEXT(attr, attr_len);\n\t\t\t\t\t}\n\t\t\t\t}\n\n\t\t\t\tif (payload_attr) {\n\t\t\t\t\tpayload = NFA_DATA(payload_attr);\n\t\t\t\t\tpkth.len = pkth.caplen = NFA_PAYLOAD(payload_attr);\n\t\t\t\t}\n\n\t\t\t} else {\n\t\t\t\tpayload = NLMSG_DATA(nlh);\n\t\t\t\tpkth.caplen = pkth.len = nlh->nlmsg_len-NLMSG_ALIGN(sizeof(struct nlmsghdr));\n\t\t\t}\n\n\t\t\tif (payload) {\n\t\t\t\t/* pkth.caplen = min (payload_len, handle->snapshot); */\n\n\t\t\t\tgettimeofday(&pkth.ts, NULL);\n\t\t\t\tif (handle->fcode.bf_insns == NULL ||\n\t\t\t\t\t\tbpf_filter(handle->fcode.bf_insns, payload, pkth.len, pkth.caplen))\n\t\t\t\t{\n\t\t\t\t\thandlep->packets_read++;\n\t\t\t\t\tcallback(user, &pkth, payload);\n\t\t\t\t\tcount++;\n\t\t\t\t}\n\t\t\t}\n\n\t\t\tif (type == NFQUEUE) {\n\t\t\t\t/* XXX, possible responses: NF_DROP, NF_ACCEPT, NF_STOLEN, NF_QUEUE, NF_REPEAT, NF_STOP */\n\t\t\t\t/* if type == NFQUEUE, handle->linktype is always != DLT_NFLOG,\n\t\t\t\t   so nfg is always initialized to NLMSG_DATA(nlh). */\n\t\t\t\tif (nfg != NULL)\n\t\t\t\t\tnfqueue_send_verdict(handle, ntohs(nfg->res_id), id, NF_ACCEPT);\n\t\t\t}\n\t\t}\n\n\t\tmsg_len = NLMSG_ALIGN(nlh->nlmsg_len);\n\t\t/*\n\t\t * If the message length would run past the end of the\n\t\t * buffer, truncate it to the remaining space in the\n\t\t * buffer.\n\t\t */\n\t\tif (msg_len > ep - bp)\n\t\t\tmsg_len = ep - bp;\n\n\t\tbp += msg_len;\n\t\tif (count >= max_packets && !PACKET_COUNT_IS_UNLIMITED(max_packets)) {\n\t\t\thandle->bp = bp;\n\t\t\thandle->cc = ep - bp;\n\t\t\tif (handle->cc < 0)\n\t\t\t\thandle->cc = 0;\n\t\t\treturn count;\n\t\t}\n\t}\n\n\thandle->cc = 0;\n\treturn count;\n}",
+      "fn_code_pos": [
+        [
+          87,
+          0
+        ],
+        [
+          280,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "netfilter_read_linux",
+        "parameters": {
+          "handle": "pcap_t",
+          "max_packets": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnetfilter_set_datalink(pcap_t *handle, int dlt)\n{\n\thandle->linktype = dlt;\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          282,
+          0
+        ],
+        [
+          287,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "netfilter_set_datalink",
+        "parameters": {
+          "handle": "pcap_t",
+          "dlt": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnetfilter_stats_linux(pcap_t *handle, struct pcap_stat *stats)\n{\n\tstruct pcap_netfilter *handlep = handle->priv;\n\n\tstats->ps_recv = handlep->packets_read;\n\tstats->ps_drop = handlep->packets_nobufs;\n\tstats->ps_ifdrop = 0;\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          289,
+          0
+        ],
+        [
+          298,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "netfilter_stats_linux",
+        "parameters": {
+          "handle": "pcap_t",
+          "stats": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnetfilter_inject_linux(pcap_t *handle, const void *buf _U_, size_t size _U_)\n{\n\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE, \"inject not supported on netfilter devices\");\n\treturn (-1);\n}",
+      "fn_code_pos": [
+        [
+          300,
+          0
+        ],
+        [
+          305,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "netfilter_inject_linux",
+        "parameters": {
+          "handle": "pcap_t",
+          "buf": "void",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnetfilter_send_config_msg(const pcap_t *handle, uint16_t msg_type, int ack, u_int8_t family, u_int16_t res_id, const struct my_nfattr *mynfa)\n{\n\tchar buf[1024] __attribute__ ((aligned));\n\n\tstruct nlmsghdr *nlh = (struct nlmsghdr *) buf;\n\tstruct nfgenmsg *nfg = (struct nfgenmsg *) (buf + sizeof(struct nlmsghdr));\n\n\tstruct sockaddr_nl snl;\n\tstatic unsigned int seq_id;\n\n\tif (!seq_id)\n\t\tseq_id = time(NULL);\n\t++seq_id;\n\n\tnlh->nlmsg_len = NLMSG_LENGTH(sizeof(struct nfgenmsg));\n\tnlh->nlmsg_type = msg_type;\n\tnlh->nlmsg_flags = NLM_F_REQUEST | (ack ? NLM_F_ACK : 0);\n\tnlh->nlmsg_pid = 0;\t/* to kernel */\n\tnlh->nlmsg_seq = seq_id;\n\n\tnfg->nfgen_family = family;\n\tnfg->version = NFNETLINK_V0;\n\tnfg->res_id = htons(res_id);\n\n\tif (mynfa) {\n\t\tstruct nfattr *nfa = (struct nfattr *) (buf + NLMSG_ALIGN(nlh->nlmsg_len));\n\n\t\tnfa->nfa_type = mynfa->nfa_type;\n\t\tnfa->nfa_len = NFA_LENGTH(mynfa->nfa_len);\n\t\tmemcpy(NFA_DATA(nfa), mynfa->data, mynfa->nfa_len);\n\t\tnlh->nlmsg_len = NLMSG_ALIGN(nlh->nlmsg_len) + NFA_ALIGN(nfa->nfa_len);\n\t}\n\n\tmemset(&snl, 0, sizeof(snl));\n\tsnl.nl_family = AF_NETLINK;\n\n\tif (sendto(handle->fd, nlh, nlh->nlmsg_len, 0, (struct sockaddr *) &snl, sizeof(snl)) == -1)\n\t\treturn -1;\n\n\tif (!ack)\n\t\treturn 0;\n\n\t/* waiting for reply loop */\n\tdo {\n\t\tsocklen_t addrlen = sizeof(snl);\n\t\tint len;\n\n\t\t/* ignore interrupt system call error */\n\t\tdo {\n\t\t\tlen = recvfrom(handle->fd, buf, sizeof(buf), 0, (struct sockaddr *) &snl, &addrlen);\n\t\t} while ((len == -1) && (errno == EINTR));\n\n\t\tif (len <= 0)\n\t\t\treturn len;\n\n\t\tif (addrlen != sizeof(snl) || snl.nl_family != AF_NETLINK) {\n\t\t\terrno = EINVAL;\n\t\t\treturn -1;\n\t\t}\n\n\t\tnlh = (struct nlmsghdr *) buf;\n\t\tif (snl.nl_pid != 0 || seq_id != nlh->nlmsg_seq)\t/* if not from kernel or wrong sequence skip */\n\t\t\tcontinue;\n\n\t\twhile ((u_int)len >= NLMSG_SPACE(0) && NLMSG_OK(nlh, (u_int)len)) {\n\t\t\tif (nlh->nlmsg_type == NLMSG_ERROR || (nlh->nlmsg_type == NLMSG_DONE && nlh->nlmsg_flags & NLM_F_MULTI)) {\n\t\t\t\tif (nlh->nlmsg_len < NLMSG_ALIGN(sizeof(struct nlmsgerr))) {\n\t\t\t\t\terrno = EBADMSG;\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\t\t\t\terrno = -(*((int *)NLMSG_DATA(nlh)));\n\t\t\t\treturn (errno == 0) ? 0 : -1;\n\t\t\t}\n\t\t\tnlh = NLMSG_NEXT(nlh, len);\n\t\t}\n\t} while (1);\n\n\treturn -1; /* never here */\n}",
+      "fn_code_pos": [
+        [
+          313,
+          0
+        ],
+        [
+          392,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "netfilter_send_config_msg",
+        "parameters": {
+          "handle": "pcap_t",
+          "msg_type": "uint16_t",
+          "ack": "int",
+          "family": "u_int8_t",
+          "res_id": "u_int16_t",
+          "mynfa": "struct my_nfattr"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnflog_send_config_msg(const pcap_t *handle, uint8_t family, u_int16_t group_id, const struct my_nfattr *mynfa)\n{\n\treturn netfilter_send_config_msg(handle, (NFNL_SUBSYS_ULOG << 8) | NFULNL_MSG_CONFIG, 1, family, group_id, mynfa);\n}",
+      "fn_code_pos": [
+        [
+          394,
+          0
+        ],
+        [
+          398,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nflog_send_config_msg",
+        "parameters": {
+          "handle": "pcap_t",
+          "family": "uint8_t",
+          "group_id": "u_int16_t",
+          "mynfa": "struct my_nfattr"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnflog_send_config_cmd(const pcap_t *handle, uint16_t group_id, u_int8_t cmd, u_int8_t family)\n{\n\tstruct nfulnl_msg_config_cmd msg;\n\tstruct my_nfattr nfa;\n\n\tmsg.command = cmd;\n\n\tnfa.data = &msg;\n\tnfa.nfa_type = NFULA_CFG_CMD;\n\tnfa.nfa_len = sizeof(msg);\n\n\treturn nflog_send_config_msg(handle, family, group_id, &nfa);\n}",
+      "fn_code_pos": [
+        [
+          400,
+          0
+        ],
+        [
+          413,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nflog_send_config_cmd",
+        "parameters": {
+          "handle": "pcap_t",
+          "group_id": "uint16_t",
+          "cmd": "u_int8_t",
+          "family": "u_int8_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnflog_send_config_mode(const pcap_t *handle, uint16_t group_id, u_int8_t copy_mode, u_int32_t copy_range)\n{\n\tstruct nfulnl_msg_config_mode msg;\n\tstruct my_nfattr nfa;\n\n\tmsg.copy_range = htonl(copy_range);\n\tmsg.copy_mode = copy_mode;\n\n\tnfa.data = &msg;\n\tnfa.nfa_type = NFULA_CFG_MODE;\n\tnfa.nfa_len = sizeof(msg);\n\n\treturn nflog_send_config_msg(handle, AF_UNSPEC, group_id, &nfa);\n}",
+      "fn_code_pos": [
+        [
+          415,
+          0
+        ],
+        [
+          429,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nflog_send_config_mode",
+        "parameters": {
+          "handle": "pcap_t",
+          "group_id": "uint16_t",
+          "copy_mode": "u_int8_t",
+          "copy_range": "u_int32_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnfqueue_send_verdict(const pcap_t *handle, uint16_t group_id, u_int32_t id, u_int32_t verdict)\n{\n\tstruct nfqnl_msg_verdict_hdr msg;\n\tstruct my_nfattr nfa;\n\n\tmsg.id = htonl(id);\n\tmsg.verdict = htonl(verdict);\n\n\tnfa.data = &msg;\n\tnfa.nfa_type = NFQA_VERDICT_HDR;\n\tnfa.nfa_len = sizeof(msg);\n\n\treturn netfilter_send_config_msg(handle, (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_VERDICT, 0, AF_UNSPEC, group_id, &nfa);\n}",
+      "fn_code_pos": [
+        [
+          431,
+          0
+        ],
+        [
+          445,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nfqueue_send_verdict",
+        "parameters": {
+          "handle": "pcap_t",
+          "group_id": "uint16_t",
+          "id": "u_int32_t",
+          "verdict": "u_int32_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnfqueue_send_config_msg(const pcap_t *handle, uint8_t family, u_int16_t group_id, const struct my_nfattr *mynfa)\n{\n\treturn netfilter_send_config_msg(handle, (NFNL_SUBSYS_QUEUE << 8) | NFQNL_MSG_CONFIG, 1, family, group_id, mynfa);\n}",
+      "fn_code_pos": [
+        [
+          447,
+          0
+        ],
+        [
+          451,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nfqueue_send_config_msg",
+        "parameters": {
+          "handle": "pcap_t",
+          "family": "uint8_t",
+          "group_id": "u_int16_t",
+          "mynfa": "struct my_nfattr"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnfqueue_send_config_cmd(const pcap_t *handle, uint16_t group_id, u_int8_t cmd, u_int16_t pf)\n{\n\tstruct nfqnl_msg_config_cmd msg;\n\tstruct my_nfattr nfa;\n\n\tmsg.command = cmd;\n\tmsg.pf = htons(pf);\n\n\tnfa.data = &msg;\n\tnfa.nfa_type = NFQA_CFG_CMD;\n\tnfa.nfa_len = sizeof(msg);\n\n\treturn nfqueue_send_config_msg(handle, AF_UNSPEC, group_id, &nfa);\n}",
+      "fn_code_pos": [
+        [
+          453,
+          0
+        ],
+        [
+          467,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nfqueue_send_config_cmd",
+        "parameters": {
+          "handle": "pcap_t",
+          "group_id": "uint16_t",
+          "cmd": "u_int8_t",
+          "pf": "u_int16_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnfqueue_send_config_mode(const pcap_t *handle, uint16_t group_id, u_int8_t copy_mode, u_int32_t copy_range)\n{\n\tstruct nfqnl_msg_config_params msg;\n\tstruct my_nfattr nfa;\n\n\tmsg.copy_range = htonl(copy_range);\n\tmsg.copy_mode = copy_mode;\n\n\tnfa.data = &msg;\n\tnfa.nfa_type = NFQA_CFG_PARAMS;\n\tnfa.nfa_len = sizeof(msg);\n\n\treturn nfqueue_send_config_msg(handle, AF_UNSPEC, group_id, &nfa);\n}",
+      "fn_code_pos": [
+        [
+          469,
+          0
+        ],
+        [
+          483,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nfqueue_send_config_mode",
+        "parameters": {
+          "handle": "pcap_t",
+          "group_id": "uint16_t",
+          "copy_mode": "u_int8_t",
+          "copy_range": "u_int32_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnetfilter_activate(pcap_t* handle)\n{\n\tconst char *dev = handle->opt.device;\n\tunsigned short groups[32];\n\tint group_count = 0;\n\tnftype_t type = OTHER;\n\tint i;\n\n \tif (strncmp(dev, NFLOG_IFACE, strlen(NFLOG_IFACE)) == 0) {\n \t\tdev += strlen(NFLOG_IFACE);\n\t\ttype = NFLOG;\n\n\t} else if (strncmp(dev, NFQUEUE_IFACE, strlen(NFQUEUE_IFACE)) == 0) {\n\t\tdev += strlen(NFQUEUE_IFACE);\n\t\ttype = NFQUEUE;\n\t}\n\n\tif (type != OTHER && *dev == ':') {\n\t\tdev++;\n\t\twhile (*dev) {\n\t\t\tlong int group_id;\n\t\t\tchar *end_dev;\n\n\t\t\tif (group_count == 32) {\n\t\t\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t\t\t\"Maximum 32 netfilter groups! dev: %s\",\n\t\t\t\t\t\thandle->opt.device);\n\t\t\t\treturn PCAP_ERROR;\n\t\t\t}\n\n\t\t\tgroup_id = strtol(dev, &end_dev, 0);\n\t\t\tif (end_dev != dev) {\n\t\t\t\tif (group_id < 0 || group_id > 65535) {\n\t\t\t\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t\t\t\t\"Netfilter group range from 0 to 65535 (got %ld)\",\n\t\t\t\t\t\t\tgroup_id);\n\t\t\t\t\treturn PCAP_ERROR;\n\t\t\t\t}\n\n\t\t\t\tgroups[group_count++] = (unsigned short) group_id;\n\t\t\t\tdev = end_dev;\n\t\t\t}\n\t\t\tif (*dev != ',')\n\t\t\t\tbreak;\n\t\t\tdev++;\n\t\t}\n\t}\n\n\tif (type == OTHER || *dev) {\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t\"Can't get netfilter group(s) index from %s\",\n\t\t\t\thandle->opt.device);\n\t\treturn PCAP_ERROR;\n\t}\n\n\t/* if no groups, add default: 0 */\n\tif (!group_count) {\n\t\tgroups[0] = 0;\n\t\tgroup_count = 1;\n\t}\n\n\t/*\n\t * Turn a negative snapshot value (invalid), a snapshot value of\n\t * 0 (unspecified), or a value bigger than the normal maximum\n\t * value, into the maximum allowed value.\n\t *\n\t * If some application really *needs* a bigger snapshot\n\t * length, we should just increase MAXIMUM_SNAPLEN.\n\t */\n\tif (handle->snapshot <= 0 || handle->snapshot > MAXIMUM_SNAPLEN)\n\t\thandle->snapshot = MAXIMUM_SNAPLEN;\n\n\t/* Initialize some components of the pcap structure. */\n\thandle->bufsize = 128 + handle->snapshot;\n\thandle->offset = 0;\n\thandle->read_op = netfilter_read_linux;\n\thandle->inject_op = netfilter_inject_linux;\n\thandle->setfilter_op = install_bpf_program; /* no kernel filtering */\n\thandle->setdirection_op = NULL;\n\thandle->set_datalink_op = netfilter_set_datalink;\n\thandle->getnonblock_op = pcap_getnonblock_fd;\n\thandle->setnonblock_op = pcap_setnonblock_fd;\n\thandle->stats_op = netfilter_stats_linux;\n\n\t/* Create netlink socket */\n\thandle->fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER);\n\tif (handle->fd < 0) {\n\t\tpcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't create raw socket\");\n\t\treturn PCAP_ERROR;\n\t}\n\n\tif (type == NFLOG) {\n\t\thandle->linktype = DLT_NFLOG;\n\t\thandle->dlt_list = (u_int *) malloc(sizeof(u_int) * 2);\n\t\tif (handle->dlt_list != NULL) {\n\t\t\thandle->dlt_list[0] = DLT_NFLOG;\n\t\t\thandle->dlt_list[1] = DLT_IPV4;\n\t\t\thandle->dlt_count = 2;\n\t\t}\n\n\t} else\n\t\thandle->linktype = DLT_IPV4;\n\n\thandle->buffer = malloc(handle->bufsize);\n\tif (!handle->buffer) {\n\t\tpcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't allocate dump buffer\");\n\t\tgoto close_fail;\n\t}\n\n\tif (type == NFLOG) {\n\t\tif (nflog_send_config_cmd(handle, 0, NFULNL_CFG_CMD_PF_UNBIND, AF_INET) < 0) {\n\t\t\tpcap_fmt_errmsg_for_errno(handle->errbuf,\n\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t    \"NFULNL_CFG_CMD_PF_UNBIND\");\n\t\t\tgoto close_fail;\n\t\t}\n\n\t\tif (nflog_send_config_cmd(handle, 0, NFULNL_CFG_CMD_PF_BIND, AF_INET) < 0) {\n\t\t\tpcap_fmt_errmsg_for_errno(handle->errbuf,\n\t\t\t    PCAP_ERRBUF_SIZE, errno, \"NFULNL_CFG_CMD_PF_BIND\");\n\t\t\tgoto close_fail;\n\t\t}\n\n\t\t/* Bind socket to the nflog groups */\n\t\tfor (i = 0; i < group_count; i++) {\n\t\t\tif (nflog_send_config_cmd(handle, groups[i], NFULNL_CFG_CMD_BIND, AF_UNSPEC) < 0) {\n\t\t\t\tpcap_fmt_errmsg_for_errno(handle->errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"Can't listen on group group index\");\n\t\t\t\tgoto close_fail;\n\t\t\t}\n\n\t\t\tif (nflog_send_config_mode(handle, groups[i], NFULNL_COPY_PACKET, handle->snapshot) < 0) {\n\t\t\t\tpcap_fmt_errmsg_for_errno(handle->errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"NFULNL_COPY_PACKET\");\n\t\t\t\tgoto close_fail;\n\t\t\t}\n\t\t}\n\n\t} else {\n\t\tif (nfqueue_send_config_cmd(handle, 0, NFQNL_CFG_CMD_PF_UNBIND, AF_INET) < 0) {\n\t\t\tpcap_fmt_errmsg_for_errno(handle->errbuf,\n\t\t\t    PCAP_ERRBUF_SIZE, errno, \"NFQNL_CFG_CMD_PF_UNBIND\");\n\t\t\tgoto close_fail;\n\t\t}\n\n\t\tif (nfqueue_send_config_cmd(handle, 0, NFQNL_CFG_CMD_PF_BIND, AF_INET) < 0) {\n\t\t\tpcap_fmt_errmsg_for_errno(handle->errbuf,\n\t\t\t    PCAP_ERRBUF_SIZE, errno, \"NFQNL_CFG_CMD_PF_BIND\");\n\t\t\tgoto close_fail;\n\t\t}\n\n\t\t/* Bind socket to the nfqueue groups */\n\t\tfor (i = 0; i < group_count; i++) {\n\t\t\tif (nfqueue_send_config_cmd(handle, groups[i], NFQNL_CFG_CMD_BIND, AF_UNSPEC) < 0) {\n\t\t\t\tpcap_fmt_errmsg_for_errno(handle->errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"Can't listen on group group index\");\n\t\t\t\tgoto close_fail;\n\t\t\t}\n\n\t\t\tif (nfqueue_send_config_mode(handle, groups[i], NFQNL_COPY_PACKET, handle->snapshot) < 0) {\n\t\t\t\tpcap_fmt_errmsg_for_errno(handle->errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"NFQNL_COPY_PACKET\");\n\t\t\t\tgoto close_fail;\n\t\t\t}\n\t\t}\n\t}\n\n\tif (handle->opt.rfmon) {\n\t\t/*\n\t\t * Monitor mode doesn't apply to netfilter devices.\n\t\t */\n\t\tpcap_cleanup_live_common(handle);\n\t\treturn PCAP_ERROR_RFMON_NOTSUP;\n\t}\n\n\tif (handle->opt.buffer_size != 0) {\n\t\t/*\n\t\t * Set the socket buffer size to the specified value.\n\t\t */\n\t\tif (setsockopt(handle->fd, SOL_SOCKET, SO_RCVBUF, &handle->opt.buffer_size, sizeof(handle->opt.buffer_size)) == -1) {\n\t\t\tpcap_fmt_errmsg_for_errno(handle->errbuf,\n\t\t\t    PCAP_ERRBUF_SIZE, errno, \"SO_RCVBUF\");\n\t\t\tgoto close_fail;\n\t\t}\n\t}\n\n\thandle->selectable_fd = handle->fd;\n\treturn 0;\n\nclose_fail:\n\tpcap_cleanup_live_common(handle);\n\treturn PCAP_ERROR;\n}",
+      "fn_code_pos": [
+        [
+          485,
+          0
+        ],
+        [
+          684,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "netfilter_activate",
+        "parameters": {
+          "handle": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\nnetfilter_create(const char *device, char *ebuf, int *is_ours)\n{\n\tconst char *cp;\n\tpcap_t *p;\n\n\t/* Does this look like an netfilter device? */\n\tcp = strrchr(device, '/');\n\tif (cp == NULL)\n\t\tcp = device;\n\n\t/* Does it begin with NFLOG_IFACE or NFQUEUE_IFACE? */\n\tif (strncmp(cp, NFLOG_IFACE, sizeof NFLOG_IFACE - 1) == 0)\n\t\tcp += sizeof NFLOG_IFACE - 1;\n\telse if (strncmp(cp, NFQUEUE_IFACE, sizeof NFQUEUE_IFACE - 1) == 0)\n\t\tcp += sizeof NFQUEUE_IFACE - 1;\n\telse {\n\t\t/* Nope, doesn't begin with NFLOG_IFACE nor NFQUEUE_IFACE */\n\t\t*is_ours = 0;\n\t\treturn NULL;\n\t}\n\n\t/*\n\t * Yes - is that either the end of the name, or is it followed\n\t * by a colon?\n\t */\n\tif (*cp != ':' && *cp != '\\0') {\n\t\t/* Nope */\n\t\t*is_ours = 0;\n\t\treturn NULL;\n\t}\n\n\t/* OK, it's probably ours. */\n\t*is_ours = 1;\n\n\tp = pcap_create_common(ebuf, sizeof (struct pcap_netfilter));\n\tif (p == NULL)\n\t\treturn (NULL);\n\n\tp->activate_op = netfilter_activate;\n\treturn (p);\n}",
+      "fn_code_pos": [
+        [
+          686,
+          0
+        ],
+        [
+          727,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "netfilter_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "int\nnetfilter_findalldevs(pcap_if_list_t *devlistp, char *err_str)\n{\n\tint sock;\n\n\tsock = socket(AF_NETLINK, SOCK_RAW, NETLINK_NETFILTER);\n\tif (sock < 0) {\n\t\t/* if netlink is not supported this is not fatal */\n\t\tif (errno == EAFNOSUPPORT || errno == EPROTONOSUPPORT)\n\t\t\treturn 0;\n\t\tpcap_fmt_errmsg_for_errno(err_str, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't open netlink socket\");\n\t\treturn -1;\n\t}\n\tclose(sock);\n\n\t/*\n\t * The notion of \"connected\" vs. \"disconnected\" doesn't apply.\n\t * XXX - what about \"up\" and \"running\"?\n\t */\n\tif (add_dev(devlistp, NFLOG_IFACE,\n\t    PCAP_IF_CONNECTION_STATUS_NOT_APPLICABLE,\n\t    \"Linux netfilter log (NFLOG) interface\", err_str) == NULL)\n\t\treturn -1;\n\tif (add_dev(devlistp, NFQUEUE_IFACE,\n\t    PCAP_IF_CONNECTION_STATUS_NOT_APPLICABLE,\n\t    \"Linux netfilter queue (NFQUEUE) interface\", err_str) == NULL)\n\t\treturn -1;\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          729,
+          0
+        ],
+        [
+          758,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "netfilter_findalldevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "err_str": "char"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "nfqueue_send_verdict(const pcap_t *handle, uint16_t group_id, u_int32_t id, u_int32_t verdict)",
+      "fn_dec_pos": [
+        [
+          84,
+          11
+        ],
+        [
+          84,
+          105
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nfqueue_send_verdict",
+        "parameters": {
+          "handle": "pcap_t",
+          "group_id": "uint16_t",
+          "id": "u_int32_t",
+          "verdict": "u_int32_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "netfilter_create(const char *device, char *ebuf, int *is_ours)",
+      "fn_dec_pos": [
+        [
+          687,
+          0
+        ],
+        [
+          687,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "netfilter_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_netfilter {\n\tu_int\tpackets_read;\t/* count of packets read with recvfrom() */\n\tu_int   packets_nobufs; /* ENOBUFS counter */\n}",
+      {
+        "packets_read": "u_int",
+        "packets_nobufs": "u_int"
+      },
+      "pcap_netfilter",
+      [
+        79,
+        0
+      ],
+      [
+        82,
+        1
+      ]
+    ],
+    [
+      "struct my_nfattr {\n\tuint16_t nfa_len;\n\tuint16_t nfa_type;\n\tvoid *data;\n}",
+      {
+        "nfa_len": "uint16_t",
+        "nfa_type": "uint16_t",
+        "*data": "void"
+      },
+      "my_nfattr",
+      [
+        307,
+        0
+      ],
+      [
+        311,
+        1
+      ]
+    ],
+    [
+      "struct pcap_netfilter {\n\tu_int\tpackets_read;\t/* count of packets read with recvfrom() */\n\tu_int   packets_nobufs; /* ENOBUFS counter */\n}",
+      {
+        "packets_read": "u_int",
+        "packets_nobufs": "u_int"
+      },
+      "pcap_netfilter",
+      [
+        79,
+        0
+      ],
+      [
+        82,
+        1
+      ]
+    ],
+    [
+      "struct pcap_netfilter",
+      {},
+      "",
+      [
+        90,
+        1
+      ],
+      [
+        90,
+        22
+      ]
+    ],
+    [
+      "struct nlmsghdr",
+      {},
+      "",
+      [
+        139,
+        8
+      ],
+      [
+        139,
+        23
+      ]
+    ],
+    [
+      "struct nlmsghdr",
+      {},
+      "",
+      [
+        139,
+        38
+      ],
+      [
+        139,
+        53
+      ]
+    ],
+    [
+      "struct nlmsghdr",
+      {},
+      "",
+      [
+        169,
+        30
+      ],
+      [
+        169,
+        45
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        183,
+        3
+      ],
+      [
+        183,
+        21
+      ]
+    ],
+    [
+      "struct nfgenmsg",
+      {},
+      "",
+      [
+        185,
+        9
+      ],
+      [
+        185,
+        24
+      ]
+    ],
+    [
+      "struct nfattr",
+      {},
+      "",
+      [
+        189,
+        10
+      ],
+      [
+        189,
+        23
+      ]
+    ],
+    [
+      "struct nfattr",
+      {},
+      "",
+      [
+        198,
+        5
+      ],
+      [
+        198,
+        18
+      ]
+    ],
+    [
+      "struct nfqnl_msg_packet_hdr",
+      {},
+      "",
+      [
+        206,
+        16
+      ],
+      [
+        206,
+        43
+      ]
+    ],
+    [
+      "struct nfqnl_msg_packet_hdr",
+      {},
+      "",
+      [
+        206,
+        62
+      ],
+      [
+        206,
+        89
+      ]
+    ],
+    [
+      "struct nlmsghdr",
+      {},
+      "",
+      [
+        234,
+        63
+      ],
+      [
+        234,
+        78
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        290,
+        38
+      ],
+      [
+        290,
+        54
+      ]
+    ],
+    [
+      "struct pcap_netfilter",
+      {},
+      "",
+      [
+        292,
+        1
+      ],
+      [
+        292,
+        22
+      ]
+    ],
+    [
+      "struct my_nfattr {\n\tuint16_t nfa_len;\n\tuint16_t nfa_type;\n\tvoid *data;\n}",
+      {
+        "nfa_len": "uint16_t",
+        "nfa_type": "uint16_t",
+        "*data": "void"
+      },
+      "my_nfattr",
+      [
+        307,
+        0
+      ],
+      [
+        311,
+        1
+      ]
+    ],
+    [
+      "struct my_nfattr",
+      {},
+      "",
+      [
+        314,
+        117
+      ],
+      [
+        314,
+        133
+      ]
+    ],
+    [
+      "struct nlmsghdr",
+      {},
+      "",
+      [
+        318,
+        1
+      ],
+      [
+        318,
+        16
+      ]
+    ],
+    [
+      "struct nlmsghdr",
+      {},
+      "",
+      [
+        318,
+        25
+      ],
+      [
+        318,
+        40
+      ]
+    ],
+    [
+      "struct nfgenmsg",
+      {},
+      "",
+      [
+        319,
+        1
+      ],
+      [
+        319,
+        16
+      ]
+    ],
+    [
+      "struct nfgenmsg",
+      {},
+      "",
+      [
+        319,
+        25
+      ],
+      [
+        319,
+        40
+      ]
+    ],
+    [
+      "struct nlmsghdr",
+      {},
+      "",
+      [
+        319,
+        58
+      ],
+      [
+        319,
+        73
+      ]
+    ],
+    [
+      "struct sockaddr_nl",
+      {},
+      "",
+      [
+        321,
+        1
+      ],
+      [
+        321,
+        19
+      ]
+    ],
+    [
+      "struct nfgenmsg",
+      {},
+      "",
+      [
+        328,
+        38
+      ],
+      [
+        328,
+        53
+      ]
+    ],
+    [
+      "struct nfattr",
+      {},
+      "",
+      [
+        339,
+        2
+      ],
+      [
+        339,
+        15
+      ]
+    ],
+    [
+      "struct nfattr",
+      {},
+      "",
+      [
+        339,
+        24
+      ],
+      [
+        339,
+        37
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        350,
+        49
+      ],
+      [
+        350,
+        64
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        363,
+        52
+      ],
+      [
+        363,
+        67
+      ]
+    ],
+    [
+      "struct nlmsghdr",
+      {},
+      "",
+      [
+        374,
+        9
+      ],
+      [
+        374,
+        24
+      ]
+    ],
+    [
+      "struct nlmsgerr",
+      {},
+      "",
+      [
+        380,
+        44
+      ],
+      [
+        380,
+        59
+      ]
+    ],
+    [
+      "struct my_nfattr",
+      {},
+      "",
+      [
+        395,
+        86
+      ],
+      [
+        395,
+        102
+      ]
+    ],
+    [
+      "struct nfulnl_msg_config_cmd",
+      {},
+      "",
+      [
+        403,
+        1
+      ],
+      [
+        403,
+        29
+      ]
+    ],
+    [
+      "struct my_nfattr",
+      {},
+      "",
+      [
+        404,
+        1
+      ],
+      [
+        404,
+        17
+      ]
+    ],
+    [
+      "struct nfulnl_msg_config_mode",
+      {},
+      "",
+      [
+        418,
+        1
+      ],
+      [
+        418,
+        30
+      ]
+    ],
+    [
+      "struct my_nfattr",
+      {},
+      "",
+      [
+        419,
+        1
+      ],
+      [
+        419,
+        17
+      ]
+    ],
+    [
+      "struct nfqnl_msg_verdict_hdr",
+      {},
+      "",
+      [
+        434,
+        1
+      ],
+      [
+        434,
+        29
+      ]
+    ],
+    [
+      "struct my_nfattr",
+      {},
+      "",
+      [
+        435,
+        1
+      ],
+      [
+        435,
+        17
+      ]
+    ],
+    [
+      "struct my_nfattr",
+      {},
+      "",
+      [
+        448,
+        88
+      ],
+      [
+        448,
+        104
+      ]
+    ],
+    [
+      "struct nfqnl_msg_config_cmd",
+      {},
+      "",
+      [
+        456,
+        1
+      ],
+      [
+        456,
+        28
+      ]
+    ],
+    [
+      "struct my_nfattr",
+      {},
+      "",
+      [
+        457,
+        1
+      ],
+      [
+        457,
+        17
+      ]
+    ],
+    [
+      "struct nfqnl_msg_config_params",
+      {},
+      "",
+      [
+        472,
+        1
+      ],
+      [
+        472,
+        31
+      ]
+    ],
+    [
+      "struct my_nfattr",
+      {},
+      "",
+      [
+        473,
+        1
+      ],
+      [
+        473,
+        17
+      ]
+    ],
+    [
+      "struct pcap_netfilter",
+      {},
+      "",
+      [
+        721,
+        38
+      ],
+      [
+        721,
+        59
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"strerror.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include <arpa/inet.h>\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <time.h>\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in.h>\n",
+      [
+        49,
+        0
+      ],
+      [
+        50,
+        0
+      ]
+    ],
+    [
+      "#include <linux/types.h>\n",
+      [
+        50,
+        0
+      ],
+      [
+        51,
+        0
+      ]
+    ],
+    [
+      "#include <linux/netlink.h>\n",
+      [
+        52,
+        0
+      ],
+      [
+        53,
+        0
+      ]
+    ],
+    [
+      "#include <linux/netfilter.h>\n",
+      [
+        53,
+        0
+      ],
+      [
+        54,
+        0
+      ]
+    ],
+    [
+      "#include <linux/netfilter/nfnetlink.h>\n",
+      [
+        54,
+        0
+      ],
+      [
+        55,
+        0
+      ]
+    ],
+    [
+      "#include <linux/netfilter/nfnetlink_log.h>\n",
+      [
+        55,
+        0
+      ],
+      [
+        56,
+        0
+      ]
+    ],
+    [
+      "#include <linux/netfilter/nfnetlink_queue.h>\n",
+      [
+        56,
+        0
+      ],
+      [
+        57,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-netfilter-linux.h\"\n",
+      [
+        67,
+        0
+      ],
+      [
+        68,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "typedef enum { OTHER = -1, NFLOG, NFQUEUE } nftype_t;",
+      {
+        "OTHER": "",
+        "NFLOG": "",
+        "NFQUEUE": ""
+      },
+      "nftype_t",
+      [
+        74,
+        0
+      ],
+      [
+        74,
+        53
+      ]
+    ]
+  ]
+}

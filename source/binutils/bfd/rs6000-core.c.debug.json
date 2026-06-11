@@ -1,0 +1,546 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static bfd_boolean\nread_hdr (bfd *abfd, CoreHdr *core)\n{\n  bfd_size_type size;\n\n  if (bfd_seek (abfd, (file_ptr) 0, SEEK_SET) != 0)\n    return FALSE;\n\n  /* Read the leading portion that old and new core dump structures have in\n     common.  */\n  size = CORE_COMMONSZ;\n  if (bfd_bread (core, size, abfd) != size)\n    return FALSE;\n\n  /* Read the trailing portion of the structure.  */\n  if (CORE_NEW (*core))\n    size = sizeof (core->new_dump);\n#ifndef BFD64\n  else\n    size = sizeof (core->old);\n#endif\n  size -= CORE_COMMONSZ;\n  return bfd_bread ((char *) core + CORE_COMMONSZ, size, abfd) == size;\n}",
+      "fn_code_pos": [
+        [
+          288,
+          0
+        ],
+        [
+          311,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_hdr",
+        "parameters": {
+          "abfd": "bfd",
+          "core": "CoreHdr"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "static asection *\nmake_bfd_asection (bfd *abfd, const char *name, flagword flags,\n\t\t   bfd_size_type size, bfd_vma vma, file_ptr filepos)\n{\n  asection *asect;\n\n  asect = bfd_make_section_anyway_with_flags (abfd, name, flags);\n  if (!asect)\n    return NULL;\n\n  asect->size = size;\n  asect->vma = vma;\n  asect->filepos = filepos;\n  asect->alignment_power = 8;\n\n  return asect;\n}",
+      "fn_code_pos": [
+        [
+          313,
+          0
+        ],
+        [
+          329,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "make_bfd_asection",
+        "parameters": {
+          "abfd": "bfd",
+          "name": "char",
+          "flags": "flagword",
+          "size": "bfd_size_type",
+          "vma": "bfd_vma",
+          "filepos": "file_ptr"
+        },
+        "return_type": "asection"
+      }
+    },
+    {
+      "fn_code": "const bfd_target *\nrs6000coff_core_p (bfd *abfd)\n{\n  CoreHdr core;\n  struct stat statbuf;\n  bfd_size_type size;\n  char *tmpptr;\n\n  /* Values from new and old core structures.  */\n  int c_flag;\n  file_ptr c_stack, c_regoff, c_loader;\n  bfd_size_type c_size, c_regsize, c_lsize;\n  bfd_vma c_stackend;\n  void *c_regptr;\n  int proc64;\n\n  if (!read_hdr (abfd, &core))\n    {\n      if (bfd_get_error () != bfd_error_system_call)\n\tbfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n\n  /* This isn't the right handler for 64-bit core files on AIX 5.x.  */\n  if (CORE_NEW (core) && CNEW_IS_CORE_DUMPXX (core))\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n\n  /* Copy fields from new or old core structure.  */\n  if (CORE_NEW (core))\n    {\n      c_flag = core.new_dump.c_flag;\n      c_stack = (file_ptr) core.new_dump.c_stack;\n      c_size = core.new_dump.c_size;\n      c_stackend = CNEW_STACKORG (core.new_dump) + c_size;\n      c_lsize = CNEW_LSIZE (core.new_dump);\n      c_loader = CNEW_LOADER (core.new_dump);\n#ifndef BFD64\n      proc64 = CNEW_PROC64 (core.new_dump);\n    }\n  else\n    {\n      c_flag = core.old.c_flag;\n      c_stack = (file_ptr) (ptr_to_uint) core.old.c_stack;\n      c_size = core.old.c_size;\n      c_stackend = COLD_STACKEND;\n      c_lsize = 0x7ffffff;\n      c_loader = (file_ptr) (ptr_to_uint) COLD_LOADER (core.old);\n#endif\n      proc64 = 0;\n    }\n\n  if (proc64)\n    {\n      c_regsize = sizeof (CNEW_CONTEXT64 (core.new_dump));\n      c_regptr = &CNEW_CONTEXT64 (core.new_dump);\n    }\n  else if (CORE_NEW (core))\n    {\n      c_regsize = sizeof (CNEW_MSTSAVE (core.new_dump));\n      c_regptr = &CNEW_MSTSAVE (core.new_dump);\n    }\n#ifndef BFD64\n  else\n    {\n      c_regsize = sizeof (COLD_MSTSAVE (core.old));\n      c_regptr = &COLD_MSTSAVE (core.old);\n    }\n#endif\n  c_regoff = (char *) c_regptr - (char *) &core;\n\n  if (bfd_stat (abfd, &statbuf) < 0)\n    {\n      bfd_set_error (bfd_error_system_call);\n      return NULL;\n    }\n\n  /* If the core file ulimit is too small, the system will first\n     omit the data segment, then omit the stack, then decline to\n     dump core altogether (as far as I know UBLOCK_VALID and LE_VALID\n     are always set) (this is based on experimentation on AIX 3.2).\n     Now, the thing is that GDB users will be surprised\n     if segments just silently don't appear (well, maybe they would\n     think to check \"info files\", I don't know).\n\n     For the data segment, we have no choice but to keep going if it's\n     not there, since the default behavior is not to dump it (regardless\n     of the ulimit, it's based on SA_FULLDUMP).  But for the stack segment,\n     if it's not there, we refuse to have anything to do with this core\n     file.  The usefulness of a core dump without a stack segment is pretty\n     limited anyway.  */\n\n  if (!(c_flag & UBLOCK_VALID)\n      || !(c_flag & LE_VALID))\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n\n  if (!(c_flag & USTACK_VALID))\n    {\n      bfd_set_error (bfd_error_file_truncated);\n      return NULL;\n    }\n\n  /* Don't check the core file size for a full core, AIX 4.1 includes\n     additional shared library sections in a full core.  */\n  if (!(c_flag & (FULL_CORE | CORE_TRUNC)))\n    {\n      /* If the size is wrong, it means we're misinterpreting something.  */\n      if (c_stack + (file_ptr) c_size != statbuf.st_size)\n\t{\n\t  bfd_set_error (bfd_error_wrong_format);\n\t  return NULL;\n\t}\n    }\n\n  /* Sanity check on the c_tab field.  */\n  if (!CORE_NEW (core)\n      && (\n#ifndef BFD64\n\t  c_loader < (file_ptr) sizeof core.old\n#else\n\t  c_loader < (file_ptr) sizeof core.new_dump\n#endif\n\t  || c_loader >= statbuf.st_size\n\t  || c_loader >= c_stack))\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n\n  /* Issue warning if the core file was truncated during writing.  */\n  if (c_flag & CORE_TRUNC)\n    _bfd_error_handler (_(\"%B: warning core file truncated\"), abfd);\n\n  /* Allocate core file header.  */\n#ifndef BFD64\n  size = CORE_NEW (core) ? sizeof (core.new_dump) : sizeof (core.old);\n#else\n  size =  sizeof (core.new_dump);\n#endif\n  tmpptr = (char *) bfd_zalloc (abfd, (bfd_size_type) size);\n  if (!tmpptr)\n    return NULL;\n\n  /* Copy core file header.  */\n  memcpy (tmpptr, &core, size);\n  set_tdata (abfd, tmpptr);\n\n  /* Set architecture.  */\n  if (CORE_NEW (core))\n    {\n      enum bfd_architecture arch;\n      unsigned long mach;\n\n      switch (CNEW_IMPL (core.new_dump))\n\t{\n\tcase POWER_RS1:\n\tcase POWER_RSC:\n\tcase POWER_RS2:\n\t  arch = bfd_arch_rs6000;\n\t  mach = bfd_mach_rs6k;\n\t  break;\n\tdefault:\n\t  arch = bfd_arch_powerpc;\n\t  mach = bfd_mach_ppc;\n\t  break;\n\t}\n      bfd_default_set_arch_mach (abfd, arch, mach);\n    }\n\n  /* .stack section.  */\n  if (!make_bfd_asection (abfd, \".stack\",\n\t\t\t  SEC_ALLOC | SEC_LOAD | SEC_HAS_CONTENTS,\n\t\t\t  c_size, c_stackend - c_size, c_stack))\n    goto fail;\n\n  /* .reg section for all registers.  */\n  if (!make_bfd_asection (abfd, \".reg\",\n\t\t\t  SEC_HAS_CONTENTS,\n\t\t\t  c_regsize, (bfd_vma) 0, c_regoff))\n    goto fail;\n\n  /* .ldinfo section.\n     To actually find out how long this section is in this particular\n     core dump would require going down the whole list of struct ld_info's.\n     See if we can just fake it.  */\n  if (!make_bfd_asection (abfd, \".ldinfo\",\n\t\t\t  SEC_HAS_CONTENTS,\n\t\t\t  c_lsize, (bfd_vma) 0, c_loader))\n    goto fail;\n\n#ifndef CORE_VERSION_1\n  /* .data section if present.\n     AIX 3 dumps the complete data section and sets FULL_CORE if the\n     ulimit is large enough, otherwise the data section is omitted.\n     AIX 4 sets FULL_CORE even if the core file is truncated, we have\n     to examine core.c_datasize below to find out the actual size of\n     the .data section.  */\n  if (c_flag & FULL_CORE)\n    {\n      if (!make_bfd_asection (abfd, \".data\",\n\t\t\t      SEC_ALLOC | SEC_LOAD | SEC_HAS_CONTENTS,\n\t\t\t      (bfd_size_type) core.old.c_u.u_dsize,\n\t\t\t      (bfd_vma)\n\t\t\t\tCDATA_ADDR (core.old.c_u.u_dsize),\n\t\t\t      c_stack + c_size))\n\tgoto fail;\n    }\n#endif\n\n#ifdef CORE_VERSION_1\n  /* AIX 4 adds data sections from loaded objects to the core file,\n     which can be found by examining ldinfo, and anonymously mmapped\n     regions.  */\n  {\n    LdInfo ldinfo;\n    bfd_size_type ldi_datasize;\n    file_ptr ldi_core;\n    uint ldi_next;\n    bfd_vma ldi_dataorg;\n    bfd_vma core_dataorg;\n\n    /* Fields from new and old core structures.  */\n    bfd_size_type c_datasize, c_vmregions;\n    file_ptr c_data, c_vmm;\n\n    if (CORE_NEW (core))\n      {\n\tc_datasize = CNEW_DATASIZE (core.new_dump);\n\tc_data = (file_ptr) core.new_dump.c_data;\n\tc_vmregions = core.new_dump.c_vmregions;\n\tc_vmm = (file_ptr) core.new_dump.c_vmm;\n      }\n#ifndef BFD64\n    else\n      {\n\tc_datasize = core.old.c_datasize;\n\tc_data = (file_ptr) (ptr_to_uint) core.old.c_data;\n\tc_vmregions = core.old.c_vmregions;\n\tc_vmm = (file_ptr) (ptr_to_uint) core.old.c_vmm;\n      }\n#endif\n\n    /* .data section from executable.  */\n    if (c_datasize)\n      {\n\t/* If Large Memory Model is used, then the .data segment should start from\n\t   BDATAORG which has been defined in the system header files. */\n\n        if (c_flag & CORE_BIGDATA)\n          core_dataorg = BDATAORG;\n        else\n          core_dataorg = CDATA_ADDR (c_datasize);\n\n\tif (!make_bfd_asection (abfd, \".data\",\n\t\t\t\tSEC_ALLOC | SEC_LOAD | SEC_HAS_CONTENTS,\n\t\t\t\tc_datasize,\n\t\t\t\t(bfd_vma) core_dataorg,\n\t\t\t\tc_data))\n\t  goto fail;\n      }\n\n    /* .data sections from loaded objects.  */\n    if (proc64)\n      size = (unsigned long) ((LdInfo *) 0)->l64.ldinfo_filename;\n    else\n      size = (unsigned long) ((LdInfo *) 0)->l32.ldinfo_filename;\n\n    while (1)\n      {\n\tif (bfd_seek (abfd, c_loader, SEEK_SET) != 0)\n\t  goto fail;\n\tif (bfd_bread (&ldinfo, size, abfd) != size)\n\t  goto fail;\n\n\tif (proc64)\n\t  {\n\t    ldi_core = ldinfo.l64.ldinfo_core;\n\t    ldi_datasize = ldinfo.l64.ldinfo_datasize;\n\t    ldi_dataorg = (bfd_vma) ldinfo.l64.ldinfo_dataorg;\n\t    ldi_next = ldinfo.l64.ldinfo_next;\n\t  }\n\telse\n\t  {\n\t    ldi_core = ldinfo.l32.ldinfo_core;\n\t    ldi_datasize = ldinfo.l32.ldinfo_datasize;\n\t    ldi_dataorg = (bfd_vma) (ptr_to_uint) ldinfo.l32.ldinfo_dataorg;\n\t    ldi_next = ldinfo.l32.ldinfo_next;\n\t  }\n\n\tif (ldi_core)\n\t  if (!make_bfd_asection (abfd, \".data\",\n\t\t\t\t  SEC_ALLOC | SEC_LOAD | SEC_HAS_CONTENTS,\n\t\t\t\t  ldi_datasize, ldi_dataorg, ldi_core))\n\t    goto fail;\n\n\tif (ldi_next == 0)\n\t  break;\n\tc_loader += ldi_next;\n      }\n\n    /* .vmdata sections from anonymously mmapped regions.  */\n    if (c_vmregions)\n      {\n\tbfd_size_type i;\n\n\tif (bfd_seek (abfd, c_vmm, SEEK_SET) != 0)\n\t  goto fail;\n\n\tfor (i = 0; i < c_vmregions; i++)\n\t  {\n\t    VmInfo vminfo;\n\t    bfd_size_type vminfo_size;\n\t    file_ptr vminfo_offset;\n\t    bfd_vma vminfo_addr;\n\n#ifndef BFD64\n\t    size = CORE_NEW (core) ? sizeof (vminfo.new_dump) : sizeof (vminfo.old);\n#else\n            size = sizeof (vminfo.new_dump);\n#endif\n\t    if (bfd_bread (&vminfo, size, abfd) != size)\n\t      goto fail;\n\n\t    if (CORE_NEW (core))\n\t      {\n\t\tvminfo_addr = (bfd_vma) vminfo.new_dump.vminfo_addr;\n\t\tvminfo_size = vminfo.new_dump.vminfo_size;\n\t\tvminfo_offset = vminfo.new_dump.vminfo_offset;\n\t      }\n#ifndef BFD64\n\t    else\n\t      {\n\t\tvminfo_addr = (bfd_vma) (ptr_to_uint) vminfo.old.vminfo_addr;\n\t\tvminfo_size = vminfo.old.vminfo_size;\n\t\tvminfo_offset = vminfo.old.vminfo_offset;\n\t      }\n#endif\n\n\t    if (vminfo_offset)\n\t      if (!make_bfd_asection (abfd, \".vmdata\",\n\t\t\t\t      SEC_ALLOC | SEC_LOAD | SEC_HAS_CONTENTS,\n\t\t\t\t      vminfo_size, vminfo_addr,\n\t\t\t\t      vminfo_offset))\n\t\tgoto fail;\n\t  }\n      }\n  }\n#endif\n\n  return abfd->xvec;\t\t/* This is garbage for now.  */\n\n fail:\n  bfd_release (abfd, abfd->tdata.any);\n  abfd->tdata.any = NULL;\n  bfd_section_list_clear (abfd);\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          334,
+          0
+        ],
+        [
+          695,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000coff_core_p",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": "bfd_target"
+      }
+    },
+    {
+      "fn_code": "bfd_boolean\nrs6000coff_core_file_matches_executable_p (bfd *core_bfd, bfd *exec_bfd)\n{\n  CoreHdr core;\n  bfd_size_type size;\n  char *path, *s;\n  size_t alloc;\n  const char *str1, *str2;\n  bfd_boolean ret;\n  file_ptr c_loader;\n\n  if (!read_hdr (core_bfd, &core))\n    return FALSE;\n\n  if (CORE_NEW (core))\n    c_loader = CNEW_LOADER (core.new_dump);\n#ifndef BFD64\n  else\n    c_loader = (file_ptr) (ptr_to_uint) COLD_LOADER (core.old);\n#endif\n\n  if (CORE_NEW (core) && CNEW_PROC64 (core.new_dump))\n    size = (int) ((LdInfo *) 0)->l64.ldinfo_filename;\n  else\n    size = (int) ((LdInfo *) 0)->l32.ldinfo_filename;\n\n  if (bfd_seek (core_bfd, c_loader + size, SEEK_SET) != 0)\n    return FALSE;\n\n  alloc = 100;\n  path = bfd_malloc ((bfd_size_type) alloc);\n  if (path == NULL)\n    return FALSE;\n  s = path;\n\n  while (1)\n    {\n      if (bfd_bread (s, (bfd_size_type) 1, core_bfd) != 1)\n\t{\n\t  free (path);\n\t  return FALSE;\n\t}\n      if (*s == '\\0')\n\tbreak;\n      ++s;\n      if (s == path + alloc)\n\t{\n\t  char *n;\n\n\t  alloc *= 2;\n\t  n = bfd_realloc (path, (bfd_size_type) alloc);\n\t  if (n == NULL)\n\t    {\n\t      free (path);\n\t      return FALSE;\n\t    }\n\t  s = n + (path - s);\n\t  path = n;\n\t}\n    }\n\n  str1 = strrchr (path, '/');\n  str2 = strrchr (exec_bfd->filename, '/');\n\n  /* step over character '/' */\n  str1 = str1 != NULL ? str1 + 1 : path;\n  str2 = str2 != NULL ? str2 + 1 : exec_bfd->filename;\n\n  if (strcmp (str1, str2) == 0)\n    ret = TRUE;\n  else\n    ret = FALSE;\n\n  free (path);\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          699,
+          0
+        ],
+        [
+          775,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000coff_core_file_matches_executable_p",
+        "parameters": {
+          "core_bfd": "bfd",
+          "exec_bfd": "bfd"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "char *\nrs6000coff_core_file_failing_command (bfd *abfd)\n{\n  CoreHdr *core = core_hdr (abfd);\n#ifndef BFD64\n  char *com = CORE_NEW (*core) ?\n    CNEW_COMM (core->new_dump) : COLD_COMM (core->old);\n#else\n  char *com = CNEW_COMM (core->new_dump);\n#endif\n\n  if (*com)\n    return com;\n  else\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          777,
+          0
+        ],
+        [
+          792,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000coff_core_file_failing_command",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "int\nrs6000coff_core_file_failing_signal (bfd *abfd)\n{\n  CoreHdr *core = core_hdr (abfd);\n#ifndef BFD64\n  return CORE_NEW (*core) ? core->new_dump.c_signo : core->old.c_signo;\n#else\n  return  core->new_dump.c_signo;\n#endif\n}",
+      "fn_code_pos": [
+        [
+          794,
+          0
+        ],
+        [
+          803,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000coff_core_file_failing_signal",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "rs6000coff_core_p (bfd *abfd)",
+      "fn_dec_pos": [
+        [
+          279,
+          19
+        ],
+        [
+          279,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000coff_core_p",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "rs6000coff_core_file_matches_executable_p (bfd *core_bfd,\n                                                       bfd *exec_bfd)",
+      "fn_dec_pos": [
+        [
+          280,
+          12
+        ],
+        [
+          281,
+          69
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000coff_core_file_matches_executable_p",
+        "parameters": {
+          "core_bfd": "bfd",
+          "exec_bfd": "bfd"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "rs6000coff_core_file_failing_command (bfd *abfd)",
+      "fn_dec_pos": [
+        [
+          282,
+          7
+        ],
+        [
+          282,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000coff_core_file_failing_command",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "rs6000coff_core_file_failing_signal (bfd *abfd)",
+      "fn_dec_pos": [
+        [
+          283,
+          4
+        ],
+        [
+          283,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000coff_core_file_failing_signal",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "make_bfd_asection (bfd *abfd, const char *name, flagword flags,\n\t\t   bfd_size_type size, bfd_vma vma, file_ptr filepos)",
+      "fn_dec_pos": [
+        [
+          314,
+          0
+        ],
+        [
+          315,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "make_bfd_asection",
+        "parameters": {
+          "abfd": "bfd",
+          "name": "char",
+          "flags": "flagword",
+          "size": "bfd_size_type",
+          "vma": "bfd_vma",
+          "filepos": "file_ptr"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "rs6000coff_core_p (bfd *abfd)",
+      "fn_dec_pos": [
+        [
+          335,
+          0
+        ],
+        [
+          335,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000coff_core_p",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "rs6000coff_core_file_failing_command (bfd *abfd)",
+      "fn_dec_pos": [
+        [
+          778,
+          0
+        ],
+        [
+          778,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000coff_core_file_failing_command",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct __ld_info32",
+      {},
+      "",
+      [
+        94,
+        2
+      ],
+      [
+        94,
+        20
+      ]
+    ],
+    [
+      "struct __ld_info64",
+      {},
+      "",
+      [
+        95,
+        2
+      ],
+      [
+        95,
+        20
+      ]
+    ],
+    [
+      "struct ld_info",
+      {},
+      "",
+      [
+        97,
+        2
+      ],
+      [
+        97,
+        16
+      ]
+    ],
+    [
+      "struct ld_info",
+      {},
+      "",
+      [
+        98,
+        2
+      ],
+      [
+        98,
+        16
+      ]
+    ],
+    [
+      "struct core_dumpx",
+      {},
+      "",
+      [
+        107,
+        2
+      ],
+      [
+        107,
+        19
+      ]
+    ],
+    [
+      "struct core_dump",
+      {},
+      "",
+      [
+        109,
+        2
+      ],
+      [
+        109,
+        18
+      ]
+    ],
+    [
+      "struct core_dump",
+      {},
+      "",
+      [
+        112,
+        2
+      ],
+      [
+        112,
+        18
+      ]
+    ],
+    [
+      "struct vm_infox",
+      {},
+      "",
+      [
+        123,
+        2
+      ],
+      [
+        123,
+        17
+      ]
+    ],
+    [
+      "struct vm_info",
+      {},
+      "",
+      [
+        125,
+        2
+      ],
+      [
+        125,
+        16
+      ]
+    ],
+    [
+      "struct vm_info",
+      {},
+      "",
+      [
+        128,
+        2
+      ],
+      [
+        128,
+        16
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        338,
+        2
+      ],
+      [
+        338,
+        13
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include \"libbfd.h\"\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include <sys/user.h>\n",
+      [
+        59,
+        0
+      ],
+      [
+        60,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ldr.h>\n",
+      [
+        62,
+        0
+      ],
+      [
+        63,
+        0
+      ]
+    ],
+    [
+      "#include <sys/core.h>\n",
+      [
+        63,
+        0
+      ],
+      [
+        64,
+        0
+      ]
+    ],
+    [
+      "#include <sys/systemcfg.h>\n",
+      [
+        64,
+        0
+      ],
+      [
+        65,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum bfd_architecture",
+      {},
+      "",
+      [
+        489,
+        6
+      ],
+      [
+        489,
+        27
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,1069 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nattach_tx3904sio_regs (struct hw *me,\n\t\t      struct tx3904sio *controller)\n{\n  unsigned_word attach_address;\n  int attach_space;\n  unsigned attach_size;\n  reg_property_spec reg;\n\n  if (hw_find_property (me, \"reg\") == NULL)\n    hw_abort (me, \"Missing \\\"reg\\\" property\");\n\n  if (!hw_find_reg_array_property (me, \"reg\", 0, &reg))\n    hw_abort (me, \"\\\"reg\\\" property must contain one addr/size entry\");\n\n  hw_unit_address_to_attach_address (hw_parent (me),\n\t\t\t\t     &reg.address,\n\t\t\t\t     &attach_space,\n\t\t\t\t     &attach_address,\n\t\t\t\t     me);\n  hw_unit_size_to_attach_size (hw_parent (me),\n\t\t\t       &reg.size,\n\t\t\t       &attach_size, me);\n\n  hw_attach_address (hw_parent (me), 0,\n\t\t     attach_space, attach_address, attach_size,\n\t\t     me);\n\n  if(hw_find_property(me, \"backend\") != NULL)\n    {\n      const char* value = hw_find_string_property(me, \"backend\");\n      if(! strcmp(value, \"tcp\"))\n\tcontroller->backend = sio_tcp;\n      else if(! strcmp(value, \"stdio\"))\n\tcontroller->backend = sio_stdio;\n      else\n\thw_abort(me, \"illegal value for backend parameter `%s': use tcp or stdio\", value);\n    }\n\n  controller->base_address = attach_address;\n}",
+      "fn_code_pos": [
+        [
+          197,
+          0
+        ],
+        [
+          237,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_tx3904sio_regs",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct tx3904sio"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntx3904sio_finish (struct hw *me)\n{\n  struct tx3904sio *controller;\n\n  controller = HW_ZALLOC (me, struct tx3904sio);\n  set_hw_data (me, controller);\n  set_hw_io_read_buffer (me, tx3904sio_io_read_buffer);\n  set_hw_io_write_buffer (me, tx3904sio_io_write_buffer);\n  set_hw_ports (me, tx3904sio_ports);\n  set_hw_port_event (me, tx3904sio_port_event);\n\n  /* Preset defaults */\n  controller->backend = sio_stdio;\n\n  /* Attach ourself to our parent bus */\n  attach_tx3904sio_regs (me, controller);\n\n  /* Initialize to reset state */\n  tx3904sio_fifo_reset(me, & controller->rx_fifo);\n  tx3904sio_fifo_reset(me, & controller->tx_fifo);\n  controller->slsr = controller->sdicr\n    = controller->sdisr = controller->sfcr\n    = controller->sbgr = 0;\n  controller->slcr = 0x40000000; /* set TWUB */\n  controller->sbgr = 0x03ff0000; /* set BCLK=3, BRD=FF */\n  controller->poll_event = NULL;\n}",
+      "fn_code_pos": [
+        [
+          240,
+          0
+        ],
+        [
+          267,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntx3904sio_port_event (struct hw *me,\n\t\t     int my_port,\n\t\t     struct hw *source,\n\t\t     int source_port,\n\t\t     int level)\n{\n  struct tx3904sio *controller = hw_data (me);\n\n  switch (my_port)\n    {\n    case RESET_PORT:\n      {\n\tHW_TRACE ((me, \"reset\"));\n\n\ttx3904sio_fifo_reset(me, & controller->rx_fifo);\n\ttx3904sio_fifo_reset(me, & controller->tx_fifo);\n\tcontroller->slsr = controller->sdicr\n\t  = controller->sdisr = controller->sfcr\n\t  = controller->sbgr = 0;\n\tcontroller->slcr = 0x40000000; /* set TWUB */\n\tcontroller->sbgr = 0x03ff0000; /* set BCLK=3, BRD=FF */\n\t/* Don't interfere with I/O poller. */\n\tbreak;\n      }\n\n    default:\n      hw_abort (me, \"Event on unknown port %d\", my_port);\n      break;\n    }\n}",
+      "fn_code_pos": [
+        [
+          273,
+          0
+        ],
+        [
+          303,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_port_event",
+        "parameters": {
+          "me": "struct hw",
+          "my_port": "int",
+          "source": "struct hw",
+          "source_port": "int",
+          "level": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ntx3904sio_io_read_buffer (struct hw *me,\n\t\t\t void *dest,\n\t\t\t int space,\n\t\t\t unsigned_word base,\n\t\t\t unsigned nr_bytes)\n{\n  struct tx3904sio *controller = hw_data (me);\n  unsigned byte;\n\n  HW_TRACE ((me, \"read 0x%08lx %d\", (long) base, (int) nr_bytes));\n\n  /* tickle fifos */\n  tx3904sio_tickle(me);\n\n  for (byte = 0; byte < nr_bytes; byte++)\n    {\n      address_word address = base + byte;\n      int reg_number = (address - controller->base_address) / 4;\n      int reg_offset = (address - controller->base_address) % 4;\n      unsigned_4 register_value; /* in target byte order */\n\n      /* fill in entire register_value word */\n      switch (reg_number)\n\t{\n\tcase SLCR_REG: register_value = controller->slcr; break;\n\tcase SLSR_REG: register_value = controller->slsr; break;\n\tcase SDICR_REG: register_value = controller->sdicr; break;\n\tcase SDISR_REG: register_value = controller->sdisr; break;\n\tcase SFCR_REG: register_value = controller->sfcr; break;\n\tcase SBGR_REG: register_value = controller->sbgr; break;\n\tcase TFIFO_REG: register_value = 0; break;\n\tcase SFIFO_REG:\n\t  /* consume rx fifo for MS byte */\n\t  if(reg_offset == 0 && tx3904sio_fifo_nonempty(me, & controller->rx_fifo))\n\t    register_value = (tx3904sio_fifo_pop(me, & controller->rx_fifo) << 24);\n\t  else\n\t    register_value = 0;\n\t  break;\n\tdefault: register_value = 0;\n\t}\n\n      /* write requested byte out */\n      register_value = H2T_4(register_value);\n      /* HW_TRACE ((me, \"byte %d %02x\", reg_offset, ((char*)& register_value)[reg_offset])); */\n      memcpy ((char*) dest + byte, ((char*)& register_value)+reg_offset, 1);\n    }\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          308,
+          0
+        ],
+        [
+          357,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\ntx3904sio_io_write_buffer (struct hw *me,\n\t\t\t  const void *source,\n\t\t\t  int space,\n\t\t\t  unsigned_word base,\n\t\t\t  unsigned nr_bytes)\n{\n  struct tx3904sio *controller = hw_data (me);\n  unsigned byte;\n\n  HW_TRACE ((me, \"write 0x%08lx %d\", (long) base, (int) nr_bytes));\n  for (byte = 0; byte < nr_bytes; byte++)\n    {\n      address_word address = base + byte;\n      unsigned_1 write_byte = ((const unsigned char*) source)[byte];\n      int reg_number = (address - controller->base_address) / 4;\n      int reg_offset = 3 - (address - controller->base_address) % 4;\n\n      /* HW_TRACE ((me, \"byte %d %02x\", reg_offset, write_byte)); */\n\n      /* fill in entire register_value word */\n      switch (reg_number)\n\t{\n\tcase SLCR_REG:\n\t  SLCR_SET_BYTE(controller, reg_offset, write_byte);\n\t  break;\n\n\tcase SLSR_REG: /* unwriteable */ break;\n\n\tcase SDICR_REG:\n\t  {\n\t    unsigned_4 last_int, next_int;\n\t    \n\t    /* deassert interrupt upon clear */\n\t    last_int = controller->sdisr & controller->sdicr;\n\t    /* HW_TRACE ((me, \"sdicr - sdisr %08x sdicr %08x\",\n\t       controller->sdisr, controller->sdicr)); */\n\t    SDICR_SET_BYTE(controller, reg_offset, write_byte);\n\t    /* HW_TRACE ((me, \"sdicr + sdisr %08x sdicr %08x\",\n\t       controller->sdisr, controller->sdicr)); */\n\t    next_int = controller->sdisr & controller->sdicr;\n\t    \n\t    if(SDICR_GET_SDMAE(controller))\n\t      hw_abort(me, \"Cannot support DMA-driven sio.\");\n\n\t    if(~last_int & next_int) /* any bits set? */\n\t      hw_port_event(me, INT_PORT, 1);\n\t    if(last_int & ~next_int) /* any bits cleared? */\n\t      hw_port_event(me, INT_PORT, 0);\n\t  }\n\tbreak;\n\n\tcase SDISR_REG:\n\t  {\n\t    unsigned_4 last_int, next_int;\n\n\t    /* deassert interrupt upon clear */\n\t    last_int = controller->sdisr & controller->sdicr;\n\t    /* HW_TRACE ((me, \"sdisr - sdisr %08x sdicr %08x\", \n\t       controller->sdisr, controller->sdicr)); */\n\t    SDISR_CLEAR_FLAG_BYTE(controller, reg_offset, write_byte);\n\t    /* HW_TRACE ((me, \"sdisr + sdisr %08x sdicr %08x\", \n\t       controller->sdisr, controller->sdicr)); */\n\t    next_int = controller->sdisr & controller->sdicr;\n\n\t    if(~last_int & next_int) /* any bits set? */\n\t      hw_port_event(me, INT_PORT, 1);\n\t    if(last_int & ~next_int) /* any bits cleared? */\n\t      hw_port_event(me, INT_PORT, 0);\n\t  }\n\tbreak;\n\t\n\tcase SFCR_REG:\n\t  SFCR_SET_BYTE(controller, reg_offset, write_byte);\n\t  if(SFCR_GET_FRSTE(controller))\n\t    {\n\t      if(SFCR_GET_TFRST(controller)) tx3904sio_fifo_reset(me, & controller->tx_fifo);\n\t      if(SFCR_GET_RFRST(controller)) tx3904sio_fifo_reset(me, & controller->rx_fifo);\n\t    }\n\t  break;\n\t  \n\tcase SBGR_REG:\n\t  SBGR_SET_BYTE(controller, reg_offset, write_byte);\n\t  break;\n\t  \n\tcase SFIFO_REG: /* unwriteable */ break;\n\t  \n\tcase TFIFO_REG: \n\t  if(reg_offset == 3) /* first byte */\n\t    tx3904sio_fifo_push(me, & controller->tx_fifo, write_byte);\n\t  break;\n\n\tdefault: \n\t  HW_TRACE ((me, \"write to illegal register %d\", reg_number));\n\t}\n    } /* loop over bytes */\n\n  /* tickle fifos */\n  tx3904sio_tickle(me);\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          361,
+          0
+        ],
+        [
+          462,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\ntx3904sio_tickle(struct hw *me)\n{\n  struct tx3904sio* controller = hw_data(me);\n  int c;\n  char cc;\n  unsigned_4 last_int, next_int;\n\n  /* HW_TRACE ((me, \"tickle backend: %02x\", controller->backend)); */\n  switch(controller->backend) \n    {\n    case sio_tcp:\n\n      while(tx3904sio_fifo_nonempty(me, & controller->tx_fifo))\n\t{\n\t  cc = tx3904sio_fifo_pop(me, & controller->tx_fifo);\n\t  dv_sockser_write(hw_system(me), cc);\n\t  HW_TRACE ((me, \"tcp output: %02x\", cc));\n\t}\n\n      c = dv_sockser_read(hw_system(me));\n      while(c != -1)\n\t{\n\t  cc = (char) c;\n\t  HW_TRACE ((me, \"tcp input: %02x\", cc));\n\t  tx3904sio_fifo_push(me, & controller->rx_fifo, cc);\n\t  c = dv_sockser_read(hw_system(me));\n\t}\n      break;\n\n    case sio_stdio:\n\n      while(tx3904sio_fifo_nonempty(me, & controller->tx_fifo))\n\t{\n\t  cc = tx3904sio_fifo_pop(me, & controller->tx_fifo);\n\t  sim_io_write_stdout(hw_system(me), & cc, 1);\n\t  sim_io_flush_stdout(hw_system(me));\n\t  HW_TRACE ((me, \"stdio output: %02x\", cc));\n\t}\n\n      c = sim_io_poll_read(hw_system(me), 0 /* stdin */, & cc, 1);\n      while(c == 1)\n\t{\n\t  HW_TRACE ((me, \"stdio input: %02x\", cc));\n\t  tx3904sio_fifo_push(me, & controller->rx_fifo, cc);\n\t  c = sim_io_poll_read(hw_system(me), 0 /* stdin */, & cc, 1);\n\t}\n\n      break;\n\n    default:\n      hw_abort(me, \"Illegal backend mode: %d\", controller->backend);\n    }\n\n  /* Update RDIS / TDIS flags */\n  last_int = controller->sdisr & controller->sdicr;\n  /* HW_TRACE ((me, \"tickle - sdisr %08x sdicr %08x\", controller->sdisr, controller->sdicr)); */\n  if(tx3904sio_fifo_nonempty(me, & controller->rx_fifo))\n    SDISR_SET_RDIS(controller);\n  if(! tx3904sio_fifo_nonempty(me, & controller->tx_fifo))\n    SDISR_SET_TDIS(controller);\n  next_int = controller->sdisr & controller->sdicr;\n  /* HW_TRACE ((me, \"tickle + sdisr %08x sdicr %08x\", controller->sdisr, controller->sdicr)); */\n\n  if(~last_int & next_int) /* any bits set? */\n    hw_port_event(me, INT_PORT, 1);\n  if(last_int & ~next_int) /* any bits cleared? */\n    hw_port_event(me, INT_PORT, 0);\n\n  /* Add periodic polling for this port, if it's not already going. */\n  if(controller->poll_event == NULL)\n    {\n      controller->poll_event = hw_event_queue_schedule (me, 1000,\n\t\t\t\t\t\t\ttx3904sio_poll, NULL);\n\n    }\n}",
+      "fn_code_pos": [
+        [
+          471,
+          0
+        ],
+        [
+          547,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_tickle",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\ntx3904sio_fifo_nonempty(struct hw* me, struct tx3904sio_fifo* fifo)\n{\n  /* HW_TRACE ((me, \"fifo used: %d\", fifo->used)); */\n  return(fifo->used > 0);\n}",
+      "fn_code_pos": [
+        [
+          552,
+          0
+        ],
+        [
+          557,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_fifo_nonempty",
+        "parameters": {
+          "me": "struct hw",
+          "fifo": "struct tx3904sio_fifo"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "char\ntx3904sio_fifo_pop(struct hw* me, struct tx3904sio_fifo* fifo)\n{\n  char it;\n  ASSERT(fifo->used > 0);\n  ASSERT(fifo->buffer != NULL);\n  it = fifo->buffer[0];\n  memcpy(& fifo->buffer[0], & fifo->buffer[1], fifo->used - 1);\n  fifo->used --;\n  /* HW_TRACE ((me, \"pop fifo -> %02x\", it)); */\n  return it;\n}",
+      "fn_code_pos": [
+        [
+          560,
+          0
+        ],
+        [
+          571,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_fifo_pop",
+        "parameters": {
+          "me": "struct hw",
+          "fifo": "struct tx3904sio_fifo"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "void\ntx3904sio_fifo_push(struct hw* me, struct tx3904sio_fifo* fifo, char it)\n{\n  /* HW_TRACE ((me, \"push %02x -> fifo\", it)); */\n  if(fifo->size == fifo->used) /* full */\n    {\n      int next_size = fifo->size * 2 + 16;\n      char* next_buf = zalloc(next_size);\n      memcpy(next_buf, fifo->buffer, fifo->used);\n\n      if(fifo->buffer != NULL) free(fifo->buffer);\n      fifo->buffer = next_buf;\n      fifo->size = next_size;\n    }\n\n  fifo->buffer[fifo->used] = it;\n  fifo->used ++;\n}",
+      "fn_code_pos": [
+        [
+          574,
+          0
+        ],
+        [
+          591,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_fifo_push",
+        "parameters": {
+          "me": "struct hw",
+          "fifo": "struct tx3904sio_fifo",
+          "it": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\ntx3904sio_fifo_reset(struct hw* me, struct tx3904sio_fifo* fifo)\n{\n  /* HW_TRACE ((me, \"reset fifo\")); */\n  fifo->used = 0;\n  fifo->size = 0;\n  free(fifo->buffer);\n  fifo->buffer = 0;\n}",
+      "fn_code_pos": [
+        [
+          594,
+          0
+        ],
+        [
+          602,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_fifo_reset",
+        "parameters": {
+          "me": "struct hw",
+          "fifo": "struct tx3904sio_fifo"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\ntx3904sio_poll(struct hw* me, void* ignored)\n{\n  struct tx3904sio* controller = hw_data (me);\n  tx3904sio_tickle (me);\n  hw_event_queue_deschedule (me, controller->poll_event);\n  controller->poll_event = hw_event_queue_schedule (me, 1000,\n\t\t\t\t\t\t    tx3904sio_poll, NULL);\n}",
+      "fn_code_pos": [
+        [
+          605,
+          0
+        ],
+        [
+          613,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_poll",
+        "parameters": {
+          "me": "struct hw",
+          "ignored": "void"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "tx3904sio_tickle(struct hw*)",
+      "fn_dec_pos": [
+        [
+          93,
+          12
+        ],
+        [
+          93,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_tickle",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tx3904sio_fifo_nonempty(struct hw*, struct tx3904sio_fifo*)",
+      "fn_dec_pos": [
+        [
+          94,
+          11
+        ],
+        [
+          94,
+          70
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_fifo_nonempty",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "tx3904sio_fifo_pop(struct hw*, struct tx3904sio_fifo*)",
+      "fn_dec_pos": [
+        [
+          95,
+          12
+        ],
+        [
+          95,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_fifo_pop",
+        "parameters": {},
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "tx3904sio_fifo_push(struct hw*, struct tx3904sio_fifo*, char)",
+      "fn_dec_pos": [
+        [
+          96,
+          12
+        ],
+        [
+          96,
+          73
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_fifo_push",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tx3904sio_fifo_reset(struct hw*, struct tx3904sio_fifo*)",
+      "fn_dec_pos": [
+        [
+          97,
+          12
+        ],
+        [
+          97,
+          68
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_fifo_reset",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tx3904sio_poll(struct hw*, void* data)",
+      "fn_dec_pos": [
+        [
+          98,
+          12
+        ],
+        [
+          98,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tx3904sio_poll",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct tx3904sio_fifo \n{\n  int size, used;\n  unsigned_1 *buffer;\n}",
+      {
+        "size": "int",
+        "*buffer": "unsigned_1"
+      },
+      "tx3904sio_fifo",
+      [
+        135,
+        0
+      ],
+      [
+        139,
+        1
+      ]
+    ],
+    [
+      "struct tx3904sio \n{\n  address_word base_address; /* control register base */\n  enum {sio_tcp, sio_stdio} backend; /* backend */\n\n  struct tx3904sio_fifo rx_fifo, tx_fifo; /* FIFOs */\n\n  unsigned_4 slcr;\n#define SLCR_WR_MASK        0xe17f0000U\n#define SLCR_SET_BYTE(c,o,b) ((c)->slcr = SLCR_WR_MASK & (((c)->slcr & ~LSMASK32((o)*8+7,(o)*8)) | ((b)<< (o)*8)))\n  unsigned_4 slsr;\n#define SLSR_WR_MASK        0x00000000 /* UFER/UPER/UOER unimplemented */\n  unsigned_4 sdicr;\n#define SDICR_WR_MASK       0x000f0000U\n#define SDICR_SET_BYTE(c,o,b) ((c)->sdicr = SDICR_WR_MASK & (((c)->sdicr & ~LSMASK32((o)*8+7,(o)*8)) | ((b)<< (o)*8)))\n#define SDICR_GET_SDMAE(c)  ((c)->sdicr & 0x00080000)\n#define SDICR_GET_ERIE(c)   ((c)->sdicr & 0x00040000)\n#define SDICR_GET_TDIE(c)   ((c)->sdicr & 0x00020000)\n#define SDICR_GET_RDIE(c)   ((c)->sdicr & 0x00010000)\n  unsigned_4 sdisr;\n#define SDISR_WR_MASK       0x00070000U\n#define SDISR_SET_BYTE(c,o,b) ((c)->sdisr = SDISR_WR_MASK & (((c)->sdisr & ~LSMASK32((o)*8+7,(o)*8)) | ((b)<< (o)*8)))\n#define SDISR_CLEAR_FLAG_BYTE(c,o,b) ((c)->sdisr = SDISR_WR_MASK & (((c)->sdisr & ~LSMASK32((o)*8+7,(o)*8)) & ((b)<< (o)*8)))\n#define SDISR_GET_TDIS(c)   ((c)->sdisr & 0x00020000)\n#define SDISR_SET_TDIS(c)   ((c)->sdisr |= 0x00020000)\n#define SDISR_GET_RDIS(c)   ((c)->sdisr & 0x00010000)\n#define SDISR_SET_RDIS(c)   ((c)->sdisr |= 0x00010000)\n  unsigned_4 sfcr;\n#define SFCR_WR_MASK       0x001f0000U\n#define SFCR_SET_BYTE(c,o,b) ((c)->sfcr = SFCR_WR_MASK & (((c)->sfcr & ~LSMASK32((o)*8+7,(o)*8)) | ((b)<< (o)*8)))\n#define SFCR_GET_TFRST(c)   ((c)->sfcr & 0x00040000)\n#define SFCR_GET_RFRST(c)   ((c)->sfcr & 0x00020000)\n#define SFCR_GET_FRSTE(c)   ((c)->sfcr & 0x00010000)\n  unsigned_4 sbgr;\n#define SBGR_WR_MASK       0x03ff0000U\n#define SBGR_SET_BYTE(c,o,b) ((c)->sbgr = SBGR_WR_MASK & (((c)->sbgr & ~LSMASK32((o)*8+7,(o)*8)) | ((b)<< (o)*8)))\n\n  /* Periodic I/O polling */\n  struct hw_event* poll_event;\n}",
+      {
+        "base_address": "address_word",
+        "backend": "enum {sio_tcp, sio_stdio}",
+        "rx_fifo": "struct tx3904sio_fifo",
+        "slcr": "unsigned_4",
+        "slsr": "unsigned_4",
+        "sdicr": "unsigned_4",
+        "sdisr": "unsigned_4",
+        "sfcr": "unsigned_4",
+        "sbgr": "unsigned_4",
+        "* poll_event": "struct hw_event"
+      },
+      "tx3904sio",
+      [
+        146,
+        0
+      ],
+      [
+        185,
+        1
+      ]
+    ],
+    [
+      "struct tx3904sio_fifo",
+      {},
+      "",
+      [
+        91,
+        0
+      ],
+      [
+        91,
+        21
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        93,
+        29
+      ],
+      [
+        93,
+        38
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        94,
+        35
+      ],
+      [
+        94,
+        44
+      ]
+    ],
+    [
+      "struct tx3904sio_fifo",
+      {},
+      "",
+      [
+        94,
+        47
+      ],
+      [
+        94,
+        68
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        95,
+        31
+      ],
+      [
+        95,
+        40
+      ]
+    ],
+    [
+      "struct tx3904sio_fifo",
+      {},
+      "",
+      [
+        95,
+        43
+      ],
+      [
+        95,
+        64
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        96,
+        32
+      ],
+      [
+        96,
+        41
+      ]
+    ],
+    [
+      "struct tx3904sio_fifo",
+      {},
+      "",
+      [
+        96,
+        44
+      ],
+      [
+        96,
+        65
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        97,
+        33
+      ],
+      [
+        97,
+        42
+      ]
+    ],
+    [
+      "struct tx3904sio_fifo",
+      {},
+      "",
+      [
+        97,
+        45
+      ],
+      [
+        97,
+        66
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        98,
+        27
+      ],
+      [
+        98,
+        36
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        125,
+        13
+      ],
+      [
+        125,
+        38
+      ]
+    ],
+    [
+      "struct tx3904sio_fifo \n{\n  int size, used;\n  unsigned_1 *buffer;\n}",
+      {
+        "size": "int",
+        "*buffer": "unsigned_1"
+      },
+      "tx3904sio_fifo",
+      [
+        135,
+        0
+      ],
+      [
+        139,
+        1
+      ]
+    ],
+    [
+      "struct tx3904sio \n{\n  address_word base_address; /* control register base */\n  enum {sio_tcp, sio_stdio} backend; /* backend */\n\n  struct tx3904sio_fifo rx_fifo, tx_fifo; /* FIFOs */\n\n  unsigned_4 slcr;\n#define SLCR_WR_MASK        0xe17f0000U\n#define SLCR_SET_BYTE(c,o,b) ((c)->slcr = SLCR_WR_MASK & (((c)->slcr & ~LSMASK32((o)*8+7,(o)*8)) | ((b)<< (o)*8)))\n  unsigned_4 slsr;\n#define SLSR_WR_MASK        0x00000000 /* UFER/UPER/UOER unimplemented */\n  unsigned_4 sdicr;\n#define SDICR_WR_MASK       0x000f0000U\n#define SDICR_SET_BYTE(c,o,b) ((c)->sdicr = SDICR_WR_MASK & (((c)->sdicr & ~LSMASK32((o)*8+7,(o)*8)) | ((b)<< (o)*8)))\n#define SDICR_GET_SDMAE(c)  ((c)->sdicr & 0x00080000)\n#define SDICR_GET_ERIE(c)   ((c)->sdicr & 0x00040000)\n#define SDICR_GET_TDIE(c)   ((c)->sdicr & 0x00020000)\n#define SDICR_GET_RDIE(c)   ((c)->sdicr & 0x00010000)\n  unsigned_4 sdisr;\n#define SDISR_WR_MASK       0x00070000U\n#define SDISR_SET_BYTE(c,o,b) ((c)->sdisr = SDISR_WR_MASK & (((c)->sdisr & ~LSMASK32((o)*8+7,(o)*8)) | ((b)<< (o)*8)))\n#define SDISR_CLEAR_FLAG_BYTE(c,o,b) ((c)->sdisr = SDISR_WR_MASK & (((c)->sdisr & ~LSMASK32((o)*8+7,(o)*8)) & ((b)<< (o)*8)))\n#define SDISR_GET_TDIS(c)   ((c)->sdisr & 0x00020000)\n#define SDISR_SET_TDIS(c)   ((c)->sdisr |= 0x00020000)\n#define SDISR_GET_RDIS(c)   ((c)->sdisr & 0x00010000)\n#define SDISR_SET_RDIS(c)   ((c)->sdisr |= 0x00010000)\n  unsigned_4 sfcr;\n#define SFCR_WR_MASK       0x001f0000U\n#define SFCR_SET_BYTE(c,o,b) ((c)->sfcr = SFCR_WR_MASK & (((c)->sfcr & ~LSMASK32((o)*8+7,(o)*8)) | ((b)<< (o)*8)))\n#define SFCR_GET_TFRST(c)   ((c)->sfcr & 0x00040000)\n#define SFCR_GET_RFRST(c)   ((c)->sfcr & 0x00020000)\n#define SFCR_GET_FRSTE(c)   ((c)->sfcr & 0x00010000)\n  unsigned_4 sbgr;\n#define SBGR_WR_MASK       0x03ff0000U\n#define SBGR_SET_BYTE(c,o,b) ((c)->sbgr = SBGR_WR_MASK & (((c)->sbgr & ~LSMASK32((o)*8+7,(o)*8)) | ((b)<< (o)*8)))\n\n  /* Periodic I/O polling */\n  struct hw_event* poll_event;\n}",
+      {
+        "base_address": "address_word",
+        "backend": "enum {sio_tcp, sio_stdio}",
+        "rx_fifo": "struct tx3904sio_fifo",
+        "slcr": "unsigned_4",
+        "slsr": "unsigned_4",
+        "sdicr": "unsigned_4",
+        "sdisr": "unsigned_4",
+        "sfcr": "unsigned_4",
+        "sbgr": "unsigned_4",
+        "* poll_event": "struct hw_event"
+      },
+      "tx3904sio",
+      [
+        146,
+        0
+      ],
+      [
+        185,
+        1
+      ]
+    ],
+    [
+      "struct tx3904sio_fifo",
+      {},
+      "",
+      [
+        151,
+        2
+      ],
+      [
+        151,
+        23
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        184,
+        2
+      ],
+      [
+        184,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        198,
+        23
+      ],
+      [
+        198,
+        32
+      ]
+    ],
+    [
+      "struct tx3904sio",
+      {},
+      "",
+      [
+        199,
+        8
+      ],
+      [
+        199,
+        24
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        241,
+        18
+      ],
+      [
+        241,
+        27
+      ]
+    ],
+    [
+      "struct tx3904sio",
+      {},
+      "",
+      [
+        243,
+        2
+      ],
+      [
+        243,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        274,
+        22
+      ],
+      [
+        274,
+        31
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        276,
+        7
+      ],
+      [
+        276,
+        16
+      ]
+    ],
+    [
+      "struct tx3904sio",
+      {},
+      "",
+      [
+        280,
+        2
+      ],
+      [
+        280,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        309,
+        26
+      ],
+      [
+        309,
+        35
+      ]
+    ],
+    [
+      "struct tx3904sio",
+      {},
+      "",
+      [
+        315,
+        2
+      ],
+      [
+        315,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        362,
+        27
+      ],
+      [
+        362,
+        36
+      ]
+    ],
+    [
+      "struct tx3904sio",
+      {},
+      "",
+      [
+        368,
+        2
+      ],
+      [
+        368,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        472,
+        17
+      ],
+      [
+        472,
+        26
+      ]
+    ],
+    [
+      "struct tx3904sio",
+      {},
+      "",
+      [
+        474,
+        2
+      ],
+      [
+        474,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        553,
+        24
+      ],
+      [
+        553,
+        33
+      ]
+    ],
+    [
+      "struct tx3904sio_fifo",
+      {},
+      "",
+      [
+        553,
+        39
+      ],
+      [
+        553,
+        60
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        561,
+        19
+      ],
+      [
+        561,
+        28
+      ]
+    ],
+    [
+      "struct tx3904sio_fifo",
+      {},
+      "",
+      [
+        561,
+        34
+      ],
+      [
+        561,
+        55
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        575,
+        20
+      ],
+      [
+        575,
+        29
+      ]
+    ],
+    [
+      "struct tx3904sio_fifo",
+      {},
+      "",
+      [
+        575,
+        35
+      ],
+      [
+        575,
+        56
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        595,
+        21
+      ],
+      [
+        595,
+        30
+      ]
+    ],
+    [
+      "struct tx3904sio_fifo",
+      {},
+      "",
+      [
+        595,
+        36
+      ],
+      [
+        595,
+        57
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        606,
+        15
+      ],
+      [
+        606,
+        24
+      ]
+    ],
+    [
+      "struct tx3904sio",
+      {},
+      "",
+      [
+        608,
+        2
+      ],
+      [
+        608,
+        18
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        617,
+        6
+      ],
+      [
+        617,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"dv-sockser.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-assert.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum \n{\n  SLCR_REG = 0,\n  SLSR_REG = 1,\n  SDICR_REG = 2,\n  SDISR_REG = 3,\n  SFCR_REG = 4,\n  SBGR_REG = 5,\n  TFIFO_REG = 8,\n  SFIFO_REG = 12,\n}",
+      {
+        "SLCR_REG": "",
+        "SLSR_REG": "",
+        "SDICR_REG": "",
+        "SDISR_REG": "",
+        "SFCR_REG": "",
+        "SBGR_REG": "",
+        "TFIFO_REG": "",
+        "SFIFO_REG": ""
+      },
+      "",
+      [
+        102,
+        0
+      ],
+      [
+        112,
+        1
+      ]
+    ],
+    [
+      "enum\n {\n  RESET_PORT,\n  INT_PORT,\n}",
+      {
+        "RESET_PORT": "",
+        "INT_PORT": ""
+      },
+      "",
+      [
+        118,
+        0
+      ],
+      [
+        122,
+        1
+      ]
+    ],
+    [
+      "enum {sio_tcp, sio_stdio}",
+      {
+        "sio_tcp": "",
+        "sio_stdio": ""
+      },
+      "",
+      [
+        149,
+        2
+      ],
+      [
+        149,
+        27
+      ]
+    ]
+  ]
+}

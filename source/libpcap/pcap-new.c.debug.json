@@ -1,0 +1,287 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int pcap_findalldevs_ex(char *source, struct pcap_rmtauth *auth, pcap_if_t **alldevs, char *errbuf)\n{\n\tint type;\n\tchar name[PCAP_BUF_SIZE], path[PCAP_BUF_SIZE], filename[PCAP_BUF_SIZE];\n\tpcap_t *fp;\n\tchar tmpstring[PCAP_BUF_SIZE + 1];\t\t/* Needed to convert names and descriptions from 'old' syntax to the 'new' one */\n\tpcap_if_t *lastdev;\t/* Last device in the pcap_if_t list */\n\tpcap_if_t *dev;\t\t/* Device we're adding to the pcap_if_t list */\n\n\t/* List starts out empty. */\n\t(*alldevs) = NULL;\n\tlastdev = NULL;\n\n\tif (strlen(source) > PCAP_BUF_SIZE)\n\t{\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"The source string is too long. Cannot handle it correctly.\");\n\t\treturn -1;\n\t}\n\n\t/*\n\t * Determine the type of the source (file, local, remote)\n\t * There are some differences if pcap_findalldevs_ex() is called to list files and remote adapters.\n\t * In the first case, the name of the directory we have to look into must be present (therefore\n\t * the 'name' parameter of the pcap_parsesrcstr() is present).\n\t * In the second case, the name of the adapter is not required (we need just the host). So, we have\n\t * to use a first time this function to get the source type, and a second time to get the appropriate\n\t * info, which depends on the source type.\n\t */\n\tif (pcap_parsesrcstr(source, &type, NULL, NULL, NULL, errbuf) == -1)\n\t\treturn -1;\n\n\tswitch (type)\n\t{\n\tcase PCAP_SRC_IFLOCAL:\n\t\tif (pcap_parsesrcstr(source, &type, NULL, NULL, NULL, errbuf) == -1)\n\t\t\treturn -1;\n\n\t\t/* Initialize temporary string */\n\t\ttmpstring[PCAP_BUF_SIZE] = 0;\n\n\t\t/* The user wants to retrieve adapters from a local host */\n\t\tif (pcap_findalldevs(alldevs, errbuf) == -1)\n\t\t\treturn -1;\n\n\t\tif (*alldevs == NULL)\n\t\t{\n\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t\"No interfaces found! Make sure libpcap/WinPcap is properly installed\"\n\t\t\t\t\" on the local machine.\");\n\t\t\treturn -1;\n\t\t}\n\n\t\t/* Scan all the interfaces and modify name and description */\n\t\t/* This is a trick in order to avoid the re-implementation of the pcap_findalldevs here */\n\t\tdev = *alldevs;\n\t\twhile (dev)\n\t\t{\n\t\t\t/* Create the new device identifier */\n\t\t\tif (pcap_createsrcstr(tmpstring, PCAP_SRC_IFLOCAL, NULL, NULL, dev->name, errbuf) == -1)\n\t\t\t\treturn -1;\n\n\t\t\t/* Delete the old pointer */\n\t\t\tfree(dev->name);\n\n\t\t\t/* Make a copy of the new device identifier */\n\t\t\tdev->name = strdup(tmpstring);\n\t\t\tif (dev->name == NULL)\n\t\t\t{\n\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"malloc() failed\");\n\t\t\t\tpcap_freealldevs(*alldevs);\n\t\t\t\treturn -1;\n\t\t\t}\n\n\t\t\t/* Create the new device description */\n\t\t\tif ((dev->description == NULL) || (dev->description[0] == 0))\n\t\t\t\tpcap_snprintf(tmpstring, sizeof(tmpstring) - 1, \"%s '%s' %s\", PCAP_TEXT_SOURCE_ADAPTER,\n\t\t\t\tdev->name, PCAP_TEXT_SOURCE_ON_LOCAL_HOST);\n\t\t\telse\n\t\t\t\tpcap_snprintf(tmpstring, sizeof(tmpstring) - 1, \"%s '%s' %s\", PCAP_TEXT_SOURCE_ADAPTER,\n\t\t\t\tdev->description, PCAP_TEXT_SOURCE_ON_LOCAL_HOST);\n\n\t\t\t/* Delete the old pointer */\n\t\t\tfree(dev->description);\n\n\t\t\t/* Make a copy of the description */\n\t\t\tdev->description = strdup(tmpstring);\n\t\t\tif (dev->description == NULL)\n\t\t\t{\n\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"malloc() failed\");\n\t\t\t\tpcap_freealldevs(*alldevs);\n\t\t\t\treturn -1;\n\t\t\t}\n\n\t\t\tdev = dev->next;\n\t\t}\n\n\t\treturn 0;\n\n\tcase PCAP_SRC_FILE:\n\t{\n\t\tsize_t stringlen;\n#ifdef _WIN32\n\t\tWIN32_FIND_DATA filedata;\n\t\tHANDLE filehandle;\n#else\n\t\tstruct dirent *filedata;\n\t\tDIR *unixdir;\n#endif\n\n\t\tif (pcap_parsesrcstr(source, &type, NULL, NULL, name, errbuf) == -1)\n\t\t\treturn -1;\n\n\t\t/* Check that the filename is correct */\n\t\tstringlen = strlen(name);\n\n\t\t/* The directory must end with '\\' in Win32 and '/' in UNIX */\n#ifdef _WIN32\n#define ENDING_CHAR '\\\\'\n#else\n#define ENDING_CHAR '/'\n#endif\n\n\t\tif (name[stringlen - 1] != ENDING_CHAR)\n\t\t{\n\t\t\tname[stringlen] = ENDING_CHAR;\n\t\t\tname[stringlen + 1] = 0;\n\n\t\t\tstringlen++;\n\t\t}\n\n\t\t/* Save the path for future reference */\n\t\tpcap_snprintf(path, sizeof(path), \"%s\", name);\n\n#ifdef _WIN32\n\t\t/* To perform directory listing, Win32 must have an 'asterisk' as ending char */\n\t\tif (name[stringlen - 1] != '*')\n\t\t{\n\t\t\tname[stringlen] = '*';\n\t\t\tname[stringlen + 1] = 0;\n\t\t}\n\n\t\tfilehandle = FindFirstFile(name, &filedata);\n\n\t\tif (filehandle == INVALID_HANDLE_VALUE)\n\t\t{\n\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"Error when listing files: does folder '%s' exist?\", path);\n\t\t\treturn -1;\n\t\t}\n\n#else\n\t\t/* opening the folder */\n\t\tunixdir= opendir(path);\n\n\t\t/* get the first file into it */\n\t\tfiledata= readdir(unixdir);\n\n\t\tif (filedata == NULL)\n\t\t{\n\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"Error when listing files: does folder '%s' exist?\", path);\n\t\t\treturn -1;\n\t\t}\n#endif\n\n\t\t/* Add all files we find to the list. */\n\t\tdo\n\t\t{\n\n#ifdef _WIN32\n\t\t\tpcap_snprintf(filename, sizeof(filename), \"%s%s\", path, filedata.cFileName);\n#else\n\t\t\tpcap_snprintf(filename, sizeof(filename), \"%s%s\", path, filedata->d_name);\n#endif\n\n\t\t\tfp = pcap_open_offline(filename, errbuf);\n\n\t\t\tif (fp)\n\t\t\t{\n\t\t\t\t/* allocate the main structure */\n\t\t\t\tdev = (pcap_if_t *)malloc(sizeof(pcap_if_t));\n\t\t\t\tif (dev == NULL)\n\t\t\t\t{\n\t\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t\t    \"malloc() failed\");\n\t\t\t\t\tpcap_freealldevs(*alldevs);\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\n\t\t\t\t/* Initialize the structure to 'zero' */\n\t\t\t\tmemset(dev, 0, sizeof(pcap_if_t));\n\n\t\t\t\t/* Append it to the list. */\n\t\t\t\tif (lastdev == NULL)\n\t\t\t\t{\n\t\t\t\t\t/*\n\t\t\t\t\t * List is empty, so it's also\n\t\t\t\t\t * the first device.\n\t\t\t\t\t */\n\t\t\t\t\t*alldevs = dev;\n\t\t\t\t}\n\t\t\t\telse\n\t\t\t\t{\n\t\t\t\t\t/*\n\t\t\t\t\t * Append after the last device.\n\t\t\t\t\t */\n\t\t\t\t\tlastdev->next = dev;\n\t\t\t\t}\n\t\t\t\t/* It's now the last device. */\n\t\t\t\tlastdev = dev;\n\n\t\t\t\t/* Create the new source identifier */\n\t\t\t\tif (pcap_createsrcstr(tmpstring, PCAP_SRC_FILE, NULL, NULL, filename, errbuf) == -1)\n\t\t\t\t{\n\t\t\t\t\tpcap_freealldevs(*alldevs);\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\n\t\t\t\tstringlen = strlen(tmpstring);\n\n\t\t\t\tdev->name = (char *)malloc(stringlen + 1);\n\t\t\t\tif (dev->name == NULL)\n\t\t\t\t{\n\t\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t\t    \"malloc() failed\");\n\t\t\t\t\tpcap_freealldevs(*alldevs);\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\n\t\t\t\tstrlcpy(dev->name, tmpstring, stringlen);\n\n\t\t\t\tdev->name[stringlen] = 0;\n\n\t\t\t\t/* Create the description */\n\t\t\t\tpcap_snprintf(tmpstring, sizeof(tmpstring) - 1, \"%s '%s' %s\", PCAP_TEXT_SOURCE_FILE,\n\t\t\t\t\tfilename, PCAP_TEXT_SOURCE_ON_LOCAL_HOST);\n\n\t\t\t\tstringlen = strlen(tmpstring);\n\n\t\t\t\tdev->description = (char *)malloc(stringlen + 1);\n\n\t\t\t\tif (dev->description == NULL)\n\t\t\t\t{\n\t\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t\t    \"malloc() failed\");\n\t\t\t\t\tpcap_freealldevs(*alldevs);\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\n\t\t\t\t/* Copy the new device description into the correct memory location */\n\t\t\t\tstrlcpy(dev->description, tmpstring, stringlen + 1);\n\n\t\t\t\tpcap_close(fp);\n\t\t\t}\n\t\t}\n#ifdef _WIN32\n\t\twhile (FindNextFile(filehandle, &filedata) != 0);\n#else\n\t\twhile ( (filedata= readdir(unixdir)) != NULL);\n#endif\n\n\n#ifdef _WIN32\n\t\t/* Close the search handle. */\n\t\tFindClose(filehandle);\n#endif\n\n\t\treturn 0;\n\t}\n\n\tcase PCAP_SRC_IFREMOTE:\n\t\treturn pcap_findalldevs_ex_remote(source, auth, alldevs, errbuf);\n\n\tdefault:\n\t\tstrlcpy(errbuf, \"Source type not supported\", PCAP_ERRBUF_SIZE);\n\t\treturn -1;\n\t}\n}",
+      "fn_code_pos": [
+        [
+          68,
+          0
+        ],
+        [
+          350,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_findalldevs_ex",
+        "parameters": {
+          "source": "char",
+          "auth": "struct pcap_rmtauth",
+          "alldevs": "pcap_if_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *pcap_open(const char *source, int snaplen, int flags, int read_timeout, struct pcap_rmtauth *auth, char *errbuf)\n{\n\tchar name[PCAP_BUF_SIZE];\n\tint type;\n\tpcap_t *fp;\n\tint status;\n\n\tif (strlen(source) > PCAP_BUF_SIZE)\n\t{\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"The source string is too long. Cannot handle it correctly.\");\n\t\treturn NULL;\n\t}\n\n\t/*\n\t * Determine the type of the source (file, local, remote) and,\n\t * if it's file or local, the name of the file or capture device.\n\t */\n\tif (pcap_parsesrcstr(source, &type, NULL, NULL, name, errbuf) == -1)\n\t\treturn NULL;\n\n\tswitch (type)\n\t{\n\tcase PCAP_SRC_FILE:\n\t\treturn pcap_open_offline(name, errbuf);\n\n\tcase PCAP_SRC_IFLOCAL:\n\t\tfp = pcap_create(name, errbuf);\n\t\tbreak;\n\n\tcase PCAP_SRC_IFREMOTE:\n\t\t/*\n\t\t * Although we already have host, port and iface, we prefer\n\t\t * to pass only 'source' to pcap_open_rpcap(), so that it\n\t\t * has to call pcap_parsesrcstr() again.\n\t\t * This is less optimized, but much clearer.\n\t\t */\n\t\treturn pcap_open_rpcap(source, snaplen, flags, read_timeout, auth, errbuf);\n\n\tdefault:\n\t\tstrlcpy(errbuf, \"Source type not supported\", PCAP_ERRBUF_SIZE);\n\t\treturn NULL;\n\t}\n\n\tif (fp == NULL)\n\t\treturn (NULL);\n\tstatus = pcap_set_snaplen(fp, snaplen);\n\tif (status < 0)\n\t\tgoto fail;\n\tif (flags & PCAP_OPENFLAG_PROMISCUOUS)\n\t{\n\t\tstatus = pcap_set_promisc(fp, 1);\n\t\tif (status < 0)\n\t\t\tgoto fail;\n\t}\n\tif (flags & PCAP_OPENFLAG_MAX_RESPONSIVENESS)\n\t{\n\t\tstatus = pcap_set_immediate_mode(fp, 1);\n\t\tif (status < 0)\n\t\t\tgoto fail;\n\t}\n#ifdef _WIN32\n\t/*\n\t * This flag is supported on Windows only.\n\t * XXX - is there a way to support it with\n\t * the capture mechanisms on UN*X?  It's not\n\t * exactly a \"set direction\" operation; I\n\t * think it means \"do not capture packets\n\t * injected with pcap_sendpacket() or\n\t * pcap_inject()\".\n\t */\n\t/* disable loopback capture if requested */\n\tif (flags & PCAP_OPENFLAG_NOCAPTURE_LOCAL)\n\t\tfp->opt.nocapture_local = 1;\n#endif /* _WIN32 */\n\tstatus = pcap_set_timeout(fp, read_timeout);\n\tif (status < 0)\n\t\tgoto fail;\n\tstatus = pcap_activate(fp);\n\tif (status < 0)\n\t\tgoto fail;\n\treturn fp;\n\nfail:\n\tif (status == PCAP_ERROR)\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"%s: %s\",\n\t\t    name, fp->errbuf);\n\telse if (status == PCAP_ERROR_NO_SUCH_DEVICE ||\n\t    status == PCAP_ERROR_PERM_DENIED ||\n\t    status == PCAP_ERROR_PROMISC_PERM_DENIED)\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"%s: %s (%s)\",\n\t\t    name, pcap_statustostr(status), fp->errbuf);\n\telse\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"%s: %s\",\n\t\t    name, pcap_statustostr(status));\n\tpcap_close(fp);\n\treturn NULL;\n}",
+      "fn_code_pos": [
+        [
+          352,
+          0
+        ],
+        [
+          448,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_open",
+        "parameters": {
+          "source": "char",
+          "snaplen": "int",
+          "flags": "int",
+          "read_timeout": "int",
+          "auth": "struct pcap_rmtauth",
+          "errbuf": "char"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "struct pcap_samp *pcap_setsampling(pcap_t *p)\n{\n\treturn &p->rmt_samp;\n}",
+      "fn_code_pos": [
+        [
+          450,
+          0
+        ],
+        [
+          453,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setsampling",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "pcap_open(const char *source, int snaplen, int flags, int read_timeout, struct pcap_rmtauth *auth, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          352,
+          8
+        ],
+        [
+          352,
+          120
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_open",
+        "parameters": {
+          "source": "char",
+          "snaplen": "int",
+          "flags": "int",
+          "read_timeout": "int",
+          "auth": "struct pcap_rmtauth",
+          "errbuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_setsampling(pcap_t *p)",
+      "fn_dec_pos": [
+        [
+          450,
+          18
+        ],
+        [
+          450,
+          45
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setsampling",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_rmtauth",
+      {},
+      "",
+      [
+        68,
+        38
+      ],
+      [
+        68,
+        57
+      ]
+    ],
+    [
+      "struct dirent",
+      {},
+      "",
+      [
+        177,
+        2
+      ],
+      [
+        177,
+        15
+      ]
+    ],
+    [
+      "struct pcap_rmtauth",
+      {},
+      "",
+      [
+        352,
+        80
+      ],
+      [
+        352,
+        99
+      ]
+    ],
+    [
+      "struct pcap_samp",
+      {},
+      "",
+      [
+        450,
+        0
+      ],
+      [
+        450,
+        16
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"sockutils.h\"\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\t// for the details of the pcap_t structure\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-rpcap.h\"\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include \"rpcap-protocol.h\"\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\t\t// for the errno variable\n",
+      [
+        46,
+        0
+      ],
+      [
+        47,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\t\t// for malloc(), free(), ...\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\t\t// for strstr, etc\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include <dirent.h>\t\t// for readdir\n",
+      [
+        51,
+        0
+      ],
+      [
+        52,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

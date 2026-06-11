@@ -1,0 +1,708 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static unsigned\nbfin_uart_io_write_buffer (struct hw *me, const void *source,\n\t\t\t   int space, address_word addr, unsigned nr_bytes)\n{\n  struct bfin_uart *uart = hw_data (me);\n  bu32 mmr_off;\n  bu32 value;\n  bu16 *valuep;\n\n  /* Invalid access mode is higher priority than missing register.  */\n  if (!dv_bfin_mmr_require_16 (me, addr, nr_bytes, true))\n    return 0;\n\n  value = dv_load_2 (source);\n  mmr_off = addr - uart->base;\n  valuep = (void *)((unsigned long)uart + mmr_base() + mmr_off);\n\n  HW_TRACE_WRITE ();\n\n  /* XXX: All MMRs are \"8bit\" ... what happens to high 8bits ?  */\n\n  switch (mmr_off)\n    {\n    case mmr_offset(thr):\n      uart->thr = bfin_uart_write_byte (me, value, uart->mcr);\n      if (uart->ier & ETBEI)\n\thw_port_event (me, DV_PORT_TX, 1);\n      break;\n    case mmr_offset(ier_set):\n      uart->ier |= value;\n      break;\n    case mmr_offset(ier_clear):\n      dv_w1c_2 (&uart->ier, value, -1);\n      break;\n    case mmr_offset(lsr):\n      dv_w1c_2 (valuep, value, TFI | BI | FE | PE | OE);\n      break;\n    case mmr_offset(rbr):\n      /* XXX: Writes are ignored ?  */\n      break;\n    case mmr_offset(msr):\n      dv_w1c_2 (valuep, value, SCTS);\n      break;\n    case mmr_offset(dll):\n    case mmr_offset(dlh):\n    case mmr_offset(gctl):\n    case mmr_offset(lcr):\n    case mmr_offset(mcr):\n    case mmr_offset(scr):\n      *valuep = value;\n      break;\n    default:\n      dv_bfin_mmr_invalid (me, addr, nr_bytes, true);\n      return 0;\n    }\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          69,
+          0
+        ],
+        [
+          126,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_uart_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "addr": "address_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nbfin_uart_io_read_buffer (struct hw *me, void *dest,\n\t\t\t  int space, address_word addr, unsigned nr_bytes)\n{\n  struct bfin_uart *uart = hw_data (me);\n  bu32 mmr_off;\n  bu16 *valuep;\n\n  /* Invalid access mode is higher priority than missing register.  */\n  if (!dv_bfin_mmr_require_16 (me, addr, nr_bytes, false))\n    return 0;\n\n  mmr_off = addr - uart->base;\n  valuep = (void *)((unsigned long)uart + mmr_base() + mmr_off);\n\n  HW_TRACE_READ ();\n\n  switch (mmr_off)\n    {\n    case mmr_offset(rbr):\n      uart->rbr = bfin_uart_get_next_byte (me, uart->rbr, uart->mcr, NULL);\n      dv_store_2 (dest, uart->rbr);\n      break;\n    case mmr_offset(ier_set):\n    case mmr_offset(ier_clear):\n      dv_store_2 (dest, uart->ier);\n      bfin_uart_reschedule (me);\n      break;\n    case mmr_offset(lsr):\n      uart->lsr &= ~(DR | THRE | TEMT);\n      uart->lsr |= bfin_uart_get_status (me);\n    case mmr_offset(thr):\n    case mmr_offset(msr):\n    case mmr_offset(dll):\n    case mmr_offset(dlh):\n    case mmr_offset(gctl):\n    case mmr_offset(lcr):\n    case mmr_offset(mcr):\n    case mmr_offset(scr):\n      dv_store_2 (dest, *valuep);\n      break;\n    default:\n      dv_bfin_mmr_invalid (me, addr, nr_bytes, false);\n      return 0;\n    }\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          128,
+          0
+        ],
+        [
+          175,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_uart_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "addr": "address_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nbfin_uart_dma_read_buffer (struct hw *me, void *dest, int space,\n\t\t\t   unsigned_word addr, unsigned nr_bytes)\n{\n  HW_TRACE_DMA_READ ();\n  return bfin_uart_read_buffer (me, dest, nr_bytes);\n}",
+      "fn_code_pos": [
+        [
+          177,
+          0
+        ],
+        [
+          183,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_uart_dma_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nbfin_uart_dma_write_buffer (struct hw *me, const void *source,\n\t\t\t    int space, unsigned_word addr,\n\t\t\t    unsigned nr_bytes,\n\t\t\t    int violate_read_only_section)\n{\n  struct bfin_uart *uart = hw_data (me);\n  unsigned ret;\n\n  HW_TRACE_DMA_WRITE ();\n\n  ret = bfin_uart_write_buffer (me, source, nr_bytes);\n\n  if (ret == nr_bytes && (uart->ier & ETBEI))\n    hw_port_event (me, DV_PORT_TX, 1);\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          185,
+          0
+        ],
+        [
+          202,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_uart_dma_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "violate_read_only_section": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nattach_bfin_uart_regs (struct hw *me, struct bfin_uart *uart)\n{\n  address_word attach_address;\n  int attach_space;\n  unsigned attach_size;\n  reg_property_spec reg;\n\n  if (hw_find_property (me, \"reg\") == NULL)\n    hw_abort (me, \"Missing \\\"reg\\\" property\");\n\n  if (!hw_find_reg_array_property (me, \"reg\", 0, &reg))\n    hw_abort (me, \"\\\"reg\\\" property must contain three addr/size entries\");\n\n  hw_unit_address_to_attach_address (hw_parent (me),\n\t\t\t\t     &reg.address,\n\t\t\t\t     &attach_space, &attach_address, me);\n  hw_unit_size_to_attach_size (hw_parent (me), &reg.size, &attach_size, me);\n\n  if (attach_size != BFIN_MMR_UART2_SIZE)\n    hw_abort (me, \"\\\"reg\\\" size must be %#x\", BFIN_MMR_UART2_SIZE);\n\n  hw_attach_address (hw_parent (me),\n\t\t     0, attach_space, attach_address, attach_size, me);\n\n  uart->base = attach_address;\n}",
+      "fn_code_pos": [
+        [
+          212,
+          0
+        ],
+        [
+          238,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_bfin_uart_regs",
+        "parameters": {
+          "me": "struct hw",
+          "uart": "struct bfin_uart"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_uart_finish (struct hw *me)\n{\n  struct bfin_uart *uart;\n\n  uart = HW_ZALLOC (me, struct bfin_uart);\n\n  set_hw_data (me, uart);\n  set_hw_io_read_buffer (me, bfin_uart_io_read_buffer);\n  set_hw_io_write_buffer (me, bfin_uart_io_write_buffer);\n  set_hw_dma_read_buffer (me, bfin_uart_dma_read_buffer);\n  set_hw_dma_write_buffer (me, bfin_uart_dma_write_buffer);\n  set_hw_ports (me, bfin_uart_ports);\n\n  attach_bfin_uart_regs (me, uart);\n\n  /* Initialize the UART.  */\n  uart->dll = 0x0001;\n  uart->lsr = 0x0060;\n}",
+      "fn_code_pos": [
+        [
+          240,
+          0
+        ],
+        [
+          259,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_uart_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "BFIN_MMR_16(dll)",
+      "fn_dec_pos": [
+        [
+          45,
+          7
+        ],
+        [
+          45,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(dlh)",
+      "fn_dec_pos": [
+        [
+          46,
+          7
+        ],
+        [
+          46,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(gctl)",
+      "fn_dec_pos": [
+        [
+          47,
+          7
+        ],
+        [
+          47,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(lcr)",
+      "fn_dec_pos": [
+        [
+          48,
+          7
+        ],
+        [
+          48,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(mcr)",
+      "fn_dec_pos": [
+        [
+          49,
+          7
+        ],
+        [
+          49,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(lsr)",
+      "fn_dec_pos": [
+        [
+          50,
+          7
+        ],
+        [
+          50,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(msr)",
+      "fn_dec_pos": [
+        [
+          51,
+          7
+        ],
+        [
+          51,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(scr)",
+      "fn_dec_pos": [
+        [
+          52,
+          7
+        ],
+        [
+          52,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(ier_set)",
+      "fn_dec_pos": [
+        [
+          53,
+          7
+        ],
+        [
+          53,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(ier_clear)",
+      "fn_dec_pos": [
+        [
+          54,
+          7
+        ],
+        [
+          54,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(thr)",
+      "fn_dec_pos": [
+        [
+          55,
+          7
+        ],
+        [
+          55,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(rbr)",
+      "fn_dec_pos": [
+        [
+          56,
+          7
+        ],
+        [
+          56,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct bfin_uart\n{\n  /* This top portion matches common dv_bfin struct.  */\n  bu32 base;\n  struct hw *dma_master;\n  bool acked;\n\n  struct hw_event *handler;\n  char saved_byte;\n  int saved_count;\n\n  /* Accessed indirectly by ier_{set,clear}.  */\n  bu16 ier;\n\n  /* Order after here is important -- matches hardware MMR layout.  */\n  bu16 BFIN_MMR_16(dll);\n  bu16 BFIN_MMR_16(dlh);\n  bu16 BFIN_MMR_16(gctl);\n  bu16 BFIN_MMR_16(lcr);\n  bu16 BFIN_MMR_16(mcr);\n  bu16 BFIN_MMR_16(lsr);\n  bu16 BFIN_MMR_16(msr);\n  bu16 BFIN_MMR_16(scr);\n  bu16 BFIN_MMR_16(ier_set);\n  bu16 BFIN_MMR_16(ier_clear);\n  bu16 BFIN_MMR_16(thr);\n  bu16 BFIN_MMR_16(rbr);\n}",
+      {
+        "base": "bu32",
+        "*dma_master": "struct hw",
+        "acked": "bool",
+        "*handler": "struct hw_event",
+        "saved_byte": "char",
+        "saved_count": "int",
+        "ier": "bu16",
+        "BFIN_MMR_16(dll)": "bu16",
+        "BFIN_MMR_16(dlh)": "bu16",
+        "BFIN_MMR_16(gctl)": "bu16",
+        "BFIN_MMR_16(lcr)": "bu16",
+        "BFIN_MMR_16(mcr)": "bu16",
+        "BFIN_MMR_16(lsr)": "bu16",
+        "BFIN_MMR_16(msr)": "bu16",
+        "BFIN_MMR_16(scr)": "bu16",
+        "BFIN_MMR_16(ier_set)": "bu16",
+        "BFIN_MMR_16(ier_clear)": "bu16",
+        "BFIN_MMR_16(thr)": "bu16",
+        "BFIN_MMR_16(rbr)": "bu16"
+      },
+      "bfin_uart",
+      [
+        30,
+        0
+      ],
+      [
+        57,
+        1
+      ]
+    ],
+    [
+      "struct bfin_uart\n{\n  /* This top portion matches common dv_bfin struct.  */\n  bu32 base;\n  struct hw *dma_master;\n  bool acked;\n\n  struct hw_event *handler;\n  char saved_byte;\n  int saved_count;\n\n  /* Accessed indirectly by ier_{set,clear}.  */\n  bu16 ier;\n\n  /* Order after here is important -- matches hardware MMR layout.  */\n  bu16 BFIN_MMR_16(dll);\n  bu16 BFIN_MMR_16(dlh);\n  bu16 BFIN_MMR_16(gctl);\n  bu16 BFIN_MMR_16(lcr);\n  bu16 BFIN_MMR_16(mcr);\n  bu16 BFIN_MMR_16(lsr);\n  bu16 BFIN_MMR_16(msr);\n  bu16 BFIN_MMR_16(scr);\n  bu16 BFIN_MMR_16(ier_set);\n  bu16 BFIN_MMR_16(ier_clear);\n  bu16 BFIN_MMR_16(thr);\n  bu16 BFIN_MMR_16(rbr);\n}",
+      {
+        "base": "bu32",
+        "*dma_master": "struct hw",
+        "acked": "bool",
+        "*handler": "struct hw_event",
+        "saved_byte": "char",
+        "saved_count": "int",
+        "ier": "bu16",
+        "BFIN_MMR_16(dll)": "bu16",
+        "BFIN_MMR_16(dlh)": "bu16",
+        "BFIN_MMR_16(gctl)": "bu16",
+        "BFIN_MMR_16(lcr)": "bu16",
+        "BFIN_MMR_16(mcr)": "bu16",
+        "BFIN_MMR_16(lsr)": "bu16",
+        "BFIN_MMR_16(msr)": "bu16",
+        "BFIN_MMR_16(scr)": "bu16",
+        "BFIN_MMR_16(ier_set)": "bu16",
+        "BFIN_MMR_16(ier_clear)": "bu16",
+        "BFIN_MMR_16(thr)": "bu16",
+        "BFIN_MMR_16(rbr)": "bu16"
+      },
+      "bfin_uart",
+      [
+        30,
+        0
+      ],
+      [
+        57,
+        1
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        34,
+        2
+      ],
+      [
+        34,
+        11
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        37,
+        2
+      ],
+      [
+        37,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        70,
+        27
+      ],
+      [
+        70,
+        36
+      ]
+    ],
+    [
+      "struct bfin_uart",
+      {},
+      "",
+      [
+        73,
+        2
+      ],
+      [
+        73,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        129,
+        26
+      ],
+      [
+        129,
+        35
+      ]
+    ],
+    [
+      "struct bfin_uart",
+      {},
+      "",
+      [
+        132,
+        2
+      ],
+      [
+        132,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        178,
+        27
+      ],
+      [
+        178,
+        36
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        186,
+        28
+      ],
+      [
+        186,
+        37
+      ]
+    ],
+    [
+      "struct bfin_uart",
+      {},
+      "",
+      [
+        191,
+        2
+      ],
+      [
+        191,
+        18
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        204,
+        13
+      ],
+      [
+        204,
+        38
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        213,
+        23
+      ],
+      [
+        213,
+        32
+      ]
+    ],
+    [
+      "struct bfin_uart",
+      {},
+      "",
+      [
+        213,
+        38
+      ],
+      [
+        213,
+        54
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        241,
+        18
+      ],
+      [
+        241,
+        27
+      ]
+    ],
+    [
+      "struct bfin_uart",
+      {},
+      "",
+      [
+        243,
+        2
+      ],
+      [
+        243,
+        18
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        261,
+        6
+      ],
+      [
+        261,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"devices.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"dv-bfin_uart2.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

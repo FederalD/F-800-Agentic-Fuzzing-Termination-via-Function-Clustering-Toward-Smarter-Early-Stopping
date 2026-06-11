@@ -1,0 +1,482 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "decimal32 * decimal32FromNumber(decimal32 *d32, const decNumber *dn,\n\t\t\t      decContext *set) {\n  uInt status=0;\t\t   /* status accumulator */\n  Int ae;\t\t\t   /* adjusted exponent */\n  decNumber  dw;\t\t   /* work */\n  decContext dc;\t\t   /* .. */\n  uInt comb, exp;\t\t   /* .. */\n  uInt uiwork;\t\t\t   /* for macros */\n  uInt targ=0;\t\t\t   /* target 32-bit */\n\n  /* If the number has too many digits, or the exponent could be */\n  /* out of range then reduce the number under the appropriate */\n  /* constraints.  This could push the number to Infinity or zero, */\n  /* so this check and rounding must be done before generating the */\n  /* decimal32] */\n  ae=dn->exponent+dn->digits-1; \t     /* [0 if special] */\n  if (dn->digits>DECIMAL32_Pmax \t     /* too many digits */\n   || ae>DECIMAL32_Emax \t\t     /* likely overflow */\n   || ae<DECIMAL32_Emin) {\t\t     /* likely underflow */\n    decContextDefault(&dc, DEC_INIT_DECIMAL32); /* [no traps] */\n    dc.round=set->round;\t\t     /* use supplied rounding */\n    decNumberPlus(&dw, dn, &dc);\t     /* (round and check) */\n    /* [this changes -0 to 0, so enforce the sign...] */\n    dw.bits|=dn->bits&DECNEG;\n    status=dc.status;\t\t\t     /* save status */\n    dn=&dw;\t\t\t\t     /* use the work number */\n    } /* maybe out of range */\n\n  if (dn->bits&DECSPECIAL) {\t\t\t  /* a special value */\n    if (dn->bits&DECINF) targ=DECIMAL_Inf<<24;\n     else {\t\t\t\t\t  /* sNaN or qNaN */\n      if ((*dn->lsu!=0 || dn->digits>1) \t  /* non-zero coefficient */\n       && (dn->digits<DECIMAL32_Pmax)) {\t  /* coefficient fits */\n\tdecDigitsToDPD(dn, &targ, 0);\n\t}\n      if (dn->bits&DECNAN) targ|=DECIMAL_NaN<<24;\n       else targ|=DECIMAL_sNaN<<24;\n      } /* a NaN */\n    } /* special */\n\n   else { /* is finite */\n    if (decNumberIsZero(dn)) {\t\t     /* is a zero */\n      /* set and clamp exponent */\n      if (dn->exponent<-DECIMAL32_Bias) {\n\texp=0;\t\t\t\t     /* low clamp */\n\tstatus|=DEC_Clamped;\n\t}\n       else {\n\texp=dn->exponent+DECIMAL32_Bias;     /* bias exponent */\n\tif (exp>DECIMAL32_Ehigh) {\t     /* top clamp */\n\t  exp=DECIMAL32_Ehigh;\n\t  status|=DEC_Clamped;\n\t  }\n\t}\n      comb=(exp>>3) & 0x18;\t\t/* msd=0, exp top 2 bits .. */\n      }\n     else {\t\t\t\t/* non-zero finite number */\n      uInt msd; \t\t\t/* work */\n      Int pad=0;\t\t\t/* coefficient pad digits */\n\n      /* the dn is known to fit, but it may need to be padded */\n      exp=(uInt)(dn->exponent+DECIMAL32_Bias);\t  /* bias exponent */\n      if (exp>DECIMAL32_Ehigh) {\t\t  /* fold-down case */\n\tpad=exp-DECIMAL32_Ehigh;\n\texp=DECIMAL32_Ehigh;\t\t\t  /* [to maximum] */\n\tstatus|=DEC_Clamped;\n\t}\n\n      /* fastpath common case */\n      if (DECDPUN==3 && pad==0) {\n\ttarg=BIN2DPD[dn->lsu[0]];\n\tif (dn->digits>3) targ|=(uInt)(BIN2DPD[dn->lsu[1]])<<10;\n\tmsd=(dn->digits==7 ? dn->lsu[2] : 0);\n\t}\n       else { /* general case */\n\tdecDigitsToDPD(dn, &targ, pad);\n\t/* save and clear the top digit */\n\tmsd=targ>>20;\n\ttarg&=0x000fffff;\n\t}\n\n      /* create the combination field */\n      if (msd>=8) comb=0x18 | ((exp>>5) & 0x06) | (msd & 0x01);\n\t     else comb=((exp>>3) & 0x18) | msd;\n      }\n    targ|=comb<<26;\t\t   /* add combination field .. */\n    targ|=(exp&0x3f)<<20;\t   /* .. and exponent continuation */\n    } /* finite */\n\n  if (dn->bits&DECNEG) targ|=0x80000000;  /* add sign bit */\n\n  /* now write to storage; this is endian */\n  UBFROMUI(d32->bytes, targ);\t   /* directly store the int */\n\n  if (status!=0) decContextSetStatus(set, status); /* pass on status */\n  /* decimal32Show(d32); */\n  return d32;\n  }",
+      "fn_code_pos": [
+        [
+          80,
+          0
+        ],
+        [
+          177,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32FromNumber",
+        "parameters": {
+          "d32": "decimal32",
+          "dn": "decNumber",
+          "set": "decContext"
+        },
+        "return_type": "decimal32"
+      }
+    },
+    {
+      "fn_code": "decNumber * decimal32ToNumber(const decimal32 *d32, decNumber *dn) {\n  uInt msd;\t\t\t   /* coefficient MSD */\n  uInt exp;\t\t\t   /* exponent top two bits */\n  uInt comb;\t\t\t   /* combination field */\n  uInt sour;\t\t\t   /* source 32-bit */\n  uInt uiwork;\t\t\t   /* for macros */\n\n  /* load source from storage; this is endian */\n  sour=UBTOUI(d32->bytes);\t   /* directly load the int */\n\n  comb=(sour>>26)&0x1f; \t   /* combination field */\n\n  decNumberZero(dn);\t\t   /* clean number */\n  if (sour&0x80000000) dn->bits=DECNEG; /* set sign if negative */\n\n  msd=COMBMSD[comb];\t\t   /* decode the combination field */\n  exp=COMBEXP[comb];\t\t   /* .. */\n\n  if (exp==3) { \t\t   /* is a special */\n    if (msd==0) {\n      dn->bits|=DECINF;\n      return dn;\t\t   /* no coefficient needed */\n      }\n    else if (sour&0x02000000) dn->bits|=DECSNAN;\n    else dn->bits|=DECNAN;\n    msd=0;\t\t\t   /* no top digit */\n    }\n   else {\t\t\t   /* is a finite number */\n    dn->exponent=(exp<<6)+((sour>>20)&0x3f)-DECIMAL32_Bias; /* unbiased */\n    }\n\n  /* get the coefficient */\n  sour&=0x000fffff;\t\t   /* clean coefficient continuation */\n  if (msd) {\t\t\t   /* non-zero msd */\n    sour|=msd<<20;\t\t   /* prefix to coefficient */\n    decDigitsFromDPD(dn, &sour, 3); /* process 3 declets */\n    return dn;\n    }\n  /* msd=0 */\n  if (!sour) return dn; \t   /* easy: coefficient is 0 */\n  if (sour&0x000ffc00)\t\t   /* need 2 declets? */\n    decDigitsFromDPD(dn, &sour, 2); /* process 2 declets */\n   else\n    decDigitsFromDPD(dn, &sour, 1); /* process 1 declet */\n  return dn;\n  }",
+      "fn_code_pos": [
+        [
+          185,
+          0
+        ],
+        [
+          230,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32ToNumber",
+        "parameters": {
+          "d32": "decimal32",
+          "dn": "decNumber"
+        },
+        "return_type": "decNumber"
+      }
+    },
+    {
+      "fn_code": "char * decimal32ToEngString(const decimal32 *d32, char *string){\n  decNumber dn; \t\t\t/* work */\n  decimal32ToNumber(d32, &dn);\n  decNumberToEngString(&dn, string);\n  return string;\n  }",
+      "fn_code_pos": [
+        [
+          246,
+          0
+        ],
+        [
+          251,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32ToEngString",
+        "parameters": {
+          "d32": "decimal32",
+          "string": "char"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "char * decimal32ToString(const decimal32 *d32, char *string){\n  uInt msd;\t\t\t   /* coefficient MSD */\n  Int  exp;\t\t\t   /* exponent top two bits or full */\n  uInt comb;\t\t\t   /* combination field */\n  char *cstart; \t\t   /* coefficient start */\n  char *c;\t\t\t   /* output pointer in string */\n  const uByte *u;\t\t   /* work */\n  char *s, *t;\t\t\t   /* .. (source, target) */\n  Int  dpd;\t\t\t   /* .. */\n  Int  pre, e;\t\t\t   /* .. */\n  uInt uiwork;\t\t\t   /* for macros */\n  uInt sour;\t\t\t   /* source 32-bit */\n\n  /* load source from storage; this is endian */\n  sour=UBTOUI(d32->bytes);\t   /* directly load the int */\n\n  c=string;\t\t\t   /* where result will go */\n  if (((Int)sour)<0) *c++='-';\t   /* handle sign */\n\n  comb=(sour>>26)&0x1f; \t   /* combination field */\n  msd=COMBMSD[comb];\t\t   /* decode the combination field */\n  exp=COMBEXP[comb];\t\t   /* .. */\n\n  if (exp==3) {\n    if (msd==0) {\t\t   /* infinity */\n      strcpy(c,   \"Inf\");\n      strcpy(c+3, \"inity\");\n      return string;\t\t   /* easy */\n      }\n    if (sour&0x02000000) *c++='s'; /* sNaN */\n    strcpy(c, \"NaN\");\t\t   /* complete word */\n    c+=3;\t\t\t   /* step past */\n    if ((sour&0x000fffff)==0) return string; /* zero payload */\n    /* otherwise drop through to add integer; set correct exp */\n    exp=0; msd=0;\t\t   /* setup for following code */\n    }\n   else exp=(exp<<6)+((sour>>20)&0x3f)-DECIMAL32_Bias; /* unbiased */\n\n  /* convert 7 digits of significand to characters */\n  cstart=c;\t\t\t   /* save start of coefficient */\n  if (msd) *c++='0'+(char)msd;\t   /* non-zero most significant digit */\n\n  /* Now decode the declets.  After extracting each one, it is */\n  /* decoded to binary and then to a 4-char sequence by table lookup; */\n  /* the 4-chars are a 1-char length (significant digits, except 000 */\n  /* has length 0).  This allows us to left-align the first declet */\n  /* with non-zero content, then remaining ones are full 3-char */\n  /* length.  We use fixed-length memcpys because variable-length */\n  /* causes a subroutine call in GCC.  (These are length 4 for speed */\n  /* and are safe because the array has an extra terminator byte.) */\n  #define dpd2char u=&BIN2CHAR[DPD2BIN[dpd]*4]; \t\t  \\\n\t\t   if (c!=cstart) {memcpy(c, u+1, 4); c+=3;}\t  \\\n\t\t    else if (*u)  {memcpy(c, u+4-*u, 4); c+=*u;}\n\n  dpd=(sour>>10)&0x3ff; \t   /* declet 1 */\n  dpd2char;\n  dpd=(sour)&0x3ff;\t\t   /* declet 2 */\n  dpd2char;\n\n  if (c==cstart) *c++='0';\t   /* all zeros -- make 0 */\n\n  if (exp==0) { \t\t   /* integer or NaN case -- easy */\n    *c='\\0';\t\t\t   /* terminate */\n    return string;\n    }\n\n  /* non-0 exponent */\n  e=0;\t\t\t\t   /* assume no E */\n  pre=c-cstart+exp;\n  /* [here, pre-exp is the digits count (==1 for zero)] */\n  if (exp>0 || pre<-5) {\t   /* need exponential form */\n    e=pre-1;\t\t\t   /* calculate E value */\n    pre=1;\t\t\t   /* assume one digit before '.' */\n    } /* exponential form */\n\n  /* modify the coefficient, adding 0s, '.', and E+nn as needed */\n  s=c-1;\t\t\t   /* source (LSD) */\n  if (pre>0) {\t\t\t   /* ddd.ddd (plain), perhaps with E */\n    char *dotat=cstart+pre;\n    if (dotat<c) {\t\t   /* if embedded dot needed... */\n      t=c;\t\t\t\t/* target */\n      for (; s>=dotat; s--, t--) *t=*s; /* open the gap; leave t at gap */\n      *t='.';\t\t\t\t/* insert the dot */\n      c++;\t\t\t\t/* length increased by one */\n      }\n\n    /* finally add the E-part, if needed; it will never be 0, and has */\n    /* a maximum length of 3 digits (E-101 case) */\n    if (e!=0) {\n      *c++='E'; \t\t   /* starts with E */\n      *c++='+'; \t\t   /* assume positive */\n      if (e<0) {\n\t*(c-1)='-';\t\t   /* oops, need '-' */\n\te=-e;\t\t\t   /* uInt, please */\n\t}\n      u=&BIN2CHAR[e*4]; \t   /* -> length byte */\n      memcpy(c, u+4-*u, 4);\t   /* copy fixed 4 characters [is safe] */\n      c+=*u;\t\t\t   /* bump pointer appropriately */\n      }\n    *c='\\0';\t\t\t   /* add terminator */\n    /*printf(\"res %s\\n\", string); */\n    return string;\n    } /* pre>0 */\n\n  /* -5<=pre<=0: here for plain 0.ddd or 0.000ddd forms (can never have E) */\n  t=c+1-pre;\n  *(t+1)='\\0';\t\t\t\t/* can add terminator now */\n  for (; s>=cstart; s--, t--) *t=*s;\t/* shift whole coefficient right */\n  c=cstart;\n  *c++='0';\t\t\t\t/* always starts with 0. */\n  *c++='.';\n  for (; pre<0; pre++) *c++='0';\t/* add any 0's after '.' */\n  /*printf(\"res %s\\n\", string); */\n  return string;\n  }",
+      "fn_code_pos": [
+        [
+          253,
+          0
+        ],
+        [
+          367,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32ToString",
+        "parameters": {
+          "d32": "decimal32",
+          "string": "char"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "decimal32 * decimal32FromString(decimal32 *result, const char *string,\n\t\t\t\tdecContext *set) {\n  decContext dc;\t\t\t     /* work */\n  decNumber dn; \t\t\t     /* .. */\n\n  decContextDefault(&dc, DEC_INIT_DECIMAL32); /* no traps, please */\n  dc.round=set->round;\t\t\t      /* use supplied rounding */\n\n  decNumberFromString(&dn, string, &dc);     /* will round if needed */\n  decimal32FromNumber(result, &dn, &dc);\n  if (dc.status!=0) {\t\t\t     /* something happened */\n    decContextSetStatus(set, dc.status);     /* .. pass it on */\n    }\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          384,
+          0
+        ],
+        [
+          398,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32FromString",
+        "parameters": {
+          "result": "decimal32",
+          "string": "char",
+          "set": "decContext"
+        },
+        "return_type": "decimal32"
+      }
+    },
+    {
+      "fn_code": "uInt decimal32IsCanonical(const decimal32 *d32) {\n  decNumber dn; \t\t\t/* work */\n  decimal32 canon;\t\t\t/* .. */\n  decContext dc;\t\t\t/* .. */\n  decContextDefault(&dc, DEC_INIT_DECIMAL32);\n  decimal32ToNumber(d32, &dn);\n  decimal32FromNumber(&canon, &dn, &dc);/* canon will now be canonical */\n  return memcmp(d32, &canon, DECIMAL32_Bytes)==0;\n  }",
+      "fn_code_pos": [
+        [
+          406,
+          0
+        ],
+        [
+          414,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32IsCanonical",
+        "parameters": {
+          "d32": "decimal32"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "decimal32 * decimal32Canonical(decimal32 *result, const decimal32 *d32) {\n  decNumber dn; \t\t\t/* work */\n  decContext dc;\t\t\t/* .. */\n  decContextDefault(&dc, DEC_INIT_DECIMAL32);\n  decimal32ToNumber(d32, &dn);\n  decimal32FromNumber(result, &dn, &dc);/* result will now be canonical */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          423,
+          0
+        ],
+        [
+          430,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32Canonical",
+        "parameters": {
+          "result": "decimal32",
+          "d32": "decimal32"
+        },
+        "return_type": "decimal32"
+      }
+    },
+    {
+      "fn_code": "void decimal32Show(const decimal32 *d32) {\n  char buf[DECIMAL32_Bytes*2+1];\n  Int i, j=0;\n\n  if (DECLITEND) {\n    for (i=0; i<DECIMAL32_Bytes; i++, j+=2) {\n      sprintf(&buf[j], \"%02x\", d32->bytes[3-i]);\n      }\n    printf(\" D32> %s [S:%d Cb:%02x Ec:%02x] LittleEndian\\n\", buf,\n\t   d32->bytes[3]>>7, (d32->bytes[3]>>2)&0x1f,\n\t   ((d32->bytes[3]&0x3)<<4)| (d32->bytes[2]>>4));\n    }\n   else {\n    for (i=0; i<DECIMAL32_Bytes; i++, j+=2) {\n      sprintf(&buf[j], \"%02x\", d32->bytes[i]);\n      }\n    printf(\" D32> %s [S:%d Cb:%02x Ec:%02x] BigEndian\\n\", buf,\n\t   decimal32Sign(d32), decimal32Comb(d32), decimal32ExpCon(d32));\n    }\n  }",
+      "fn_code_pos": [
+        [
+          462,
+          0
+        ],
+        [
+          481,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32Show",
+        "parameters": {
+          "d32": "decimal32"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "decDigitsToDPD(const decNumber *, uInt *, Int)",
+      "fn_dec_pos": [
+        [
+          51,
+          12
+        ],
+        [
+          51,
+          58
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decDigitsToDPD",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "decDigitsFromDPD(decNumber *, const uInt *, Int)",
+      "fn_dec_pos": [
+        [
+          52,
+          12
+        ],
+        [
+          52,
+          60
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decDigitsFromDPD",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "decimal32Show(const decimal32 *)",
+      "fn_dec_pos": [
+        [
+          55,
+          5
+        ],
+        [
+          55,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32Show",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "decNumberShow(const decNumber *)",
+      "fn_dec_pos": [
+        [
+          56,
+          12
+        ],
+        [
+          56,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decNumberShow",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "decimal32FromNumber(decimal32 *d32, const decNumber *dn,\n\t\t\t      decContext *set)",
+      "fn_dec_pos": [
+        [
+          80,
+          12
+        ],
+        [
+          81,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32FromNumber",
+        "parameters": {
+          "d32": "decimal32",
+          "dn": "decNumber",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decimal32ToNumber(const decimal32 *d32, decNumber *dn)",
+      "fn_dec_pos": [
+        [
+          185,
+          12
+        ],
+        [
+          185,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32ToNumber",
+        "parameters": {
+          "d32": "decimal32",
+          "dn": "decNumber"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decimal32ToEngString(const decimal32 *d32, char *string)",
+      "fn_dec_pos": [
+        [
+          246,
+          7
+        ],
+        [
+          246,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32ToEngString",
+        "parameters": {
+          "d32": "decimal32",
+          "string": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decimal32ToString(const decimal32 *d32, char *string)",
+      "fn_dec_pos": [
+        [
+          253,
+          7
+        ],
+        [
+          253,
+          60
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32ToString",
+        "parameters": {
+          "d32": "decimal32",
+          "string": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decimal32FromString(decimal32 *result, const char *string,\n\t\t\t\tdecContext *set)",
+      "fn_dec_pos": [
+        [
+          384,
+          12
+        ],
+        [
+          385,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32FromString",
+        "parameters": {
+          "result": "decimal32",
+          "string": "char",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decimal32Canonical(decimal32 *result, const decimal32 *d32)",
+      "fn_dec_pos": [
+        [
+          423,
+          12
+        ],
+        [
+          423,
+          71
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal32Canonical",
+        "parameters": {
+          "result": "decimal32",
+          "d32": "decimal32"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include <string.h>\t      /* [for memset/memcpy] */\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\t      /* [for printf] */\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"dconfig.h\"          /* GCC definitions */\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"decNumber.h\"\t      /* base number library */\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include \"decNumberLocal.h\"   /* decNumber local types, etc. */\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include \"decimal32.h\"\t      /* our primary include */\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

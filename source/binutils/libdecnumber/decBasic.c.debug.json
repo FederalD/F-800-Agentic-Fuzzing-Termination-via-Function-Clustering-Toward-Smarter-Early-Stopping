@@ -1,0 +1,3220 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static decFloat * decCanonical(decFloat *result, const decFloat *df) {\n  uInt encode, precode, dpd;\t   /* work */\n  uInt inword, uoff, canon;\t   /* .. */\n  Int  n;\t\t\t   /* counter (down) */\n  if (df!=result) *result=*df;\t   /* effect copy if needed */\n  if (DFISSPECIAL(result)) {\n    if (DFISINF(result)) return decInfinity(result, df); /* clean Infinity */\n    /* is a NaN */\n    DFWORD(result, 0)&=~ECONNANMASK;\t/* clear ECON except selector */\n    if (DFISCCZERO(df)) return result;\t/* coefficient continuation is 0 */\n    /* drop through to check payload */\n    }\n  /* return quickly if the coefficient continuation is canonical */\n  { /* declare block */\n  #if DOUBLE\n    uInt sourhi=DFWORD(df, 0);\n    uInt sourlo=DFWORD(df, 1);\n    if (CANONDPDOFF(sourhi, 8)\n     && CANONDPDTWO(sourhi, sourlo, 30)\n     && CANONDPDOFF(sourlo, 20)\n     && CANONDPDOFF(sourlo, 10)\n     && CANONDPDOFF(sourlo, 0)) return result;\n  #elif QUAD\n    uInt sourhi=DFWORD(df, 0);\n    uInt sourmh=DFWORD(df, 1);\n    uInt sourml=DFWORD(df, 2);\n    uInt sourlo=DFWORD(df, 3);\n    if (CANONDPDOFF(sourhi, 4)\n     && CANONDPDTWO(sourhi, sourmh, 26)\n     && CANONDPDOFF(sourmh, 16)\n     && CANONDPDOFF(sourmh, 6)\n     && CANONDPDTWO(sourmh, sourml, 28)\n     && CANONDPDOFF(sourml, 18)\n     && CANONDPDOFF(sourml, 8)\n     && CANONDPDTWO(sourml, sourlo, 30)\n     && CANONDPDOFF(sourlo, 20)\n     && CANONDPDOFF(sourlo, 10)\n     && CANONDPDOFF(sourlo, 0)) return result;\n  #endif\n  } /* block */\n\n  /* Loop to repair a non-canonical coefficent, as needed */\n  inword=DECWORDS-1;\t\t   /* current input word */\n  uoff=0;\t\t\t   /* bit offset of declet */\n  encode=DFWORD(result, inword);\n  for (n=DECLETS-1; n>=0; n--) {   /* count down declets of 10 bits */\n    dpd=encode>>uoff;\n    uoff+=10;\n    if (uoff>32) {\t\t   /* crossed uInt boundary */\n      inword--;\n      encode=DFWORD(result, inword);\n      uoff-=32;\n      dpd|=encode<<(10-uoff);\t   /* get pending bits */\n      }\n    dpd&=0x3ff; \t\t   /* clear uninteresting bits */\n    if (dpd<0x16e) continue;\t   /* must be canonical */\n    canon=BIN2DPD[DPD2BIN[dpd]];   /* determine canonical declet */\n    if (canon==dpd) continue;\t   /* have canonical declet */\n    /* need to replace declet */\n    if (uoff>=10) {\t\t   /* all within current word */\n      encode&=~(0x3ff<<(uoff-10)); /* clear the 10 bits ready for replace */\n      encode|=canon<<(uoff-10);    /* insert the canonical form */\n      DFWORD(result, inword)=encode;\t/* .. and save */\n      continue;\n      }\n    /* straddled words */\n    precode=DFWORD(result, inword+1);\t/* get previous */\n    precode&=0xffffffff>>(10-uoff);\t/* clear top bits */\n    DFWORD(result, inword+1)=precode|(canon<<(32-(10-uoff)));\n    encode&=0xffffffff<<uoff;\t\t/* clear bottom bits */\n    encode|=canon>>(10-uoff);\t\t/* insert canonical */\n    DFWORD(result, inword)=encode;\t/* .. and save */\n    } /* n */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          84,
+          0
+        ],
+        [
+          158,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decCanonical",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "static decFloat * decDivide(decFloat *result, const decFloat *dfl,\n\t\t\t    const decFloat *dfr, decContext *set, uInt op) {\n  decFloat quotient;\t\t   /* for remainders */\n  bcdnum num;\t\t\t   /* for final conversion */\n  uInt\t acc[DIVACCLEN];\t   /* coefficent in base-billion .. */\n  uInt\t div[DIVOPLEN]; \t   /* divisor in base-billion .. */\n  uInt\t quo[DIVOPLEN+1];\t   /* quotient in base-billion .. */\n  uByte  bcdacc[(DIVOPLEN+1)*9+2]; /* for quotient in BCD, +1, +1 */\n  uInt\t *msua, *msud, *msuq;\t   /* -> msu of acc, div, and quo */\n  Int\t divunits, accunits;\t   /* lengths */\n  Int\t quodigits;\t\t   /* digits in quotient */\n  uInt\t *lsua, *lsuq;\t\t   /* -> current acc and quo lsus */\n  Int\t length, multiplier;\t   /* work */\n  uInt\t carry, sign;\t\t   /* .. */\n  uInt\t *ua, *ud, *uq; \t   /* .. */\n  uByte  *ub;\t\t\t   /* .. */\n  uInt\t uiwork;\t\t   /* for macros */\n  uInt\t divtop;\t\t   /* top unit of div adjusted for estimating */\n  #if DIVCOUNT\n  static uInt maxcount=0;\t   /* worst-seen subtractions count */\n  uInt\t divcount=0;\t\t   /* subtractions count [this divide] */\n  #endif\n\n  /* calculate sign */\n  num.sign=(DFWORD(dfl, 0)^DFWORD(dfr, 0)) & DECFLOAT_Sign;\n\n  if (DFISSPECIAL(dfl) || DFISSPECIAL(dfr)) { /* either is special? */\n    /* NaNs are handled as usual */\n    if (DFISNAN(dfl) || DFISNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n    /* one or two infinities */\n    if (DFISINF(dfl)) {\n      if (DFISINF(dfr)) return decInvalid(result, set); /* Two infinities bad */\n      if (op&(REMAINDER|REMNEAR)) return decInvalid(result, set); /* as is rem */\n      /* Infinity/x is infinite and quiet, even if x=0 */\n      DFWORD(result, 0)=num.sign;\n      return decInfinity(result, result);\n      }\n    /* must be x/Infinity -- remainders are lhs */\n    if (op&(REMAINDER|REMNEAR)) return decCanonical(result, dfl);\n    /* divides: return zero with correct sign and exponent depending */\n    /* on op (Etiny for divide, 0 for divideInt) */\n    decFloatZero(result);\n    if (op==DIVIDEINT) DFWORD(result, 0)|=num.sign; /* add sign */\n     else DFWORD(result, 0)=num.sign;\t     /* zeros the exponent, too */\n    return result;\n    }\n  /* next, handle zero operands (x/0 and 0/x) */\n  if (DFISZERO(dfr)) {\t\t\t     /* x/0 */\n    if (DFISZERO(dfl)) {\t\t     /* 0/0 is undefined */\n      decFloatZero(result);\n      DFWORD(result, 0)=DECFLOAT_qNaN;\n      set->status|=DEC_Division_undefined;\n      return result;\n      }\n    if (op&(REMAINDER|REMNEAR)) return decInvalid(result, set); /* bad rem */\n    set->status|=DEC_Division_by_zero;\n    DFWORD(result, 0)=num.sign;\n    return decInfinity(result, result);      /* x/0 -> signed Infinity */\n    }\n  num.exponent=GETEXPUN(dfl)-GETEXPUN(dfr);  /* ideal exponent */\n  if (DFISZERO(dfl)) {\t\t\t     /* 0/x (x!=0) */\n    /* if divide, result is 0 with ideal exponent; divideInt has */\n    /* exponent=0, remainders give zero with lower exponent */\n    if (op&DIVIDEINT) {\n      decFloatZero(result);\n      DFWORD(result, 0)|=num.sign;\t     /* add sign */\n      return result;\n      }\n    if (!(op&DIVIDE)) { \t\t     /* a remainder */\n      /* exponent is the minimum of the operands */\n      num.exponent=MINI(GETEXPUN(dfl), GETEXPUN(dfr));\n      /* if the result is zero the sign shall be sign of dfl */\n      num.sign=DFWORD(dfl, 0)&DECFLOAT_Sign;\n      }\n    bcdacc[0]=0;\n    num.msd=bcdacc;\t\t\t     /* -> 0 */\n    num.lsd=bcdacc;\t\t\t     /* .. */\n    return decFinalize(result, &num, set);   /* [divide may clamp exponent] */\n    } /* 0/x */\n  /* [here, both operands are known to be finite and non-zero] */\n\n  /* extract the operand coefficents into 'units' which are */\n  /* base-billion; the lhs is high-aligned in acc and the msu of both */\n  /* acc and div is at the right-hand end of array (offset length-1); */\n  /* the quotient can need one more unit than the operands as digits */\n  /* in it are not necessarily aligned neatly; further, the quotient */\n  /* may not start accumulating until after the end of the initial */\n  /* operand in acc if that is small (e.g., 1) so the accumulator */\n  /* must have at least that number of units extra (at the ls end) */\n  GETCOEFFBILL(dfl, acc+DIVACCLEN-DIVOPLEN);\n  GETCOEFFBILL(dfr, div);\n  /* zero the low uInts of acc */\n  acc[0]=0;\n  acc[1]=0;\n  acc[2]=0;\n  acc[3]=0;\n  #if DOUBLE\n    #if DIVOPLEN!=2\n      #error Unexpected Double DIVOPLEN\n    #endif\n  #elif QUAD\n  acc[4]=0;\n  acc[5]=0;\n  acc[6]=0;\n  acc[7]=0;\n    #if DIVOPLEN!=4\n      #error Unexpected Quad DIVOPLEN\n    #endif\n  #endif\n\n  /* set msu and lsu pointers */\n  msua=acc+DIVACCLEN-1;       /* [leading zeros removed below] */\n  msuq=quo+DIVOPLEN;\n  /*[loop for div will terminate because operands are non-zero] */\n  for (msud=div+DIVOPLEN-1; *msud==0;) msud--;\n  /* the initial least-significant unit of acc is set so acc appears */\n  /* to have the same length as div. */\n  /* This moves one position towards the least possible for each */\n  /* iteration */\n  divunits=(Int)(msud-div+1); /* precalculate */\n  lsua=msua-divunits+1;       /* initial working lsu of acc */\n  lsuq=msuq;\t\t      /* and of quo */\n\n  /* set up the estimator for the multiplier; this is the msu of div, */\n  /* plus two bits from the unit below (if any) rounded up by one if */\n  /* there are any non-zero bits or units below that [the extra two */\n  /* bits makes for a much better estimate when the top unit is small] */\n  divtop=*msud<<2;\n  if (divunits>1) {\n    uInt *um=msud-1;\n    uInt d=*um;\n    if (d>=750000000) {divtop+=3; d-=750000000;}\n     else if (d>=500000000) {divtop+=2; d-=500000000;}\n     else if (d>=250000000) {divtop++; d-=250000000;}\n    if (d) divtop++;\n     else for (um--; um>=div; um--) if (*um) {\n      divtop++;\n      break;\n      }\n    } /* >1 unit */\n\n  #if DECTRACE\n  {Int i;\n  printf(\"----- div=\");\n  for (i=divunits-1; i>=0; i--) printf(\"%09ld \", (LI)div[i]);\n  printf(\"\\n\");}\n  #endif\n\n  /* now collect up to DECPMAX+1 digits in the quotient (this may */\n  /* need OPLEN+1 uInts if unaligned) */\n  quodigits=0;\t\t      /* no digits yet */\n  for (;; lsua--) {\t      /* outer loop -- each input position */\n    #if DECCHECK\n    if (lsua<acc) {\n      printf(\"Acc underrun...\\n\");\n      break;\n      }\n    #endif\n    #if DECTRACE\n    printf(\"Outer: quodigits=%ld acc=\", (LI)quodigits);\n    for (ua=msua; ua>=lsua; ua--) printf(\"%09ld \", (LI)*ua);\n    printf(\"\\n\");\n    #endif\n    *lsuq=0;\t\t      /* default unit result is 0 */\n    for (;;) {\t\t      /* inner loop -- calculate quotient unit */\n      /* strip leading zero units from acc (either there initially or */\n      /* from subtraction below); this may strip all if exactly 0 */\n      for (; *msua==0 && msua>=lsua;) msua--;\n      accunits=(Int)(msua-lsua+1);\t\t  /* [maybe 0] */\n      /* subtraction is only necessary and possible if there are as */\n      /* least as many units remaining in acc for this iteration as */\n      /* there are in div */\n      if (accunits<divunits) {\n\tif (accunits==0) msua++;\t\t  /* restore */\n\tbreak;\n\t}\n\n      /* If acc is longer than div then subtraction is definitely */\n      /* possible (as msu of both is non-zero), but if they are the */\n      /* same length a comparison is needed. */\n      /* If a subtraction is needed then a good estimate of the */\n      /* multiplier for the subtraction is also needed in order to */\n      /* minimise the iterations of this inner loop because the */\n      /* subtractions needed dominate division performance. */\n      if (accunits==divunits) {\n\t/* compare the high divunits of acc and div: */\n\t/* acc<div:  this quotient unit is unchanged; subtraction */\n\t/*\t     will be possible on the next iteration */\n\t/* acc==div: quotient gains 1, set acc=0 */\n\t/* acc>div:  subtraction necessary at this position */\n\tfor (ud=msud, ua=msua; ud>div; ud--, ua--) if (*ud!=*ua) break;\n\t/* [now at first mismatch or lsu] */\n\tif (*ud>*ua) break;\t\t\t  /* next time... */\n\tif (*ud==*ua) { \t\t\t  /* all compared equal */\n\t  *lsuq+=1;\t\t\t\t  /* increment result */\n\t  msua=lsua;\t\t\t\t  /* collapse acc units */\n\t  *msua=0;\t\t\t\t  /* .. to a zero */\n\t  break;\n\t  }\n\n\t/* subtraction necessary; estimate multiplier [see above] */\n\t/* if both *msud and *msua are small it is cost-effective to */\n\t/* bring in part of the following units (if any) to get a */\n\t/* better estimate (assume some other non-zero in div) */\n\t#define DIVLO 1000000U\n\t#define DIVHI (DIVBASE/DIVLO)\n\t#if DECUSE64\n\t  if (divunits>1) {\n\t    /* there cannot be a *(msud-2) for DECDOUBLE so next is */\n\t    /* an exact calculation unless DECQUAD (which needs to */\n\t    /* assume bits out there if divunits>2) */\n\t    uLong mul=(uLong)*msua * DIVBASE + *(msua-1);\n\t    uLong div=(uLong)*msud * DIVBASE + *(msud-1);\n\t    #if QUAD\n\t    if (divunits>2) div++;\n\t    #endif\n\t    mul/=div;\n\t    multiplier=(Int)mul;\n\t    }\n\t   else multiplier=*msua/(*msud);\n\t#else\n\t  if (divunits>1 && *msua<DIVLO && *msud<DIVLO) {\n\t    multiplier=(*msua*DIVHI + *(msua-1)/DIVLO)\n\t\t      /(*msud*DIVHI + *(msud-1)/DIVLO +1);\n\t    }\n\t   else multiplier=(*msua<<2)/divtop;\n\t#endif\n\t}\n       else {\t\t\t\t\t  /* accunits>divunits */\n\t/* msud is one unit 'lower' than msua, so estimate differently */\n\t#if DECUSE64\n\t  uLong mul;\n\t  /* as before, bring in extra digits if possible */\n\t  if (divunits>1 && *msua<DIVLO && *msud<DIVLO) {\n\t    mul=((uLong)*msua * DIVHI * DIVBASE) + *(msua-1) * DIVHI\n\t       + *(msua-2)/DIVLO;\n\t    mul/=(*msud*DIVHI + *(msud-1)/DIVLO +1);\n\t    }\n\t   else if (divunits==1) {\n\t    mul=(uLong)*msua * DIVBASE + *(msua-1);\n\t    mul/=*msud;       /* no more to the right */\n\t    }\n\t   else {\n\t    mul=(uLong)(*msua) * (uInt)(DIVBASE<<2)\n\t\t+ (*(msua-1)<<2);\n\t    mul/=divtop;      /* [divtop already allows for sticky bits] */\n\t    }\n\t  multiplier=(Int)mul;\n\t#else\n\t  multiplier=*msua * ((DIVBASE<<2)/divtop);\n\t#endif\n\t}\n      if (multiplier==0) multiplier=1;\t\t  /* marginal case */\n      *lsuq+=multiplier;\n\n      #if DIVCOUNT\n      /* printf(\"Multiplier: %ld\\n\", (LI)multiplier); */\n      divcount++;\n      #endif\n\n      /* Carry out the subtraction  acc-(div*multiplier); for each */\n      /* unit in div, do the multiply, split to units (see */\n      /* decFloatMultiply for the algorithm), and subtract from acc */\n      #define DIVMAGIC\t2305843009U\t\t  /* 2**61/10**9 */\n      #define DIVSHIFTA 29\n      #define DIVSHIFTB 32\n      carry=0;\n      for (ud=div, ua=lsua; ud<=msud; ud++, ua++) {\n\tuInt lo, hop;\n\t#if DECUSE64\n\t  uLong sub=(uLong)multiplier*(*ud)+carry;\n\t  if (sub<DIVBASE) {\n\t    carry=0;\n\t    lo=(uInt)sub;\n\t    }\n\t   else {\n\t    hop=(uInt)(sub>>DIVSHIFTA);\n\t    carry=(uInt)(((uLong)hop*DIVMAGIC)>>DIVSHIFTB);\n\t    /* the estimate is now in hi; now calculate sub-hi*10**9 */\n\t    /* to get the remainder (which will be <DIVBASE)) */\n\t    lo=(uInt)sub;\n\t    lo-=carry*DIVBASE;\t\t\t  /* low word of result */\n\t    if (lo>=DIVBASE) {\n\t      lo-=DIVBASE;\t\t\t  /* correct by +1 */\n\t      carry++;\n\t      }\n\t    }\n\t#else /* 32-bit */\n\t  uInt hi;\n\t  /* calculate multiplier*(*ud) into hi and lo */\n\t  LONGMUL32HI(hi, *ud, multiplier);\t  /* get the high word */\n\t  lo=multiplier*(*ud);\t\t\t  /* .. and the low */\n\t  lo+=carry;\t\t\t\t  /* add the old hi */\n\t  carry=hi+(lo<carry);\t\t\t  /* .. with any carry */\n\t  if (carry || lo>=DIVBASE) {\t\t  /* split is needed */\n\t    hop=(carry<<3)+(lo>>DIVSHIFTA);\t  /* hi:lo/2**29 */\n\t    LONGMUL32HI(carry, hop, DIVMAGIC);\t  /* only need the high word */\n\t    /* [DIVSHIFTB is 32, so carry can be used directly] */\n\t    /* the estimate is now in carry; now calculate hi:lo-est*10**9; */\n\t    /* happily the top word of the result is irrelevant because it */\n\t    /* will always be zero so this needs only one multiplication */\n\t    lo-=(carry*DIVBASE);\n\t    /* the correction here will be at most +1; do it */\n\t    if (lo>=DIVBASE) {\n\t      lo-=DIVBASE;\n\t      carry++;\n\t      }\n\t    }\n\t#endif\n\tif (lo>*ua) {\t\t   /* borrow needed */\n\t  *ua+=DIVBASE;\n\t  carry++;\n\t  }\n\t*ua-=lo;\n\t} /* ud loop */\n      if (carry) *ua-=carry;\t   /* accdigits>divdigits [cannot borrow] */\n      } /* inner loop */\n\n    /* the outer loop terminates when there is either an exact result */\n    /* or enough digits; first update the quotient digit count and */\n    /* pointer (if any significant digits) */\n    #if DECTRACE\n    if (*lsuq || quodigits) printf(\"*lsuq=%09ld\\n\", (LI)*lsuq);\n    #endif\n    if (quodigits) {\n      quodigits+=9;\t\t   /* had leading unit earlier */\n      lsuq--;\n      if (quodigits>DECPMAX+1) break;\t/* have enough */\n      }\n     else if (*lsuq) {\t\t   /* first quotient digits */\n      const uInt *pow;\n      for (pow=DECPOWERS; *lsuq>=*pow; pow++) quodigits++;\n      lsuq--;\n      /* [cannot have >DECPMAX+1 on first unit] */\n      }\n\n    if (*msua!=0) continue;\t   /* not an exact result */\n    /* acc is zero iff used all of original units and zero down to lsua */\n    /* (must also continue to original lsu for correct quotient length) */\n    if (lsua>acc+DIVACCLEN-DIVOPLEN) continue;\n    for (; msua>lsua && *msua==0;) msua--;\n    if (*msua==0 && msua==lsua) break;\n    } /* outer loop */\n\n  /* all of the original operand in acc has been covered at this point */\n  /* quotient now has at least DECPMAX+2 digits */\n  /* *msua is now non-0 if inexact and sticky bits */\n  /* lsuq is one below the last uint of the quotient */\n  lsuq++;\t\t\t   /* set -> true lsu of quo */\n  if (*msua) *lsuq|=1;\t\t   /* apply sticky bit */\n\n  /* quo now holds the (unrounded) quotient in base-billion; one */\n  /* base-billion 'digit' per uInt. */\n  #if DECTRACE\n  printf(\"DivQuo:\");\n  for (uq=msuq; uq>=lsuq; uq--) printf(\" %09ld\", (LI)*uq);\n  printf(\"\\n\");\n  #endif\n\n  /* Now convert to BCD for rounding and cleanup, starting from the */\n  /* most significant end [offset by one into bcdacc to leave room */\n  /* for a possible carry digit if rounding for REMNEAR is needed] */\n  for (uq=msuq, ub=bcdacc+1; uq>=lsuq; uq--, ub+=9) {\n    uInt top, mid, rem; \t\t/* work */\n    if (*uq==0) {\t\t\t/* no split needed */\n      UBFROMUI(ub, 0);\t\t\t/* clear 9 BCD8s */\n      UBFROMUI(ub+4, 0);\t\t/* .. */\n      *(ub+8)=0;\t\t\t/* .. */\n      continue;\n      }\n    /* *uq is non-zero -- split the base-billion digit into */\n    /* hi, mid, and low three-digits */\n    #define divsplit9 1000000\t\t/* divisor */\n    #define divsplit6 1000\t\t/* divisor */\n    /* The splitting is done by simple divides and remainders, */\n    /* assuming the compiler will optimize these [GCC does] */\n    top=*uq/divsplit9;\n    rem=*uq%divsplit9;\n    mid=rem/divsplit6;\n    rem=rem%divsplit6;\n    /* lay out the nine BCD digits (plus one unwanted byte) */\n    UBFROMUI(ub,   UBTOUI(&BIN2BCD8[top*4]));\n    UBFROMUI(ub+3, UBTOUI(&BIN2BCD8[mid*4]));\n    UBFROMUI(ub+6, UBTOUI(&BIN2BCD8[rem*4]));\n    } /* BCD conversion loop */\n  ub--; \t\t\t\t/* -> lsu */\n\n  /* complete the bcdnum; quodigits is correct, so the position of */\n  /* the first non-zero is known */\n  num.msd=bcdacc+1+(msuq-lsuq+1)*9-quodigits;\n  num.lsd=ub;\n\n  /* make exponent adjustments, etc */\n  if (lsua<acc+DIVACCLEN-DIVOPLEN) {\t/* used extra digits */\n    num.exponent-=(Int)((acc+DIVACCLEN-DIVOPLEN-lsua)*9);\n    /* if the result was exact then there may be up to 8 extra */\n    /* trailing zeros in the overflowed quotient final unit */\n    if (*msua==0) {\n      for (; *ub==0;) ub--;\t\t/* drop zeros */\n      num.exponent+=(Int)(num.lsd-ub);\t/* and adjust exponent */\n      num.lsd=ub;\n      }\n    } /* adjustment needed */\n\n  #if DIVCOUNT\n  if (divcount>maxcount) {\t\t/* new high-water nark */\n    maxcount=divcount;\n    printf(\"DivNewMaxCount: %ld\\n\", (LI)maxcount);\n    }\n  #endif\n\n  if (op&DIVIDE) return decFinalize(result, &num, set); /* all done */\n\n  /* Is DIVIDEINT or a remainder; there is more to do -- first form */\n  /* the integer (this is done 'after the fact', unlike as in */\n  /* decNumber, so as not to tax DIVIDE) */\n\n  /* The first non-zero digit will be in the first 9 digits, known */\n  /* from quodigits and num.msd, so there is always space for DECPMAX */\n  /* digits */\n\n  length=(Int)(num.lsd-num.msd+1);\n  /*printf(\"Length exp: %ld %ld\\n\", (LI)length, (LI)num.exponent); */\n\n  if (length+num.exponent>DECPMAX) { /* cannot fit */\n    decFloatZero(result);\n    DFWORD(result, 0)=DECFLOAT_qNaN;\n    set->status|=DEC_Division_impossible;\n    return result;\n    }\n\n  if (num.exponent>=0) {\t   /* already an int, or need pad zeros */\n    for (ub=num.lsd+1; ub<=num.lsd+num.exponent; ub++) *ub=0;\n    num.lsd+=num.exponent;\n    }\n   else {\t\t\t   /* too long: round or truncate needed */\n    Int drop=-num.exponent;\n    if (!(op&REMNEAR)) {\t   /* simple truncate */\n      num.lsd-=drop;\n      if (num.lsd<num.msd) {\t   /* truncated all */\n\tnum.lsd=num.msd;\t   /* make 0 */\n\t*num.lsd=0;\t\t   /* .. [sign still relevant] */\n\t}\n      }\n     else {\t\t\t   /* round to nearest even [sigh] */\n      /* round-to-nearest, in-place; msd is at or to right of bcdacc+1 */\n      /* (this is a special case of Quantize -- q.v. for commentary) */\n      uByte *roundat;\t\t   /* -> re-round digit */\n      uByte reround;\t\t   /* reround value */\n      *(num.msd-1)=0;\t\t   /* in case of left carry, or make 0 */\n      if (drop<length) roundat=num.lsd-drop+1;\n       else if (drop==length) roundat=num.msd;\n       else roundat=num.msd-1;\t   /* [-> 0] */\n      reround=*roundat;\n      for (ub=roundat+1; ub<=num.lsd; ub++) {\n\tif (*ub!=0) {\n\t  reround=DECSTICKYTAB[reround];\n\t  break;\n\t  }\n\t} /* check stickies */\n      if (roundat>num.msd) num.lsd=roundat-1;\n       else {\n\tnum.msd--;\t\t\t     /* use the 0 .. */\n\tnum.lsd=num.msd;\t\t     /* .. at the new MSD place */\n\t}\n      if (reround!=0) { \t\t     /* discarding non-zero */\n\tuInt bump=0;\n\t/* rounding is DEC_ROUND_HALF_EVEN always */\n\tif (reround>5) bump=1;\t\t     /* >0.5 goes up */\n\t else if (reround==5)\t\t     /* exactly 0.5000 .. */\n\t  bump=*(num.lsd) & 0x01;\t     /* .. up iff [new] lsd is odd */\n\tif (bump!=0) {\t\t\t     /* need increment */\n\t  /* increment the coefficient; this might end up with 1000... */\n\t  ub=num.lsd;\n\t  for (; UBTOUI(ub-3)==0x09090909; ub-=4) UBFROMUI(ub-3, 0);\n\t  for (; *ub==9; ub--) *ub=0;\t     /* at most 3 more */\n\t  *ub+=1;\n\t  if (ub<num.msd) num.msd--;\t     /* carried */\n\t  } /* bump needed */\n\t} /* reround!=0 */\n      } /* remnear */\n    } /* round or truncate needed */\n  num.exponent=0;\t\t\t     /* all paths */\n  /*decShowNum(&num, \"int\"); */\n\n  if (op&DIVIDEINT) return decFinalize(result, &num, set); /* all done */\n\n  /* Have a remainder to calculate */\n  decFinalize(&quotient, &num, set);\t     /* lay out the integer so far */\n  DFWORD(&quotient, 0)^=DECFLOAT_Sign;\t     /* negate it */\n  sign=DFWORD(dfl, 0);\t\t\t     /* save sign of dfl */\n  decFloatFMA(result, &quotient, dfr, dfl, set);\n  if (!DFISZERO(result)) return result;\n  /* if the result is zero the sign shall be sign of dfl */\n  DFWORD(&quotient, 0)=sign;\t\t     /* construct decFloat of sign */\n  return decFloatCopySign(result, result, &quotient);\n  }",
+      "fn_code_pos": [
+        [
+          176,
+          0
+        ],
+        [
+          672,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decDivide",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext",
+          "op": "uInt"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "static void decFiniteMultiply(bcdnum *num, uByte *bcdacc,\n\t\t\t      const decFloat *dfl, const decFloat *dfr) {\n  uInt\t bufl[MULOPLEN];\t   /* left  coefficient (base-billion) */\n  uInt\t bufr[MULOPLEN];\t   /* right coefficient (base-billion) */\n  uInt\t *ui, *uj;\t\t   /* work */\n  uByte  *ub;\t\t\t   /* .. */\n  uInt\t uiwork;\t\t   /* for macros */\n\n  #if DECUSE64\n  uLong  accl[MULACCLEN];\t   /* lazy accumulator (base-billion+) */\n  uLong  *pl;\t\t\t   /* work -> lazy accumulator */\n  uInt\t acc[MULACCLEN];\t   /* coefficent in base-billion .. */\n  #else\n  uInt\t acc[MULACCLEN*2];\t   /* accumulator in base-billion .. */\n  #endif\n  uInt\t *pa;\t\t\t   /* work -> accumulator */\n  /*printf(\"Base10**9: OpLen=%d MulAcclen=%d\\n\", OPLEN, MULACCLEN); */\n\n  /* Calculate sign and exponent */\n  num->sign=(DFWORD(dfl, 0)^DFWORD(dfr, 0)) & DECFLOAT_Sign;\n  num->exponent=GETEXPUN(dfl)+GETEXPUN(dfr); /* [see assertion above] */\n\n  /* Extract the coefficients and prepare the accumulator */\n  /* the coefficients of the operands are decoded into base-billion */\n  /* numbers in uInt arrays (bufl and bufr, LSD at offset 0) of the */\n  /* appropriate size. */\n  GETCOEFFBILL(dfl, bufl);\n  GETCOEFFBILL(dfr, bufr);\n  #if DECTRACE && 0\n    printf(\"CoeffbL:\");\n    for (ui=bufl+MULOPLEN-1; ui>=bufl; ui--) printf(\" %08lx\", (LI)*ui);\n    printf(\"\\n\");\n    printf(\"CoeffbR:\");\n    for (uj=bufr+MULOPLEN-1; uj>=bufr; uj--) printf(\" %08lx\", (LI)*uj);\n    printf(\"\\n\");\n  #endif\n\n  /* start the 64-bit/32-bit differing paths... */\n#if DECUSE64\n\n  /* zero the accumulator */\n  #if MULACCLEN==4\n    accl[0]=0; accl[1]=0; accl[2]=0; accl[3]=0;\n  #else \t\t\t\t     /* use a loop */\n    /* MULACCLEN is a multiple of four, asserted above */\n    for (pl=accl; pl<accl+MULACCLEN; pl+=4) {\n      *pl=0; *(pl+1)=0; *(pl+2)=0; *(pl+3)=0;/* [reduce overhead] */\n      } /* pl */\n  #endif\n\n  /* Effect the multiplication */\n  /* The multiplcation proceeds using MFC's lazy-carry resolution */\n  /* algorithm from decNumber.\tFirst, the multiplication is */\n  /* effected, allowing accumulation of the partial products (which */\n  /* are in base-billion at each column position) into 64 bits */\n  /* without resolving back to base=billion after each addition. */\n  /* These 64-bit numbers (which may contain up to 19 decimal digits) */\n  /* are then split using the Clark & Cowlishaw algorithm (see below). */\n  /* [Testing for 0 in the inner loop is not really a 'win'] */\n  for (ui=bufr; ui<bufr+MULOPLEN; ui++) { /* over each item in rhs */\n    if (*ui==0) continue;\t\t  /* product cannot affect result */\n    pl=accl+(ui-bufr);\t\t\t  /* where to add the lhs */\n    for (uj=bufl; uj<bufl+MULOPLEN; uj++, pl++) { /* over each item in lhs */\n      /* if (*uj==0) continue;\t\t  // product cannot affect result */\n      *pl+=((uLong)*ui)*(*uj);\n      } /* uj */\n    } /* ui */\n\n  /* The 64-bit carries must now be resolved; this means that a */\n  /* quotient/remainder has to be calculated for base-billion (1E+9). */\n  /* For this, Clark & Cowlishaw's quotient estimation approach (also */\n  /* used in decNumber) is needed, because 64-bit divide is generally */\n  /* extremely slow on 32-bit machines, and may be slower than this */\n  /* approach even on 64-bit machines.\tThis algorithm splits X */\n  /* using: */\n  /* */\n  /*   magic=2**(A+B)/1E+9;   // 'magic number' */\n  /*   hop=X/2**A;\t      // high order part of X (by shift) */\n  /*   est=magic*hop/2**B     // quotient estimate (may be low by 1) */\n  /* */\n  /* A and B are quite constrained; hop and magic must fit in 32 bits, */\n  /* and 2**(A+B) must be as large as possible (which is 2**61 if */\n  /* magic is to fit).\tFurther, maxX increases with the length of */\n  /* the operands (and hence the number of partial products */\n  /* accumulated); maxX is OPLEN*(10**18), which is up to 19 digits. */\n  /* */\n  /* It can be shown that when OPLEN is 2 then the maximum error in */\n  /* the estimated quotient is <1, but for larger maximum x the */\n  /* maximum error is above 1 so a correction that is >1 may be */\n  /* needed.  Values of A and B are chosen to satisfy the constraints */\n  /* just mentioned while minimizing the maximum error (and hence the */\n  /* maximum correction), as shown in the following table: */\n  /* */\n  /*   Type    OPLEN   A   B\t maxX\t maxError  maxCorrection */\n  /*   --------------------------------------------------------- */\n  /*   DOUBLE\t 2    29  32  <2*10**18    0.63       1 */\n  /*   QUAD\t 4    30  31  <4*10**18    1.17       2 */\n  /* */\n  /* In the OPLEN==2 case there is most choice, but the value for B */\n  /* of 32 has a big advantage as then the calculation of the */\n  /* estimate requires no shifting; the compiler can extract the high */\n  /* word directly after multiplying magic*hop. */\n  #define MULMAGIC 2305843009U\t\t/* 2**61/10**9\t[both cases] */\n  #if DOUBLE\n    #define MULSHIFTA 29\n    #define MULSHIFTB 32\n  #elif QUAD\n    #define MULSHIFTA 30\n    #define MULSHIFTB 31\n  #else\n    #error Unexpected type\n  #endif\n\n  #if DECTRACE\n  printf(\"MulAccl:\");\n  for (pl=accl+MULACCLEN-1; pl>=accl; pl--)\n    printf(\" %08lx:%08lx\", (LI)(*pl>>32), (LI)(*pl&0xffffffff));\n  printf(\"\\n\");\n  #endif\n\n  for (pl=accl, pa=acc; pl<accl+MULACCLEN; pl++, pa++) { /* each column position */\n    uInt lo, hop;\t\t\t/* work */\n    uInt est;\t\t\t\t/* cannot exceed 4E+9 */\n    if (*pl>=MULTBASE) {\n      /* *pl holds a binary number which needs to be split */\n      hop=(uInt)(*pl>>MULSHIFTA);\n      est=(uInt)(((uLong)hop*MULMAGIC)>>MULSHIFTB);\n      /* the estimate is now in est; now calculate hi:lo-est*10**9; */\n      /* happily the top word of the result is irrelevant because it */\n      /* will always be zero so this needs only one multiplication */\n      lo=(uInt)(*pl-((uLong)est*MULTBASE));  /* low word of result */\n      /* If QUAD, the correction here could be +2 */\n      if (lo>=MULTBASE) {\n\tlo-=MULTBASE;\t\t\t/* correct by +1 */\n\test++;\n\t#if QUAD\n\t/* may need to correct by +2 */\n\tif (lo>=MULTBASE) {\n\t  lo-=MULTBASE;\n\t  est++;\n\t  }\n\t#endif\n\t}\n      /* finally place lo as the new coefficient 'digit' and add est to */\n      /* the next place up [this is safe because this path is never */\n      /* taken on the final iteration as *pl will fit] */\n      *pa=lo;\n      *(pl+1)+=est;\n      } /* *pl needed split */\n     else {\t\t\t\t/* *pl<MULTBASE */\n      *pa=(uInt)*pl;\t\t\t/* just copy across */\n      }\n    } /* pl loop */\n\n#else  /* 32-bit */\n  for (pa=acc;; pa+=4) {\t\t     /* zero the accumulator */\n    *pa=0; *(pa+1)=0; *(pa+2)=0; *(pa+3)=0;  /* [reduce overhead] */\n    if (pa==acc+MULACCLEN*2-4) break;\t     /* multiple of 4 asserted */\n    } /* pa */\n\n  /* Effect the multiplication */\n  /* uLongs are not available (and in particular, there is no uLong */\n  /* divide) but it is still possible to use MFC's lazy-carry */\n  /* resolution algorithm from decNumber.  First, the multiplication */\n  /* is effected, allowing accumulation of the partial products */\n  /* (which are in base-billion at each column position) into 64 bits */\n  /* [with the high-order 32 bits in each position being held at */\n  /* offset +ACCLEN from the low-order 32 bits in the accumulator]. */\n  /* These 64-bit numbers (which may contain up to 19 decimal digits) */\n  /* are then split using the Clark & Cowlishaw algorithm (see */\n  /* below). */\n  for (ui=bufr;; ui++) {\t\t/* over each item in rhs */\n    uInt hi, lo;\t\t\t/* words of exact multiply result */\n    pa=acc+(ui-bufr);\t\t\t/* where to add the lhs */\n    for (uj=bufl;; uj++, pa++) {\t/* over each item in lhs */\n      LONGMUL32HI(hi, *ui, *uj);\t/* calculate product of digits */\n      lo=(*ui)*(*uj);\t\t\t/* .. */\n      *pa+=lo;\t\t\t\t/* accumulate low bits and .. */\n      *(pa+MULACCLEN)+=hi+(*pa<lo);\t/* .. high bits with any carry */\n      if (uj==bufl+MULOPLEN-1) break;\n      }\n    if (ui==bufr+MULOPLEN-1) break;\n    }\n\n  /* The 64-bit carries must now be resolved; this means that a */\n  /* quotient/remainder has to be calculated for base-billion (1E+9). */\n  /* For this, Clark & Cowlishaw's quotient estimation approach (also */\n  /* used in decNumber) is needed, because 64-bit divide is generally */\n  /* extremely slow on 32-bit machines.  This algorithm splits X */\n  /* using: */\n  /* */\n  /*   magic=2**(A+B)/1E+9;   // 'magic number' */\n  /*   hop=X/2**A;\t      // high order part of X (by shift) */\n  /*   est=magic*hop/2**B     // quotient estimate (may be low by 1) */\n  /* */\n  /* A and B are quite constrained; hop and magic must fit in 32 bits, */\n  /* and 2**(A+B) must be as large as possible (which is 2**61 if */\n  /* magic is to fit).\tFurther, maxX increases with the length of */\n  /* the operands (and hence the number of partial products */\n  /* accumulated); maxX is OPLEN*(10**18), which is up to 19 digits. */\n  /* */\n  /* It can be shown that when OPLEN is 2 then the maximum error in */\n  /* the estimated quotient is <1, but for larger maximum x the */\n  /* maximum error is above 1 so a correction that is >1 may be */\n  /* needed.  Values of A and B are chosen to satisfy the constraints */\n  /* just mentioned while minimizing the maximum error (and hence the */\n  /* maximum correction), as shown in the following table: */\n  /* */\n  /*   Type    OPLEN   A   B\t maxX\t maxError  maxCorrection */\n  /*   --------------------------------------------------------- */\n  /*   DOUBLE\t 2    29  32  <2*10**18    0.63       1 */\n  /*   QUAD\t 4    30  31  <4*10**18    1.17       2 */\n  /* */\n  /* In the OPLEN==2 case there is most choice, but the value for B */\n  /* of 32 has a big advantage as then the calculation of the */\n  /* estimate requires no shifting; the high word is simply */\n  /* calculated from multiplying magic*hop. */\n  #define MULMAGIC 2305843009U\t\t/* 2**61/10**9\t[both cases] */\n  #if DOUBLE\n    #define MULSHIFTA 29\n    #define MULSHIFTB 32\n  #elif QUAD\n    #define MULSHIFTA 30\n    #define MULSHIFTB 31\n  #else\n    #error Unexpected type\n  #endif\n\n  #if DECTRACE\n  printf(\"MulHiLo:\");\n  for (pa=acc+MULACCLEN-1; pa>=acc; pa--)\n    printf(\" %08lx:%08lx\", (LI)*(pa+MULACCLEN), (LI)*pa);\n  printf(\"\\n\");\n  #endif\n\n  for (pa=acc;; pa++) { \t\t/* each low uInt */\n    uInt hi, lo;\t\t\t/* words of exact multiply result */\n    uInt hop, estlo;\t\t\t/* work */\n    #if QUAD\n    uInt esthi; \t\t\t/* .. */\n    #endif\n\n    lo=*pa;\n    hi=*(pa+MULACCLEN); \t\t/* top 32 bits */\n    /* hi and lo now hold a binary number which needs to be split */\n\n    #if DOUBLE\n      hop=(hi<<3)+(lo>>MULSHIFTA);\t/* hi:lo/2**29 */\n      LONGMUL32HI(estlo, hop, MULMAGIC);/* only need the high word */\n      /* [MULSHIFTB is 32, so estlo can be used directly] */\n      /* the estimate is now in estlo; now calculate hi:lo-est*10**9; */\n      /* happily the top word of the result is irrelevant because it */\n      /* will always be zero so this needs only one multiplication */\n      lo-=(estlo*MULTBASE);\n      /* esthi=0;\t\t\t// high word is ignored below */\n      /* the correction here will be at most +1; do it */\n      if (lo>=MULTBASE) {\n\tlo-=MULTBASE;\n\testlo++;\n\t}\n    #elif QUAD\n      hop=(hi<<2)+(lo>>MULSHIFTA);\t/* hi:lo/2**30 */\n      LONGMUL32HI(esthi, hop, MULMAGIC);/* shift will be 31 .. */\n      estlo=hop*MULMAGIC;\t\t/* .. so low word needed */\n      estlo=(esthi<<1)+(estlo>>MULSHIFTB); /* [just the top bit] */\n      /* esthi=0;\t\t\t// high word is ignored below */\n      lo-=(estlo*MULTBASE);\t\t/* as above */\n      /* the correction here could be +1 or +2 */\n      if (lo>=MULTBASE) {\n\tlo-=MULTBASE;\n\testlo++;\n\t}\n      if (lo>=MULTBASE) {\n\tlo-=MULTBASE;\n\testlo++;\n\t}\n    #else\n      #error Unexpected type\n    #endif\n\n    /* finally place lo as the new accumulator digit and add est to */\n    /* the next place up; this latter add could cause a carry of 1 */\n    /* to the high word of the next place */\n    *pa=lo;\n    *(pa+1)+=estlo;\n    /* esthi is always 0 for DOUBLE and QUAD so this is skipped */\n    /* *(pa+1+MULACCLEN)+=esthi; */\n    if (*(pa+1)<estlo) *(pa+1+MULACCLEN)+=1; /* carry */\n    if (pa==acc+MULACCLEN-2) break;\t     /* [MULACCLEN-1 will never need split] */\n    } /* pa loop */\n#endif\n\n  /* At this point, whether using the 64-bit or the 32-bit paths, the */\n  /* accumulator now holds the (unrounded) result in base-billion; */\n  /* one base-billion 'digit' per uInt. */\n  #if DECTRACE\n  printf(\"MultAcc:\");\n  for (pa=acc+MULACCLEN-1; pa>=acc; pa--) printf(\" %09ld\", (LI)*pa);\n  printf(\"\\n\");\n  #endif\n\n  /* Now convert to BCD for rounding and cleanup, starting from the */\n  /* most significant end */\n  pa=acc+MULACCLEN-1;\n  if (*pa!=0) num->msd=bcdacc+LEADZEROS;/* drop known lead zeros */\n   else {\t\t\t\t/* >=1 word of leading zeros */\n    num->msd=bcdacc;\t\t\t/* known leading zeros are gone */\n    pa--;\t\t\t\t/* skip first word .. */\n    for (; *pa==0; pa--) if (pa==acc) break; /* .. and any more leading 0s */\n    }\n  for (ub=bcdacc;; pa--, ub+=9) {\n    if (*pa!=0) {\t\t\t/* split(s) needed */\n      uInt top, mid, rem;\t\t/* work */\n      /* *pa is non-zero -- split the base-billion acc digit into */\n      /* hi, mid, and low three-digits */\n      #define mulsplit9 1000000 \t/* divisor */\n      #define mulsplit6 1000\t\t/* divisor */\n      /* The splitting is done by simple divides and remainders, */\n      /* assuming the compiler will optimize these where useful */\n      /* [GCC does] */\n      top=*pa/mulsplit9;\n      rem=*pa%mulsplit9;\n      mid=rem/mulsplit6;\n      rem=rem%mulsplit6;\n      /* lay out the nine BCD digits (plus one unwanted byte) */\n      UBFROMUI(ub,   UBTOUI(&BIN2BCD8[top*4]));\n      UBFROMUI(ub+3, UBTOUI(&BIN2BCD8[mid*4]));\n      UBFROMUI(ub+6, UBTOUI(&BIN2BCD8[rem*4]));\n      }\n     else {\t\t\t\t/* *pa==0 */\n      UBFROMUI(ub, 0);\t\t\t/* clear 9 BCD8s */\n      UBFROMUI(ub+4, 0);\t\t/* .. */\n      *(ub+8)=0;\t\t\t/* .. */\n      }\n    if (pa==acc) break;\n    } /* BCD conversion loop */\n\n  num->lsd=ub+8;\t\t\t/* complete the bcdnum .. */\n\n  #if DECTRACE\n  decShowNum(num, \"postmult\");\n  decFloatShow(dfl, \"dfl\");\n  decFloatShow(dfr, \"dfr\");\n  #endif\n  return;\n  }",
+      "fn_code_pos": [
+        [
+          717,
+          0
+        ],
+        [
+          1062,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFiniteMultiply",
+        "parameters": {
+          "num": "bcdnum",
+          "bcdacc": "uByte",
+          "dfl": "decFloat",
+          "dfr": "decFloat"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatAbs(decFloat *result, const decFloat *df,\n\t\t       decContext *set) {\n  if (DFISNAN(df)) return decNaNs(result, df, NULL, set);\n  decCanonical(result, df);\t\t/* copy and check */\n  DFBYTE(result, 0)&=~0x80;\t\t/* zero sign bit */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          1078,
+          0
+        ],
+        [
+          1084,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatAbs",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatAdd(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set) {\n  bcdnum num;\t\t\t   /* for final conversion */\n  Int\t bexpl, bexpr;\t\t   /* left and right biased exponents */\n  uByte  *ub, *us, *ut; \t   /* work */\n  uInt\t uiwork;\t\t   /* for macros */\n  #if QUAD\n  uShort uswork;\t\t   /* .. */\n  #endif\n\n  uInt sourhil, sourhir;\t   /* top words from source decFloats */\n\t\t\t\t   /* [valid only through end of */\n\t\t\t\t   /* fastpath code -- before swap] */\n  uInt diffsign;\t\t   /* non-zero if signs differ */\n  uInt carry;\t\t\t   /* carry: 0 or 1 before add loop */\n  Int  overlap; \t\t   /* coefficient overlap (if full) */\n  Int  summ;\t\t\t   /* sum of the MSDs */\n  /* the following buffers hold coefficients with various alignments */\n  /* (see commentary and diagrams below) */\n  uByte acc[4+2+DECPMAX*3+8];\n  uByte buf[4+2+DECPMAX*2];\n  uByte *umsd, *ulsd;\t\t   /* local MSD and LSD pointers */\n\n  #if DECLITEND\n    #define CARRYPAT 0x01000000    /* carry=1 pattern */\n  #else\n    #define CARRYPAT 0x00000001    /* carry=1 pattern */\n  #endif\n\n  /* Start decoding the arguments */\n  /* The initial exponents are placed into the opposite Ints to */\n  /* that which might be expected; there are two sets of data to */\n  /* keep track of (each decFloat and the corresponding exponent), */\n  /* and this scheme means that at the swap point (after comparing */\n  /* exponents) only one pair of words needs to be swapped */\n  /* whichever path is taken (thereby minimising worst-case path). */\n  /* The calculated exponents will be nonsense when the arguments are */\n  /* Special, but are not used in that path */\n  sourhil=DFWORD(dfl, 0);\t   /* LHS top word */\n  summ=DECTESTMSD[sourhil>>26];    /* get first MSD for testing */\n  bexpr=DECCOMBEXP[sourhil>>26];   /* get exponent high bits (in place) */\n  bexpr+=GETECON(dfl);\t\t   /* .. + continuation */\n\n  sourhir=DFWORD(dfr, 0);\t   /* RHS top word */\n  summ+=DECTESTMSD[sourhir>>26];   /* sum MSDs for testing */\n  bexpl=DECCOMBEXP[sourhir>>26];\n  bexpl+=GETECON(dfr);\n\n  /* here bexpr has biased exponent from lhs, and vice versa */\n\n  diffsign=(sourhil^sourhir)&DECFLOAT_Sign;\n\n  /* now determine whether to take a fast path or the full-function */\n  /* slow path.  The slow path must be taken when: */\n  /*   -- both numbers are finite, and: */\n  /*\t     the exponents are different, or */\n  /*\t     the signs are different, or */\n  /*\t     the sum of the MSDs is >8 (hence might overflow) */\n  /* specialness and the sum of the MSDs can be tested at once using */\n  /* the summ value just calculated, so the test for specials is no */\n  /* longer on the worst-case path (as of 3.60) */\n\n  if (summ<=8) {\t\t   /* MSD+MSD is good, or there is a special */\n    if (summ<0) {\t\t   /* there is a special */\n      /* Inf+Inf would give -64; Inf+finite is -32 or higher */\n      if (summ<-64) return decNaNs(result, dfl, dfr, set);  /* one or two NaNs */\n      /* two infinities with different signs is invalid */\n      if (summ==-64 && diffsign) return decInvalid(result, set);\n      if (DFISINF(dfl)) return decInfinity(result, dfl);    /* LHS is infinite */\n      return decInfinity(result, dfr);\t\t\t    /* RHS must be Inf */\n      }\n    /* Here when both arguments are finite; fast path is possible */\n    /* (currently only for aligned and same-sign) */\n    if (bexpr==bexpl && !diffsign) {\n      uInt tac[DECLETS+1];\t\t/* base-1000 coefficient */\n      uInt encode;\t\t\t/* work */\n\n      /* Get one coefficient as base-1000 and add the other */\n      GETCOEFFTHOU(dfl, tac);\t\t/* least-significant goes to [0] */\n      ADDCOEFFTHOU(dfr, tac);\n      /* here the sum of the MSDs (plus any carry) will be <10 due to */\n      /* the fastpath test earlier */\n\n      /* construct the result; low word is the same for both formats */\n      encode =BIN2DPD[tac[0]];\n      encode|=BIN2DPD[tac[1]]<<10;\n      encode|=BIN2DPD[tac[2]]<<20;\n      encode|=BIN2DPD[tac[3]]<<30;\n      DFWORD(result, (DECBYTES/4)-1)=encode;\n\n      /* collect next two declets (all that remains, for Double) */\n      encode =BIN2DPD[tac[3]]>>2;\n      encode|=BIN2DPD[tac[4]]<<8;\n\n      #if QUAD\n      /* complete and lay out middling words */\n      encode|=BIN2DPD[tac[5]]<<18;\n      encode|=BIN2DPD[tac[6]]<<28;\n      DFWORD(result, 2)=encode;\n\n      encode =BIN2DPD[tac[6]]>>4;\n      encode|=BIN2DPD[tac[7]]<<6;\n      encode|=BIN2DPD[tac[8]]<<16;\n      encode|=BIN2DPD[tac[9]]<<26;\n      DFWORD(result, 1)=encode;\n\n      /* and final two declets */\n      encode =BIN2DPD[tac[9]]>>6;\n      encode|=BIN2DPD[tac[10]]<<4;\n      #endif\n\n      /* add exponent continuation and sign (from either argument) */\n      encode|=sourhil & (ECONMASK | DECFLOAT_Sign);\n\n      /* create lookup index = MSD + top two bits of biased exponent <<4 */\n      tac[DECLETS]|=(bexpl>>DECECONL)<<4;\n      encode|=DECCOMBFROM[tac[DECLETS]]; /* add constructed combination field */\n      DFWORD(result, 0)=encode; \t /* complete */\n\n      /* decFloatShow(result, \">\"); */\n      return result;\n      } /* fast path OK */\n    /* drop through to slow path */\n    } /* low sum or Special(s) */\n\n  /* Slow path required -- arguments are finite and might overflow,   */\n  /* or require alignment, or might have different signs\t      */\n\n  /* now swap either exponents or argument pointers */\n  if (bexpl<=bexpr) {\n    /* original left is bigger */\n    Int bexpswap=bexpl;\n    bexpl=bexpr;\n    bexpr=bexpswap;\n    /* printf(\"left bigger\\n\"); */\n    }\n   else {\n    const decFloat *dfswap=dfl;\n    dfl=dfr;\n    dfr=dfswap;\n    /* printf(\"right bigger\\n\"); */\n    }\n  /* [here dfl and bexpl refer to the datum with the larger exponent, */\n  /* of if the exponents are equal then the original LHS argument] */\n\n  /* if lhs is zero then result will be the rhs (now known to have */\n  /* the smaller exponent), which also may need to be tested for zero */\n  /* for the weird IEEE 754 sign rules */\n  if (DFISZERO(dfl)) {\n    decCanonical(result, dfr);\t\t     /* clean copy */\n    /* \"When the sum of two operands with opposite signs is */\n    /* exactly zero, the sign of that sum shall be '+' in all */\n    /* rounding modes except round toward -Infinity, in which */\n    /* mode that sign shall be '-'.\" */\n    if (diffsign && DFISZERO(result)) {\n      DFWORD(result, 0)&=~DECFLOAT_Sign;     /* assume sign 0 */\n      if (set->round==DEC_ROUND_FLOOR) DFWORD(result, 0)|=DECFLOAT_Sign;\n      }\n    return result;\n    } /* numfl is zero */\n  /* [here, LHS is non-zero; code below assumes that] */\n\n  /* Coefficients layout during the calculations to follow: */\n  /* */\n  /*\t   Overlap case: */\n  /*\t   +------------------------------------------------+ */\n  /* acc:  |0000|      coeffa\t   | tail B |\t\t    | */\n  /*\t   +------------------------------------------------+ */\n  /* buf:  |0000| pad0s |      coeffb\t    |\t\t    | */\n  /*\t   +------------------------------------------------+ */\n  /* */\n  /*\t   Touching coefficients or gap: */\n  /*\t   +------------------------------------------------+ */\n  /* acc:  |0000|      coeffa\t   | gap |\tcoeffb\t    | */\n  /*\t   +------------------------------------------------+ */\n  /*\t   [buf not used or needed; gap clamped to Pmax] */\n\n  /* lay out lhs coefficient into accumulator; this starts at acc+4 */\n  /* for decDouble or acc+6 for decQuad so the LSD is word- */\n  /* aligned; the top word gap is there only in case a carry digit */\n  /* is prefixed after the add -- it does not need to be zeroed */\n  #if DOUBLE\n    #define COFF 4\t\t\t/* offset into acc */\n  #elif QUAD\n    UBFROMUS(acc+4, 0); \t\t/* prefix 00 */\n    #define COFF 6\t\t\t/* offset into acc */\n  #endif\n\n  GETCOEFF(dfl, acc+COFF);\t\t/* decode from decFloat */\n  ulsd=acc+COFF+DECPMAX-1;\n  umsd=acc+4;\t\t\t\t/* [having this here avoids */\n\n  #if DECTRACE\n  {bcdnum tum;\n  tum.msd=umsd;\n  tum.lsd=ulsd;\n  tum.exponent=bexpl-DECBIAS;\n  tum.sign=DFWORD(dfl, 0) & DECFLOAT_Sign;\n  decShowNum(&tum, \"dflx\");}\n  #endif\n\n  /* if signs differ, take ten's complement of lhs (here the */\n  /* coefficient is subtracted from all-nines; the 1 is added during */\n  /* the later add cycle -- zeros to the right do not matter because */\n  /* the complement of zero is zero); these are fixed-length inverts */\n  /* where the lsd is known to be at a 4-byte boundary (so no borrow */\n  /* possible) */\n  carry=0;\t\t\t\t/* assume no carry */\n  if (diffsign) {\n    carry=CARRYPAT;\t\t\t/* for +1 during add */\n    UBFROMUI(acc+ 4, 0x09090909-UBTOUI(acc+ 4));\n    UBFROMUI(acc+ 8, 0x09090909-UBTOUI(acc+ 8));\n    UBFROMUI(acc+12, 0x09090909-UBTOUI(acc+12));\n    UBFROMUI(acc+16, 0x09090909-UBTOUI(acc+16));\n    #if QUAD\n    UBFROMUI(acc+20, 0x09090909-UBTOUI(acc+20));\n    UBFROMUI(acc+24, 0x09090909-UBTOUI(acc+24));\n    UBFROMUI(acc+28, 0x09090909-UBTOUI(acc+28));\n    UBFROMUI(acc+32, 0x09090909-UBTOUI(acc+32));\n    UBFROMUI(acc+36, 0x09090909-UBTOUI(acc+36));\n    #endif\n    } /* diffsign */\n\n  /* now process the rhs coefficient; if it cannot overlap lhs then */\n  /* it can be put straight into acc (with an appropriate gap, if */\n  /* needed) because no actual addition will be needed (except */\n  /* possibly to complete ten's complement) */\n  overlap=DECPMAX-(bexpl-bexpr);\n  #if DECTRACE\n  printf(\"exps: %ld %ld\\n\", (LI)(bexpl-DECBIAS), (LI)(bexpr-DECBIAS));\n  printf(\"Overlap=%ld carry=%08lx\\n\", (LI)overlap, (LI)carry);\n  #endif\n\n  if (overlap<=0) {\t\t\t/* no overlap possible */\n    uInt gap;\t\t\t\t/* local work */\n    /* since a full addition is not needed, a ten's complement */\n    /* calculation started above may need to be completed */\n    if (carry) {\n      for (ub=ulsd; *ub==9; ub--) *ub=0;\n      *ub+=1;\n      carry=0;\t\t\t\t/* taken care of */\n      }\n    /* up to DECPMAX-1 digits of the final result can extend down */\n    /* below the LSD of the lhs, so if the gap is >DECPMAX then the */\n    /* rhs will be simply sticky bits.\tIn this case the gap is */\n    /* clamped to DECPMAX and the exponent adjusted to suit [this is */\n    /* safe because the lhs is non-zero]. */\n    gap=-overlap;\n    if (gap>DECPMAX) {\n      bexpr+=gap-1;\n      gap=DECPMAX;\n      }\n    ub=ulsd+gap+1;\t\t\t/* where MSD will go */\n    /* Fill the gap with 0s; note that there is no addition to do */\n    ut=acc+COFF+DECPMAX;\t\t/* start of gap */\n    for (; ut<ub; ut+=4) UBFROMUI(ut, 0); /* mind the gap */\n    if (overlap<-DECPMAX) {\t\t/* gap was > DECPMAX */\n      *ub=(uByte)(!DFISZERO(dfr));\t/* make sticky digit */\n      }\n     else {\t\t\t\t/* need full coefficient */\n      GETCOEFF(dfr, ub);\t\t/* decode from decFloat */\n      ub+=DECPMAX-1;\t\t\t/* new LSD... */\n      }\n    ulsd=ub;\t\t\t\t/* save new LSD */\n    } /* no overlap possible */\n\n   else {\t\t\t\t/* overlap>0 */\n    /* coefficients overlap (perhaps completely, although also */\n    /* perhaps only where zeros) */\n    if (overlap==DECPMAX) {\t\t/* aligned */\n      ub=buf+COFF;\t\t\t/* where msd will go */\n      #if QUAD\n      UBFROMUS(buf+4, 0);\t\t/* clear quad's 00 */\n      #endif\n      GETCOEFF(dfr, ub);\t\t/* decode from decFloat */\n      }\n     else {\t\t\t\t/* unaligned */\n      ub=buf+COFF+DECPMAX-overlap;\t/* where MSD will go */\n      /* Fill the prefix gap with 0s; 8 will cover most common */\n      /* unalignments, so start with direct assignments (a loop is */\n      /* then used for any remaining -- the loop (and the one in a */\n      /* moment) is not then on the critical path because the number */\n      /* of additions is reduced by (at least) two in this case) */\n      UBFROMUI(buf+4, 0);\t\t/* [clears decQuad 00 too] */\n      UBFROMUI(buf+8, 0);\n      if (ub>buf+12) {\n\tut=buf+12;\t\t\t/* start any remaining */\n\tfor (; ut<ub; ut+=4) UBFROMUI(ut, 0); /* fill them */\n\t}\n      GETCOEFF(dfr, ub);\t\t/* decode from decFloat */\n\n      /* now move tail of rhs across to main acc; again use direct */\n      /* copies for 8 digits-worth */\n      UBFROMUI(acc+COFF+DECPMAX,   UBTOUI(buf+COFF+DECPMAX));\n      UBFROMUI(acc+COFF+DECPMAX+4, UBTOUI(buf+COFF+DECPMAX+4));\n      if (buf+COFF+DECPMAX+8<ub+DECPMAX) {\n\tus=buf+COFF+DECPMAX+8;\t\t/* source */\n\tut=acc+COFF+DECPMAX+8;\t\t/* target */\n\tfor (; us<ub+DECPMAX; us+=4, ut+=4) UBFROMUI(ut, UBTOUI(us));\n\t}\n      } /* unaligned */\n\n    ulsd=acc+(ub-buf+DECPMAX-1);\t/* update LSD pointer */\n\n    /* Now do the add of the non-tail; this is all nicely aligned, */\n    /* and is over a multiple of four digits (because for Quad two */\n    /* zero digits were added on the left); words in both acc and */\n    /* buf (buf especially) will often be zero */\n    /* [byte-by-byte add, here, is about 15% slower total effect than */\n    /* the by-fours] */\n\n    /* Now effect the add; this is harder on a little-endian */\n    /* machine as the inter-digit carry cannot use the usual BCD */\n    /* addition trick because the bytes are loaded in the wrong order */\n    /* [this loop could be unrolled, but probably scarcely worth it] */\n\n    ut=acc+COFF+DECPMAX-4;\t\t/* target LSW (acc) */\n    us=buf+COFF+DECPMAX-4;\t\t/* source LSW (buf, to add to acc) */\n\n    #if !DECLITEND\n    for (; ut>=acc+4; ut-=4, us-=4) {\t/* big-endian add loop */\n      /* bcd8 add */\n      carry+=UBTOUI(us);\t\t/* rhs + carry */\n      if (carry==0) continue;\t\t/* no-op */\n      carry+=UBTOUI(ut);\t\t/* lhs */\n      /* Big-endian BCD adjust (uses internal carry) */\n      carry+=0x76f6f6f6;\t\t/* note top nibble not all bits */\n      /* apply BCD adjust and save */\n      UBFROMUI(ut, (carry & 0x0f0f0f0f) - ((carry & 0x60606060)>>4));\n      carry>>=31;\t\t\t/* true carry was at far left */\n      } /* add loop */\n    #else\n    for (; ut>=acc+4; ut-=4, us-=4) {\t/* little-endian add loop */\n      /* bcd8 add */\n      carry+=UBTOUI(us);\t\t/* rhs + carry */\n      if (carry==0) continue;\t\t/* no-op [common if unaligned] */\n      carry+=UBTOUI(ut);\t\t/* lhs */\n      /* Little-endian BCD adjust; inter-digit carry must be manual */\n      /* because the lsb from the array will be in the most-significant */\n      /* byte of carry */\n      carry+=0x76767676;\t\t/* note no inter-byte carries */\n      carry+=(carry & 0x80000000)>>15;\n      carry+=(carry & 0x00800000)>>15;\n      carry+=(carry & 0x00008000)>>15;\n      carry-=(carry & 0x60606060)>>4;\t/* BCD adjust back */\n      UBFROMUI(ut, carry & 0x0f0f0f0f); /* clear debris and save */\n      /* here, final carry-out bit is at 0x00000080; move it ready */\n      /* for next word-add (i.e., to 0x01000000) */\n      carry=(carry & 0x00000080)<<17;\n      } /* add loop */\n    #endif\n\n    #if DECTRACE\n    {bcdnum tum;\n    printf(\"Add done, carry=%08lx, diffsign=%ld\\n\", (LI)carry, (LI)diffsign);\n    tum.msd=umsd;  /* acc+4; */\n    tum.lsd=ulsd;\n    tum.exponent=0;\n    tum.sign=0;\n    decShowNum(&tum, \"dfadd\");}\n    #endif\n    } /* overlap possible */\n\n  /* ordering here is a little strange in order to have slowest path */\n  /* first in GCC asm listing */\n  if (diffsign) {\t\t   /* subtraction */\n    if (!carry) {\t\t   /* no carry out means RHS<LHS */\n      /* borrowed -- take ten's complement */\n      /* sign is lhs sign */\n      num.sign=DFWORD(dfl, 0) & DECFLOAT_Sign;\n\n      /* invert the coefficient first by fours, then add one; space */\n      /* at the end of the buffer ensures the by-fours is always */\n      /* safe, but lsd+1 must be cleared to prevent a borrow */\n      /* if big-endian */\n      #if !DECLITEND\n      *(ulsd+1)=0;\n      #endif\n      /* there are always at least four coefficient words */\n      UBFROMUI(umsd,\t0x09090909-UBTOUI(umsd));\n      UBFROMUI(umsd+4,\t0x09090909-UBTOUI(umsd+4));\n      UBFROMUI(umsd+8,\t0x09090909-UBTOUI(umsd+8));\n      UBFROMUI(umsd+12, 0x09090909-UBTOUI(umsd+12));\n      #if DOUBLE\n\t#define BNEXT 16\n      #elif QUAD\n\tUBFROMUI(umsd+16, 0x09090909-UBTOUI(umsd+16));\n\tUBFROMUI(umsd+20, 0x09090909-UBTOUI(umsd+20));\n\tUBFROMUI(umsd+24, 0x09090909-UBTOUI(umsd+24));\n\tUBFROMUI(umsd+28, 0x09090909-UBTOUI(umsd+28));\n\tUBFROMUI(umsd+32, 0x09090909-UBTOUI(umsd+32));\n\t#define BNEXT 36\n      #endif\n      if (ulsd>=umsd+BNEXT) {\t\t/* unaligned */\n\t/* eight will handle most unaligments for Double; 16 for Quad */\n\tUBFROMUI(umsd+BNEXT,   0x09090909-UBTOUI(umsd+BNEXT));\n\tUBFROMUI(umsd+BNEXT+4, 0x09090909-UBTOUI(umsd+BNEXT+4));\n\t#if DOUBLE\n\t#define BNEXTY (BNEXT+8)\n\t#elif QUAD\n\tUBFROMUI(umsd+BNEXT+8,\t0x09090909-UBTOUI(umsd+BNEXT+8));\n\tUBFROMUI(umsd+BNEXT+12, 0x09090909-UBTOUI(umsd+BNEXT+12));\n\t#define BNEXTY (BNEXT+16)\n\t#endif\n\tif (ulsd>=umsd+BNEXTY) {\t/* very unaligned */\n\t  ut=umsd+BNEXTY;\t\t/* -> continue */\n\t  for (;;ut+=4) {\n\t    UBFROMUI(ut, 0x09090909-UBTOUI(ut)); /* invert four digits */\n\t    if (ut>=ulsd-3) break;\t/* all done */\n\t    }\n\t  }\n\t}\n      /* complete the ten's complement by adding 1 */\n      for (ub=ulsd; *ub==9; ub--) *ub=0;\n      *ub+=1;\n      } /* borrowed */\n\n     else {\t\t\t   /* carry out means RHS>=LHS */\n      num.sign=DFWORD(dfr, 0) & DECFLOAT_Sign;\n      /* all done except for the special IEEE 754 exact-zero-result */\n      /* rule (see above); while testing for zero, strip leading */\n      /* zeros (which will save decFinalize doing it) (this is in */\n      /* diffsign path, so carry impossible and true umsd is */\n      /* acc+COFF) */\n\n      /* Check the initial coefficient area using the fast macro; */\n      /* this will often be all that needs to be done (as on the */\n      /* worst-case path when the subtraction was aligned and */\n      /* full-length) */\n      if (ISCOEFFZERO(acc+COFF)) {\n\tumsd=acc+COFF+DECPMAX-1;   /* so far, so zero */\n\tif (ulsd>umsd) {\t   /* more to check */\n\t  umsd++;\t\t   /* to align after checked area */\n\t  for (; UBTOUI(umsd)==0 && umsd+3<ulsd;) umsd+=4;\n\t  for (; *umsd==0 && umsd<ulsd;) umsd++;\n\t  }\n\tif (*umsd==0) { \t   /* must be true zero (and diffsign) */\n\t  num.sign=0;\t\t   /* assume + */\n\t  if (set->round==DEC_ROUND_FLOOR) num.sign=DECFLOAT_Sign;\n\t  }\n\t}\n      /* [else was not zero, might still have leading zeros] */\n      } /* subtraction gave positive result */\n    } /* diffsign */\n\n   else { /* same-sign addition */\n    num.sign=DFWORD(dfl, 0)&DECFLOAT_Sign;\n    #if DOUBLE\n    if (carry) {\t\t   /* only possible with decDouble */\n      *(acc+3)=1;\t\t   /* [Quad has leading 00] */\n      umsd=acc+3;\n      }\n    #endif\n    } /* same sign */\n\n  num.msd=umsd; \t\t   /* set MSD .. */\n  num.lsd=ulsd; \t\t   /* .. and LSD */\n  num.exponent=bexpr-DECBIAS;\t   /* set exponent to smaller, unbiassed */\n\n  #if DECTRACE\n  decFloatShow(dfl, \"dfl\");\n  decFloatShow(dfr, \"dfr\");\n  decShowNum(&num, \"postadd\");\n  #endif\n  return decFinalize(result, &num, set); /* round, check, and lay out */\n  }",
+      "fn_code_pos": [
+        [
+          1111,
+          0
+        ],
+        [
+          1577,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatAdd",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatAnd(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set) {\n  if (!DFISUINT01(dfl) || !DFISUINT01(dfr)\n   || !DFISCC01(dfl)   || !DFISCC01(dfr)) return decInvalid(result, set);\n  /* the operands are positive finite integers (q=0) with just 0s and 1s */\n  #if DOUBLE\n   DFWORD(result, 0)=ZEROWORD\n\t\t   |((DFWORD(dfl, 0) & DFWORD(dfr, 0))&0x04009124);\n   DFWORD(result, 1)=(DFWORD(dfl, 1) & DFWORD(dfr, 1))&0x49124491;\n  #elif QUAD\n   DFWORD(result, 0)=ZEROWORD\n\t\t   |((DFWORD(dfl, 0) & DFWORD(dfr, 0))&0x04000912);\n   DFWORD(result, 1)=(DFWORD(dfl, 1) & DFWORD(dfr, 1))&0x44912449;\n   DFWORD(result, 2)=(DFWORD(dfl, 2) & DFWORD(dfr, 2))&0x12449124;\n   DFWORD(result, 3)=(DFWORD(dfl, 3) & DFWORD(dfr, 3))&0x49124491;\n  #endif\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          1591,
+          0
+        ],
+        [
+          1609,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatAnd",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatCanonical(decFloat *result, const decFloat *df) {\n  return decCanonical(result, df);\n  }",
+      "fn_code_pos": [
+        [
+          1620,
+          0
+        ],
+        [
+          1622,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCanonical",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "enum decClass decFloatClass(const decFloat *df) {\n  Int exp;\t\t\t   /* exponent */\n  if (DFISSPECIAL(df)) {\n    if (DFISQNAN(df)) return DEC_CLASS_QNAN;\n    if (DFISSNAN(df)) return DEC_CLASS_SNAN;\n    /* must be an infinity */\n    if (DFISSIGNED(df)) return DEC_CLASS_NEG_INF;\n    return DEC_CLASS_POS_INF;\n    }\n  if (DFISZERO(df)) {\t\t   /* quite common */\n    if (DFISSIGNED(df)) return DEC_CLASS_NEG_ZERO;\n    return DEC_CLASS_POS_ZERO;\n    }\n  /* is finite and non-zero; similar code to decFloatIsNormal, here */\n  /* [this could be speeded up slightly by in-lining decFloatDigits] */\n  exp=GETEXPUN(df)\t\t   /* get unbiased exponent .. */\n     +decFloatDigits(df)-1;\t   /* .. and make adjusted exponent */\n  if (exp>=DECEMIN) {\t\t   /* is normal */\n    if (DFISSIGNED(df)) return DEC_CLASS_NEG_NORMAL;\n    return DEC_CLASS_POS_NORMAL;\n    }\n  /* is subnormal */\n  if (DFISSIGNED(df)) return DEC_CLASS_NEG_SUBNORMAL;\n  return DEC_CLASS_POS_SUBNORMAL;\n  }",
+      "fn_code_pos": [
+        [
+          1630,
+          0
+        ],
+        [
+          1654,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatClass",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "const char *decFloatClassString(const decFloat *df) {\n  enum decClass eclass=decFloatClass(df);\n  if (eclass==DEC_CLASS_POS_NORMAL)    return DEC_ClassString_PN;\n  if (eclass==DEC_CLASS_NEG_NORMAL)    return DEC_ClassString_NN;\n  if (eclass==DEC_CLASS_POS_ZERO)      return DEC_ClassString_PZ;\n  if (eclass==DEC_CLASS_NEG_ZERO)      return DEC_ClassString_NZ;\n  if (eclass==DEC_CLASS_POS_SUBNORMAL) return DEC_ClassString_PS;\n  if (eclass==DEC_CLASS_NEG_SUBNORMAL) return DEC_ClassString_NS;\n  if (eclass==DEC_CLASS_POS_INF)       return DEC_ClassString_PI;\n  if (eclass==DEC_CLASS_NEG_INF)       return DEC_ClassString_NI;\n  if (eclass==DEC_CLASS_QNAN)\t       return DEC_ClassString_QN;\n  if (eclass==DEC_CLASS_SNAN)\t       return DEC_ClassString_SN;\n  return DEC_ClassString_UN;\t       /* Unknown */\n  }",
+      "fn_code_pos": [
+        [
+          1662,
+          0
+        ],
+        [
+          1675,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatClassString",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatCompare(decFloat *result,\n\t\t\t   const decFloat *dfl, const decFloat *dfr,\n\t\t\t   decContext *set) {\n  Int comp;\t\t\t\t     /* work */\n  /* NaNs are handled as usual */\n  if (DFISNAN(dfl) || DFISNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n  /* numeric comparison needed */\n  comp=decNumCompare(dfl, dfr, 0);\n  decFloatZero(result);\n  if (comp==0) return result;\n  DFBYTE(result, DECBYTES-1)=0x01;\t/* LSD=1 */\n  if (comp<0) DFBYTE(result, 0)|=0x80;\t/* set sign bit */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          1686,
+          0
+        ],
+        [
+          1699,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCompare",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatCompareSignal(decFloat *result,\n\t\t\t\t const decFloat *dfl, const decFloat *dfr,\n\t\t\t\t decContext *set) {\n  Int comp;\t\t\t\t     /* work */\n  /* NaNs are handled as usual, except that all NaNs signal */\n  if (DFISNAN(dfl) || DFISNAN(dfr)) {\n    set->status|=DEC_Invalid_operation;\n    return decNaNs(result, dfl, dfr, set);\n    }\n  /* numeric comparison needed */\n  comp=decNumCompare(dfl, dfr, 0);\n  decFloatZero(result);\n  if (comp==0) return result;\n  DFBYTE(result, DECBYTES-1)=0x01;\t/* LSD=1 */\n  if (comp<0) DFBYTE(result, 0)|=0x80;\t/* set sign bit */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          1710,
+          0
+        ],
+        [
+          1726,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCompareSignal",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatCompareTotal(decFloat *result,\n\t\t\t\tconst decFloat *dfl, const decFloat *dfr) {\n  Int  comp;\t\t\t\t     /* work */\n  uInt uiwork;\t\t\t\t     /* for macros */\n  #if QUAD\n  uShort uswork;\t\t\t     /* .. */\n  #endif\n  if (DFISNAN(dfl) || DFISNAN(dfr)) {\n    Int nanl, nanr;\t\t\t     /* work */\n    /* morph NaNs to +/- 1 or 2, leave numbers as 0 */\n    nanl=DFISSNAN(dfl)+DFISQNAN(dfl)*2;      /* quiet > signalling */\n    if (DFISSIGNED(dfl)) nanl=-nanl;\n    nanr=DFISSNAN(dfr)+DFISQNAN(dfr)*2;\n    if (DFISSIGNED(dfr)) nanr=-nanr;\n    if (nanl>nanr) comp=+1;\n     else if (nanl<nanr) comp=-1;\n     else { /* NaNs are the same type and sign .. must compare payload */\n      /* buffers need +2 for QUAD */\n      uByte bufl[DECPMAX+4];\t\t     /* for LHS coefficient + foot */\n      uByte bufr[DECPMAX+4];\t\t     /* for RHS coefficient + foot */\n      uByte *ub, *uc;\t\t\t     /* work */\n      Int sigl; \t\t\t     /* signum of LHS */\n      sigl=(DFISSIGNED(dfl) ? -1 : +1);\n\n      /* decode the coefficients */\n      /* (shift both right two if Quad to make a multiple of four) */\n      #if QUAD\n\tUBFROMUS(bufl, 0);\n\tUBFROMUS(bufr, 0);\n      #endif\n      GETCOEFF(dfl, bufl+QUAD*2);\t     /* decode from decFloat */\n      GETCOEFF(dfr, bufr+QUAD*2);\t     /* .. */\n      /* all multiples of four, here */\n      comp=0;\t\t\t\t     /* assume equal */\n      for (ub=bufl, uc=bufr; ub<bufl+DECPMAX+QUAD*2; ub+=4, uc+=4) {\n\tuInt ui=UBTOUI(ub);\n\tif (ui==UBTOUI(uc)) continue; /* so far so same */\n\t/* about to find a winner; go by bytes in case little-endian */\n\tfor (;; ub++, uc++) {\n\t  if (*ub==*uc) continue;\n\t  if (*ub>*uc) comp=sigl;\t     /* difference found */\n\t   else comp=-sigl;\t\t     /* .. */\n\t   break;\n\t  }\n\t}\n      } /* same NaN type and sign */\n    }\n   else {\n    /* numeric comparison needed */\n    comp=decNumCompare(dfl, dfr, 1);\t/* total ordering */\n    }\n  decFloatZero(result);\n  if (comp==0) return result;\n  DFBYTE(result, DECBYTES-1)=0x01;\t/* LSD=1 */\n  if (comp<0) DFBYTE(result, 0)|=0x80;\t/* set sign bit */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          1736,
+          0
+        ],
+        [
+          1792,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCompareTotal",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatCompareTotalMag(decFloat *result,\n\t\t\t\tconst decFloat *dfl, const decFloat *dfr) {\n  decFloat a, b;\t\t\t/* for copy if needed */\n  /* copy and redirect signed operand(s) */\n  if (DFISSIGNED(dfl)) {\n    decFloatCopyAbs(&a, dfl);\n    dfl=&a;\n    }\n  if (DFISSIGNED(dfr)) {\n    decFloatCopyAbs(&b, dfr);\n    dfr=&b;\n    }\n  return decFloatCompareTotal(result, dfl, dfr);\n  }",
+      "fn_code_pos": [
+        [
+          1802,
+          0
+        ],
+        [
+          1815,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCompareTotalMag",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatCopy(decFloat *result, const decFloat *dfl) {\n  if (dfl!=result) *result=*dfl;\t     /* copy needed */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          1826,
+          0
+        ],
+        [
+          1829,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCopy",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatCopyAbs(decFloat *result, const decFloat *dfl) {\n  if (dfl!=result) *result=*dfl;\t/* copy needed */\n  DFBYTE(result, 0)&=~0x80;\t\t/* zero sign bit */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          1840,
+          0
+        ],
+        [
+          1844,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCopyAbs",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatCopyNegate(decFloat *result, const decFloat *dfl) {\n  if (dfl!=result) *result=*dfl;\t/* copy needed */\n  DFBYTE(result, 0)^=0x80;\t\t/* invert sign bit */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          1855,
+          0
+        ],
+        [
+          1859,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCopyNegate",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatCopySign(decFloat *result,\n\t\t\t    const decFloat *dfl, const decFloat *dfr) {\n  uByte sign=(uByte)(DFBYTE(dfr, 0)&0x80);   /* save sign bit */\n  if (dfl!=result) *result=*dfl;\t     /* copy needed */\n  DFBYTE(result, 0)&=~0x80;\t\t     /* clear sign .. */\n  DFBYTE(result, 0)=(uByte)(DFBYTE(result, 0)|sign); /* .. and set saved */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          1871,
+          0
+        ],
+        [
+          1878,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCopySign",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatDigits(const decFloat *df) {\n  uInt dpd;\t\t\t   /* work */\n  uInt sourhi=DFWORD(df, 0);\t   /* top word from source decFloat */\n  #if QUAD\n  uInt sourmh, sourml;\n  #endif\n  uInt sourlo;\n\n  if (DFISINF(df)) return 1;\n  /* A NaN effectively has an MSD of 0; otherwise if non-zero MSD */\n  /* then the coefficient is full-length */\n  if (!DFISNAN(df) && DECCOMBMSD[sourhi>>26]) return DECPMAX;\n\n  #if DOUBLE\n    if (sourhi&0x0003ffff) {\t /* ends in first */\n      dpdlenchk(0, sourhi>>8);\n      sourlo=DFWORD(df, 1);\n      dpdlendun(1, (sourhi<<2) | (sourlo>>30));\n      } /* [cannot drop through] */\n    sourlo=DFWORD(df, 1);  /* sourhi not involved now */\n    if (sourlo&0xfff00000) {\t /* in one of first two */\n      dpdlenchk(1, sourlo>>30);  /* very rare */\n      dpdlendun(2, sourlo>>20);\n      } /* [cannot drop through] */\n    dpdlenchk(3, sourlo>>10);\n    dpdlendun(4, sourlo);\n    /* [cannot drop through] */\n\n  #elif QUAD\n    if (sourhi&0x00003fff) {\t /* ends in first */\n      dpdlenchk(0, sourhi>>4);\n      sourmh=DFWORD(df, 1);\n      dpdlendun(1, ((sourhi)<<6) | (sourmh>>26));\n      } /* [cannot drop through] */\n    sourmh=DFWORD(df, 1);\n    if (sourmh) {\n      dpdlenchk(1, sourmh>>26);\n      dpdlenchk(2, sourmh>>16);\n      dpdlenchk(3, sourmh>>6);\n      sourml=DFWORD(df, 2);\n      dpdlendun(4, ((sourmh)<<4) | (sourml>>28));\n      } /* [cannot drop through] */\n    sourml=DFWORD(df, 2);\n    if (sourml) {\n      dpdlenchk(4, sourml>>28);\n      dpdlenchk(5, sourml>>18);\n      dpdlenchk(6, sourml>>8);\n      sourlo=DFWORD(df, 3);\n      dpdlendun(7, ((sourml)<<2) | (sourlo>>30));\n      } /* [cannot drop through] */\n    sourlo=DFWORD(df, 3);\n    if (sourlo&0xfff00000) {\t /* in one of first two */\n      dpdlenchk(7, sourlo>>30);  /* very rare */\n      dpdlendun(8, sourlo>>20);\n      } /* [cannot drop through] */\n    dpdlenchk(9, sourlo>>10);\n    dpdlendun(10, sourlo);\n    /* [cannot drop through] */\n  #endif\n  }",
+      "fn_code_pos": [
+        [
+          1900,
+          0
+        ],
+        [
+          1959,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatDigits",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatDivide(decFloat *result,\n\t\t\t  const decFloat *dfl, const decFloat *dfr,\n\t\t\t  decContext *set) {\n  return decDivide(result, dfl, dfr, set, DIVIDE);\n  }",
+      "fn_code_pos": [
+        [
+          1972,
+          0
+        ],
+        [
+          1976,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatDivide",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatDivideInteger(decFloat *result,\n\t\t\t     const decFloat *dfl, const decFloat *dfr,\n\t\t\t     decContext *set) {\n  return decDivide(result, dfl, dfr, set, DIVIDEINT);\n  }",
+      "fn_code_pos": [
+        [
+          1988,
+          0
+        ],
+        [
+          1992,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatDivideInteger",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatFMA(decFloat *result, const decFloat *dfl,\n\t\t       const decFloat *dfr, const decFloat *dff,\n\t\t       decContext *set) {\n\n  /* The accumulator has the bytes needed for FiniteMultiply, plus */\n  /* one byte to the left in case of carry, plus DECPMAX+2 to the */\n  /* right for the final addition (up to full fhs + round & sticky) */\n  #define FMALEN (ROUNDUP4(1+ (DECPMAX9*18+1) +DECPMAX+2))\n  uByte  acc[FMALEN];\t\t   /* for multiplied coefficient in BCD */\n\t\t\t\t   /* .. and for final result */\n  bcdnum mul;\t\t\t   /* for multiplication result */\n  bcdnum fin;\t\t\t   /* for final operand, expanded */\n  uByte  coe[ROUNDUP4(DECPMAX)];   /* dff coefficient in BCD */\n  bcdnum *hi, *lo;\t\t   /* bcdnum with higher/lower exponent */\n  uInt\t diffsign;\t\t   /* non-zero if signs differ */\n  uInt\t hipad; \t\t   /* pad digit for hi if needed */\n  Int\t padding;\t\t   /* excess exponent */\n  uInt\t carry; \t\t   /* +1 for ten's complement and during add */\n  uByte  *ub, *uh, *ul; \t   /* work */\n  uInt\t uiwork;\t\t   /* for macros */\n\n  /* handle all the special values [any special operand leads to a */\n  /* special result] */\n  if (DFISSPECIAL(dfl) || DFISSPECIAL(dfr) || DFISSPECIAL(dff)) {\n    decFloat proxy;\t\t   /* multiplication result proxy */\n    /* NaNs are handled as usual, giving priority to sNaNs */\n    if (DFISSNAN(dfl) || DFISSNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n    if (DFISSNAN(dff)) return decNaNs(result, dff, NULL, set);\n    if (DFISNAN(dfl) || DFISNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n    if (DFISNAN(dff)) return decNaNs(result, dff, NULL, set);\n    /* One or more of the three is infinite */\n    /* infinity times zero is bad */\n    decFloatZero(&proxy);\n    if (DFISINF(dfl)) {\n      if (DFISZERO(dfr)) return decInvalid(result, set);\n      decInfinity(&proxy, &proxy);\n      }\n     else if (DFISINF(dfr)) {\n      if (DFISZERO(dfl)) return decInvalid(result, set);\n      decInfinity(&proxy, &proxy);\n      }\n    /* compute sign of multiplication and place in proxy */\n    DFWORD(&proxy, 0)|=(DFWORD(dfl, 0)^DFWORD(dfr, 0))&DECFLOAT_Sign;\n    if (!DFISINF(dff)) return decFloatCopy(result, &proxy);\n    /* dff is Infinite */\n    if (!DFISINF(&proxy)) return decInfinity(result, dff);\n    /* both sides of addition are infinite; different sign is bad */\n    if ((DFWORD(dff, 0)&DECFLOAT_Sign)!=(DFWORD(&proxy, 0)&DECFLOAT_Sign))\n      return decInvalid(result, set);\n    return decFloatCopy(result, &proxy);\n    }\n\n  /* Here when all operands are finite */\n\n  /* First multiply dfl*dfr */\n  decFiniteMultiply(&mul, acc+1, dfl, dfr);\n  /* The multiply is complete, exact and unbounded, and described in */\n  /* mul with the coefficient held in acc[1...] */\n\n  /* now add in dff; the algorithm is essentially the same as */\n  /* decFloatAdd, but the code is different because the code there */\n  /* is highly optimized for adding two numbers of the same size */\n  fin.exponent=GETEXPUN(dff);\t\t/* get dff exponent and sign */\n  fin.sign=DFWORD(dff, 0)&DECFLOAT_Sign;\n  diffsign=mul.sign^fin.sign;\t\t/* note if signs differ */\n  fin.msd=coe;\n  fin.lsd=coe+DECPMAX-1;\n  GETCOEFF(dff, coe);\t\t\t/* extract the coefficient */\n\n  /* now set hi and lo so that hi points to whichever of mul and fin */\n  /* has the higher exponent and lo points to the other [don't care, */\n  /* if the same].  One coefficient will be in acc, the other in coe. */\n  if (mul.exponent>=fin.exponent) {\n    hi=&mul;\n    lo=&fin;\n    }\n   else {\n    hi=&fin;\n    lo=&mul;\n    }\n\n  /* remove leading zeros on both operands; this will save time later */\n  /* and make testing for zero trivial (tests are safe because acc */\n  /* and coe are rounded up to uInts) */\n  for (; UBTOUI(hi->msd)==0 && hi->msd+3<hi->lsd;) hi->msd+=4;\n  for (; *hi->msd==0 && hi->msd<hi->lsd;) hi->msd++;\n  for (; UBTOUI(lo->msd)==0 && lo->msd+3<lo->lsd;) lo->msd+=4;\n  for (; *lo->msd==0 && lo->msd<lo->lsd;) lo->msd++;\n\n  /* if hi is zero then result will be lo (which has the smaller */\n  /* exponent), which also may need to be tested for zero for the */\n  /* weird IEEE 754 sign rules */\n  if (*hi->msd==0) {\t\t\t     /* hi is zero */\n    /* \"When the sum of two operands with opposite signs is */\n    /* exactly zero, the sign of that sum shall be '+' in all */\n    /* rounding modes except round toward -Infinity, in which */\n    /* mode that sign shall be '-'.\" */\n    if (diffsign) {\n      if (*lo->msd==0) {\t\t     /* lo is zero */\n\tlo->sign=0;\n\tif (set->round==DEC_ROUND_FLOOR) lo->sign=DECFLOAT_Sign;\n\t} /* diffsign && lo=0 */\n      } /* diffsign */\n    return decFinalize(result, lo, set);     /* may need clamping */\n    } /* numfl is zero */\n  /* [here, both are minimal length and hi is non-zero] */\n  /* (if lo is zero then padding with zeros may be needed, below) */\n\n  /* if signs differ, take the ten's complement of hi (zeros to the */\n  /* right do not matter because the complement of zero is zero); the */\n  /* +1 is done later, as part of the addition, inserted at the */\n  /* correct digit */\n  hipad=0;\n  carry=0;\n  if (diffsign) {\n    hipad=9;\n    carry=1;\n    /* exactly the correct number of digits must be inverted */\n    for (uh=hi->msd; uh<hi->lsd-3; uh+=4) UBFROMUI(uh, 0x09090909-UBTOUI(uh));\n    for (; uh<=hi->lsd; uh++) *uh=(uByte)(0x09-*uh);\n    }\n\n  /* ready to add; note that hi has no leading zeros so gap */\n  /* calculation does not have to be as pessimistic as in decFloatAdd */\n  /* (this is much more like the arbitrary-precision algorithm in */\n  /* Rexx and decNumber) */\n\n  /* padding is the number of zeros that would need to be added to hi */\n  /* for its lsd to be aligned with the lsd of lo */\n  padding=hi->exponent-lo->exponent;\n  /* printf(\"FMA pad %ld\\n\", (LI)padding); */\n\n  /* the result of the addition will be built into the accumulator, */\n  /* starting from the far right; this could be either hi or lo, and */\n  /* will be aligned */\n  ub=acc+FMALEN-1;\t\t   /* where lsd of result will go */\n  ul=lo->lsd;\t\t\t   /* lsd of rhs */\n\n  if (padding!=0) {\t\t   /* unaligned */\n    /* if the msd of lo is more than DECPMAX+2 digits to the right of */\n    /* the original msd of hi then it can be reduced to a single */\n    /* digit at the right place, as it stays clear of hi digits */\n    /* [it must be DECPMAX+2 because during a subtraction the msd */\n    /* could become 0 after a borrow from 1.000 to 0.9999...] */\n\n    Int hilen=(Int)(hi->lsd-hi->msd+1); /* length of hi */\n    Int lolen=(Int)(lo->lsd-lo->msd+1); /* and of lo */\n\n    if (hilen+padding-lolen > DECPMAX+2) {   /* can reduce lo to single */\n      /* make sure it is virtually at least DECPMAX from hi->msd, at */\n      /* least to right of hi->lsd (in case of destructive subtract), */\n      /* and separated by at least two digits from either of those */\n      /* (the tricky DOUBLE case is when hi is a 1 that will become a */\n      /* 0.9999... by subtraction: */\n      /*   hi:\t 1\t\t\t\t     E+16 */\n      /*   lo:\t  .................1000000000000000  E-16 */\n      /* which for the addition pads to: */\n      /*   hi:\t 1000000000000000000\t\t     E-16 */\n      /*   lo:\t  .................1000000000000000  E-16 */\n      Int newexp=MINI(hi->exponent, hi->exponent+hilen-DECPMAX)-3;\n\n      /* printf(\"FMA reduce: %ld\\n\", (LI)reduce); */\n      lo->lsd=lo->msd;\t\t\t     /* to single digit [maybe 0] */\n      lo->exponent=newexp;\t\t     /* new lowest exponent */\n      padding=hi->exponent-lo->exponent;     /* recalculate */\n      ul=lo->lsd;\t\t\t     /* .. and repoint */\n      }\n\n    /* padding is still > 0, but will fit in acc (less leading carry slot) */\n    #if DECCHECK\n      if (padding<=0) printf(\"FMA low padding: %ld\\n\", (LI)padding);\n      if (hilen+padding+1>FMALEN)\n\tprintf(\"FMA excess hilen+padding: %ld+%ld \\n\", (LI)hilen, (LI)padding);\n      /* printf(\"FMA padding: %ld\\n\", (LI)padding); */\n    #endif\n\n    /* padding digits can now be set in the result; one or more of */\n    /* these will come from lo; others will be zeros in the gap */\n    for (; ul-3>=lo->msd && padding>3; padding-=4, ul-=4, ub-=4) {\n      UBFROMUI(ub-3, UBTOUI(ul-3));\t     /* [cannot overlap] */\n      }\n    for (; ul>=lo->msd && padding>0; padding--, ul--, ub--) *ub=*ul;\n    for (;padding>0; padding--, ub--) *ub=0; /* mind the gap */\n    }\n\n  /* addition now complete to the right of the rightmost digit of hi */\n  uh=hi->lsd;\n\n  /* dow do the add from hi->lsd to the left */\n  /* [bytewise, because either operand can run out at any time] */\n  /* carry was set up depending on ten's complement above */\n  /* first assume both operands have some digits */\n  for (;; ub--) {\n    if (uh<hi->msd || ul<lo->msd) break;\n    *ub=(uByte)(carry+(*uh--)+(*ul--));\n    carry=0;\n    if (*ub<10) continue;\n    *ub-=10;\n    carry=1;\n    } /* both loop */\n\n  if (ul<lo->msd) {\t      /* to left of lo */\n    for (;; ub--) {\n      if (uh<hi->msd) break;\n      *ub=(uByte)(carry+(*uh--));  /* [+0] */\n      carry=0;\n      if (*ub<10) continue;\n      *ub-=10;\n      carry=1;\n      } /* hi loop */\n    }\n   else {\t\t      /* to left of hi */\n    for (;; ub--) {\n      if (ul<lo->msd) break;\n      *ub=(uByte)(carry+hipad+(*ul--));\n      carry=0;\n      if (*ub<10) continue;\n      *ub-=10;\n      carry=1;\n      } /* lo loop */\n    }\n\n  /* addition complete -- now handle carry, borrow, etc. */\n  /* use lo to set up the num (its exponent is already correct, and */\n  /* sign usually is) */\n  lo->msd=ub+1;\n  lo->lsd=acc+FMALEN-1;\n  /* decShowNum(lo, \"lo\"); */\n  if (!diffsign) {\t\t   /* same-sign addition */\n    if (carry) {\t\t   /* carry out */\n      *ub=1;\t\t\t   /* place the 1 .. */\n      lo->msd--;\t\t   /* .. and update */\n      }\n    } /* same sign */\n   else {\t\t\t   /* signs differed (subtraction) */\n    if (!carry) {\t\t   /* no carry out means hi<lo */\n      /* borrowed -- take ten's complement of the right digits */\n      lo->sign=hi->sign;\t   /* sign is lhs sign */\n      for (ul=lo->msd; ul<lo->lsd-3; ul+=4) UBFROMUI(ul, 0x09090909-UBTOUI(ul));\n      for (; ul<=lo->lsd; ul++) *ul=(uByte)(0x09-*ul); /* [leaves ul at lsd+1] */\n      /* complete the ten's complement by adding 1 [cannot overrun] */\n      for (ul--; *ul==9; ul--) *ul=0;\n      *ul+=1;\n      } /* borrowed */\n     else {\t\t\t   /* carry out means hi>=lo */\n      /* sign to use is lo->sign */\n      /* all done except for the special IEEE 754 exact-zero-result */\n      /* rule (see above); while testing for zero, strip leading */\n      /* zeros (which will save decFinalize doing it) */\n      for (; UBTOUI(lo->msd)==0 && lo->msd+3<lo->lsd;) lo->msd+=4;\n      for (; *lo->msd==0 && lo->msd<lo->lsd;) lo->msd++;\n      if (*lo->msd==0) {\t   /* must be true zero (and diffsign) */\n\tlo->sign=0;\t\t   /* assume + */\n\tif (set->round==DEC_ROUND_FLOOR) lo->sign=DECFLOAT_Sign;\n\t}\n      /* [else was not zero, might still have leading zeros] */\n      } /* subtraction gave positive result */\n    } /* diffsign */\n\n  #if DECCHECK\n  /* assert no left underrun */\n  if (lo->msd<acc) {\n    printf(\"FMA underrun by %ld \\n\", (LI)(acc-lo->msd));\n    }\n  #endif\n\n  return decFinalize(result, lo, set);\t/* round, check, and lay out */\n  }",
+      "fn_code_pos": [
+        [
+          2005,
+          0
+        ],
+        [
+          2272,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFMA",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "dff": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatFromInt32(decFloat *result, Int n) {\n  uInt u=(uInt)n;\t\t\t/* copy as bits */\n  uInt encode;\t\t\t\t/* work */\n  DFWORD(result, 0)=ZEROWORD;\t\t/* always */\n  #if QUAD\n    DFWORD(result, 1)=0;\n    DFWORD(result, 2)=0;\n  #endif\n  if (n<0) {\t\t\t\t/* handle -n with care */\n    /* [This can be done without the test, but is then slightly slower] */\n    u=(~u)+1;\n    DFWORD(result, 0)|=DECFLOAT_Sign;\n    }\n  /* Since the maximum value of u now is 2**31, only the low word of */\n  /* result is affected */\n  encode=BIN2DPD[u%1000];\n  u/=1000;\n  encode|=BIN2DPD[u%1000]<<10;\n  u/=1000;\n  encode|=BIN2DPD[u%1000]<<20;\n  u/=1000;\t\t\t\t/* now 0, 1, or 2 */\n  encode|=u<<30;\n  DFWORD(result, DECWORDS-1)=encode;\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          2283,
+          0
+        ],
+        [
+          2307,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromInt32",
+        "parameters": {
+          "result": "decFloat",
+          "n": "Int"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatFromUInt32(decFloat *result, uInt u) {\n  uInt encode;\t\t\t\t/* work */\n  DFWORD(result, 0)=ZEROWORD;\t\t/* always */\n  #if QUAD\n    DFWORD(result, 1)=0;\n    DFWORD(result, 2)=0;\n  #endif\n  encode=BIN2DPD[u%1000];\n  u/=1000;\n  encode|=BIN2DPD[u%1000]<<10;\n  u/=1000;\n  encode|=BIN2DPD[u%1000]<<20;\n  u/=1000;\t\t\t\t/* now 0 -> 4 */\n  encode|=u<<30;\n  DFWORD(result, DECWORDS-1)=encode;\n  DFWORD(result, DECWORDS-2)|=u>>2;\t/* rarely non-zero */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          2318,
+          0
+        ],
+        [
+          2335,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromUInt32",
+        "parameters": {
+          "result": "decFloat",
+          "u": "uInt"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatInvert(decFloat *result, const decFloat *df,\n\t\t\t  decContext *set) {\n  uInt sourhi=DFWORD(df, 0);\t\t/* top word of dfs */\n\n  if (!DFISUINT01(df) || !DFISCC01(df)) return decInvalid(result, set);\n  /* the operand is a finite integer (q=0) */\n  #if DOUBLE\n   DFWORD(result, 0)=ZEROWORD|((~sourhi)&0x04009124);\n   DFWORD(result, 1)=(~DFWORD(df, 1))\t&0x49124491;\n  #elif QUAD\n   DFWORD(result, 0)=ZEROWORD|((~sourhi)&0x04000912);\n   DFWORD(result, 1)=(~DFWORD(df, 1))\t&0x44912449;\n   DFWORD(result, 2)=(~DFWORD(df, 2))\t&0x12449124;\n   DFWORD(result, 3)=(~DFWORD(df, 3))\t&0x49124491;\n  #endif\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          2348,
+          0
+        ],
+        [
+          2364,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatInvert",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatIsCanonical(const decFloat *df) {\n  if (DFISSPECIAL(df)) {\n    if (DFISINF(df)) {\n      if (DFWORD(df, 0)&ECONMASK) return 0;  /* exponent continuation */\n      if (!DFISCCZERO(df)) return 0;\t     /* coefficient continuation */\n      return 1;\n      }\n    /* is a NaN */\n    if (DFWORD(df, 0)&ECONNANMASK) return 0; /* exponent continuation */\n    if (DFISCCZERO(df)) return 1;\t     /* coefficient continuation */\n    /* drop through to check payload */\n    }\n  { /* declare block */\n  #if DOUBLE\n    uInt sourhi=DFWORD(df, 0);\n    uInt sourlo=DFWORD(df, 1);\n    if (CANONDPDOFF(sourhi, 8)\n     && CANONDPDTWO(sourhi, sourlo, 30)\n     && CANONDPDOFF(sourlo, 20)\n     && CANONDPDOFF(sourlo, 10)\n     && CANONDPDOFF(sourlo, 0)) return 1;\n  #elif QUAD\n    uInt sourhi=DFWORD(df, 0);\n    uInt sourmh=DFWORD(df, 1);\n    uInt sourml=DFWORD(df, 2);\n    uInt sourlo=DFWORD(df, 3);\n    if (CANONDPDOFF(sourhi, 4)\n     && CANONDPDTWO(sourhi, sourmh, 26)\n     && CANONDPDOFF(sourmh, 16)\n     && CANONDPDOFF(sourmh, 6)\n     && CANONDPDTWO(sourmh, sourml, 28)\n     && CANONDPDOFF(sourml, 18)\n     && CANONDPDOFF(sourml, 8)\n     && CANONDPDTWO(sourml, sourlo, 30)\n     && CANONDPDOFF(sourlo, 20)\n     && CANONDPDOFF(sourlo, 10)\n     && CANONDPDOFF(sourlo, 0)) return 1;\n  #endif\n  } /* block */\n  return 0;    /* a declet is non-canonical */\n  }",
+      "fn_code_pos": [
+        [
+          2376,
+          0
+        ],
+        [
+          2416,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatIsCanonical",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatIsFinite(const decFloat *df) {\n  return !DFISSPECIAL(df);\n  }",
+      "fn_code_pos": [
+        [
+          2418,
+          0
+        ],
+        [
+          2420,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatIsFinite",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatIsInfinite(const decFloat *df) {\n  return DFISINF(df);\n  }",
+      "fn_code_pos": [
+        [
+          2421,
+          0
+        ],
+        [
+          2423,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatIsInfinite",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatIsInteger(const decFloat *df) {\n  return DFISINT(df);\n  }",
+      "fn_code_pos": [
+        [
+          2424,
+          0
+        ],
+        [
+          2426,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatIsInteger",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatIsNaN(const decFloat *df) {\n  return DFISNAN(df);\n  }",
+      "fn_code_pos": [
+        [
+          2427,
+          0
+        ],
+        [
+          2429,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatIsNaN",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatIsNormal(const decFloat *df) {\n  Int exp;\t\t\t   /* exponent */\n  if (DFISSPECIAL(df)) return 0;\n  if (DFISZERO(df)) return 0;\n  /* is finite and non-zero */\n  exp=GETEXPUN(df)\t\t   /* get unbiased exponent .. */\n     +decFloatDigits(df)-1;\t   /* .. and make adjusted exponent */\n  return (exp>=DECEMIN);\t   /* < DECEMIN is subnormal */\n  }",
+      "fn_code_pos": [
+        [
+          2430,
+          0
+        ],
+        [
+          2438,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatIsNormal",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatIsSignaling(const decFloat *df) {\n  return DFISSNAN(df);\n  }",
+      "fn_code_pos": [
+        [
+          2439,
+          0
+        ],
+        [
+          2441,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatIsSignaling",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatIsSignalling(const decFloat *df) {\n  return DFISSNAN(df);\n  }",
+      "fn_code_pos": [
+        [
+          2442,
+          0
+        ],
+        [
+          2444,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatIsSignalling",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatIsSigned(const decFloat *df) {\n  return DFISSIGNED(df);\n  }",
+      "fn_code_pos": [
+        [
+          2445,
+          0
+        ],
+        [
+          2447,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatIsSigned",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatIsSubnormal(const decFloat *df) {\n  if (DFISSPECIAL(df)) return 0;\n  /* is finite */\n  if (decFloatIsNormal(df)) return 0;\n  /* it is <Nmin, but could be zero */\n  if (DFISZERO(df)) return 0;\n  return 1;\t\t\t\t     /* is subnormal */\n  }",
+      "fn_code_pos": [
+        [
+          2448,
+          0
+        ],
+        [
+          2455,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatIsSubnormal",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatIsZero(const decFloat *df) {\n  return DFISZERO(df);\n  }",
+      "fn_code_pos": [
+        [
+          2456,
+          0
+        ],
+        [
+          2458,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatIsZero",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatLogB(decFloat *result, const decFloat *df,\n\t\t\tdecContext *set) {\n  Int ae;\t\t\t\t     /* adjusted exponent */\n  if (DFISNAN(df)) return decNaNs(result, df, NULL, set);\n  if (DFISINF(df)) {\n    DFWORD(result, 0)=0;\t\t     /* need +ve */\n    return decInfinity(result, result);      /* canonical +Infinity */\n    }\n  if (DFISZERO(df)) {\n    set->status|=DEC_Division_by_zero;\t     /* as per 754 */\n    DFWORD(result, 0)=DECFLOAT_Sign;\t     /* make negative */\n    return decInfinity(result, result);      /* canonical -Infinity */\n    }\n  ae=GETEXPUN(df)\t\t\t/* get unbiased exponent .. */\n    +decFloatDigits(df)-1;\t\t/* .. and make adjusted exponent */\n  /* ae has limited range (3 digits for DOUBLE and 4 for QUAD), so */\n  /* it is worth using a special case of decFloatFromInt32 */\n  DFWORD(result, 0)=ZEROWORD;\t\t/* always */\n  if (ae<0) {\n    DFWORD(result, 0)|=DECFLOAT_Sign;\t/* -0 so far */\n    ae=-ae;\n    }\n  #if DOUBLE\n    DFWORD(result, 1)=BIN2DPD[ae];\t/* a single declet */\n  #elif QUAD\n    DFWORD(result, 1)=0;\n    DFWORD(result, 2)=0;\n    DFWORD(result, 3)=(ae/1000)<<10;\t/* is <10, so need no DPD encode */\n    DFWORD(result, 3)|=BIN2DPD[ae%1000];\n  #endif\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          2475,
+          0
+        ],
+        [
+          2506,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatLogB",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatMax(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set) {\n  Int comp;\n  if (DFISNAN(dfl)) {\n    /* sNaN or both NaNs leads to normal NaN processing */\n    if (DFISNAN(dfr) || DFISSNAN(dfl)) return decNaNs(result, dfl, dfr, set);\n    return decCanonical(result, dfr);\t     /* RHS is numeric */\n    }\n  if (DFISNAN(dfr)) {\n    /* sNaN leads to normal NaN processing (both NaN handled above) */\n    if (DFISSNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n    return decCanonical(result, dfl);\t     /* LHS is numeric */\n    }\n  /* Both operands are numeric; numeric comparison needed -- use */\n  /* total order for a well-defined choice (and +0 > -0) */\n  comp=decNumCompare(dfl, dfr, 1);\n  if (comp>=0) return decCanonical(result, dfl);\n  return decCanonical(result, dfr);\n  }",
+      "fn_code_pos": [
+        [
+          2519,
+          0
+        ],
+        [
+          2538,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMax",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatMaxMag(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set) {\n  Int comp;\n  decFloat absl, absr;\n  if (DFISNAN(dfl) || DFISNAN(dfr)) return decFloatMax(result, dfl, dfr, set);\n\n  decFloatCopyAbs(&absl, dfl);\n  decFloatCopyAbs(&absr, dfr);\n  comp=decNumCompare(&absl, &absr, 0);\n  if (comp>0) return decCanonical(result, dfl);\n  if (comp<0) return decCanonical(result, dfr);\n  return decFloatMax(result, dfl, dfr, set);\n  }",
+      "fn_code_pos": [
+        [
+          2552,
+          0
+        ],
+        [
+          2565,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMaxMag",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatMin(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set) {\n  Int comp;\n  if (DFISNAN(dfl)) {\n    /* sNaN or both NaNs leads to normal NaN processing */\n    if (DFISNAN(dfr) || DFISSNAN(dfl)) return decNaNs(result, dfl, dfr, set);\n    return decCanonical(result, dfr);\t     /* RHS is numeric */\n    }\n  if (DFISNAN(dfr)) {\n    /* sNaN leads to normal NaN processing (both NaN handled above) */\n    if (DFISSNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n    return decCanonical(result, dfl);\t     /* LHS is numeric */\n    }\n  /* Both operands are numeric; numeric comparison needed -- use */\n  /* total order for a well-defined choice (and +0 > -0) */\n  comp=decNumCompare(dfl, dfr, 1);\n  if (comp<=0) return decCanonical(result, dfl);\n  return decCanonical(result, dfr);\n  }",
+      "fn_code_pos": [
+        [
+          2578,
+          0
+        ],
+        [
+          2597,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMin",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatMinMag(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set) {\n  Int comp;\n  decFloat absl, absr;\n  if (DFISNAN(dfl) || DFISNAN(dfr)) return decFloatMin(result, dfl, dfr, set);\n\n  decFloatCopyAbs(&absl, dfl);\n  decFloatCopyAbs(&absr, dfr);\n  comp=decNumCompare(&absl, &absr, 0);\n  if (comp<0) return decCanonical(result, dfl);\n  if (comp>0) return decCanonical(result, dfr);\n  return decFloatMin(result, dfl, dfr, set);\n  }",
+      "fn_code_pos": [
+        [
+          2611,
+          0
+        ],
+        [
+          2624,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMinMag",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatMinus(decFloat *result, const decFloat *df,\n\t\t\t decContext *set) {\n  if (DFISNAN(df)) return decNaNs(result, df, NULL, set);\n  decCanonical(result, df);\t\t\t  /* copy and check */\n  if (DFISZERO(df)) DFBYTE(result, 0)&=~0x80;\t  /* turn off sign bit */\n   else DFBYTE(result, 0)^=0x80;\t\t  /* flip sign bit */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          2640,
+          0
+        ],
+        [
+          2647,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMinus",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatMultiply(decFloat *result,\n\t\t\t    const decFloat *dfl, const decFloat *dfr,\n\t\t\t    decContext *set) {\n  bcdnum num;\t\t\t   /* for final conversion */\n  uByte  bcdacc[DECPMAX9*18+1];    /* for coefficent in BCD */\n\n  if (DFISSPECIAL(dfl) || DFISSPECIAL(dfr)) { /* either is special? */\n    /* NaNs are handled as usual */\n    if (DFISNAN(dfl) || DFISNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n    /* infinity times zero is bad */\n    if (DFISINF(dfl) && DFISZERO(dfr)) return decInvalid(result, set);\n    if (DFISINF(dfr) && DFISZERO(dfl)) return decInvalid(result, set);\n    /* both infinite; return canonical infinity with computed sign */\n    DFWORD(result, 0)=DFWORD(dfl, 0)^DFWORD(dfr, 0); /* compute sign */\n    return decInfinity(result, result);\n    }\n\n  /* Here when both operands are finite */\n  decFiniteMultiply(&num, bcdacc, dfl, dfr);\n  return decFinalize(result, &num, set); /* round, check, and lay out */\n  }",
+      "fn_code_pos": [
+        [
+          2659,
+          0
+        ],
+        [
+          2679,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMultiply",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatNextMinus(decFloat *result, const decFloat *dfl,\n\t\t\t     decContext *set) {\n  decFloat delta;\t\t\t/* tiny increment */\n  uInt savestat;\t\t\t/* saves status */\n  enum rounding saveround;\t\t/* .. and mode */\n\n  /* +Infinity is the special case */\n  if (DFISINF(dfl) && !DFISSIGNED(dfl)) {\n    DFSETNMAX(result);\n    return result;\t\t\t/* [no status to set] */\n    }\n  /* other cases are effected by sutracting a tiny delta -- this */\n  /* should be done in a wider format as the delta is unrepresentable */\n  /* here (but can be done with normal add if the sign of zero is */\n  /* treated carefully, because no Inexactitude is interesting); */\n  /* rounding to -Infinity then pushes the result to next below */\n  decFloatZero(&delta); \t\t/* set up tiny delta */\n  DFWORD(&delta, DECWORDS-1)=1; \t/* coefficient=1 */\n  DFWORD(&delta, 0)=DECFLOAT_Sign;\t/* Sign=1 + biased exponent=0 */\n  /* set up for the directional round */\n  saveround=set->round; \t\t/* save mode */\n  set->round=DEC_ROUND_FLOOR;\t\t/* .. round towards -Infinity */\n  savestat=set->status; \t\t/* save status */\n  decFloatAdd(result, dfl, &delta, set);\n  /* Add rules mess up the sign when going from +Ntiny to 0 */\n  if (DFISZERO(result)) DFWORD(result, 0)^=DECFLOAT_Sign; /* correct */\n  set->status&=DEC_Invalid_operation;\t/* preserve only sNaN status */\n  set->status|=savestat;\t\t/* restore pending flags */\n  set->round=saveround; \t\t/* .. and mode */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          2692,
+          0
+        ],
+        [
+          2722,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatNextMinus",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatNextPlus(decFloat *result, const decFloat *dfl,\n\t\t\t    decContext *set) {\n  uInt savestat;\t\t\t/* saves status */\n  enum rounding saveround;\t\t/* .. and mode */\n  decFloat delta;\t\t\t/* tiny increment */\n\n  /* -Infinity is the special case */\n  if (DFISINF(dfl) && DFISSIGNED(dfl)) {\n    DFSETNMAX(result);\n    DFWORD(result, 0)|=DECFLOAT_Sign;\t/* make negative */\n    return result;\t\t\t/* [no status to set] */\n    }\n  /* other cases are effected by sutracting a tiny delta -- this */\n  /* should be done in a wider format as the delta is unrepresentable */\n  /* here (but can be done with normal add if the sign of zero is */\n  /* treated carefully, because no Inexactitude is interesting); */\n  /* rounding to +Infinity then pushes the result to next above */\n  decFloatZero(&delta); \t\t/* set up tiny delta */\n  DFWORD(&delta, DECWORDS-1)=1; \t/* coefficient=1 */\n  DFWORD(&delta, 0)=0;\t\t\t/* Sign=0 + biased exponent=0 */\n  /* set up for the directional round */\n  saveround=set->round; \t\t/* save mode */\n  set->round=DEC_ROUND_CEILING; \t/* .. round towards +Infinity */\n  savestat=set->status; \t\t/* save status */\n  decFloatAdd(result, dfl, &delta, set);\n  /* Add rules mess up the sign when going from -Ntiny to -0 */\n  if (DFISZERO(result)) DFWORD(result, 0)^=DECFLOAT_Sign; /* correct */\n  set->status&=DEC_Invalid_operation;\t/* preserve only sNaN status */\n  set->status|=savestat;\t\t/* restore pending flags */\n  set->round=saveround; \t\t/* .. and mode */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          2735,
+          0
+        ],
+        [
+          2766,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatNextPlus",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatNextToward(decFloat *result,\n\t\t\t      const decFloat *dfl, const decFloat *dfr,\n\t\t\t      decContext *set) {\n  decFloat delta;\t\t\t/* tiny increment or decrement */\n  decFloat pointone;\t\t\t/* 1e-1 */\n  uInt\tsavestat;\t\t\t/* saves status */\n  enum\trounding saveround;\t\t/* .. and mode */\n  uInt\tdeltatop;\t\t\t/* top word for delta */\n  Int\tcomp;\t\t\t\t/* work */\n\n  if (DFISNAN(dfl) || DFISNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n  /* Both are numeric, so Invalid no longer a possibility */\n  comp=decNumCompare(dfl, dfr, 0);\n  if (comp==0) return decFloatCopySign(result, dfl, dfr); /* equal */\n  /* unequal; do NextPlus or NextMinus but with different status rules */\n\n  if (comp<0) { /* lhs<rhs, do NextPlus, see above for commentary */\n    if (DFISINF(dfl) && DFISSIGNED(dfl)) {   /* -Infinity special case */\n      DFSETNMAX(result);\n      DFWORD(result, 0)|=DECFLOAT_Sign;\n      return result;\n      }\n    saveround=set->round;\t\t     /* save mode */\n    set->round=DEC_ROUND_CEILING;\t     /* .. round towards +Infinity */\n    deltatop=0; \t\t\t     /* positive delta */\n    }\n   else { /* lhs>rhs, do NextMinus, see above for commentary */\n    if (DFISINF(dfl) && !DFISSIGNED(dfl)) {  /* +Infinity special case */\n      DFSETNMAX(result);\n      return result;\n      }\n    saveround=set->round;\t\t     /* save mode */\n    set->round=DEC_ROUND_FLOOR; \t     /* .. round towards -Infinity */\n    deltatop=DECFLOAT_Sign;\t\t     /* negative delta */\n    }\n  savestat=set->status; \t\t     /* save status */\n  /* Here, Inexact is needed where appropriate (and hence Underflow, */\n  /* etc.).  Therefore the tiny delta which is otherwise */\n  /* unrepresentable (see NextPlus and NextMinus) is constructed */\n  /* using the multiplication of FMA. */\n  decFloatZero(&delta); \t\t/* set up tiny delta */\n  DFWORD(&delta, DECWORDS-1)=1; \t/* coefficient=1 */\n  DFWORD(&delta, 0)=deltatop;\t\t/* Sign + biased exponent=0 */\n  decFloatFromString(&pointone, \"1E-1\", set); /* set up multiplier */\n  decFloatFMA(result, &delta, &pointone, dfl, set);\n  /* [Delta is truly tiny, so no need to correct sign of zero] */\n  /* use new status unless the result is normal */\n  if (decFloatIsNormal(result)) set->status=savestat; /* else goes forward */\n  set->round=saveround; \t\t/* restore mode */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          2781,
+          0
+        ],
+        [
+          2831,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatNextToward",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatOr(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set) {\n  if (!DFISUINT01(dfl) || !DFISUINT01(dfr)\n   || !DFISCC01(dfl)   || !DFISCC01(dfr)) return decInvalid(result, set);\n  /* the operands are positive finite integers (q=0) with just 0s and 1s */\n  #if DOUBLE\n   DFWORD(result, 0)=ZEROWORD\n\t\t   |((DFWORD(dfl, 0) | DFWORD(dfr, 0))&0x04009124);\n   DFWORD(result, 1)=(DFWORD(dfl, 1) | DFWORD(dfr, 1))&0x49124491;\n  #elif QUAD\n   DFWORD(result, 0)=ZEROWORD\n\t\t   |((DFWORD(dfl, 0) | DFWORD(dfr, 0))&0x04000912);\n   DFWORD(result, 1)=(DFWORD(dfl, 1) | DFWORD(dfr, 1))&0x44912449;\n   DFWORD(result, 2)=(DFWORD(dfl, 2) | DFWORD(dfr, 2))&0x12449124;\n   DFWORD(result, 3)=(DFWORD(dfl, 3) | DFWORD(dfr, 3))&0x49124491;\n  #endif\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          2845,
+          0
+        ],
+        [
+          2863,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatOr",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatPlus(decFloat *result, const decFloat *df,\n\t\t\tdecContext *set) {\n  if (DFISNAN(df)) return decNaNs(result, df, NULL, set);\n  decCanonical(result, df);\t\t\t  /* copy and check */\n  if (DFISZERO(df)) DFBYTE(result, 0)&=~0x80;\t  /* turn off sign bit */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          2879,
+          0
+        ],
+        [
+          2885,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatPlus",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatQuantize(decFloat *result,\n\t\t\t    const decFloat *dfl, const decFloat *dfr,\n\t\t\t    decContext *set) {\n  Int\texplb, exprb;\t      /* left and right biased exponents */\n  uByte *ulsd;\t\t      /* local LSD pointer */\n  uByte *ub, *uc;\t      /* work */\n  Int\tdrop;\t\t      /* .. */\n  uInt\tdpd;\t\t      /* .. */\n  uInt\tencode; \t      /* encoding accumulator */\n  uInt\tsourhil, sourhir;     /* top words from source decFloats */\n  uInt\tuiwork; \t      /* for macros */\n  #if QUAD\n  uShort uswork;\t      /* .. */\n  #endif\n  /* the following buffer holds the coefficient for manipulation */\n  uByte buf[4+DECPMAX*3+2*QUAD];   /* + space for zeros to left or right */\n  #if DECTRACE\n  bcdnum num;\t\t\t   /* for trace displays */\n  #endif\n\n  /* Start decoding the arguments */\n  sourhil=DFWORD(dfl, 0);\t   /* LHS top word */\n  explb=DECCOMBEXP[sourhil>>26];   /* get exponent high bits (in place) */\n  sourhir=DFWORD(dfr, 0);\t   /* RHS top word */\n  exprb=DECCOMBEXP[sourhir>>26];\n\n  if (EXPISSPECIAL(explb | exprb)) { /* either is special? */\n    /* NaNs are handled as usual */\n    if (DFISNAN(dfl) || DFISNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n    /* one infinity but not both is bad */\n    if (DFISINF(dfl)!=DFISINF(dfr)) return decInvalid(result, set);\n    /* both infinite; return canonical infinity with sign of LHS */\n    return decInfinity(result, dfl);\n    }\n\n  /* Here when both arguments are finite */\n  /* complete extraction of the exponents [no need to unbias] */\n  explb+=GETECON(dfl);\t\t   /* + continuation */\n  exprb+=GETECON(dfr);\t\t   /* .. */\n\n  /* calculate the number of digits to drop from the coefficient */\n  drop=exprb-explb;\t\t   /* 0 if nothing to do */\n  if (drop==0) return decCanonical(result, dfl); /* return canonical */\n\n  /* the coefficient is needed; lay it out into buf, offset so zeros */\n  /* can be added before or after as needed -- an extra heading is */\n  /* added so can safely pad Quad DECPMAX-1 zeros to the left by */\n  /* fours */\n  #define BUFOFF (buf+4+DECPMAX)\n  GETCOEFF(dfl, BUFOFF);\t   /* decode from decFloat */\n  /* [now the msd is at BUFOFF and the lsd is at BUFOFF+DECPMAX-1] */\n\n  #if DECTRACE\n  num.msd=BUFOFF;\n  num.lsd=BUFOFF+DECPMAX-1;\n  num.exponent=explb-DECBIAS;\n  num.sign=sourhil & DECFLOAT_Sign;\n  decShowNum(&num, \"dfl\");\n  #endif\n\n  if (drop>0) { \t\t\t/* [most common case] */\n    /* (this code is very similar to that in decFloatFinalize, but */\n    /* has many differences so is duplicated here -- so any changes */\n    /* may need to be made there, too) */\n    uByte *roundat;\t\t\t     /* -> re-round digit */\n    uByte reround;\t\t\t     /* reround value */\n    /* printf(\"Rounding; drop=%ld\\n\", (LI)drop); */\n\n    /* there is at least one zero needed to the left, in all but one */\n    /* exceptional (all-nines) case, so place four zeros now; this is */\n    /* needed almost always and makes rounding all-nines by fours safe */\n    UBFROMUI(BUFOFF-4, 0);\n\n    /* Three cases here: */\n    /*\t 1. new LSD is in coefficient (almost always) */\n    /*\t 2. new LSD is digit to left of coefficient (so MSD is */\n    /*\t    round-for-reround digit) */\n    /*\t 3. new LSD is to left of case 2 (whole coefficient is sticky) */\n    /* Note that leading zeros can safely be treated as useful digits */\n\n    /* [duplicate check-stickies code to save a test] */\n    /* [by-digit check for stickies as runs of zeros are rare] */\n    if (drop<DECPMAX) { \t\t     /* NB lengths not addresses */\n      roundat=BUFOFF+DECPMAX-drop;\n      reround=*roundat;\n      for (ub=roundat+1; ub<BUFOFF+DECPMAX; ub++) {\n\tif (*ub!=0) {\t\t\t     /* non-zero to be discarded */\n\t  reround=DECSTICKYTAB[reround];     /* apply sticky bit */\n\t  break;\t\t\t     /* [remainder don't-care] */\n\t  }\n\t} /* check stickies */\n      ulsd=roundat-1;\t\t\t     /* set LSD */\n      }\n     else {\t\t\t\t     /* edge case */\n      if (drop==DECPMAX) {\n\troundat=BUFOFF;\n\treround=*roundat;\n\t}\n       else {\n\troundat=BUFOFF-1;\n\treround=0;\n\t}\n      for (ub=roundat+1; ub<BUFOFF+DECPMAX; ub++) {\n\tif (*ub!=0) {\t\t\t     /* non-zero to be discarded */\n\t  reround=DECSTICKYTAB[reround];     /* apply sticky bit */\n\t  break;\t\t\t     /* [remainder don't-care] */\n\t  }\n\t} /* check stickies */\n      *BUFOFF=0;\t\t\t     /* make a coefficient of 0 */\n      ulsd=BUFOFF;\t\t\t     /* .. at the MSD place */\n      }\n\n    if (reround!=0) {\t\t\t     /* discarding non-zero */\n      uInt bump=0;\n      set->status|=DEC_Inexact;\n\n      /* next decide whether to increment the coefficient */\n      if (set->round==DEC_ROUND_HALF_EVEN) { /* fastpath slowest case */\n\tif (reround>5) bump=1;\t\t     /* >0.5 goes up */\n\t else if (reround==5)\t\t     /* exactly 0.5000 .. */\n\t  bump=*ulsd & 0x01;\t\t     /* .. up iff [new] lsd is odd */\n\t} /* r-h-e */\n       else switch (set->round) {\n\tcase DEC_ROUND_DOWN: {\n\t  /* no change */\n\t  break;} /* r-d */\n\tcase DEC_ROUND_HALF_DOWN: {\n\t  if (reround>5) bump=1;\n\t  break;} /* r-h-d */\n\tcase DEC_ROUND_HALF_UP: {\n\t  if (reround>=5) bump=1;\n\t  break;} /* r-h-u */\n\tcase DEC_ROUND_UP: {\n\t  if (reround>0) bump=1;\n\t  break;} /* r-u */\n\tcase DEC_ROUND_CEILING: {\n\t  /* same as _UP for positive numbers, and as _DOWN for negatives */\n\t  if (!(sourhil&DECFLOAT_Sign) && reround>0) bump=1;\n\t  break;} /* r-c */\n\tcase DEC_ROUND_FLOOR: {\n\t  /* same as _UP for negative numbers, and as _DOWN for positive */\n\t  /* [negative reround cannot occur on 0] */\n\t  if (sourhil&DECFLOAT_Sign && reround>0) bump=1;\n\t  break;} /* r-f */\n\tcase DEC_ROUND_05UP: {\n\t  if (reround>0) { /* anything out there is 'sticky' */\n\t    /* bump iff lsd=0 or 5; this cannot carry so it could be */\n\t    /* effected immediately with no bump -- but the code */\n\t    /* is clearer if this is done the same way as the others */\n\t    if (*ulsd==0 || *ulsd==5) bump=1;\n\t    }\n\t  break;} /* r-r */\n\tdefault: {\t/* e.g., DEC_ROUND_MAX */\n\t  set->status|=DEC_Invalid_context;\n\t  #if DECCHECK\n\t  printf(\"Unknown rounding mode: %ld\\n\", (LI)set->round);\n\t  #endif\n\t  break;}\n\t} /* switch (not r-h-e) */\n      /* printf(\"ReRound: %ld  bump: %ld\\n\", (LI)reround, (LI)bump); */\n\n      if (bump!=0) {\t\t\t     /* need increment */\n\t/* increment the coefficient; this could give 1000... (after */\n\t/* the all nines case) */\n\tub=ulsd;\n\tfor (; UBTOUI(ub-3)==0x09090909; ub-=4) UBFROMUI(ub-3, 0);\n\t/* now at most 3 digits left to non-9 (usually just the one) */\n\tfor (; *ub==9; ub--) *ub=0;\n\t*ub+=1;\n\t/* [the all-nines case will have carried one digit to the */\n\t/* left of the original MSD -- just where it is needed] */\n\t} /* bump needed */\n      } /* inexact rounding */\n\n    /* now clear zeros to the left so exactly DECPMAX digits will be */\n    /* available in the coefficent -- the first word to the left was */\n    /* cleared earlier for safe carry; now add any more needed */\n    if (drop>4) {\n      UBFROMUI(BUFOFF-8, 0);\t\t     /* must be at least 5 */\n      for (uc=BUFOFF-12; uc>ulsd-DECPMAX-3; uc-=4) UBFROMUI(uc, 0);\n      }\n    } /* need round (drop>0) */\n\n   else { /* drop<0; padding with -drop digits is needed */\n    /* This is the case where an error can occur if the padded */\n    /* coefficient will not fit; checking for this can be done in the */\n    /* same loop as padding for zeros if the no-hope and zero cases */\n    /* are checked first */\n    if (-drop>DECPMAX-1) {\t\t     /* cannot fit unless 0 */\n      if (!ISCOEFFZERO(BUFOFF)) return decInvalid(result, set);\n      /* a zero can have any exponent; just drop through and use it */\n      ulsd=BUFOFF+DECPMAX-1;\n      }\n     else { /* padding will fit (but may still be too long) */\n      /* final-word mask depends on endianess */\n      #if DECLITEND\n      static const uInt dmask[]={0, 0x000000ff, 0x0000ffff, 0x00ffffff};\n      #else\n      static const uInt dmask[]={0, 0xff000000, 0xffff0000, 0xffffff00};\n      #endif\n      /* note that here zeros to the right are added by fours, so in */\n      /* the Quad case this could write 36 zeros if the coefficient has */\n      /* fewer than three significant digits (hence the +2*QUAD for buf) */\n      for (uc=BUFOFF+DECPMAX;; uc+=4) {\n\tUBFROMUI(uc, 0);\n\tif (UBTOUI(uc-DECPMAX)!=0) {\t\t  /* could be bad */\n\t  /* if all four digits should be zero, definitely bad */\n\t  if (uc<=BUFOFF+DECPMAX+(-drop)-4)\n\t    return decInvalid(result, set);\n\t  /* must be a 1- to 3-digit sequence; check more carefully */\n\t  if ((UBTOUI(uc-DECPMAX)&dmask[(-drop)%4])!=0)\n\t    return decInvalid(result, set);\n\t  break;    /* no need for loop end test */\n\t  }\n\tif (uc>=BUFOFF+DECPMAX+(-drop)-4) break;  /* done */\n\t}\n      ulsd=BUFOFF+DECPMAX+(-drop)-1;\n      } /* pad and check leading zeros */\n    } /* drop<0 */\n\n  #if DECTRACE\n  num.msd=ulsd-DECPMAX+1;\n  num.lsd=ulsd;\n  num.exponent=explb-DECBIAS;\n  num.sign=sourhil & DECFLOAT_Sign;\n  decShowNum(&num, \"res\");\n  #endif\n\n  /*------------------------------------------------------------------*/\n  /* At this point the result is DECPMAX digits, ending at ulsd, so   */\n  /* fits the encoding exactly; there is no possibility of error      */\n  /*------------------------------------------------------------------*/\n  encode=((exprb>>DECECONL)<<4) + *(ulsd-DECPMAX+1); /* make index */\n  encode=DECCOMBFROM[encode];\t\t     /* indexed by (0-2)*16+msd */\n  /* the exponent continuation can be extracted from the original RHS */\n  encode|=sourhir & ECONMASK;\n  encode|=sourhil&DECFLOAT_Sign;\t     /* add the sign from LHS */\n\n  /* finally encode the coefficient */\n  /* private macro to encode a declet; this version can be used */\n  /* because all coefficient digits exist */\n  #define getDPD3q(dpd, n) ub=ulsd-(3*(n))-2;\t\t\t\\\n    dpd=BCD2DPD[(*ub*256)+(*(ub+1)*16)+*(ub+2)];\n\n  #if DOUBLE\n    getDPD3q(dpd, 4); encode|=dpd<<8;\n    getDPD3q(dpd, 3); encode|=dpd>>2;\n    DFWORD(result, 0)=encode;\n    encode=dpd<<30;\n    getDPD3q(dpd, 2); encode|=dpd<<20;\n    getDPD3q(dpd, 1); encode|=dpd<<10;\n    getDPD3q(dpd, 0); encode|=dpd;\n    DFWORD(result, 1)=encode;\n\n  #elif QUAD\n    getDPD3q(dpd,10); encode|=dpd<<4;\n    getDPD3q(dpd, 9); encode|=dpd>>6;\n    DFWORD(result, 0)=encode;\n    encode=dpd<<26;\n    getDPD3q(dpd, 8); encode|=dpd<<16;\n    getDPD3q(dpd, 7); encode|=dpd<<6;\n    getDPD3q(dpd, 6); encode|=dpd>>4;\n    DFWORD(result, 1)=encode;\n    encode=dpd<<28;\n    getDPD3q(dpd, 5); encode|=dpd<<18;\n    getDPD3q(dpd, 4); encode|=dpd<<8;\n    getDPD3q(dpd, 3); encode|=dpd>>2;\n    DFWORD(result, 2)=encode;\n    encode=dpd<<30;\n    getDPD3q(dpd, 2); encode|=dpd<<20;\n    getDPD3q(dpd, 1); encode|=dpd<<10;\n    getDPD3q(dpd, 0); encode|=dpd;\n    DFWORD(result, 3)=encode;\n  #endif\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          2899,
+          0
+        ],
+        [
+          3174,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatQuantize",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatReduce(decFloat *result, const decFloat *df,\n\t\t\t  decContext *set) {\n  bcdnum num;\t\t\t\t/* work */\n  uByte buf[DECPMAX], *ub;\t\t/* coefficient and pointer */\n  if (df!=result) *result=*df;\t\t/* copy, if needed */\n  if (DFISNAN(df)) return decNaNs(result, df, NULL, set);   /* sNaN */\n  /* zeros and infinites propagate too */\n  if (DFISINF(df)) return decInfinity(result, df);     /* canonical */\n  if (DFISZERO(df)) {\n    uInt sign=DFWORD(df, 0)&DECFLOAT_Sign;\n    decFloatZero(result);\n    DFWORD(result, 0)|=sign;\n    return result;\t\t\t/* exponent dropped, sign OK */\n    }\n  /* non-zero finite */\n  GETCOEFF(df, buf);\n  ub=buf+DECPMAX-1;\t\t\t/* -> lsd */\n  if (*ub) return result;\t\t/* no trailing zeros */\n  for (ub--; *ub==0;) ub--;\t\t/* terminates because non-zero */\n  /* *ub is the first non-zero from the right */\n  num.sign=DFWORD(df, 0)&DECFLOAT_Sign; /* set up number... */\n  num.exponent=GETEXPUN(df)+(Int)(buf+DECPMAX-1-ub); /* adjusted exponent */\n  num.msd=buf;\n  num.lsd=ub;\n  return decFinalize(result, &num, set);\n  }",
+      "fn_code_pos": [
+        [
+          3189,
+          0
+        ],
+        [
+          3214,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatReduce",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatRemainder(decFloat *result,\n\t\t\t     const decFloat *dfl, const decFloat *dfr,\n\t\t\t     decContext *set) {\n  return decDivide(result, dfl, dfr, set, REMAINDER);\n  }",
+      "fn_code_pos": [
+        [
+          3226,
+          0
+        ],
+        [
+          3230,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatRemainder",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatRemainderNear(decFloat *result,\n\t\t\t     const decFloat *dfl, const decFloat *dfr,\n\t\t\t     decContext *set) {\n  return decDivide(result, dfl, dfr, set, REMNEAR);\n  }",
+      "fn_code_pos": [
+        [
+          3243,
+          0
+        ],
+        [
+          3247,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatRemainderNear",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatRotate(decFloat *result,\n\t\t\t const decFloat *dfl, const decFloat *dfr,\n\t\t\t decContext *set) {\n  Int rotate;\t\t\t\t/* dfr as an Int */\n  uByte buf[DECPMAX+PHALF];\t\t/* coefficient + half */\n  uInt digits, savestat;\t\t/* work */\n  bcdnum num;\t\t\t\t/* .. */\n  uByte *ub;\t\t\t\t/* .. */\n\n  if (DFISNAN(dfl)||DFISNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n  if (!DFISINT(dfr)) return decInvalid(result, set);\n  digits=decFloatDigits(dfr);\t\t\t /* calculate digits */\n  if (digits>2) return decInvalid(result, set);  /* definitely out of range */\n  rotate=DPD2BIN[DFWORD(dfr, DECWORDS-1)&0x3ff]; /* is in bottom declet */\n  if (rotate>DECPMAX) return decInvalid(result, set); /* too big */\n  /* [from here on no error or status change is possible] */\n  if (DFISINF(dfl)) return decInfinity(result, dfl);  /* canonical */\n  /* handle no-rotate cases */\n  if (rotate==0 || rotate==DECPMAX) return decCanonical(result, dfl);\n  /* a real rotate is needed: 0 < rotate < DECPMAX */\n  /* reduce the rotation to no more than half to reduce copying later */\n  /* (for QUAD in fact half + 2 digits) */\n  if (DFISSIGNED(dfr)) rotate=-rotate;\n  if (abs(rotate)>PHALF) {\n    if (rotate<0) rotate=DECPMAX+rotate;\n     else rotate=rotate-DECPMAX;\n    }\n  /* now lay out the coefficient, leaving room to the right or the */\n  /* left depending on the direction of rotation */\n  ub=buf;\n  if (rotate<0) ub+=PHALF;    /* rotate right, so space to left */\n  GETCOEFF(dfl, ub);\n  /* copy half the digits to left or right, and set num.msd */\n  if (rotate<0) {\n    memcpy(buf, buf+DECPMAX, PHALF);\n    num.msd=buf+PHALF+rotate;\n    }\n   else {\n    memcpy(buf+DECPMAX, buf, PHALF);\n    num.msd=buf+rotate;\n    }\n  /* fill in rest of num */\n  num.lsd=num.msd+DECPMAX-1;\n  num.sign=DFWORD(dfl, 0)&DECFLOAT_Sign;\n  num.exponent=GETEXPUN(dfl);\n  savestat=set->status; \t\t/* record */\n  decFinalize(result, &num, set);\n  set->status=savestat; \t\t/* restore */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          3268,
+          0
+        ],
+        [
+          3317,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatRotate",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatSameQuantum(const decFloat *dfl, const decFloat *dfr) {\n  if (DFISSPECIAL(dfl) || DFISSPECIAL(dfr)) {\n    if (DFISNAN(dfl) && DFISNAN(dfr)) return 1;\n    if (DFISINF(dfl) && DFISINF(dfr)) return 1;\n    return 0;  /* any other special mixture gives false */\n    }\n  if (GETEXP(dfl)==GETEXP(dfr)) return 1; /* biased exponents match */\n  return 0;\n  }",
+      "fn_code_pos": [
+        [
+          3328,
+          0
+        ],
+        [
+          3336,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatSameQuantum",
+        "parameters": {
+          "dfl": "decFloat",
+          "dfr": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatScaleB(decFloat *result,\n\t\t\t  const decFloat *dfl, const decFloat *dfr,\n\t\t\t  decContext *set) {\n  uInt digits;\t\t\t\t/* work */\n  Int  expr;\t\t\t\t/* dfr as an Int */\n\n  if (DFISNAN(dfl)||DFISNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n  if (!DFISINT(dfr)) return decInvalid(result, set);\n  digits=decFloatDigits(dfr);\t\t     /* calculate digits */\n\n  #if DOUBLE\n  if (digits>3) return decInvalid(result, set);   /* definitely out of range */\n  expr=DPD2BIN[DFWORD(dfr, 1)&0x3ff];\t\t  /* must be in bottom declet */\n  #elif QUAD\n  if (digits>5) return decInvalid(result, set);   /* definitely out of range */\n  expr=DPD2BIN[DFWORD(dfr, 3)&0x3ff]\t\t  /* in bottom 2 declets .. */\n      +DPD2BIN[(DFWORD(dfr, 3)>>10)&0x3ff]*1000;  /* .. */\n  #endif\n  if (expr>SCALEBMAX) return decInvalid(result, set);  /* oops */\n  /* [from now on no error possible] */\n  if (DFISINF(dfl)) return decInfinity(result, dfl);   /* canonical */\n  if (DFISSIGNED(dfr)) expr=-expr;\n  /* dfl is finite and expr is valid */\n  *result=*dfl; \t\t\t     /* copy to target */\n  return decFloatSetExponent(result, set, GETEXPUN(result)+expr);\n  }",
+      "fn_code_pos": [
+        [
+          3353,
+          0
+        ],
+        [
+          3378,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatScaleB",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatShift(decFloat *result,\n\t\t\t const decFloat *dfl, const decFloat *dfr,\n\t\t\t decContext *set) {\n  Int\t shift; \t\t\t/* dfr as an Int */\n  uByte  buf[DECPMAX*2];\t\t/* coefficient + padding */\n  uInt\t digits, savestat;\t\t/* work */\n  bcdnum num;\t\t\t\t/* .. */\n  uInt\t uiwork;\t\t\t/* for macros */\n\n  if (DFISNAN(dfl)||DFISNAN(dfr)) return decNaNs(result, dfl, dfr, set);\n  if (!DFISINT(dfr)) return decInvalid(result, set);\n  digits=decFloatDigits(dfr);\t\t\t  /* calculate digits */\n  if (digits>2) return decInvalid(result, set);   /* definitely out of range */\n  shift=DPD2BIN[DFWORD(dfr, DECWORDS-1)&0x3ff];   /* is in bottom declet */\n  if (shift>DECPMAX) return decInvalid(result, set);   /* too big */\n  /* [from here on no error or status change is possible] */\n\n  if (DFISINF(dfl)) return decInfinity(result, dfl); /* canonical */\n  /* handle no-shift and all-shift (clear to zero) cases */\n  if (shift==0) return decCanonical(result, dfl);\n  if (shift==DECPMAX) { \t\t     /* zero with sign */\n    uByte sign=(uByte)(DFBYTE(dfl, 0)&0x80); /* save sign bit */\n    decFloatZero(result);\t\t     /* make +0 */\n    DFBYTE(result, 0)=(uByte)(DFBYTE(result, 0)|sign); /* and set sign */\n    /* [cannot safely use CopySign] */\n    return result;\n    }\n  /* a real shift is needed: 0 < shift < DECPMAX */\n  num.sign=DFWORD(dfl, 0)&DECFLOAT_Sign;\n  num.exponent=GETEXPUN(dfl);\n  num.msd=buf;\n  GETCOEFF(dfl, buf);\n  if (DFISSIGNED(dfr)) { /* shift right */\n    /* edge cases are taken care of, so this is easy */\n    num.lsd=buf+DECPMAX-shift-1;\n    }\n   else { /* shift left -- zero padding needed to right */\n    UBFROMUI(buf+DECPMAX, 0);\t\t/* 8 will handle most cases */\n    UBFROMUI(buf+DECPMAX+4, 0); \t/* .. */\n    if (shift>8) memset(buf+DECPMAX+8, 0, 8+QUAD*18); /* all other cases */\n    num.msd+=shift;\n    num.lsd=num.msd+DECPMAX-1;\n    }\n  savestat=set->status; \t\t/* record */\n  decFinalize(result, &num, set);\n  set->status=savestat; \t\t/* restore */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          3398,
+          0
+        ],
+        [
+          3445,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatShift",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatSubtract(decFloat *result,\n\t\t\t    const decFloat *dfl, const decFloat *dfr,\n\t\t\t    decContext *set) {\n  decFloat temp;\n  /* NaNs must propagate without sign change */\n  if (DFISNAN(dfr)) return decFloatAdd(result, dfl, dfr, set);\n  temp=*dfr;\t\t\t\t       /* make a copy */\n  DFBYTE(&temp, 0)^=0x80;\t\t       /* flip sign */\n  return decFloatAdd(result, dfl, &temp, set); /* and add to the lhs */\n  }",
+      "fn_code_pos": [
+        [
+          3457,
+          0
+        ],
+        [
+          3466,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatSubtract",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatToUInt32(const decFloat *df, decContext *set,\n\t\t      enum rounding round) {\n  return decToInt32(df, set, round, 0, 1);}",
+      "fn_code_pos": [
+        [
+          3480,
+          0
+        ],
+        [
+          3482,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToUInt32",
+        "parameters": {
+          "df": "decFloat",
+          "set": "decContext",
+          "round": "enum rounding"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatToUInt32Exact(const decFloat *df, decContext *set,\n\t\t\t   enum rounding round) {\n  return decToInt32(df, set, round, 1, 1);}",
+      "fn_code_pos": [
+        [
+          3484,
+          0
+        ],
+        [
+          3486,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToUInt32Exact",
+        "parameters": {
+          "df": "decFloat",
+          "set": "decContext",
+          "round": "enum rounding"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "Int decFloatToInt32(const decFloat *df, decContext *set,\n\t\t    enum rounding round) {\n  return (Int)decToInt32(df, set, round, 0, 0);}",
+      "fn_code_pos": [
+        [
+          3488,
+          0
+        ],
+        [
+          3490,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToInt32",
+        "parameters": {
+          "df": "decFloat",
+          "set": "decContext",
+          "round": "enum rounding"
+        },
+        "return_type": "Int"
+      }
+    },
+    {
+      "fn_code": "Int decFloatToInt32Exact(const decFloat *df, decContext *set,\n\t\t\t enum rounding round) {\n  return (Int)decToInt32(df, set, round, 1, 0);}",
+      "fn_code_pos": [
+        [
+          3492,
+          0
+        ],
+        [
+          3494,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToInt32Exact",
+        "parameters": {
+          "df": "decFloat",
+          "set": "decContext",
+          "round": "enum rounding"
+        },
+        "return_type": "Int"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatToIntegralValue(decFloat *result, const decFloat *df,\n\t\t\t\t   decContext *set, enum rounding round) {\n  return decToIntegral(result, df, set, round, 0);}",
+      "fn_code_pos": [
+        [
+          3508,
+          0
+        ],
+        [
+          3510,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToIntegralValue",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext",
+          "round": "enum rounding"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatToIntegralExact(decFloat *result, const decFloat *df,\n\t\t\t\t   decContext *set) {\n  return decToIntegral(result, df, set, set->round, 1);}",
+      "fn_code_pos": [
+        [
+          3512,
+          0
+        ],
+        [
+          3514,
+          56
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToIntegralExact",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatXor(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set) {\n  if (!DFISUINT01(dfl) || !DFISUINT01(dfr)\n   || !DFISCC01(dfl)   || !DFISCC01(dfr)) return decInvalid(result, set);\n  /* the operands are positive finite integers (q=0) with just 0s and 1s */\n  #if DOUBLE\n   DFWORD(result, 0)=ZEROWORD\n\t\t   |((DFWORD(dfl, 0) ^ DFWORD(dfr, 0))&0x04009124);\n   DFWORD(result, 1)=(DFWORD(dfl, 1) ^ DFWORD(dfr, 1))&0x49124491;\n  #elif QUAD\n   DFWORD(result, 0)=ZEROWORD\n\t\t   |((DFWORD(dfl, 0) ^ DFWORD(dfr, 0))&0x04000912);\n   DFWORD(result, 1)=(DFWORD(dfl, 1) ^ DFWORD(dfr, 1))&0x44912449;\n   DFWORD(result, 2)=(DFWORD(dfl, 2) ^ DFWORD(dfr, 2))&0x12449124;\n   DFWORD(result, 3)=(DFWORD(dfl, 3) ^ DFWORD(dfr, 3))&0x49124491;\n  #endif\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          3528,
+          0
+        ],
+        [
+          3546,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatXor",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "static decFloat *decInvalid(decFloat *result, decContext *set) {\n  decFloatZero(result);\n  DFWORD(result, 0)=DECFLOAT_qNaN;\n  set->status|=DEC_Invalid_operation;\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          3557,
+          0
+        ],
+        [
+          3562,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decInvalid",
+        "parameters": {
+          "result": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "static decFloat *decInfinity(decFloat *result, const decFloat *df) {\n  uInt sign=DFWORD(df, 0);\t   /* save source signword */\n  decFloatZero(result); \t   /* clear everything */\n  DFWORD(result, 0)=DECFLOAT_Inf | (sign & DECFLOAT_Sign);\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          3573,
+          0
+        ],
+        [
+          3578,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decInfinity",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "static decFloat *decNaNs(decFloat *result,\n\t\t\t const decFloat *dfl, const decFloat *dfr,\n\t\t\t decContext *set) {\n  /* handle sNaNs first */\n  if (dfr!=NULL && DFISSNAN(dfr) && !DFISSNAN(dfl)) dfl=dfr; /* use RHS */\n  if (DFISSNAN(dfl)) {\n    decCanonical(result, dfl);\t\t/* propagate canonical sNaN */\n    DFWORD(result, 0)&=~(DECFLOAT_qNaN ^ DECFLOAT_sNaN); /* quiet */\n    set->status|=DEC_Invalid_operation;\n    return result;\n    }\n  /* one or both is a quiet NaN */\n  if (!DFISNAN(dfl)) dfl=dfr;\t\t/* RHS must be NaN, use it */\n  return decCanonical(result, dfl);\t/* propagate canonical qNaN */\n  }",
+      "fn_code_pos": [
+        [
+          3595,
+          0
+        ],
+        [
+          3609,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decNaNs",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "static Int decNumCompare(const decFloat *dfl, const decFloat *dfr, Flag tot) {\n  Int\tsigl, sigr;\t\t\t/* LHS and RHS non-0 signums */\n  Int\tshift;\t\t\t\t/* shift needed to align operands */\n  uByte *ub, *uc;\t\t\t/* work */\n  uInt\tuiwork; \t\t\t/* for macros */\n  /* buffers +2 if Quad (36 digits), need double plus 4 for safe padding */\n  uByte bufl[DECPMAX*2+QUAD*2+4];\t/* for LHS coefficient + padding */\n  uByte bufr[DECPMAX*2+QUAD*2+4];\t/* for RHS coefficient + padding */\n\n  sigl=1;\n  if (DFISSIGNED(dfl)) {\n    if (!DFISSIGNED(dfr)) {\t\t/* -LHS +RHS */\n      if (DFISZERO(dfl) && DFISZERO(dfr) && !tot) return 0;\n      return -1;\t\t\t/* RHS wins */\n      }\n    sigl=-1;\n    }\n  if (DFISSIGNED(dfr)) {\n    if (!DFISSIGNED(dfl)) {\t\t/* +LHS -RHS */\n      if (DFISZERO(dfl) && DFISZERO(dfr) && !tot) return 0;\n      return +1;\t\t\t/* LHS wins */\n      }\n    }\n\n  /* signs are the same; operand(s) could be zero */\n  sigr=-sigl;\t\t\t\t/* sign to return if abs(RHS) wins */\n\n  if (DFISINF(dfl)) {\n    if (DFISINF(dfr)) return 0; \t/* both infinite & same sign */\n    return sigl;\t\t\t/* inf > n */\n    }\n  if (DFISINF(dfr)) return sigr;\t/* n < inf [dfl is finite] */\n\n  /* here, both are same sign and finite; calculate their offset */\n  shift=GETEXP(dfl)-GETEXP(dfr);\t/* [0 means aligned] */\n  /* [bias can be ignored -- the absolute exponent is not relevant] */\n\n  if (DFISZERO(dfl)) {\n    if (!DFISZERO(dfr)) return sigr;\t/* LHS=0, RHS!=0 */\n    /* both are zero, return 0 if both same exponent or numeric compare */\n    if (shift==0 || !tot) return 0;\n    if (shift>0) return sigl;\n    return sigr;\t\t\t/* [shift<0] */\n    }\n   else {\t\t\t\t/* LHS!=0 */\n    if (DFISZERO(dfr)) return sigl;\t/* LHS!=0, RHS=0 */\n    }\n  /* both are known to be non-zero at this point */\n\n  /* if the exponents are so different that the coefficients do not */\n  /* overlap (by even one digit) then a full comparison is not needed */\n  if (abs(shift)>=DECPMAX) {\t\t/* no overlap */\n    /* coefficients are known to be non-zero */\n    if (shift>0) return sigl;\n    return sigr;\t\t\t/* [shift<0] */\n    }\n\n  /* decode the coefficients */\n  /* (shift both right two if Quad to make a multiple of four) */\n  #if QUAD\n    UBFROMUI(bufl, 0);\n    UBFROMUI(bufr, 0);\n  #endif\n  GETCOEFF(dfl, bufl+QUAD*2);\t\t/* decode from decFloat */\n  GETCOEFF(dfr, bufr+QUAD*2);\t\t/* .. */\n  if (shift==0) {\t\t\t/* aligned; common and easy */\n    /* all multiples of four, here */\n    for (ub=bufl, uc=bufr; ub<bufl+DECPMAX+QUAD*2; ub+=4, uc+=4) {\n      uInt ui=UBTOUI(ub);\n      if (ui==UBTOUI(uc)) continue;\t/* so far so same */\n      /* about to find a winner; go by bytes in case little-endian */\n      for (;; ub++, uc++) {\n\tif (*ub>*uc) return sigl;\t/* difference found */\n\tif (*ub<*uc) return sigr;\t/* .. */\n\t}\n      }\n    } /* aligned */\n   else if (shift>0) {\t\t\t/* lhs to left */\n    ub=bufl;\t\t\t\t/* RHS pointer */\n    /* pad bufl so right-aligned; most shifts will fit in 8 */\n    UBFROMUI(bufl+DECPMAX+QUAD*2, 0);\t/* add eight zeros */\n    UBFROMUI(bufl+DECPMAX+QUAD*2+4, 0); /* .. */\n    if (shift>8) {\n      /* more than eight; fill the rest, and also worth doing the */\n      /* lead-in by fours */\n      uByte *up;\t\t\t/* work */\n      uByte *upend=bufl+DECPMAX+QUAD*2+shift;\n      for (up=bufl+DECPMAX+QUAD*2+8; up<upend; up+=4) UBFROMUI(up, 0);\n      /* [pads up to 36 in all for Quad] */\n      for (;; ub+=4) {\n\tif (UBTOUI(ub)!=0) return sigl;\n\tif (ub+4>bufl+shift-4) break;\n\t}\n      }\n    /* check remaining leading digits */\n    for (; ub<bufl+shift; ub++) if (*ub!=0) return sigl;\n    /* now start the overlapped part; bufl has been padded, so the */\n    /* comparison can go for the full length of bufr, which is a */\n    /* multiple of 4 bytes */\n    for (uc=bufr; ; uc+=4, ub+=4) {\n      uInt ui=UBTOUI(ub);\n      if (ui!=UBTOUI(uc)) {\t\t/* mismatch found */\n\tfor (;; uc++, ub++) {\t\t/* check from left [little-endian?] */\n\t  if (*ub>*uc) return sigl;\t/* difference found */\n\t  if (*ub<*uc) return sigr;\t/* .. */\n\t  }\n\t} /* mismatch */\n      if (uc==bufr+QUAD*2+DECPMAX-4) break; /* all checked */\n      }\n    } /* shift>0 */\n\n   else { /* shift<0) .. RHS is to left of LHS; mirror shift>0 */\n    uc=bufr;\t\t\t\t/* RHS pointer */\n    /* pad bufr so right-aligned; most shifts will fit in 8 */\n    UBFROMUI(bufr+DECPMAX+QUAD*2, 0);\t/* add eight zeros */\n    UBFROMUI(bufr+DECPMAX+QUAD*2+4, 0); /* .. */\n    if (shift<-8) {\n      /* more than eight; fill the rest, and also worth doing the */\n      /* lead-in by fours */\n      uByte *up;\t\t\t/* work */\n      uByte *upend=bufr+DECPMAX+QUAD*2-shift;\n      for (up=bufr+DECPMAX+QUAD*2+8; up<upend; up+=4) UBFROMUI(up, 0);\n      /* [pads up to 36 in all for Quad] */\n      for (;; uc+=4) {\n\tif (UBTOUI(uc)!=0) return sigr;\n\tif (uc+4>bufr-shift-4) break;\n\t}\n      }\n    /* check remaining leading digits */\n    for (; uc<bufr-shift; uc++) if (*uc!=0) return sigr;\n    /* now start the overlapped part; bufr has been padded, so the */\n    /* comparison can go for the full length of bufl, which is a */\n    /* multiple of 4 bytes */\n    for (ub=bufl; ; ub+=4, uc+=4) {\n      uInt ui=UBTOUI(ub);\n      if (ui!=UBTOUI(uc)) {\t\t/* mismatch found */\n\tfor (;; ub++, uc++) {\t\t/* check from left [little-endian?] */\n\t  if (*ub>*uc) return sigl;\t/* difference found */\n\t  if (*ub<*uc) return sigr;\t/* .. */\n\t  }\n\t} /* mismatch */\n      if (ub==bufl+QUAD*2+DECPMAX-4) break; /* all checked */\n      }\n    } /* shift<0 */\n\n  /* Here when compare equal */\n  if (!tot) return 0;\t\t\t/* numerically equal */\n  /* total ordering .. exponent matters */\n  if (shift>0) return sigl;\t\t/* total order by exponent */\n  if (shift<0) return sigr;\t\t/* .. */\n  return 0;\n  }",
+      "fn_code_pos": [
+        [
+          3621,
+          0
+        ],
+        [
+          3772,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decNumCompare",
+        "parameters": {
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "tot": "Flag"
+        },
+        "return_type": "Int"
+      }
+    },
+    {
+      "fn_code": "static decFloat * decToIntegral(decFloat *result, const decFloat *df,\n\t\t\t\tdecContext *set, enum rounding rmode,\n\t\t\t\tFlag exact) {\n  Int  exp;\t\t\t   /* exponent */\n  uInt sourhi;\t\t\t   /* top word from source decFloat */\n  enum rounding saveround;\t   /* saver */\n  uInt savestatus;\t\t   /* .. */\n  decFloat zero;\t\t   /* work */\n\n  /* Start decoding the argument */\n  sourhi=DFWORD(df, 0); \t   /* top word */\n  exp=DECCOMBEXP[sourhi>>26];\t   /* get exponent high bits (in place) */\n\n  if (EXPISSPECIAL(exp)) {\t   /* is special? */\n    /* NaNs are handled as usual */\n    if (DFISNAN(df)) return decNaNs(result, df, NULL, set);\n    /* must be infinite; return canonical infinity with sign of df */\n    return decInfinity(result, df);\n    }\n\n  /* Here when the argument is finite */\n  /* complete extraction of the exponent */\n  exp+=GETECON(df)-DECBIAS;\t\t/* .. + continuation and unbias */\n\n  if (exp>=0) return decCanonical(result, df); /* already integral */\n\n  saveround=set->round; \t\t/* save rounding mode .. */\n  savestatus=set->status;\t\t/* .. and status */\n  set->round=rmode;\t\t\t/* set mode */\n  decFloatZero(&zero);\t\t\t/* make 0E+0 */\n  decFloatQuantize(result, df, &zero, set); /* 'integrate'; cannot fail */\n  set->round=saveround; \t\t/* restore rounding mode .. */\n  if (!exact) set->status=savestatus;\t/* .. and status, unless exact */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          3874,
+          0
+        ],
+        [
+          3908,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decToIntegral",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext",
+          "rmode": "enum rounding",
+          "exact": "Flag"
+        },
+        "return_type": "decFloat"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "decDivide(decFloat *, const decFloat *,\n\t\t\t      const decFloat *, decContext *, uInt)",
+      "fn_dec_pos": [
+        [
+          59,
+          17
+        ],
+        [
+          60,
+          46
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decDivide",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decCanonical(decFloat *, const decFloat *)",
+      "fn_dec_pos": [
+        [
+          61,
+          17
+        ],
+        [
+          61,
+          59
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decCanonical",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFiniteMultiply(bcdnum *, uByte *, const decFloat *,\n\t\t\t      const decFloat *)",
+      "fn_dec_pos": [
+        [
+          62,
+          13
+        ],
+        [
+          63,
+          26
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFiniteMultiply",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "decInfinity(decFloat *, const decFloat *)",
+      "fn_dec_pos": [
+        [
+          64,
+          17
+        ],
+        [
+          64,
+          58
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decInfinity",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decInvalid(decFloat *, decContext *)",
+      "fn_dec_pos": [
+        [
+          65,
+          17
+        ],
+        [
+          65,
+          53
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decInvalid",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decNaNs(decFloat *, const decFloat *, const decFloat *,\n\t\t\t      decContext *)",
+      "fn_dec_pos": [
+        [
+          66,
+          17
+        ],
+        [
+          67,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decNaNs",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decNumCompare(const decFloat *, const decFloat *, Flag)",
+      "fn_dec_pos": [
+        [
+          68,
+          12
+        ],
+        [
+          68,
+          67
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decNumCompare",
+        "parameters": {},
+        "return_type": "Int"
+      }
+    },
+    {
+      "fn_code": "decToIntegral(decFloat *, const decFloat *, decContext *,\n\t\t\t      enum rounding, Flag)",
+      "fn_dec_pos": [
+        [
+          69,
+          17
+        ],
+        [
+          70,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decToIntegral",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decToInt32(const decFloat *, decContext *, enum rounding,\n\t\t\t      Flag, Flag)",
+      "fn_dec_pos": [
+        [
+          71,
+          13
+        ],
+        [
+          72,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decToInt32",
+        "parameters": {},
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "decCanonical(decFloat *result, const decFloat *df)",
+      "fn_dec_pos": [
+        [
+          84,
+          18
+        ],
+        [
+          84,
+          68
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decCanonical",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decDivide(decFloat *result, const decFloat *dfl,\n\t\t\t    const decFloat *dfr, decContext *set, uInt op)",
+      "fn_dec_pos": [
+        [
+          176,
+          18
+        ],
+        [
+          177,
+          53
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decDivide",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext",
+          "op": "uInt"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatAbs(decFloat *result, const decFloat *df,\n\t\t       decContext *set)",
+      "fn_dec_pos": [
+        [
+          1078,
+          11
+        ],
+        [
+          1079,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatAbs",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatAdd(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set)",
+      "fn_dec_pos": [
+        [
+          1111,
+          11
+        ],
+        [
+          1113,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatAdd",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatAnd(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set)",
+      "fn_dec_pos": [
+        [
+          1591,
+          11
+        ],
+        [
+          1593,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatAnd",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatCanonical(decFloat *result, const decFloat *df)",
+      "fn_dec_pos": [
+        [
+          1620,
+          11
+        ],
+        [
+          1620,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCanonical",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatClassString(const decFloat *df)",
+      "fn_dec_pos": [
+        [
+          1662,
+          12
+        ],
+        [
+          1662,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatClassString",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatCompare(decFloat *result,\n\t\t\t   const decFloat *dfl, const decFloat *dfr,\n\t\t\t   decContext *set)",
+      "fn_dec_pos": [
+        [
+          1686,
+          11
+        ],
+        [
+          1688,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCompare",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatCompareSignal(decFloat *result,\n\t\t\t\t const decFloat *dfl, const decFloat *dfr,\n\t\t\t\t decContext *set)",
+      "fn_dec_pos": [
+        [
+          1710,
+          11
+        ],
+        [
+          1712,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCompareSignal",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatCompareTotal(decFloat *result,\n\t\t\t\tconst decFloat *dfl, const decFloat *dfr)",
+      "fn_dec_pos": [
+        [
+          1736,
+          11
+        ],
+        [
+          1737,
+          45
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCompareTotal",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatCompareTotalMag(decFloat *result,\n\t\t\t\tconst decFloat *dfl, const decFloat *dfr)",
+      "fn_dec_pos": [
+        [
+          1802,
+          11
+        ],
+        [
+          1803,
+          45
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCompareTotalMag",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatCopy(decFloat *result, const decFloat *dfl)",
+      "fn_dec_pos": [
+        [
+          1826,
+          11
+        ],
+        [
+          1826,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCopy",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatCopyAbs(decFloat *result, const decFloat *dfl)",
+      "fn_dec_pos": [
+        [
+          1840,
+          11
+        ],
+        [
+          1840,
+          65
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCopyAbs",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatCopyNegate(decFloat *result, const decFloat *dfl)",
+      "fn_dec_pos": [
+        [
+          1855,
+          11
+        ],
+        [
+          1855,
+          68
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCopyNegate",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatCopySign(decFloat *result,\n\t\t\t    const decFloat *dfl, const decFloat *dfr)",
+      "fn_dec_pos": [
+        [
+          1871,
+          11
+        ],
+        [
+          1872,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatCopySign",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatDivide(decFloat *result,\n\t\t\t  const decFloat *dfl, const decFloat *dfr,\n\t\t\t  decContext *set)",
+      "fn_dec_pos": [
+        [
+          1972,
+          11
+        ],
+        [
+          1974,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatDivide",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatDivideInteger(decFloat *result,\n\t\t\t     const decFloat *dfl, const decFloat *dfr,\n\t\t\t     decContext *set)",
+      "fn_dec_pos": [
+        [
+          1988,
+          11
+        ],
+        [
+          1990,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatDivideInteger",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatFMA(decFloat *result, const decFloat *dfl,\n\t\t       const decFloat *dfr, const decFloat *dff,\n\t\t       decContext *set)",
+      "fn_dec_pos": [
+        [
+          2005,
+          11
+        ],
+        [
+          2007,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFMA",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "dff": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatFromInt32(decFloat *result, Int n)",
+      "fn_dec_pos": [
+        [
+          2283,
+          11
+        ],
+        [
+          2283,
+          53
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromInt32",
+        "parameters": {
+          "result": "decFloat",
+          "n": "Int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatFromUInt32(decFloat *result, uInt u)",
+      "fn_dec_pos": [
+        [
+          2318,
+          11
+        ],
+        [
+          2318,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromUInt32",
+        "parameters": {
+          "result": "decFloat",
+          "u": "uInt"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatInvert(decFloat *result, const decFloat *df,\n\t\t\t  decContext *set)",
+      "fn_dec_pos": [
+        [
+          2348,
+          11
+        ],
+        [
+          2349,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatInvert",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatLogB(decFloat *result, const decFloat *df,\n\t\t\tdecContext *set)",
+      "fn_dec_pos": [
+        [
+          2475,
+          11
+        ],
+        [
+          2476,
+          19
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatLogB",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatMax(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set)",
+      "fn_dec_pos": [
+        [
+          2519,
+          11
+        ],
+        [
+          2521,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMax",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatMaxMag(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set)",
+      "fn_dec_pos": [
+        [
+          2552,
+          11
+        ],
+        [
+          2554,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMaxMag",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatMin(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set)",
+      "fn_dec_pos": [
+        [
+          2578,
+          11
+        ],
+        [
+          2580,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMin",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatMinMag(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set)",
+      "fn_dec_pos": [
+        [
+          2611,
+          11
+        ],
+        [
+          2613,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMinMag",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatMinus(decFloat *result, const decFloat *df,\n\t\t\t decContext *set)",
+      "fn_dec_pos": [
+        [
+          2640,
+          11
+        ],
+        [
+          2641,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMinus",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatMultiply(decFloat *result,\n\t\t\t    const decFloat *dfl, const decFloat *dfr,\n\t\t\t    decContext *set)",
+      "fn_dec_pos": [
+        [
+          2659,
+          11
+        ],
+        [
+          2661,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatMultiply",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatNextMinus(decFloat *result, const decFloat *dfl,\n\t\t\t     decContext *set)",
+      "fn_dec_pos": [
+        [
+          2692,
+          11
+        ],
+        [
+          2693,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatNextMinus",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatNextPlus(decFloat *result, const decFloat *dfl,\n\t\t\t    decContext *set)",
+      "fn_dec_pos": [
+        [
+          2735,
+          11
+        ],
+        [
+          2736,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatNextPlus",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatNextToward(decFloat *result,\n\t\t\t      const decFloat *dfl, const decFloat *dfr,\n\t\t\t      decContext *set)",
+      "fn_dec_pos": [
+        [
+          2781,
+          11
+        ],
+        [
+          2783,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatNextToward",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatOr(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set)",
+      "fn_dec_pos": [
+        [
+          2845,
+          11
+        ],
+        [
+          2847,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatOr",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatPlus(decFloat *result, const decFloat *df,\n\t\t\tdecContext *set)",
+      "fn_dec_pos": [
+        [
+          2879,
+          11
+        ],
+        [
+          2880,
+          19
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatPlus",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatQuantize(decFloat *result,\n\t\t\t    const decFloat *dfl, const decFloat *dfr,\n\t\t\t    decContext *set)",
+      "fn_dec_pos": [
+        [
+          2899,
+          11
+        ],
+        [
+          2901,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatQuantize",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatReduce(decFloat *result, const decFloat *df,\n\t\t\t  decContext *set)",
+      "fn_dec_pos": [
+        [
+          3189,
+          11
+        ],
+        [
+          3190,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatReduce",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatRemainder(decFloat *result,\n\t\t\t     const decFloat *dfl, const decFloat *dfr,\n\t\t\t     decContext *set)",
+      "fn_dec_pos": [
+        [
+          3226,
+          11
+        ],
+        [
+          3228,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatRemainder",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatRemainderNear(decFloat *result,\n\t\t\t     const decFloat *dfl, const decFloat *dfr,\n\t\t\t     decContext *set)",
+      "fn_dec_pos": [
+        [
+          3243,
+          11
+        ],
+        [
+          3245,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatRemainderNear",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatRotate(decFloat *result,\n\t\t\t const decFloat *dfl, const decFloat *dfr,\n\t\t\t decContext *set)",
+      "fn_dec_pos": [
+        [
+          3268,
+          11
+        ],
+        [
+          3270,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatRotate",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatScaleB(decFloat *result,\n\t\t\t  const decFloat *dfl, const decFloat *dfr,\n\t\t\t  decContext *set)",
+      "fn_dec_pos": [
+        [
+          3353,
+          11
+        ],
+        [
+          3355,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatScaleB",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatShift(decFloat *result,\n\t\t\t const decFloat *dfl, const decFloat *dfr,\n\t\t\t decContext *set)",
+      "fn_dec_pos": [
+        [
+          3398,
+          11
+        ],
+        [
+          3400,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatShift",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatSubtract(decFloat *result,\n\t\t\t    const decFloat *dfl, const decFloat *dfr,\n\t\t\t    decContext *set)",
+      "fn_dec_pos": [
+        [
+          3457,
+          11
+        ],
+        [
+          3459,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatSubtract",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatToIntegralValue(decFloat *result, const decFloat *df,\n\t\t\t\t   decContext *set, enum rounding round)",
+      "fn_dec_pos": [
+        [
+          3508,
+          11
+        ],
+        [
+          3509,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToIntegralValue",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext",
+          "round": "enum rounding"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatToIntegralExact(decFloat *result, const decFloat *df,\n\t\t\t\t   decContext *set)",
+      "fn_dec_pos": [
+        [
+          3512,
+          11
+        ],
+        [
+          3513,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToIntegralExact",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatXor(decFloat *result,\n\t\t       const decFloat *dfl, const decFloat *dfr,\n\t\t       decContext *set)",
+      "fn_dec_pos": [
+        [
+          3528,
+          11
+        ],
+        [
+          3530,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatXor",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decInvalid(decFloat *result, decContext *set)",
+      "fn_dec_pos": [
+        [
+          3557,
+          17
+        ],
+        [
+          3557,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decInvalid",
+        "parameters": {
+          "result": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decInfinity(decFloat *result, const decFloat *df)",
+      "fn_dec_pos": [
+        [
+          3573,
+          17
+        ],
+        [
+          3573,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decInfinity",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decNaNs(decFloat *result,\n\t\t\t const decFloat *dfl, const decFloat *dfr,\n\t\t\t decContext *set)",
+      "fn_dec_pos": [
+        [
+          3595,
+          17
+        ],
+        [
+          3597,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decNaNs",
+        "parameters": {
+          "result": "decFloat",
+          "dfl": "decFloat",
+          "dfr": "decFloat",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decToInt32(const decFloat *df, decContext *set,\n\t\t       enum rounding rmode, Flag exact, Flag unsign)",
+      "fn_dec_pos": [
+        [
+          3787,
+          12
+        ],
+        [
+          3788,
+          54
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decToInt32",
+        "parameters": {
+          "df": "decFloat",
+          "set": "decContext",
+          "rmode": "enum rounding",
+          "exact": "Flag",
+          "unsign": "Flag"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "decToIntegral(decFloat *result, const decFloat *df,\n\t\t\t\tdecContext *set, enum rounding rmode,\n\t\t\t\tFlag exact)",
+      "fn_dec_pos": [
+        [
+          3874,
+          18
+        ],
+        [
+          3876,
+          15
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decToIntegral",
+        "parameters": {
+          "result": "decFloat",
+          "df": "decFloat",
+          "set": "decContext",
+          "rmode": "enum rounding",
+          "exact": "Flag"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        70,
+        9
+      ],
+      [
+        70,
+        22
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        71,
+        56
+      ],
+      [
+        71,
+        69
+      ]
+    ],
+    [
+      "enum decClass",
+      {},
+      "",
+      [
+        1630,
+        0
+      ],
+      [
+        1630,
+        13
+      ]
+    ],
+    [
+      "enum decClass",
+      {},
+      "",
+      [
+        1663,
+        2
+      ],
+      [
+        1663,
+        15
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        2696,
+        2
+      ],
+      [
+        2696,
+        15
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        2738,
+        2
+      ],
+      [
+        2738,
+        15
+      ]
+    ],
+    [
+      "enum\trounding",
+      {},
+      "",
+      [
+        2787,
+        2
+      ],
+      [
+        2787,
+        15
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        3481,
+        8
+      ],
+      [
+        3481,
+        21
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        3485,
+        6
+      ],
+      [
+        3485,
+        19
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        3489,
+        6
+      ],
+      [
+        3489,
+        19
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        3493,
+        4
+      ],
+      [
+        3493,
+        17
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        3509,
+        24
+      ],
+      [
+        3509,
+        37
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        3788,
+        9
+      ],
+      [
+        3788,
+        22
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        3806,
+        4
+      ],
+      [
+        3806,
+        17
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        3875,
+        21
+      ],
+      [
+        3875,
+        34
+      ]
+    ],
+    [
+      "enum rounding",
+      {},
+      "",
+      [
+        3879,
+        2
+      ],
+      [
+        3879,
+        15
+      ]
+    ]
+  ]
+}

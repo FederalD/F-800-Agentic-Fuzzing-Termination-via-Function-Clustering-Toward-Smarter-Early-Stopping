@@ -1,0 +1,413 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int\nbt_monitor_findalldevs(pcap_if_list_t *devlistp, char *err_str)\n{\n    int         ret = 0;\n\n    /*\n     * Bluetooth is a wireless technology.\n     *\n     * This is a device to monitor all Bluetooth interfaces, so\n     * there's no notion of \"connected\" or \"disconnected\", any\n     * more than there's a notion of \"connected\" or \"disconnected\"\n     * for the \"any\" device.\n     */\n    if (add_dev(devlistp, INTERFACE_NAME,\n                PCAP_IF_WIRELESS|PCAP_IF_CONNECTION_STATUS_NOT_APPLICABLE,\n                \"Bluetooth Linux Monitor\", err_str) == NULL)\n    {\n        ret = -1;\n    }\n\n    return ret;\n}",
+      "fn_code_pos": [
+        [
+          61,
+          0
+        ],
+        [
+          82,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_monitor_findalldevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "err_str": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbt_monitor_read(pcap_t *handle, int max_packets _U_, pcap_handler callback, u_char *user)\n{\n    struct cmsghdr *cmsg;\n    struct msghdr msg;\n    struct iovec  iv[2];\n    ssize_t ret;\n    struct pcap_pkthdr pkth;\n    pcap_bluetooth_linux_monitor_header *bthdr;\n    u_char *pktd;\n    struct hci_mon_hdr hdr;\n\n    pktd = (u_char *)handle->buffer + BT_CONTROL_SIZE;\n    bthdr = (pcap_bluetooth_linux_monitor_header*)(void *)pktd;\n\n    iv[0].iov_base = &hdr;\n    iv[0].iov_len = sizeof(hdr);\n    iv[1].iov_base = pktd + sizeof(pcap_bluetooth_linux_monitor_header);\n    iv[1].iov_len = handle->snapshot;\n\n    memset(&pkth.ts, 0, sizeof(pkth.ts));\n    memset(&msg, 0, sizeof(msg));\n    msg.msg_iov = iv;\n    msg.msg_iovlen = 2;\n    msg.msg_control = handle->buffer;\n    msg.msg_controllen = BT_CONTROL_SIZE;\n\n    do {\n        ret = recvmsg(handle->fd, &msg, 0);\n        if (handle->break_loop)\n        {\n            handle->break_loop = 0;\n            return -2;\n        }\n    } while ((ret == -1) && (errno == EINTR));\n\n    if (ret < 0) {\n        pcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n            errno, \"Can't receive packet\");\n        return -1;\n    }\n\n    pkth.caplen = ret - sizeof(hdr) + sizeof(pcap_bluetooth_linux_monitor_header);\n    pkth.len = pkth.caplen;\n\n    for (cmsg = CMSG_FIRSTHDR(&msg); cmsg != NULL; cmsg = CMSG_NXTHDR(&msg, cmsg)) {\n        if (cmsg->cmsg_level != SOL_SOCKET) continue;\n\n        if (cmsg->cmsg_type == SCM_TIMESTAMP) {\n            memcpy(&pkth.ts, CMSG_DATA(cmsg), sizeof(pkth.ts));\n        }\n    }\n\n    bthdr->adapter_id = htons(hdr.index);\n    bthdr->opcode = htons(hdr.opcode);\n\n    if (handle->fcode.bf_insns == NULL ||\n        bpf_filter(handle->fcode.bf_insns, pktd, pkth.len, pkth.caplen)) {\n        callback(user, &pkth, pktd);\n        return 1;\n    }\n    return 0;   /* didn't pass filter */\n}",
+      "fn_code_pos": [
+        [
+          84,
+          0
+        ],
+        [
+          146,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_monitor_read",
+        "parameters": {
+          "handle": "pcap_t",
+          "max_packets": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbt_monitor_inject(pcap_t *handle, const void *buf _U_, size_t size _U_)\n{\n    pcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE, \"inject not supported yet\");\n    return -1;\n}",
+      "fn_code_pos": [
+        [
+          148,
+          0
+        ],
+        [
+          153,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_monitor_inject",
+        "parameters": {
+          "handle": "pcap_t",
+          "buf": "void",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbt_monitor_setdirection(pcap_t *p, pcap_direction_t d)\n{\n    p->direction = d;\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          155,
+          0
+        ],
+        [
+          160,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_monitor_setdirection",
+        "parameters": {
+          "p": "pcap_t",
+          "d": "pcap_direction_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbt_monitor_activate(pcap_t* handle)\n{\n    struct sockaddr_hci addr;\n    int err = PCAP_ERROR;\n    int opt;\n\n    if (handle->opt.rfmon) {\n        /* monitor mode doesn't apply here */\n        return PCAP_ERROR_RFMON_NOTSUP;\n    }\n\n    /*\n     * Turn a negative snapshot value (invalid), a snapshot value of\n     * 0 (unspecified), or a value bigger than the normal maximum\n     * value, into the maximum allowed value.\n     *\n     * If some application really *needs* a bigger snapshot\n     * length, we should just increase MAXIMUM_SNAPLEN.\n     */\n    if (handle->snapshot <= 0 || handle->snapshot > MAXIMUM_SNAPLEN)\n        handle->snapshot = MAXIMUM_SNAPLEN;\n\n    handle->bufsize = BT_CONTROL_SIZE + sizeof(pcap_bluetooth_linux_monitor_header) + handle->snapshot;\n    handle->linktype = DLT_BLUETOOTH_LINUX_MONITOR;\n\n    handle->read_op = bt_monitor_read;\n    handle->inject_op = bt_monitor_inject;\n    handle->setfilter_op = install_bpf_program; /* no kernel filtering */\n    handle->setdirection_op = bt_monitor_setdirection;\n    handle->set_datalink_op = NULL; /* can't change data link type */\n    handle->getnonblock_op = pcap_getnonblock_fd;\n    handle->setnonblock_op = pcap_setnonblock_fd;\n    handle->stats_op = bt_monitor_stats;\n\n    handle->fd = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);\n    if (handle->fd < 0) {\n        pcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n            errno, \"Can't create raw socket\");\n        return PCAP_ERROR;\n    }\n\n    handle->buffer = malloc(handle->bufsize);\n    if (!handle->buffer) {\n        pcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n            errno, \"Can't allocate dump buffer\");\n        goto close_fail;\n    }\n\n    /* Bind socket to the HCI device */\n    addr.hci_family = AF_BLUETOOTH;\n    addr.hci_dev = HCI_DEV_NONE;\n    addr.hci_channel = HCI_CHANNEL_MONITOR;\n\n    if (bind(handle->fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {\n        pcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n            errno, \"Can't attach to interface\");\n        goto close_fail;\n    }\n\n    opt = 1;\n    if (setsockopt(handle->fd, SOL_SOCKET, SO_TIMESTAMP, &opt, sizeof(opt)) < 0) {\n        pcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n            errno, \"Can't enable time stamp\");\n        goto close_fail;\n    }\n\n    handle->selectable_fd = handle->fd;\n\n    return 0;\n\nclose_fail:\n    pcap_cleanup_live_common(handle);\n    return err;\n}",
+      "fn_code_pos": [
+        [
+          172,
+          0
+        ],
+        [
+          246,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_monitor_activate",
+        "parameters": {
+          "handle": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\nbt_monitor_create(const char *device, char *ebuf, int *is_ours)\n{\n    pcap_t      *p;\n    const char  *cp;\n\n    cp = strrchr(device, '/');\n    if (cp == NULL)\n        cp = device;\n\n    if (strcmp(cp, INTERFACE_NAME) != 0) {\n        *is_ours = 0;\n        return NULL;\n    }\n\n    *is_ours = 1;\n    p = pcap_create_common(ebuf, 0);\n    if (p == NULL)\n        return NULL;\n\n    p->activate_op = bt_monitor_activate;\n\n    return p;\n}",
+      "fn_code_pos": [
+        [
+          248,
+          0
+        ],
+        [
+          271,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_monitor_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": "pcap_t"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "bt_monitor_create(const char *device, char *ebuf, int *is_ours)",
+      "fn_dec_pos": [
+        [
+          249,
+          0
+        ],
+        [
+          249,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_monitor_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct hci_mon_hdr {\n    uint16_t opcode;\n    uint16_t index;\n    uint16_t len;\n} __attribute__((packed))",
+      {
+        "opcode": "uint16_t",
+        "index": "uint16_t",
+        "len": "uint16_t"
+      },
+      "hci_mon_hdr",
+      [
+        55,
+        0
+      ],
+      [
+        59,
+        25
+      ]
+    ],
+    [
+      "struct hci_mon_hdr {\n    uint16_t opcode;\n    uint16_t index;\n    uint16_t len;\n} __attribute__((packed))",
+      {
+        "opcode": "uint16_t",
+        "index": "uint16_t",
+        "len": "uint16_t"
+      },
+      "hci_mon_hdr",
+      [
+        55,
+        0
+      ],
+      [
+        59,
+        25
+      ]
+    ],
+    [
+      "struct cmsghdr",
+      {},
+      "",
+      [
+        87,
+        4
+      ],
+      [
+        87,
+        18
+      ]
+    ],
+    [
+      "struct msghdr",
+      {},
+      "",
+      [
+        88,
+        4
+      ],
+      [
+        88,
+        17
+      ]
+    ],
+    [
+      "struct iovec",
+      {},
+      "",
+      [
+        89,
+        4
+      ],
+      [
+        89,
+        16
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        91,
+        4
+      ],
+      [
+        91,
+        22
+      ]
+    ],
+    [
+      "struct hci_mon_hdr",
+      {},
+      "",
+      [
+        94,
+        4
+      ],
+      [
+        94,
+        22
+      ]
+    ],
+    [
+      "struct sockaddr_hci",
+      {},
+      "",
+      [
+        175,
+        4
+      ],
+      [
+        175,
+        23
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        226,
+        26
+      ],
+      [
+        226,
+        41
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <stdint.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <bluetooth/bluetooth.h>\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include <bluetooth/hci.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap/bluetooth.h\"\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-bt-monitor-linux.h\"\n",
+      [
+        46,
+        0
+      ],
+      [
+        47,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

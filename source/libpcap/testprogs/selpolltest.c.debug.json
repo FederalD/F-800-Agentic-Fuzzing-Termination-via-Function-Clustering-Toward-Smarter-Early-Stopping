@@ -1,0 +1,489 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int\nmain(int argc, char **argv)\n{\n\tregister int op;\n\tbpf_u_int32 localnet, netmask;\n\tregister char *cp, *cmdbuf, *device;\n\tint doselect, dopoll, dotimeout, dononblock;\n\tconst char *mechanism;\n\tstruct bpf_program fcode;\n\tchar ebuf[PCAP_ERRBUF_SIZE];\n\tpcap_if_t *devlist;\n\tint selectable_fd;\n\tstruct timeval *required_timeout;\n\tint status;\n\tint packet_count;\n\n\tdevice = NULL;\n\tdoselect = 0;\n\tdopoll = 0;\n\tmechanism = NULL;\n\tdotimeout = 0;\n\tdononblock = 0;\n\tif ((cp = strrchr(argv[0], '/')) != NULL)\n\t\tprogram_name = cp + 1;\n\telse\n\t\tprogram_name = argv[0];\n\n\topterr = 0;\n\twhile ((op = getopt(argc, argv, \"i:sptn\")) != -1) {\n\t\tswitch (op) {\n\n\t\tcase 'i':\n\t\t\tdevice = optarg;\n\t\t\tbreak;\n\n\t\tcase 's':\n\t\t\tdoselect = 1;\n\t\t\tmechanism = \"select() and pcap_dispatch()\";\n\t\t\tbreak;\n\n\t\tcase 'p':\n\t\t\tdopoll = 1;\n\t\t\tmechanism = \"poll() and pcap_dispatch()\";\n\t\t\tbreak;\n\n\t\tcase 't':\n\t\t\tdotimeout = 1;\n\t\t\tbreak;\n\n\t\tcase 'n':\n\t\t\tdononblock = 1;\n\t\t\tbreak;\n\n\t\tdefault:\n\t\t\tusage();\n\t\t\t/* NOTREACHED */\n\t\t}\n\t}\n\n\tif (doselect && dopoll) {\n\t\tfprintf(stderr, \"selpolltest: choose select (-s) or poll (-p), but not both\\n\");\n\t\treturn 1;\n\t}\n\tif (dotimeout && !doselect && !dopoll) {\n\t\tfprintf(stderr, \"selpolltest: timeout (-t) requires select (-s) or poll (-p)\\n\");\n\t\treturn 1;\n\t}\n\tif (device == NULL) {\n\t\tif (pcap_findalldevs(&devlist, ebuf) == -1)\n\t\t\terror(\"%s\", ebuf);\n\t\tif (devlist == NULL)\n\t\t\terror(\"no interfaces available for capture\");\n\t\tdevice = strdup(devlist->name);\n\t\tpcap_freealldevs(devlist);\n\t}\n\t*ebuf = '\\0';\n\tpd = pcap_open_live(device, 65535, 0, 1000, ebuf);\n\tif (pd == NULL)\n\t\terror(\"%s\", ebuf);\n\telse if (*ebuf)\n\t\twarning(\"%s\", ebuf);\n\tif (pcap_lookupnet(device, &localnet, &netmask, ebuf) < 0) {\n\t\tlocalnet = 0;\n\t\tnetmask = 0;\n\t\twarning(\"%s\", ebuf);\n\t}\n\tcmdbuf = copy_argv(&argv[optind]);\n\n\tif (pcap_compile(pd, &fcode, cmdbuf, 1, netmask) < 0)\n\t\terror(\"%s\", pcap_geterr(pd));\n\tif (pcap_setfilter(pd, &fcode) < 0)\n\t\terror(\"%s\", pcap_geterr(pd));\n\n\tif (doselect || dopoll) {\n\t\t/*\n\t\t * We need either an FD on which to do select()/poll()\n\t\t * or, if there isn't one, a timeout to use in select()/\n\t\t * poll().\n\t\t */\n\t\tselectable_fd = pcap_get_selectable_fd(pd);\n\t\tif (selectable_fd == -1) {\n\t\t\tprintf(\"Listening on %s, using %s, with a timeout\\n\",\n\t\t\t    device, mechanism);\n\t\t\trequired_timeout = pcap_get_required_select_timeout(pd);\n\t\t\tif (required_timeout == NULL)\n\t\t\t\terror(\"select()/poll() isn't supported on %s, even with a timeout\",\n\t\t\t\t    device);\n\n\t\t\t/*\n\t\t\t * As we won't be notified by select() or poll()\n\t\t\t * that a read can be done, we'll have to periodically\n\t\t\t * try reading from the device every time the required\n\t\t\t * timeout expires, and we don't want those attempts\n\t\t\t * to block if nothing has arrived in that interval,\n\t\t\t * so we want to force non-blocking mode.\n\t\t\t */\n\t\t\tdononblock = 1;\n\t\t} else {\n\t\t\tprintf(\"Listening on %s, using %s\\n\", device,\n\t\t\t    mechanism);\n\t\t\trequired_timeout = NULL;\n\t\t}\n\t} else\n\t\tprintf(\"Listening on %s, using pcap_dispatch()\\n\", device);\n\n\tif (dononblock) {\n\t\tif (pcap_setnonblock(pd, 1, ebuf) == -1)\n\t\t\terror(\"pcap_setnonblock failed: %s\", ebuf);\n\t}\n\tif (doselect) {\n\t\tfor (;;) {\n\t\t\tfd_set setread, setexcept;\n\t\t\tstruct timeval seltimeout;\n\n\t\t\tFD_ZERO(&setread);\n\t\t\tif (selectable_fd != -1) {\n\t\t\t\tFD_SET(selectable_fd, &setread);\n\t\t\t\tFD_ZERO(&setexcept);\n\t\t\t\tFD_SET(selectable_fd, &setexcept);\n\t\t\t}\n\t\t\tif (dotimeout) {\n\t\t\t\tseltimeout.tv_sec = 0;\n\t\t\t\tif (required_timeout != NULL &&\n\t\t\t\t    required_timeout->tv_usec < 1000)\n\t\t\t\t\tseltimeout.tv_usec = required_timeout->tv_usec;\n\t\t\t\telse\n\t\t\t\t\tseltimeout.tv_usec = 1000;\n\t\t\t\tstatus = select(selectable_fd + 1, &setread,\n\t\t\t\t    NULL, &setexcept, &seltimeout);\n\t\t\t} else if (required_timeout != NULL) {\n\t\t\t\tseltimeout = *required_timeout;\n\t\t\t\tstatus = select(selectable_fd + 1, &setread,\n\t\t\t\t    NULL, &setexcept, &seltimeout);\n\t\t\t} else {\n\t\t\t\tstatus = select((selectable_fd == -1) ?\n\t\t\t\t    0 : selectable_fd + 1, &setread,\n\t\t\t\t    NULL, &setexcept, NULL);\n\t\t\t}\n\t\t\tif (status == -1) {\n\t\t\t\tprintf(\"Select returns error (%s)\\n\",\n\t\t\t\t    strerror(errno));\n\t\t\t} else {\n\t\t\t\tif (selectable_fd == -1) {\n\t\t\t\t\tif (status != 0)\n\t\t\t\t\t\tprintf(\"Select returned a descriptor\\n\");\n\t\t\t\t} else {\n\t\t\t\t\tif (status == 0)\n\t\t\t\t\t\tprintf(\"Select timed out: \");\n\t\t\t\t\telse\n\t\t\t\t\t\tprintf(\"Select returned a descriptor: \");\n\t\t\t\t\tif (FD_ISSET(selectable_fd, &setread))\n\t\t\t\t\t\tprintf(\"readable, \");\n\t\t\t\t\telse\n\t\t\t\t\t\tprintf(\"not readable, \");\n\t\t\t\t\tif (FD_ISSET(selectable_fd, &setexcept))\n\t\t\t\t\t\tprintf(\"exceptional condition\\n\");\n\t\t\t\t\telse\n\t\t\t\t\t\tprintf(\"no exceptional condition\\n\");\n\t\t\t\t}\n\t\t\t\tpacket_count = 0;\n\t\t\t\tstatus = pcap_dispatch(pd, -1, countme,\n\t\t\t\t    (u_char *)&packet_count);\n\t\t\t\tif (status < 0)\n\t\t\t\t\tbreak;\n\t\t\t\t/*\n\t\t\t\t * Don't report this if we're using a\n\t\t\t\t * required timeout and we got no packets,\n\t\t\t\t * because that could be a very short timeout,\n\t\t\t\t * and we don't want to spam the user with\n\t\t\t\t * a ton of \"no packets\" reports.\n\t\t\t\t */\n\t\t\t\tif (status != 0 || packet_count != 0 ||\n\t\t\t\t    required_timeout != NULL) {\n\t\t\t\t\tprintf(\"%d packets seen, %d packets counted after select returns\\n\",\n\t\t\t\t\t    status, packet_count);\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t} else if (dopoll) {\n\t\tfor (;;) {\n\t\t\tstruct pollfd fd;\n\t\t\tint polltimeout;\n\n\t\t\tfd.fd = selectable_fd;\n\t\t\tfd.events = POLLIN;\n\t\t\tif (dotimeout)\n\t\t\t\tpolltimeout = 1;\n\t\t\telse if (required_timeout != NULL &&\n\t\t\t    required_timeout->tv_usec >= 1000)\n\t\t\t\tpolltimeout = required_timeout->tv_usec/1000;\n\t\t\telse\n\t\t\t\tpolltimeout = -1;\n\t\t\tstatus = poll(&fd, (selectable_fd == -1) ? 0 : 1, polltimeout);\n\t\t\tif (status == -1) {\n\t\t\t\tprintf(\"Poll returns error (%s)\\n\",\n\t\t\t\t    strerror(errno));\n\t\t\t} else {\n\t\t\t\tif (selectable_fd == -1) {\n\t\t\t\t\tif (status != 0)\n\t\t\t\t\t\tprintf(\"Poll returned a descriptor\\n\");\n\t\t\t\t} else {\n\t\t\t\t\tif (status == 0)\n\t\t\t\t\t\tprintf(\"Poll timed out\\n\");\n\t\t\t\t\telse {\n\t\t\t\t\t\tprintf(\"Poll returned a descriptor: \");\n\t\t\t\t\t\tif (fd.revents & POLLIN)\n\t\t\t\t\t\t\tprintf(\"readable, \");\n\t\t\t\t\t\telse\n\t\t\t\t\t\t\tprintf(\"not readable, \");\n\t\t\t\t\t\tif (fd.revents & POLLERR)\n\t\t\t\t\t\t\tprintf(\"exceptional condition, \");\n\t\t\t\t\t\telse\n\t\t\t\t\t\t\tprintf(\"no exceptional condition, \");\n\t\t\t\t\t\tif (fd.revents & POLLHUP)\n\t\t\t\t\t\t\tprintf(\"disconnect, \");\n\t\t\t\t\t\telse\n\t\t\t\t\t\t\tprintf(\"no disconnect, \");\n\t\t\t\t\t\tif (fd.revents & POLLNVAL)\n\t\t\t\t\t\t\tprintf(\"invalid\\n\");\n\t\t\t\t\t\telse\n\t\t\t\t\t\t\tprintf(\"not invalid\\n\");\n\t\t\t\t\t}\n\t\t\t\t}\n\t\t\t\tpacket_count = 0;\n\t\t\t\tstatus = pcap_dispatch(pd, -1, countme,\n\t\t\t\t    (u_char *)&packet_count);\n\t\t\t\tif (status < 0)\n\t\t\t\t\tbreak;\n\t\t\t\t/*\n\t\t\t\t * Don't report this if we're using a\n\t\t\t\t * required timeout and we got no packets,\n\t\t\t\t * because that could be a very short timeout,\n\t\t\t\t * and we don't want to spam the user with\n\t\t\t\t * a ton of \"no packets\" reports.\n\t\t\t\t */\n\t\t\t\tif (status != 0 || packet_count != 0 ||\n\t\t\t\t    required_timeout != NULL) {\n\t\t\t\t\tprintf(\"%d packets seen, %d packets counted after poll returns\\n\",\n\t\t\t\t\t    status, packet_count);\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t} else {\n\t\tfor (;;) {\n\t\t\tpacket_count = 0;\n\t\t\tstatus = pcap_dispatch(pd, -1, countme,\n\t\t\t    (u_char *)&packet_count);\n\t\t\tif (status < 0)\n\t\t\t\tbreak;\n\t\t\tprintf(\"%d packets seen, %d packets counted after pcap_dispatch returns\\n\",\n\t\t\t    status, packet_count);\n\t\t}\n\t}\n\tif (status == -2) {\n\t\t/*\n\t\t * We got interrupted, so perhaps we didn't\n\t\t * manage to finish a line we were printing.\n\t\t * Print an extra newline, just in case.\n\t\t */\n\t\tputchar('\\n');\n\t}\n\t(void)fflush(stdout);\n\tif (status == -1) {\n\t\t/*\n\t\t * Error.  Report it.\n\t\t */\n\t\t(void)fprintf(stderr, \"%s: pcap_loop: %s\\n\",\n\t\t    program_name, pcap_geterr(pd));\n\t}\n\tpcap_close(pd);\n\texit(status == -1 ? 1 : 0);\n}",
+      "fn_code_pos": [
+        [
+          65,
+          0
+        ],
+        [
+          356,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ncountme(u_char *user, const struct pcap_pkthdr *h _U_, const u_char *sp _U_)\n{\n\tint *counterp = (int *)user;\n\n\t(*counterp)++;\n}",
+      "fn_code_pos": [
+        [
+          358,
+          0
+        ],
+        [
+          364,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "countme",
+        "parameters": {
+          "user": "u_char",
+          "h": "struct pcap_pkthdr",
+          "sp": "u_char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nusage(void)\n{\n\t(void)fprintf(stderr, \"Usage: %s [ -sptn ] [ -i interface ] [expression]\\n\",\n\t    program_name);\n\texit(1);\n}",
+      "fn_code_pos": [
+        [
+          366,
+          0
+        ],
+        [
+          372,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "usage",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nerror(const char *fmt, ...)\n{\n\tva_list ap;\n\n\t(void)fprintf(stderr, \"%s: \", program_name);\n\tva_start(ap, fmt);\n\t(void)vfprintf(stderr, fmt, ap);\n\tva_end(ap);\n\tif (*fmt) {\n\t\tfmt += strlen(fmt);\n\t\tif (fmt[-1] != '\\n')\n\t\t\t(void)fputc('\\n', stderr);\n\t}\n\texit(1);\n\t/* NOTREACHED */\n}",
+      "fn_code_pos": [
+        [
+          375,
+          0
+        ],
+        [
+          391,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "error",
+        "parameters": {
+          "fmt": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nwarning(const char *fmt, ...)\n{\n\tva_list ap;\n\n\t(void)fprintf(stderr, \"%s: WARNING: \", program_name);\n\tva_start(ap, fmt);\n\t(void)vfprintf(stderr, fmt, ap);\n\tva_end(ap);\n\tif (*fmt) {\n\t\tfmt += strlen(fmt);\n\t\tif (fmt[-1] != '\\n')\n\t\t\t(void)fputc('\\n', stderr);\n\t}\n}",
+      "fn_code_pos": [
+        [
+          394,
+          0
+        ],
+        [
+          408,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "warning",
+        "parameters": {
+          "fmt": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\ncopy_argv(register char **argv)\n{\n\tregister char **p;\n\tregister u_int len = 0;\n\tchar *buf;\n\tchar *src, *dst;\n\n\tp = argv;\n\tif (*p == 0)\n\t\treturn 0;\n\n\twhile (*p)\n\t\tlen += strlen(*p++) + 1;\n\n\tbuf = (char *)malloc(len);\n\tif (buf == NULL)\n\t\terror(\"copy_argv: malloc\");\n\n\tp = argv;\n\tdst = buf;\n\twhile ((src = *p++) != NULL) {\n\t\twhile ((*dst++ = *src++) != '\\0')\n\t\t\t;\n\t\tdst[-1] = ' ';\n\t}\n\tdst[-1] = '\\0';\n\n\treturn buf;\n}",
+      "fn_code_pos": [
+        [
+          413,
+          0
+        ],
+        [
+          442,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "copy_argv",
+        "parameters": {
+          "argv": "char"
+        },
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "countme(u_char *, const struct pcap_pkthdr *, const u_char *)",
+      "fn_dec_pos": [
+        [
+          57,
+          12
+        ],
+        [
+          57,
+          73
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "countme",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "PCAP_NORETURN usage(void)",
+      "fn_dec_pos": [
+        [
+          58,
+          12
+        ],
+        [
+          58,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "PCAP_NORETURN usage",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "PCAP_NORETURN error(const char *, ...)",
+      "fn_dec_pos": [
+        [
+          59,
+          12
+        ],
+        [
+          59,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "PCAP_NORETURN error",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "warning(const char *, ...)",
+      "fn_dec_pos": [
+        [
+          60,
+          12
+        ],
+        [
+          60,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "warning",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "copy_argv(char **)",
+      "fn_dec_pos": [
+        [
+          61,
+          13
+        ],
+        [
+          61,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "copy_argv",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "copy_argv(register char **argv)",
+      "fn_dec_pos": [
+        [
+          414,
+          0
+        ],
+        [
+          414,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "copy_argv",
+        "parameters": {
+          "argv": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        57,
+        36
+      ],
+      [
+        57,
+        54
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        73,
+        1
+      ],
+      [
+        73,
+        19
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        77,
+        1
+      ],
+      [
+        77,
+        15
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        197,
+        3
+      ],
+      [
+        197,
+        17
+      ]
+    ],
+    [
+      "struct pollfd",
+      {},
+      "",
+      [
+        265,
+        3
+      ],
+      [
+        265,
+        16
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        359,
+        28
+      ],
+      [
+        359,
+        46
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"varattrs.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <pcap.h>\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include <stdarg.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include <sys/select.h>\n",
+      [
+        46,
+        0
+      ],
+      [
+        47,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\t/* older UN*Xes */\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include <poll.h>\n",
+      [
+        50,
+        0
+      ],
+      [
+        51,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap/funcattrs.h\"\n",
+      [
+        52,
+        0
+      ],
+      [
+        53,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

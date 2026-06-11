@@ -1,0 +1,4220 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nrpcap_deseraddr(struct rpcap_sockaddr *sockaddrin, struct sockaddr_storage **sockaddrout, char *errbuf)\n{\n\t/* Warning: we support only AF_INET and AF_INET6 */\n\tswitch (ntohs(sockaddrin->family))\n\t{\n\tcase RPCAP_AF_INET:\n\tcase NEW_BSD_AF_INET_BE:\n\tcase NEW_BSD_AF_INET_LE:\n\t\t{\n\t\tstruct rpcap_sockaddr_in *sockaddrin_ipv4;\n\t\tstruct sockaddr_in *sockaddrout_ipv4;\n\n\t\t(*sockaddrout) = (struct sockaddr_storage *) malloc(sizeof(struct sockaddr_in));\n\t\tif ((*sockaddrout) == NULL)\n\t\t{\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"malloc() failed\");\n\t\t\treturn -1;\n\t\t}\n\t\tsockaddrin_ipv4 = (struct rpcap_sockaddr_in *) sockaddrin;\n\t\tsockaddrout_ipv4 = (struct sockaddr_in *) (*sockaddrout);\n\t\tsockaddrout_ipv4->sin_family = AF_INET;\n\t\tsockaddrout_ipv4->sin_port = ntohs(sockaddrin_ipv4->port);\n\t\tmemcpy(&sockaddrout_ipv4->sin_addr, &sockaddrin_ipv4->addr, sizeof(sockaddrout_ipv4->sin_addr));\n\t\tmemset(sockaddrout_ipv4->sin_zero, 0, sizeof(sockaddrout_ipv4->sin_zero));\n\t\tbreak;\n\t\t}\n\n#ifdef AF_INET6\n\tcase RPCAP_AF_INET6:\n\tcase NEW_BSD_AF_INET6_BSD_BE:\n\tcase NEW_BSD_AF_INET6_FREEBSD_BE:\n\tcase NEW_BSD_AF_INET6_DARWIN_BE:\n\tcase NEW_BSD_AF_INET6_LE:\n\tcase LINUX_AF_INET6:\n\tcase HPUX_AF_INET6:\n\tcase AIX_AF_INET6:\n\tcase SOLARIS_AF_INET6:\n\t\t{\n\t\tstruct rpcap_sockaddr_in6 *sockaddrin_ipv6;\n\t\tstruct sockaddr_in6 *sockaddrout_ipv6;\n\n\t\t(*sockaddrout) = (struct sockaddr_storage *) malloc(sizeof(struct sockaddr_in6));\n\t\tif ((*sockaddrout) == NULL)\n\t\t{\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"malloc() failed\");\n\t\t\treturn -1;\n\t\t}\n\t\tsockaddrin_ipv6 = (struct rpcap_sockaddr_in6 *) sockaddrin;\n\t\tsockaddrout_ipv6 = (struct sockaddr_in6 *) (*sockaddrout);\n\t\tsockaddrout_ipv6->sin6_family = AF_INET6;\n\t\tsockaddrout_ipv6->sin6_port = ntohs(sockaddrin_ipv6->port);\n\t\tsockaddrout_ipv6->sin6_flowinfo = ntohl(sockaddrin_ipv6->flowinfo);\n\t\tmemcpy(&sockaddrout_ipv6->sin6_addr, &sockaddrin_ipv6->addr, sizeof(sockaddrout_ipv6->sin6_addr));\n\t\tsockaddrout_ipv6->sin6_scope_id = ntohl(sockaddrin_ipv6->scope_id);\n\t\tbreak;\n\t\t}\n#endif\n\n\tdefault:\n\t\t/*\n\t\t * It is neither AF_INET nor AF_INET6 (or, if the OS doesn't\n\t\t * support AF_INET6, it's not AF_INET).\n\t\t */\n\t\t*sockaddrout = NULL;\n\t\tbreak;\n\t}\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          280,
+          0
+        ],
+        [
+          350,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_deseraddr",
+        "parameters": {
+          "sockaddrin": "struct rpcap_sockaddr",
+          "sockaddrout": "struct sockaddr_storage",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pcap_read_nocb_remote(pcap_t *p, struct pcap_pkthdr *pkt_header, u_char **pkt_data)\n{\n\tstruct pcap_rpcap *pr = p->priv;\t/* structure used when doing a remote live capture */\n\tstruct rpcap_header *header;\t\t/* general header according to the RPCAP format */\n\tstruct rpcap_pkthdr *net_pkt_header;\t/* header of the packet, from the message */\n\tu_char *net_pkt_data;\t\t\t/* packet data from the message */\n\tuint32 plen;\n\tint retval;\t\t\t\t/* generic return value */\n\tint msglen;\n\n\t/* Structures needed for the select() call */\n\tstruct timeval tv;\t\t\t/* maximum time the select() can block waiting for data */\n\tfd_set rfds;\t\t\t\t/* set of socket descriptors we have to check */\n\n\t/*\n\t * Define the packet buffer timeout, to be used in the select()\n\t * 'timeout', in pcap_t, is in milliseconds; we have to convert it into sec and microsec\n\t */\n\ttv.tv_sec = p->opt.timeout / 1000;\n\ttv.tv_usec = (p->opt.timeout - tv.tv_sec * 1000) * 1000;\n\n\t/* Watch out sockdata to see if it has input */\n\tFD_ZERO(&rfds);\n\n\t/*\n\t * 'fp->rmt_sockdata' has always to be set before calling the select(),\n\t * since it is cleared by the select()\n\t */\n\tFD_SET(pr->rmt_sockdata, &rfds);\n\n\tretval = select((int) pr->rmt_sockdata + 1, &rfds, NULL, NULL, &tv);\n\tif (retval == -1)\n\t{\n#ifndef _WIN32\n\t\tif (errno == EINTR)\n\t\t{\n\t\t\t/* Interrupted. */\n\t\t\treturn 0;\n\t\t}\n#endif\n\t\tsock_geterror(\"select(): \", p->errbuf, PCAP_ERRBUF_SIZE);\n\t\treturn -1;\n\t}\n\n\t/* There is no data waiting, so return '0' */\n\tif (retval == 0)\n\t\treturn 0;\n\n\t/*\n\t * We have to define 'header' as a pointer to a larger buffer,\n\t * because in case of UDP we have to read all the message within a single call\n\t */\n\theader = (struct rpcap_header *) p->buffer;\n\tnet_pkt_header = (struct rpcap_pkthdr *) ((char *)p->buffer + sizeof(struct rpcap_header));\n\tnet_pkt_data = (u_char *)p->buffer + sizeof(struct rpcap_header) + sizeof(struct rpcap_pkthdr);\n\n\tif (pr->rmt_flags & PCAP_OPENFLAG_DATATX_UDP)\n\t{\n\t\t/* Read the entire message from the network */\n\t\tmsglen = sock_recv_dgram(pr->rmt_sockdata, p->buffer,\n\t\t    p->bufsize, p->errbuf, PCAP_ERRBUF_SIZE);\n\t\tif (msglen == -1)\n\t\t{\n\t\t\t/* Network error. */\n\t\t\treturn -1;\n\t\t}\n\t\tif (msglen == -3)\n\t\t{\n\t\t\t/* Interrupted receive. */\n\t\t\treturn 0;\n\t\t}\n\t\tif ((size_t)msglen < sizeof(struct rpcap_header))\n\t\t{\n\t\t\t/*\n\t\t\t * Message is shorter than an rpcap header.\n\t\t\t */\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"UDP packet message is shorter than an rpcap header\");\n\t\t\treturn -1;\n\t\t}\n\t\tplen = ntohl(header->plen);\n\t\tif ((size_t)msglen < sizeof(struct rpcap_header) + plen)\n\t\t{\n\t\t\t/*\n\t\t\t * Message is shorter than the header claims it\n\t\t\t * is.\n\t\t\t */\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"UDP packet message is shorter than its rpcap header claims\");\n\t\t\treturn -1;\n\t\t}\n\t}\n\telse\n\t{\n\t\tint status;\n\n\t\tif ((size_t)p->cc < sizeof(struct rpcap_header))\n\t\t{\n\t\t\t/*\n\t\t\t * We haven't read any of the packet header yet.\n\t\t\t * The size we should get is the size of the\n\t\t\t * packet header.\n\t\t\t */\n\t\t\tstatus = rpcap_read_packet_msg(pr->rmt_sockdata, p,\n\t\t\t    sizeof(struct rpcap_header));\n\t\t\tif (status == -1)\n\t\t\t{\n\t\t\t\t/* Network error. */\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tif (status == -3)\n\t\t\t{\n\t\t\t\t/* Interrupted receive. */\n\t\t\t\treturn 0;\n\t\t\t}\n\t\t}\n\n\t\t/*\n\t\t * We have the header, so we know how long the\n\t\t * message payload is.  The size we should get\n\t\t * is the size of the packet header plus the\n\t\t * size of the payload.\n\t\t */\n\t\tplen = ntohl(header->plen);\n\t\tif (plen > p->bufsize - sizeof(struct rpcap_header))\n\t\t{\n\t\t\t/*\n\t\t\t * This is bigger than the largest\n\t\t\t * record we'd expect.  (We do it by\n\t\t\t * subtracting in order to avoid an\n\t\t\t * overflow.)\n\t\t\t */\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"Server sent us a message larger than the largest expected packet message\");\n\t\t\treturn -1;\n\t\t}\n\t\tstatus = rpcap_read_packet_msg(pr->rmt_sockdata, p,\n\t\t    sizeof(struct rpcap_header) + plen);\n\t\tif (status == -1)\n\t\t{\n\t\t\t/* Network error. */\n\t\t\treturn -1;\n\t\t}\n\t\tif (status == -3)\n\t\t{\n\t\t\t/* Interrupted receive. */\n\t\t\treturn 0;\n\t\t}\n\n\t\t/*\n\t\t * We have the entire message; reset the buffer pointer\n\t\t * and count, as the next read should start a new\n\t\t * message.\n\t\t */\n\t\tp->bp = p->buffer;\n\t\tp->cc = 0;\n\t}\n\n\t/*\n\t * We have the entire message.\n\t */\n\theader->plen = plen;\n\n\t/*\n\t * Did the server specify the version we negotiated?\n\t */\n\tif (rpcap_check_msg_ver(pr->rmt_sockdata, pr->protocol_version,\n\t    header, p->errbuf) == -1)\n\t{\n\t\treturn 0;\t/* Return 'no packets received' */\n\t}\n\n\t/*\n\t * Is this a RPCAP_MSG_PACKET message?\n\t */\n\tif (header->type != RPCAP_MSG_PACKET)\n\t{\n\t\treturn 0;\t/* Return 'no packets received' */\n\t}\n\n\tif (ntohl(net_pkt_header->caplen) > plen)\n\t{\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"Packet's captured data goes past the end of the received packet message.\");\n\t\treturn -1;\n\t}\n\n\t/* Fill in packet header */\n\tpkt_header->caplen = ntohl(net_pkt_header->caplen);\n\tpkt_header->len = ntohl(net_pkt_header->len);\n\tpkt_header->ts.tv_sec = ntohl(net_pkt_header->timestamp_sec);\n\tpkt_header->ts.tv_usec = ntohl(net_pkt_header->timestamp_usec);\n\n\t/* Supply a pointer to the beginning of the packet data */\n\t*pkt_data = net_pkt_data;\n\n\t/*\n\t * I don't update the counter of the packets dropped by the network since we're using TCP,\n\t * therefore no packets are dropped. Just update the number of packets received correctly\n\t */\n\tpr->TotCapt++;\n\n\tif (pr->rmt_flags & PCAP_OPENFLAG_DATATX_UDP)\n\t{\n\t\tunsigned int npkt;\n\n\t\t/* We're using UDP, so we need to update the counter of the packets dropped by the network */\n\t\tnpkt = ntohl(net_pkt_header->npkt);\n\n\t\tif (pr->TotCapt != npkt)\n\t\t{\n\t\t\tpr->TotNetDrops += (npkt - pr->TotCapt);\n\t\t\tpr->TotCapt = npkt;\n\t\t}\n\t}\n\n\t/* Packet read successfully */\n\treturn 1;\n}",
+      "fn_code_pos": [
+        [
+          371,
+          0
+        ],
+        [
+          589,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_read_nocb_remote",
+        "parameters": {
+          "p": "pcap_t",
+          "pkt_header": "struct pcap_pkthdr",
+          "pkt_data": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pcap_read_rpcap(pcap_t *p, int cnt, pcap_handler callback, u_char *user)\n{\n\tstruct pcap_rpcap *pr = p->priv;\t/* structure used when doing a remote live capture */\n\tstruct pcap_pkthdr pkt_header;\n\tu_char *pkt_data;\n\tint n = 0;\n\tint ret;\n\n\t/*\n\t * If this is client-side, and we haven't already started\n\t * the capture, start it now.\n\t */\n\tif (pr->rmt_clientside)\n\t{\n\t\t/* We are on an remote capture */\n\t\tif (!pr->rmt_capstarted)\n\t\t{\n\t\t\t/*\n\t\t\t * The capture isn't started yet, so try to\n\t\t\t * start it.\n\t\t\t */\n\t\t\tif (pcap_startcapture_remote(p))\n\t\t\t\treturn -1;\n\t\t}\n\t}\n\n\twhile (n < cnt || PACKET_COUNT_IS_UNLIMITED(cnt))\n\t{\n\t\t/*\n\t\t * Has \"pcap_breakloop()\" been called?\n\t\t */\n\t\tif (p->break_loop) {\n\t\t\t/*\n\t\t\t * Yes - clear the flag that indicates that it\n\t\t\t * has, and return PCAP_ERROR_BREAK to indicate\n\t\t\t * that we were told to break out of the loop.\n\t\t\t */\n\t\t\tp->break_loop = 0;\n\t\t\treturn (PCAP_ERROR_BREAK);\n\t\t}\n\n\t\t/*\n\t\t * Read some packets.\n\t\t */\n\t\tret = pcap_read_nocb_remote(p, &pkt_header, &pkt_data);\n\t\tif (ret == 1)\n\t\t{\n\t\t\t/*\n\t\t\t * We got a packet.  Hand it to the callback\n\t\t\t * and count it so we can return the count.\n\t\t\t */\n\t\t\t(*callback)(user, &pkt_header, pkt_data);\n\t\t\tn++;\n\t\t}\n\t\telse if (ret == -1)\n\t\t{\n\t\t\t/* Error. */\n\t\t\treturn ret;\n\t\t}\n\t\telse\n\t\t{\n\t\t\t/*\n\t\t\t * No packet; this could mean that we timed\n\t\t\t * out, or that we got interrupted, or that\n\t\t\t * we got a bad packet.\n\t\t\t *\n\t\t\t * Were we told to break out of the loop?\n\t\t\t */\n\t\t\tif (p->break_loop) {\n\t\t\t\t/*\n\t\t\t\t * Yes.\n\t\t\t\t */\n\t\t\t\tp->break_loop = 0;\n\t\t\t\treturn (PCAP_ERROR_BREAK);\n\t\t\t}\n\t\t\t/* No - return the number of packets we've processed. */\n\t\t\treturn n;\n\t\t}\n\t}\n\treturn n;\n}",
+      "fn_code_pos": [
+        [
+          598,
+          0
+        ],
+        [
+          678,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_read_rpcap",
+        "parameters": {
+          "p": "pcap_t",
+          "cnt": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void pcap_cleanup_rpcap(pcap_t *fp)\n{\n\tstruct pcap_rpcap *pr = fp->priv;\t/* structure used when doing a remote live capture */\n\tstruct rpcap_header header;\t\t/* header of the RPCAP packet */\n\tstruct activehosts *temp;\t\t/* temp var needed to scan the host list chain, to detect if we're in active mode */\n\tint active = 0;\t\t\t\t/* active mode or not? */\n\n\t/* detect if we're in active mode */\n\ttemp = activeHosts;\n\twhile (temp)\n\t{\n\t\tif (temp->sockctrl == pr->rmt_sockctrl)\n\t\t{\n\t\t\tactive = 1;\n\t\t\tbreak;\n\t\t}\n\t\ttemp = temp->next;\n\t}\n\n\tif (!active)\n\t{\n\t\trpcap_createhdr(&header, pr->protocol_version,\n\t\t    RPCAP_MSG_CLOSE, 0, 0);\n\n\t\t/*\n\t\t * Send the close request; don't report any errors, as\n\t\t * we're closing this pcap_t, and have no place to report\n\t\t * the error.  No reply is sent to this message.\n\t\t */\n\t\t(void)sock_send(pr->rmt_sockctrl, (char *)&header,\n\t\t    sizeof(struct rpcap_header), NULL, 0);\n\t}\n\telse\n\t{\n\t\trpcap_createhdr(&header, pr->protocol_version,\n\t\t    RPCAP_MSG_ENDCAP_REQ, 0, 0);\n\n\t\t/*\n\t\t * Send the end capture request; don't report any errors,\n\t\t * as we're closing this pcap_t, and have no place to\n\t\t * report the error.\n\t\t */\n\t\tif (sock_send(pr->rmt_sockctrl, (char *)&header,\n\t\t    sizeof(struct rpcap_header), NULL, 0) == 0)\n\t\t{\n\t\t\t/*\n\t\t\t * Wait for the answer; don't report any errors,\n\t\t\t * as we're closing this pcap_t, and have no\n\t\t\t * place to report the error.\n\t\t\t */\n\t\t\tif (rpcap_process_msg_header(pr->rmt_sockctrl,\n\t\t\t    pr->protocol_version, RPCAP_MSG_ENDCAP_REQ,\n\t\t\t    &header, NULL) == 0)\n\t\t\t{\n\t\t\t\t(void)rpcap_discard(pr->rmt_sockctrl,\n\t\t\t\t    header.plen, NULL);\n\t\t\t}\n\t\t}\n\t}\n\n\tif (pr->rmt_sockdata)\n\t{\n\t\tsock_close(pr->rmt_sockdata, NULL, 0);\n\t\tpr->rmt_sockdata = 0;\n\t}\n\n\tif ((!active) && (pr->rmt_sockctrl))\n\t\tsock_close(pr->rmt_sockctrl, NULL, 0);\n\n\tpr->rmt_sockctrl = 0;\n\n\tif (pr->currentfilter)\n\t{\n\t\tfree(pr->currentfilter);\n\t\tpr->currentfilter = NULL;\n\t}\n\n\t/* To avoid inconsistencies in the number of sock_init() */\n\tsock_cleanup();\n}",
+      "fn_code_pos": [
+        [
+          688,
+          0
+        ],
+        [
+          767,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_cleanup_rpcap",
+        "parameters": {
+          "fp": "pcap_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int pcap_stats_rpcap(pcap_t *p, struct pcap_stat *ps)\n{\n\tstruct pcap_stat *retval;\n\n\tretval = rpcap_stats_rpcap(p, ps, PCAP_STATS_STANDARD);\n\n\tif (retval)\n\t\treturn 0;\n\telse\n\t\treturn -1;\n}",
+      "fn_code_pos": [
+        [
+          773,
+          0
+        ],
+        [
+          783,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stats_rpcap",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static struct pcap_stat *pcap_stats_ex_rpcap(pcap_t *p, int *pcap_stat_size)\n{\n\t*pcap_stat_size = sizeof (p->stat);\n\n\t/* PCAP_STATS_EX (third param) means 'extended pcap_stats()' */\n\treturn (rpcap_stats_rpcap(p, &(p->stat), PCAP_STATS_EX));\n}",
+      "fn_code_pos": [
+        [
+          790,
+          0
+        ],
+        [
+          796,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stats_ex_rpcap",
+        "parameters": {
+          "p": "pcap_t",
+          "pcap_stat_size": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static struct pcap_stat *rpcap_stats_rpcap(pcap_t *p, struct pcap_stat *ps, int mode)\n{\n\tstruct pcap_rpcap *pr = p->priv;\t/* structure used when doing a remote live capture */\n\tstruct rpcap_header header;\t\t/* header of the RPCAP packet */\n\tstruct rpcap_stats netstats;\t\t/* statistics sent on the network */\n\tuint32 plen;\t\t\t\t/* data remaining in the message */\n\n#ifdef _WIN32\n\tif (mode != PCAP_STATS_STANDARD && mode != PCAP_STATS_EX)\n#else\n\tif (mode != PCAP_STATS_STANDARD)\n#endif\n\t{\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"Invalid stats mode %d\", mode);\n\t\treturn NULL;\n\t}\n\n\t/*\n\t * If the capture has not yet started, we cannot request statistics\n\t * for the capture from our peer, so we return 0 for all statistics,\n\t * as nothing's been seen yet.\n\t */\n\tif (!pr->rmt_capstarted)\n\t{\n\t\tps->ps_drop = 0;\n\t\tps->ps_ifdrop = 0;\n\t\tps->ps_recv = 0;\n#ifdef _WIN32\n\t\tif (mode == PCAP_STATS_EX)\n\t\t{\n\t\t\tps->ps_capt = 0;\n\t\t\tps->ps_sent = 0;\n\t\t\tps->ps_netdrop = 0;\n\t\t}\n#endif /* _WIN32 */\n\n\t\treturn ps;\n\t}\n\n\trpcap_createhdr(&header, pr->protocol_version,\n\t    RPCAP_MSG_STATS_REQ, 0, 0);\n\n\t/* Send the PCAP_STATS command */\n\tif (sock_send(pr->rmt_sockctrl, (char *)&header,\n\t    sizeof(struct rpcap_header), p->errbuf, PCAP_ERRBUF_SIZE) < 0)\n\t\treturn NULL;\t\t/* Unrecoverable network error */\n\n\t/* Receive and process the reply message header. */\n\tif (rpcap_process_msg_header(pr->rmt_sockctrl, pr->protocol_version,\n\t    RPCAP_MSG_STATS_REQ, &header, p->errbuf) == -1)\n\t\treturn NULL;\t\t/* Error */\n\n\tplen = header.plen;\n\n\t/* Read the reply body */\n\tif (rpcap_recv(pr->rmt_sockctrl, (char *)&netstats,\n\t    sizeof(struct rpcap_stats), &plen, p->errbuf) == -1)\n\t\tgoto error;\n\n\tps->ps_drop = ntohl(netstats.krnldrop);\n\tps->ps_ifdrop = ntohl(netstats.ifdrop);\n\tps->ps_recv = ntohl(netstats.ifrecv);\n#ifdef _WIN32\n\tif (mode == PCAP_STATS_EX)\n\t{\n\t\tps->ps_capt = pr->TotCapt;\n\t\tps->ps_netdrop = pr->TotNetDrops;\n\t\tps->ps_sent = ntohl(netstats.svrcapt);\n\t}\n#endif /* _WIN32 */\n\n\t/* Discard the rest of the message. */\n\tif (rpcap_discard(pr->rmt_sockctrl, plen, p->errbuf) == -1)\n\t\tgoto error_nodiscard;\n\n\treturn ps;\n\nerror:\n\t/*\n\t * Discard the rest of the message.\n\t * We already reported an error; if this gets an error, just\n\t * drive on.\n\t */\n\t(void)rpcap_discard(pr->rmt_sockctrl, plen, NULL);\n\nerror_nodiscard:\n\treturn NULL;\n}",
+      "fn_code_pos": [
+        [
+          836,
+          0
+        ],
+        [
+          924,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_stats_rpcap",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat",
+          "mode": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static struct activehosts *\nrpcap_remoteact_getsock(const char *host, int *error, char *errbuf)\n{\n\tstruct activehosts *temp;\t\t\t/* temp var needed to scan the host list chain */\n\tstruct addrinfo hints, *addrinfo, *ai_next;\t/* temp var needed to translate between hostname to its address */\n\tint retval;\n\n\t/* retrieve the network address corresponding to 'host' */\n\taddrinfo = NULL;\n\tmemset(&hints, 0, sizeof(struct addrinfo));\n\thints.ai_family = PF_UNSPEC;\n\thints.ai_socktype = SOCK_STREAM;\n\n\tretval = getaddrinfo(host, \"0\", &hints, &addrinfo);\n\tif (retval != 0)\n\t{\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"getaddrinfo() %s\",\n\t\t    gai_strerror(retval));\n\t\t*error = 1;\n\t\treturn NULL;\n\t}\n\n\ttemp = activeHosts;\n\n\twhile (temp)\n\t{\n\t\tai_next = addrinfo;\n\t\twhile (ai_next)\n\t\t{\n\t\t\tif (sock_cmpaddr(&temp->host, (struct sockaddr_storage *) ai_next->ai_addr) == 0)\n\t\t\t{\n\t\t\t\t*error = 0;\n\t\t\t\tfreeaddrinfo(addrinfo);\n\t\t\t\treturn temp;\n\t\t\t}\n\n\t\t\tai_next = ai_next->ai_next;\n\t\t}\n\t\ttemp = temp->next;\n\t}\n\n\tif (addrinfo)\n\t\tfreeaddrinfo(addrinfo);\n\n\t/*\n\t * The host for which you want to get the socket ID does not have an\n\t * active connection.\n\t */\n\t*error = 0;\n\treturn NULL;\n}",
+      "fn_code_pos": [
+        [
+          945,
+          0
+        ],
+        [
+          995,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_remoteact_getsock",
+        "parameters": {
+          "host": "char",
+          "error": "int",
+          "errbuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int pcap_startcapture_remote(pcap_t *fp)\n{\n\tstruct pcap_rpcap *pr = fp->priv;\t/* structure used when doing a remote live capture */\n\tchar sendbuf[RPCAP_NETBUF_SIZE];\t/* temporary buffer in which data to be sent is buffered */\n\tint sendbufidx = 0;\t\t\t/* index which keeps the number of bytes currently buffered */\n\tchar portdata[PCAP_BUF_SIZE];\t\t/* temp variable needed to keep the network port for the data connection */\n\tuint32 plen;\n\tint active = 0;\t\t\t\t/* '1' if we're in active mode */\n\tstruct activehosts *temp;\t\t/* temp var needed to scan the host list chain, to detect if we're in active mode */\n\tchar host[INET6_ADDRSTRLEN + 1];\t/* numeric name of the other host */\n\n\t/* socket-related variables*/\n\tstruct addrinfo hints;\t\t\t/* temp, needed to open a socket connection */\n\tstruct addrinfo *addrinfo;\t\t/* temp, needed to open a socket connection */\n\tSOCKET sockdata = 0;\t\t\t/* socket descriptor of the data connection */\n\tstruct sockaddr_storage saddr;\t\t/* temp, needed to retrieve the network data port chosen on the local machine */\n\tsocklen_t saddrlen;\t\t\t/* temp, needed to retrieve the network data port chosen on the local machine */\n\tint ai_family;\t\t\t\t/* temp, keeps the address family used by the control connection */\n\n\t/* RPCAP-related variables*/\n\tstruct rpcap_header header;\t\t\t/* header of the RPCAP packet */\n\tstruct rpcap_startcapreq *startcapreq;\t\t/* start capture request message */\n\tstruct rpcap_startcapreply startcapreply;\t/* start capture reply message */\n\n\t/* Variables related to the buffer setting */\n\tint res;\n\tsocklen_t itemp;\n\tint sockbufsize = 0;\n\tuint32 server_sockbufsize;\n\n\t/*\n\t * Let's check if sampling has been required.\n\t * If so, let's set it first\n\t */\n\tif (pcap_setsampling_remote(fp) != 0)\n\t\treturn -1;\n\n\t/* detect if we're in active mode */\n\ttemp = activeHosts;\n\twhile (temp)\n\t{\n\t\tif (temp->sockctrl == pr->rmt_sockctrl)\n\t\t{\n\t\t\tactive = 1;\n\t\t\tbreak;\n\t\t}\n\t\ttemp = temp->next;\n\t}\n\n\taddrinfo = NULL;\n\n\t/*\n\t * Gets the complete sockaddr structure used in the ctrl connection\n\t * This is needed to get the address family of the control socket\n\t * Tip: I cannot save the ai_family of the ctrl sock in the pcap_t struct,\n\t * since the ctrl socket can already be open in case of active mode;\n\t * so I would have to call getpeername() anyway\n\t */\n\tsaddrlen = sizeof(struct sockaddr_storage);\n\tif (getpeername(pr->rmt_sockctrl, (struct sockaddr *) &saddr, &saddrlen) == -1)\n\t{\n\t\tsock_geterror(\"getsockname(): \", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\tgoto error_nodiscard;\n\t}\n\tai_family = ((struct sockaddr_storage *) &saddr)->ss_family;\n\n\t/* Get the numeric address of the remote host we are connected to */\n\tif (getnameinfo((struct sockaddr *) &saddr, saddrlen, host,\n\t\tsizeof(host), NULL, 0, NI_NUMERICHOST))\n\t{\n\t\tsock_geterror(\"getnameinfo(): \", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\tgoto error_nodiscard;\n\t}\n\n\t/*\n\t * Data connection is opened by the server toward the client if:\n\t * - we're using TCP, and the user wants us to be in active mode\n\t * - we're using UDP\n\t */\n\tif ((active) || (pr->rmt_flags & PCAP_OPENFLAG_DATATX_UDP))\n\t{\n\t\t/*\n\t\t * We have to create a new socket to receive packets\n\t\t * We have to do that immediately, since we have to tell the other\n\t\t * end which network port we picked up\n\t\t */\n\t\tmemset(&hints, 0, sizeof(struct addrinfo));\n\t\t/* TEMP addrinfo is NULL in case of active */\n\t\thints.ai_family = ai_family;\t/* Use the same address family of the control socket */\n\t\thints.ai_socktype = (pr->rmt_flags & PCAP_OPENFLAG_DATATX_UDP) ? SOCK_DGRAM : SOCK_STREAM;\n\t\thints.ai_flags = AI_PASSIVE;\t/* Data connection is opened by the server toward the client */\n\n\t\t/* Let's the server pick up a free network port for us */\n\t\tif (sock_initaddress(NULL, \"0\", &hints, &addrinfo, fp->errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t\t\tgoto error_nodiscard;\n\n\t\tif ((sockdata = sock_open(addrinfo, SOCKOPEN_SERVER,\n\t\t\t1 /* max 1 connection in queue */, fp->errbuf, PCAP_ERRBUF_SIZE)) == INVALID_SOCKET)\n\t\t\tgoto error_nodiscard;\n\n\t\t/* addrinfo is no longer used */\n\t\tfreeaddrinfo(addrinfo);\n\t\taddrinfo = NULL;\n\n\t\t/* get the complete sockaddr structure used in the data connection */\n\t\tsaddrlen = sizeof(struct sockaddr_storage);\n\t\tif (getsockname(sockdata, (struct sockaddr *) &saddr, &saddrlen) == -1)\n\t\t{\n\t\t\tsock_geterror(\"getsockname(): \", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\t\tgoto error_nodiscard;\n\t\t}\n\n\t\t/* Get the local port the system picked up */\n\t\tif (getnameinfo((struct sockaddr *) &saddr, saddrlen, NULL,\n\t\t\t0, portdata, sizeof(portdata), NI_NUMERICSERV))\n\t\t{\n\t\t\tsock_geterror(\"getnameinfo(): \", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\t\tgoto error_nodiscard;\n\t\t}\n\t}\n\n\t/*\n\t * Now it's time to start playing with the RPCAP protocol\n\t * RPCAP start capture command: create the request message\n\t */\n\tif (sock_bufferize(NULL, sizeof(struct rpcap_header), NULL,\n\t\t&sendbufidx, RPCAP_NETBUF_SIZE, SOCKBUF_CHECKONLY, fp->errbuf, PCAP_ERRBUF_SIZE))\n\t\tgoto error_nodiscard;\n\n\trpcap_createhdr((struct rpcap_header *) sendbuf,\n\t    pr->protocol_version, RPCAP_MSG_STARTCAP_REQ, 0,\n\t    sizeof(struct rpcap_startcapreq) + sizeof(struct rpcap_filter) + fp->fcode.bf_len * sizeof(struct rpcap_filterbpf_insn));\n\n\t/* Fill the structure needed to open an adapter remotely */\n\tstartcapreq = (struct rpcap_startcapreq *) &sendbuf[sendbufidx];\n\n\tif (sock_bufferize(NULL, sizeof(struct rpcap_startcapreq), NULL,\n\t\t&sendbufidx, RPCAP_NETBUF_SIZE, SOCKBUF_CHECKONLY, fp->errbuf, PCAP_ERRBUF_SIZE))\n\t\tgoto error_nodiscard;\n\n\tmemset(startcapreq, 0, sizeof(struct rpcap_startcapreq));\n\n\t/* By default, apply half the timeout on one side, half of the other */\n\tfp->opt.timeout = fp->opt.timeout / 2;\n\tstartcapreq->read_timeout = htonl(fp->opt.timeout);\n\n\t/* portdata on the openreq is meaningful only if we're in active mode */\n\tif ((active) || (pr->rmt_flags & PCAP_OPENFLAG_DATATX_UDP))\n\t{\n\t\tsscanf(portdata, \"%d\", (int *)&(startcapreq->portdata));\t/* cast to avoid a compiler warning */\n\t\tstartcapreq->portdata = htons(startcapreq->portdata);\n\t}\n\n\tstartcapreq->snaplen = htonl(fp->snapshot);\n\tstartcapreq->flags = 0;\n\n\tif (pr->rmt_flags & PCAP_OPENFLAG_PROMISCUOUS)\n\t\tstartcapreq->flags |= RPCAP_STARTCAPREQ_FLAG_PROMISC;\n\tif (pr->rmt_flags & PCAP_OPENFLAG_DATATX_UDP)\n\t\tstartcapreq->flags |= RPCAP_STARTCAPREQ_FLAG_DGRAM;\n\tif (active)\n\t\tstartcapreq->flags |= RPCAP_STARTCAPREQ_FLAG_SERVEROPEN;\n\n\tstartcapreq->flags = htons(startcapreq->flags);\n\n\t/* Pack the capture filter */\n\tif (pcap_pack_bpffilter(fp, &sendbuf[sendbufidx], &sendbufidx, &fp->fcode))\n\t\tgoto error_nodiscard;\n\n\tif (sock_send(pr->rmt_sockctrl, sendbuf, sendbufidx, fp->errbuf,\n\t    PCAP_ERRBUF_SIZE) < 0)\n\t\tgoto error_nodiscard;\n\n\t/* Receive and process the reply message header. */\n\tif (rpcap_process_msg_header(pr->rmt_sockctrl, pr->protocol_version,\n\t    RPCAP_MSG_STARTCAP_REQ, &header, fp->errbuf) == -1)\n\t\tgoto error_nodiscard;\n\n\tplen = header.plen;\n\n\tif (rpcap_recv(pr->rmt_sockctrl, (char *)&startcapreply,\n\t    sizeof(struct rpcap_startcapreply), &plen, fp->errbuf) == -1)\n\t\tgoto error;\n\n\t/*\n\t * In case of UDP data stream, the connection is always opened by the daemon\n\t * So, this case is already covered by the code above.\n\t * Now, we have still to handle TCP connections, because:\n\t * - if we're in active mode, we have to wait for a remote connection\n\t * - if we're in passive more, we have to start a connection\n\t *\n\t * We have to do he job in two steps because in case we're opening a TCP connection, we have\n\t * to tell the port we're using to the remote side; in case we're accepting a TCP\n\t * connection, we have to wait this info from the remote side.\n\t */\n\tif (!(pr->rmt_flags & PCAP_OPENFLAG_DATATX_UDP))\n\t{\n\t\tif (!active)\n\t\t{\n\t\t\tmemset(&hints, 0, sizeof(struct addrinfo));\n\t\t\thints.ai_family = ai_family;\t\t/* Use the same address family of the control socket */\n\t\t\thints.ai_socktype = (pr->rmt_flags & PCAP_OPENFLAG_DATATX_UDP) ? SOCK_DGRAM : SOCK_STREAM;\n\t\t\tpcap_snprintf(portdata, PCAP_BUF_SIZE, \"%d\", ntohs(startcapreply.portdata));\n\n\t\t\t/* Let's the server pick up a free network port for us */\n\t\t\tif (sock_initaddress(host, portdata, &hints, &addrinfo, fp->errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t\t\t\tgoto error;\n\n\t\t\tif ((sockdata = sock_open(addrinfo, SOCKOPEN_CLIENT, 0, fp->errbuf, PCAP_ERRBUF_SIZE)) == INVALID_SOCKET)\n\t\t\t\tgoto error;\n\n\t\t\t/* addrinfo is no longer used */\n\t\t\tfreeaddrinfo(addrinfo);\n\t\t\taddrinfo = NULL;\n\t\t}\n\t\telse\n\t\t{\n\t\t\tSOCKET socktemp;\t/* We need another socket, since we're going to accept() a connection */\n\n\t\t\t/* Connection creation */\n\t\t\tsaddrlen = sizeof(struct sockaddr_storage);\n\n\t\t\tsocktemp = accept(sockdata, (struct sockaddr *) &saddr, &saddrlen);\n\n\t\t\tif (socktemp == INVALID_SOCKET)\n\t\t\t{\n\t\t\t\tsock_geterror(\"accept(): \", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\t\t\tgoto error;\n\t\t\t}\n\n\t\t\t/* Now that I accepted the connection, the server socket is no longer needed */\n\t\t\tsock_close(sockdata, fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\t\tsockdata = socktemp;\n\t\t}\n\t}\n\n\t/* Let's save the socket of the data connection */\n\tpr->rmt_sockdata = sockdata;\n\n\t/*\n\t * Set the size of the socket buffer for the data socket.\n\t * It has the same size as the local capture buffer used\n\t * on the other side of the connection.\n\t */\n\tserver_sockbufsize = ntohl(startcapreply.bufsize);\n\n\t/* Let's get the actual size of the socket buffer */\n\titemp = sizeof(sockbufsize);\n\n\tres = getsockopt(sockdata, SOL_SOCKET, SO_RCVBUF, (char *)&sockbufsize, &itemp);\n\tif (res == -1)\n\t{\n\t\tsock_geterror(\"pcap_startcapture_remote()\", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\tSOCK_DEBUG_MESSAGE(fp->errbuf);\n\t}\n\n\t/*\n\t * Warning: on some kernels (e.g. Linux), the size of the user\n\t * buffer does not take into account the pcap_header and such,\n\t * and it is set equal to the snaplen.\n\t *\n\t * In my view, this is wrong (the meaning of the bufsize became\n\t * a bit strange).  So, here bufsize is the whole size of the\n\t * user buffer.  In case the bufsize returned is too small,\n\t * let's adjust it accordingly.\n\t */\n\tif (server_sockbufsize <= (u_int) fp->snapshot)\n\t\tserver_sockbufsize += sizeof(struct pcap_pkthdr);\n\n\t/* if the current socket buffer is smaller than the desired one */\n\tif ((u_int) sockbufsize < server_sockbufsize)\n\t{\n\t\t/*\n\t\t * Loop until the buffer size is OK or the original\n\t\t * socket buffer size is larger than this one.\n\t\t */\n\t\tfor (;;)\n\t\t{\n\t\t\tres = setsockopt(sockdata, SOL_SOCKET, SO_RCVBUF,\n\t\t\t    (char *)&(server_sockbufsize),\n\t\t\t    sizeof(server_sockbufsize));\n\n\t\t\tif (res == 0)\n\t\t\t\tbreak;\n\n\t\t\t/*\n\t\t\t * If something goes wrong, halve the buffer size\n\t\t\t * (checking that it does not become smaller than\n\t\t\t * the current one).\n\t\t\t */\n\t\t\tserver_sockbufsize /= 2;\n\n\t\t\tif ((u_int) sockbufsize >= server_sockbufsize)\n\t\t\t{\n\t\t\t\tserver_sockbufsize = sockbufsize;\n\t\t\t\tbreak;\n\t\t\t}\n\t\t}\n\t}\n\n\t/*\n\t * Let's allocate the packet; this is required in order to put\n\t * the packet somewhere when extracting data from the socket.\n\t * Since buffering has already been done in the socket buffer,\n\t * here we need just a buffer whose size is equal to the\n\t * largest possible packet message for the snapshot size,\n\t * namely the length of the message header plus the length\n\t * of the packet header plus the snapshot length.\n\t */\n\tfp->bufsize = sizeof(struct rpcap_header) + sizeof(struct rpcap_pkthdr) + fp->snapshot;\n\n\tfp->buffer = (u_char *)malloc(fp->bufsize);\n\tif (fp->buffer == NULL)\n\t{\n\t\tpcap_fmt_errmsg_for_errno(fp->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"malloc\");\n\t\tgoto error;\n\t}\n\n\t/*\n\t * The buffer is currently empty.\n\t */\n\tfp->bp = fp->buffer;\n\tfp->cc = 0;\n\n\t/* Discard the rest of the message. */\n\tif (rpcap_discard(pr->rmt_sockctrl, plen, fp->errbuf) == -1)\n\t\tgoto error_nodiscard;\n\n\t/*\n\t * In case the user does not want to capture RPCAP packets, let's update the filter\n\t * We have to update it here (instead of sending it into the 'StartCapture' message\n\t * because when we generate the 'start capture' we do not know (yet) all the ports\n\t * we're currently using.\n\t */\n\tif (pr->rmt_flags & PCAP_OPENFLAG_NOCAPTURE_RPCAP)\n\t{\n\t\tstruct bpf_program fcode;\n\n\t\tif (pcap_createfilter_norpcappkt(fp, &fcode) == -1)\n\t\t\tgoto error;\n\n\t\t/* We cannot use 'pcap_setfilter_rpcap' because formally the capture has not been started yet */\n\t\t/* (the 'pr->rmt_capstarted' variable will be updated some lines below) */\n\t\tif (pcap_updatefilter_remote(fp, &fcode) == -1)\n\t\t\tgoto error;\n\n\t\tpcap_freecode(&fcode);\n\t}\n\n\tpr->rmt_capstarted = 1;\n\treturn 0;\n\nerror:\n\t/*\n\t * When the connection has been established, we have to close it. So, at the\n\t * beginning of this function, if an error occur we return immediately with\n\t * a return NULL; when the connection is established, we have to come here\n\t * ('goto error;') in order to close everything properly.\n\t */\n\n\t/*\n\t * Discard the rest of the message.\n\t * We already reported an error; if this gets an error, just\n\t * drive on.\n\t */\n\t(void)rpcap_discard(pr->rmt_sockctrl, plen, NULL);\n\nerror_nodiscard:\n\tif ((sockdata) && (sockdata != -1))\t\t/* we can be here because sockdata said 'error' */\n\t\tsock_close(sockdata, NULL, 0);\n\n\tif (!active)\n\t\tsock_close(pr->rmt_sockctrl, NULL, 0);\n\n\tif (addrinfo != NULL)\n\t\tfreeaddrinfo(addrinfo);\n\n\t/*\n\t * We do not have to call pcap_close() here, because this function is always called\n\t * by the user in case something bad happens\n\t */\n#if 0\n\tif (fp)\n\t{\n\t\tpcap_close(fp);\n\t\tfp= NULL;\n\t}\n#endif\n\n\treturn -1;\n}",
+      "fn_code_pos": [
+        [
+          1010,
+          0
+        ],
+        [
+          1401,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_startcapture_remote",
+        "parameters": {
+          "fp": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pcap_pack_bpffilter(pcap_t *fp, char *sendbuf, int *sendbufidx, struct bpf_program *prog)\n{\n\tstruct rpcap_filter *filter;\n\tstruct rpcap_filterbpf_insn *insn;\n\tstruct bpf_insn *bf_insn;\n\tstruct bpf_program fake_prog;\t\t/* To be used just in case the user forgot to set a filter */\n\tunsigned int i;\n\n\tif (prog->bf_len == 0)\t/* No filters have been specified; so, let's apply a \"fake\" filter */\n\t{\n\t\tif (pcap_compile(fp, &fake_prog, NULL /* buffer */, 1, 0) == -1)\n\t\t\treturn -1;\n\n\t\tprog = &fake_prog;\n\t}\n\n\tfilter = (struct rpcap_filter *) sendbuf;\n\n\tif (sock_bufferize(NULL, sizeof(struct rpcap_filter), NULL, sendbufidx,\n\t\tRPCAP_NETBUF_SIZE, SOCKBUF_CHECKONLY, fp->errbuf, PCAP_ERRBUF_SIZE))\n\t\treturn -1;\n\n\tfilter->filtertype = htons(RPCAP_UPDATEFILTER_BPF);\n\tfilter->nitems = htonl((int32)prog->bf_len);\n\n\tif (sock_bufferize(NULL, prog->bf_len * sizeof(struct rpcap_filterbpf_insn),\n\t\tNULL, sendbufidx, RPCAP_NETBUF_SIZE, SOCKBUF_CHECKONLY, fp->errbuf, PCAP_ERRBUF_SIZE))\n\t\treturn -1;\n\n\tinsn = (struct rpcap_filterbpf_insn *) (filter + 1);\n\tbf_insn = prog->bf_insns;\n\n\tfor (i = 0; i < prog->bf_len; i++)\n\t{\n\t\tinsn->code = htons(bf_insn->code);\n\t\tinsn->jf = bf_insn->jf;\n\t\tinsn->jt = bf_insn->jt;\n\t\tinsn->k = htonl(bf_insn->k);\n\n\t\tinsn++;\n\t\tbf_insn++;\n\t}\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          1427,
+          0
+        ],
+        [
+          1471,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_pack_bpffilter",
+        "parameters": {
+          "fp": "pcap_t",
+          "sendbuf": "char",
+          "sendbufidx": "int",
+          "prog": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pcap_updatefilter_remote(pcap_t *fp, struct bpf_program *prog)\n{\n\tstruct pcap_rpcap *pr = fp->priv;\t/* structure used when doing a remote live capture */\n\tchar sendbuf[RPCAP_NETBUF_SIZE];\t/* temporary buffer in which data to be sent is buffered */\n\tint sendbufidx = 0;\t\t\t/* index which keeps the number of bytes currently buffered */\n\tstruct rpcap_header header;\t\t/* To keep the reply message */\n\n\tif (sock_bufferize(NULL, sizeof(struct rpcap_header), NULL, &sendbufidx,\n\t\tRPCAP_NETBUF_SIZE, SOCKBUF_CHECKONLY, fp->errbuf, PCAP_ERRBUF_SIZE))\n\t\treturn -1;\n\n\trpcap_createhdr((struct rpcap_header *) sendbuf,\n\t    pr->protocol_version, RPCAP_MSG_UPDATEFILTER_REQ, 0,\n\t    sizeof(struct rpcap_filter) + prog->bf_len * sizeof(struct rpcap_filterbpf_insn));\n\n\tif (pcap_pack_bpffilter(fp, &sendbuf[sendbufidx], &sendbufidx, prog))\n\t\treturn -1;\n\n\tif (sock_send(pr->rmt_sockctrl, sendbuf, sendbufidx, fp->errbuf,\n\t    PCAP_ERRBUF_SIZE) < 0)\n\t\treturn -1;\n\n\t/* Receive and process the reply message header. */\n\tif (rpcap_process_msg_header(pr->rmt_sockctrl, pr->protocol_version,\n\t    RPCAP_MSG_UPDATEFILTER_REQ, &header, fp->errbuf) == -1)\n\t\treturn -1;\n\n\t/*\n\t * It shouldn't have any contents; discard it if it does.\n\t */\n\tif (rpcap_discard(pr->rmt_sockctrl, header.plen, fp->errbuf) == -1)\n\t\treturn -1;\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          1498,
+          0
+        ],
+        [
+          1532,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_updatefilter_remote",
+        "parameters": {
+          "fp": "pcap_t",
+          "prog": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\npcap_save_current_filter_rpcap(pcap_t *fp, const char *filter)\n{\n\tstruct pcap_rpcap *pr = fp->priv;\t/* structure used when doing a remote live capture */\n\n\t/*\n\t * Check if:\n\t *  - We are on an remote capture\n\t *  - we do not want to capture RPCAP traffic\n\t *\n\t * If so, we have to save the current filter, because we have to\n\t * add some piece of stuff later\n\t */\n\tif (pr->rmt_clientside &&\n\t    (pr->rmt_flags & PCAP_OPENFLAG_NOCAPTURE_RPCAP))\n\t{\n\t\tif (pr->currentfilter)\n\t\t\tfree(pr->currentfilter);\n\n\t\tif (filter == NULL)\n\t\t\tfilter = \"\";\n\n\t\tpr->currentfilter = strdup(filter);\n\t}\n}",
+      "fn_code_pos": [
+        [
+          1534,
+          0
+        ],
+        [
+          1558,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_save_current_filter_rpcap",
+        "parameters": {
+          "fp": "pcap_t",
+          "filter": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int pcap_setfilter_rpcap(pcap_t *fp, struct bpf_program *prog)\n{\n\tstruct pcap_rpcap *pr = fp->priv;\t/* structure used when doing a remote live capture */\n\n\tif (!pr->rmt_capstarted)\n\t{\n\t\t/* copy filter into the pcap_t structure */\n\t\tif (install_bpf_program(fp, prog) == -1)\n\t\t\treturn -1;\n\t\treturn 0;\n\t}\n\n\t/* we have to update a filter during run-time */\n\tif (pcap_updatefilter_remote(fp, prog))\n\t\treturn -1;\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          1569,
+          0
+        ],
+        [
+          1586,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setfilter_rpcap",
+        "parameters": {
+          "fp": "pcap_t",
+          "prog": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pcap_createfilter_norpcappkt(pcap_t *fp, struct bpf_program *prog)\n{\n\tstruct pcap_rpcap *pr = fp->priv;\t/* structure used when doing a remote live capture */\n\tint RetVal = 0;\n\n\t/* We do not want to capture our RPCAP traffic. So, let's update the filter */\n\tif (pr->rmt_flags & PCAP_OPENFLAG_NOCAPTURE_RPCAP)\n\t{\n\t\tstruct sockaddr_storage saddr;\t\t/* temp, needed to retrieve the network data port chosen on the local machine */\n\t\tsocklen_t saddrlen;\t\t\t\t\t/* temp, needed to retrieve the network data port chosen on the local machine */\n\t\tchar myaddress[128];\n\t\tchar myctrlport[128];\n\t\tchar mydataport[128];\n\t\tchar peeraddress[128];\n\t\tchar peerctrlport[128];\n\t\tchar *newfilter;\n\t\tconst int newstringsize = 1024;\n\t\tsize_t currentfiltersize;\n\n\t\t/* Get the name/port of our peer */\n\t\tsaddrlen = sizeof(struct sockaddr_storage);\n\t\tif (getpeername(pr->rmt_sockctrl, (struct sockaddr *) &saddr, &saddrlen) == -1)\n\t\t{\n\t\t\tsock_geterror(\"getpeername(): \", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\t\treturn -1;\n\t\t}\n\n\t\tif (getnameinfo((struct sockaddr *) &saddr, saddrlen, peeraddress,\n\t\t\tsizeof(peeraddress), peerctrlport, sizeof(peerctrlport), NI_NUMERICHOST | NI_NUMERICSERV))\n\t\t{\n\t\t\tsock_geterror(\"getnameinfo(): \", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\t\treturn -1;\n\t\t}\n\n\t\t/* We cannot check the data port, because this is available only in case of TCP sockets */\n\t\t/* Get the name/port of the current host */\n\t\tif (getsockname(pr->rmt_sockctrl, (struct sockaddr *) &saddr, &saddrlen) == -1)\n\t\t{\n\t\t\tsock_geterror(\"getsockname(): \", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\t\treturn -1;\n\t\t}\n\n\t\t/* Get the local port the system picked up */\n\t\tif (getnameinfo((struct sockaddr *) &saddr, saddrlen, myaddress,\n\t\t\tsizeof(myaddress), myctrlport, sizeof(myctrlport), NI_NUMERICHOST | NI_NUMERICSERV))\n\t\t{\n\t\t\tsock_geterror(\"getnameinfo(): \", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\t\treturn -1;\n\t\t}\n\n\t\t/* Let's now check the data port */\n\t\tif (getsockname(pr->rmt_sockdata, (struct sockaddr *) &saddr, &saddrlen) == -1)\n\t\t{\n\t\t\tsock_geterror(\"getsockname(): \", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\t\treturn -1;\n\t\t}\n\n\t\t/* Get the local port the system picked up */\n\t\tif (getnameinfo((struct sockaddr *) &saddr, saddrlen, NULL, 0, mydataport, sizeof(mydataport), NI_NUMERICSERV))\n\t\t{\n\t\t\tsock_geterror(\"getnameinfo(): \", fp->errbuf, PCAP_ERRBUF_SIZE);\n\t\t\treturn -1;\n\t\t}\n\n\t\tcurrentfiltersize = pr->currentfilter ? strlen(pr->currentfilter) : 0;\n\n\t\tnewfilter = (char *)malloc(currentfiltersize + newstringsize + 1);\n\n\t\tif (currentfiltersize)\n\t\t{\n\t\t\tpcap_snprintf(newfilter, currentfiltersize + newstringsize,\n\t\t\t\t\"(%s) and not (host %s and host %s and port %s and port %s) and not (host %s and host %s and port %s)\",\n\t\t\t\tpr->currentfilter, myaddress, peeraddress, myctrlport, peerctrlport, myaddress, peeraddress, mydataport);\n\t\t}\n\t\telse\n\t\t{\n\t\t\tpcap_snprintf(newfilter, currentfiltersize + newstringsize,\n\t\t\t\t\"not (host %s and host %s and port %s and port %s) and not (host %s and host %s and port %s)\",\n\t\t\t\tmyaddress, peeraddress, myctrlport, peerctrlport, myaddress, peeraddress, mydataport);\n\t\t}\n\n\t\tnewfilter[currentfiltersize + newstringsize] = 0;\n\n\t\t/*\n\t\t * This is only an hack to prevent the save_current_filter\n\t\t * routine, which will be called when we call pcap_compile(),\n\t\t * from saving the modified filter.\n\t\t */\n\t\tpr->rmt_clientside = 0;\n\n\t\tif (pcap_compile(fp, prog, newfilter, 1, 0) == -1)\n\t\t\tRetVal = -1;\n\n\t\t/* Undo the hack. */\n\t\tpr->rmt_clientside = 1;\n\n\t\tfree(newfilter);\n\t}\n\n\treturn RetVal;\n}",
+      "fn_code_pos": [
+        [
+          1598,
+          0
+        ],
+        [
+          1698,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_createfilter_norpcappkt",
+        "parameters": {
+          "fp": "pcap_t",
+          "prog": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pcap_setsampling_remote(pcap_t *fp)\n{\n\tstruct pcap_rpcap *pr = fp->priv;\t/* structure used when doing a remote live capture */\n\tchar sendbuf[RPCAP_NETBUF_SIZE];/* temporary buffer in which data to be sent is buffered */\n\tint sendbufidx = 0;\t\t\t/* index which keeps the number of bytes currently buffered */\n\tstruct rpcap_header header;\t\t/* To keep the reply message */\n\tstruct rpcap_sampling *sampling_pars;\t/* Structure that is needed to send sampling parameters to the remote host */\n\n\t/* If no samping is requested, return 'ok' */\n\tif (fp->rmt_samp.method == PCAP_SAMP_NOSAMP)\n\t\treturn 0;\n\n\t/*\n\t * Check for sampling parameters that don't fit in a message.\n\t * We'll let the server complain about invalid parameters\n\t * that do fit into the message.\n\t */\n\tif (fp->rmt_samp.method < 0 || fp->rmt_samp.method > 255) {\n\t\tpcap_snprintf(fp->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"Invalid sampling method %d\", fp->rmt_samp.method);\n\t\treturn -1;\n\t}\n\tif (fp->rmt_samp.value < 0 || fp->rmt_samp.value > 65535) {\n\t\tpcap_snprintf(fp->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"Invalid sampling value %d\", fp->rmt_samp.value);\n\t\treturn -1;\n\t}\n\n\tif (sock_bufferize(NULL, sizeof(struct rpcap_header), NULL,\n\t\t&sendbufidx, RPCAP_NETBUF_SIZE, SOCKBUF_CHECKONLY, fp->errbuf, PCAP_ERRBUF_SIZE))\n\t\treturn -1;\n\n\trpcap_createhdr((struct rpcap_header *) sendbuf,\n\t    pr->protocol_version, RPCAP_MSG_SETSAMPLING_REQ, 0,\n\t    sizeof(struct rpcap_sampling));\n\n\t/* Fill the structure needed to open an adapter remotely */\n\tsampling_pars = (struct rpcap_sampling *) &sendbuf[sendbufidx];\n\n\tif (sock_bufferize(NULL, sizeof(struct rpcap_sampling), NULL,\n\t\t&sendbufidx, RPCAP_NETBUF_SIZE, SOCKBUF_CHECKONLY, fp->errbuf, PCAP_ERRBUF_SIZE))\n\t\treturn -1;\n\n\tmemset(sampling_pars, 0, sizeof(struct rpcap_sampling));\n\n\tsampling_pars->method = (uint8)fp->rmt_samp.method;\n\tsampling_pars->value = (uint16)htonl(fp->rmt_samp.value);\n\n\tif (sock_send(pr->rmt_sockctrl, sendbuf, sendbufidx, fp->errbuf,\n\t    PCAP_ERRBUF_SIZE) < 0)\n\t\treturn -1;\n\n\t/* Receive and process the reply message header. */\n\tif (rpcap_process_msg_header(pr->rmt_sockctrl, pr->protocol_version,\n\t    RPCAP_MSG_SETSAMPLING_REQ, &header, fp->errbuf) == -1)\n\t\treturn -1;\n\n\t/*\n\t * It shouldn't have any contents; discard it if it does.\n\t */\n\tif (rpcap_discard(pr->rmt_sockctrl, header.plen, fp->errbuf) == -1)\n\t\treturn -1;\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          1713,
+          0
+        ],
+        [
+          1777,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setsampling_remote",
+        "parameters": {
+          "fp": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int rpcap_doauth(SOCKET sockctrl, uint8 *ver, struct pcap_rmtauth *auth, char *errbuf)\n{\n\tint status;\n\n\t/*\n\t * Send authentication to the remote machine.\n\t *\n\t * First try with the maximum version number we support.\n\t */\n\t*ver = RPCAP_MAX_VERSION;\n\tstatus = rpcap_sendauth(sockctrl, ver, auth, errbuf);\n\tif (status == 0)\n\t{\n\t\t//\n\t\t// Success.\n\t\t//\n\t\treturn 0;\n\t}\n\tif (status == -1)\n\t{\n\t\t/* Unrecoverable error. */\n\t\treturn -1;\n\t}\n\n\t/*\n\t * The server doesn't support the version we used in the initial\n\t * message, and it sent us back a reply either with the maximum\n\t * version they do support, or with the version we sent, and we\n\t * support that version.  *ver has been set to that version; try\n\t * authenticating again with that version.\n\t */\n\tstatus = rpcap_sendauth(sockctrl, ver, auth, errbuf);\n\tif (status == 0)\n\t{\n\t\t//\n\t\t// Success.\n\t\t//\n\t\treturn 0;\n\t}\n\tif (status == -1)\n\t{\n\t\t/* Unrecoverable error. */\n\t\treturn -1;\n\t}\n\tif (status == -2)\n\t{\n\t\t/*\n\t\t * The server doesn't support that version, which\n\t\t * means there is no version we both support, so\n\t\t * this is a fatal error.\n\t\t */\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"The server doesn't support any protocol version that we support\");\n\t\treturn -1;\n\t}\n\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"rpcap_sendauth() returned %d\", status);\n\treturn -1;\n}",
+      "fn_code_pos": [
+        [
+          1808,
+          0
+        ],
+        [
+          1864,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_doauth",
+        "parameters": {
+          "sockctrl": "SOCKET",
+          "ver": "uint8",
+          "auth": "struct pcap_rmtauth",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int rpcap_sendauth(SOCKET sock, uint8 *ver, struct pcap_rmtauth *auth, char *errbuf)\n{\n\tchar sendbuf[RPCAP_NETBUF_SIZE];\t/* temporary buffer in which data that has to be sent is buffered */\n\tint sendbufidx = 0;\t\t\t/* index which keeps the number of bytes currently buffered */\n\tuint16 length;\t\t\t\t/* length of the payload of this message */\n\tuint16 errcode;\n\tstruct rpcap_auth *rpauth;\n\tuint16 auth_type;\n\tstruct rpcap_header header;\n\tsize_t str_length;\n\n\tif (auth)\n\t{\n\t\tswitch (auth->type)\n\t\t{\n\t\tcase RPCAP_RMTAUTH_NULL:\n\t\t\tlength = sizeof(struct rpcap_auth);\n\t\t\tbreak;\n\n\t\tcase RPCAP_RMTAUTH_PWD:\n\t\t\tlength = sizeof(struct rpcap_auth);\n\t\t\tif (auth->username)\n\t\t\t{\n\t\t\t\tstr_length = strlen(auth->username);\n\t\t\t\tif (str_length > 65535)\n\t\t\t\t{\n\t\t\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"User name is too long (> 65535 bytes)\");\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\t\t\t\tlength += (uint16)str_length;\n\t\t\t}\n\t\t\tif (auth->password)\n\t\t\t{\n\t\t\t\tstr_length = strlen(auth->password);\n\t\t\t\tif (str_length > 65535)\n\t\t\t\t{\n\t\t\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"Password is too long (> 65535 bytes)\");\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\t\t\t\tlength += (uint16)str_length;\n\t\t\t}\n\t\t\tbreak;\n\n\t\tdefault:\n\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"Authentication type not recognized.\");\n\t\t\treturn -1;\n\t\t}\n\n\t\tauth_type = (uint16)auth->type;\n\t}\n\telse\n\t{\n\t\tauth_type = RPCAP_RMTAUTH_NULL;\n\t\tlength = sizeof(struct rpcap_auth);\n\t}\n\n\n\tif (sock_bufferize(NULL, sizeof(struct rpcap_header), NULL,\n\t\t&sendbufidx, RPCAP_NETBUF_SIZE, SOCKBUF_CHECKONLY, errbuf, PCAP_ERRBUF_SIZE))\n\t\treturn -1;\n\n\trpcap_createhdr((struct rpcap_header *) sendbuf, *ver,\n\t    RPCAP_MSG_AUTH_REQ, 0, length);\n\n\trpauth = (struct rpcap_auth *) &sendbuf[sendbufidx];\n\n\tif (sock_bufferize(NULL, sizeof(struct rpcap_auth), NULL,\n\t\t&sendbufidx, RPCAP_NETBUF_SIZE, SOCKBUF_CHECKONLY, errbuf, PCAP_ERRBUF_SIZE))\n\t\treturn -1;\n\n\tmemset(rpauth, 0, sizeof(struct rpcap_auth));\n\n\trpauth->type = htons(auth_type);\n\n\tif (auth_type == RPCAP_RMTAUTH_PWD)\n\t{\n\t\tif (auth->username)\n\t\t\trpauth->slen1 = (uint16)strlen(auth->username);\n\t\telse\n\t\t\trpauth->slen1 = 0;\n\n\t\tif (sock_bufferize(auth->username, rpauth->slen1, sendbuf,\n\t\t\t&sendbufidx, RPCAP_NETBUF_SIZE, SOCKBUF_BUFFERIZE, errbuf, PCAP_ERRBUF_SIZE))\n\t\t\treturn -1;\n\n\t\tif (auth->password)\n\t\t\trpauth->slen2 = (uint16)strlen(auth->password);\n\t\telse\n\t\t\trpauth->slen2 = 0;\n\n\t\tif (sock_bufferize(auth->password, rpauth->slen2, sendbuf,\n\t\t\t&sendbufidx, RPCAP_NETBUF_SIZE, SOCKBUF_BUFFERIZE, errbuf, PCAP_ERRBUF_SIZE))\n\t\t\treturn -1;\n\n\t\trpauth->slen1 = htons(rpauth->slen1);\n\t\trpauth->slen2 = htons(rpauth->slen2);\n\t}\n\n\tif (sock_send(sock, sendbuf, sendbufidx, errbuf, PCAP_ERRBUF_SIZE) < 0)\n\t\treturn -1;\n\n\t/* Receive the reply */\n\tif (rpcap_recv_msg_header(sock, &header, errbuf) == -1)\n\t\treturn -1;\n\n\tif (rpcap_check_msg_type(sock, RPCAP_MSG_AUTH_REQ, &header,\n\t    &errcode, errbuf) == -1)\n\t{\n\t\t/* Error message - or something else, which is a protocol error. */\n\t\tif (header.type == RPCAP_MSG_ERROR &&\n\t\t    errcode == PCAP_ERR_WRONGVER)\n\t\t{\n\t\t\t/*\n\t\t\t * The server didn't support the version we sent,\n\t\t\t * and replied with the maximum version it supports\n\t\t\t * if our version was too big or with the version\n\t\t\t * we sent if out version was too small.\n\t\t\t *\n\t\t\t * Do we also support it?\n\t\t\t */\n\t\t\tif (!RPCAP_VERSION_IS_SUPPORTED(header.ver))\n\t\t\t{\n\t\t\t\t/*\n\t\t\t\t * No, so there's no version we both support.\n\t\t\t\t * This is an unrecoverable error.\n\t\t\t\t */\n\t\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"The server doesn't support any protocol version that we support\");\n\t\t\t\treturn -1;\n\t\t\t}\n\n\t\t\t/*\n\t\t\t * OK, use that version, and tell our caller to\n\t\t\t * try again.\n\t\t\t */\n\t\t\t*ver = header.ver;\n\t\t\treturn -2;\n\t\t}\n\n\t\t/*\n\t\t * Other error - unrecoverable.\n\t\t */\n\t\treturn -1;\n\t}\n\n\t/*\n\t * OK, it's an authentication reply, so they're OK with the\n\t * protocol version we sent.\n\t *\n\t * Discard the rest of it.\n\t */\n\tif (rpcap_discard(sock, header.plen, errbuf) == -1)\n\t\treturn -1;\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          1889,
+          0
+        ],
+        [
+          2043,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_sendauth",
+        "parameters": {
+          "sock": "SOCKET",
+          "ver": "uint8",
+          "auth": "struct pcap_rmtauth",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_getnonblock_rpcap(pcap_t *p)\n{\n\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t    \"Non-blocking mode isn't supported for capturing remotely with rpcap\");\n\treturn (-1);\n}",
+      "fn_code_pos": [
+        [
+          2046,
+          0
+        ],
+        [
+          2052,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_getnonblock_rpcap",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_setnonblock_rpcap(pcap_t *p, int nonblock _U_)\n{\n\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t    \"Non-blocking mode isn't supported for capturing remotely with rpcap\");\n\treturn (-1);\n}",
+      "fn_code_pos": [
+        [
+          2054,
+          0
+        ],
+        [
+          2060,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setnonblock_rpcap",
+        "parameters": {
+          "p": "pcap_t",
+          "nonblock": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *pcap_open_rpcap(const char *source, int snaplen, int flags, int read_timeout, struct pcap_rmtauth *auth, char *errbuf)\n{\n\tpcap_t *fp;\n\tchar *source_str;\n\tstruct pcap_rpcap *pr;\t\t/* structure used when doing a remote live capture */\n\tchar host[PCAP_BUF_SIZE], ctrlport[PCAP_BUF_SIZE], iface[PCAP_BUF_SIZE];\n\tstruct activehosts *activeconn;\t\t/* active connection, if there is one */\n\tint error;\t\t\t\t/* '1' if rpcap_remoteact_getsock returned an error */\n\tSOCKET sockctrl;\n\tuint8 protocol_version;\t\t\t/* negotiated protocol version */\n\tint active;\n\tuint32 plen;\n\tchar sendbuf[RPCAP_NETBUF_SIZE];\t/* temporary buffer in which data to be sent is buffered */\n\tint sendbufidx = 0;\t\t\t/* index which keeps the number of bytes currently buffered */\n\tint retval;\t\t\t\t/* store the return value of the functions */\n\n\t/* RPCAP-related variables */\n\tstruct rpcap_header header;\t\t/* header of the RPCAP packet */\n\tstruct rpcap_openreply openreply;\t/* open reply message */\n\n\tfp = pcap_create_common(errbuf, sizeof (struct pcap_rpcap));\n\tif (fp == NULL)\n\t{\n\t\treturn NULL;\n\t}\n\tsource_str = strdup(source);\n\tif (source_str == NULL) {\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"malloc\");\n\t\treturn NULL;\n\t}\n\n\t/*\n\t * Turn a negative snapshot value (invalid), a snapshot value of\n\t * 0 (unspecified), or a value bigger than the normal maximum\n\t * value, into the maximum allowed value.\n\t *\n\t * If some application really *needs* a bigger snapshot\n\t * length, we should just increase MAXIMUM_SNAPLEN.\n\t *\n\t * XXX - should we leave this up to the remote server to\n\t * do?\n\t */\n\tif (snaplen <= 0 || snaplen > MAXIMUM_SNAPLEN)\n\t\tsnaplen = MAXIMUM_SNAPLEN;\n\n\tfp->opt.device = source_str;\n\tfp->snapshot = snaplen;\n\tfp->opt.timeout = read_timeout;\n\tpr = fp->priv;\n\tpr->rmt_flags = flags;\n\n\t/*\n\t * determine the type of the source (NULL, file, local, remote)\n\t * You must have a valid source string even if we're in active mode, because otherwise\n\t * the call to the following function will fail.\n\t */\n\tif (pcap_parsesrcstr(fp->opt.device, &retval, host, ctrlport, iface, errbuf) == -1)\n\t{\n\t\tpcap_close(fp);\n\t\treturn NULL;\n\t}\n\n\tif (retval != PCAP_SRC_IFREMOTE)\n\t{\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"This function is able to open only remote interfaces\");\n\t\tpcap_close(fp);\n\t\treturn NULL;\n\t}\n\n\t/*\n\t * Warning: this call can be the first one called by the user.\n\t * For this reason, we have to initialize the WinSock support.\n\t */\n\tif (sock_init(errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t{\n\t\tpcap_close(fp);\n\t\treturn NULL;\n\t}\n\n\t/* Check for active mode */\n\tactiveconn = rpcap_remoteact_getsock(host, &error, errbuf);\n\tif (activeconn != NULL)\n\t{\n\t\tsockctrl = activeconn->sockctrl;\n\t\tprotocol_version = activeconn->protocol_version;\n\t\tactive = 1;\n\t}\n\telse\n\t{\n\t\tstruct addrinfo hints;\t\t\t/* temp, needed to open a socket connection */\n\t\tstruct addrinfo *addrinfo;\t\t/* temp, needed to open a socket connection */\n\n\t\tif (error)\n\t\t{\n\t\t\t/*\n\t\t\t * Call failed.\n\t\t\t */\n\t\t\tpcap_close(fp);\n\t\t\treturn NULL;\n\t\t}\n\n\t\t/*\n\t\t * We're not in active mode; let's try to open a new\n\t\t * control connection.\n\t\t */\n\t\tmemset(&hints, 0, sizeof(struct addrinfo));\n\t\thints.ai_family = PF_UNSPEC;\n\t\thints.ai_socktype = SOCK_STREAM;\n\n\t\tif (ctrlport[0] == 0)\n\t\t{\n\t\t\t/* the user chose not to specify the port */\n\t\t\tif (sock_initaddress(host, RPCAP_DEFAULT_NETPORT, &hints, &addrinfo, errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t\t\t{\n\t\t\t\tpcap_close(fp);\n\t\t\t\treturn NULL;\n\t\t\t}\n\t\t}\n\t\telse\n\t\t{\n\t\t\tif (sock_initaddress(host, ctrlport, &hints, &addrinfo, errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t\t\t{\n\t\t\t\tpcap_close(fp);\n\t\t\t\treturn NULL;\n\t\t\t}\n\t\t}\n\n\t\tif ((sockctrl = sock_open(addrinfo, SOCKOPEN_CLIENT, 0, errbuf, PCAP_ERRBUF_SIZE)) == INVALID_SOCKET)\n\t\t{\n\t\t\tfreeaddrinfo(addrinfo);\n\t\t\tpcap_close(fp);\n\t\t\treturn NULL;\n\t\t}\n\n\t\t/* addrinfo is no longer used */\n\t\tfreeaddrinfo(addrinfo);\n\n\t\tif (rpcap_doauth(sockctrl, &protocol_version, auth, errbuf) == -1)\n\t\t{\n\t\t\tsock_close(sockctrl, NULL, 0);\n\t\t\tpcap_close(fp);\n\t\t\treturn NULL;\n\t\t}\n\t\tactive = 0;\n\t}\n\n\t/*\n\t * Now it's time to start playing with the RPCAP protocol\n\t * RPCAP open command: create the request message\n\t */\n\tif (sock_bufferize(NULL, sizeof(struct rpcap_header), NULL,\n\t\t&sendbufidx, RPCAP_NETBUF_SIZE, SOCKBUF_CHECKONLY, errbuf, PCAP_ERRBUF_SIZE))\n\t\tgoto error_nodiscard;\n\n\trpcap_createhdr((struct rpcap_header *) sendbuf, protocol_version,\n\t    RPCAP_MSG_OPEN_REQ, 0, (uint32) strlen(iface));\n\n\tif (sock_bufferize(iface, (int) strlen(iface), sendbuf, &sendbufidx,\n\t\tRPCAP_NETBUF_SIZE, SOCKBUF_BUFFERIZE, errbuf, PCAP_ERRBUF_SIZE))\n\t\tgoto error_nodiscard;\n\n\tif (sock_send(sockctrl, sendbuf, sendbufidx, errbuf,\n\t    PCAP_ERRBUF_SIZE) < 0)\n\t\tgoto error_nodiscard;\n\n\t/* Receive and process the reply message header. */\n\tif (rpcap_process_msg_header(sockctrl, protocol_version,\n\t    RPCAP_MSG_OPEN_REQ, &header, errbuf) == -1)\n\t\tgoto error_nodiscard;\n\tplen = header.plen;\n\n\t/* Read the reply body */\n\tif (rpcap_recv(sockctrl, (char *)&openreply,\n\t    sizeof(struct rpcap_openreply), &plen, errbuf) == -1)\n\t\tgoto error;\n\n\t/* Discard the rest of the message, if there is any. */\n\tif (rpcap_discard(pr->rmt_sockctrl, plen, errbuf) == -1)\n\t\tgoto error_nodiscard;\n\n\t/* Set proper fields into the pcap_t struct */\n\tfp->linktype = ntohl(openreply.linktype);\n\tfp->tzoff = ntohl(openreply.tzoff);\n\tpr->rmt_sockctrl = sockctrl;\n\tpr->protocol_version = protocol_version;\n\tpr->rmt_clientside = 1;\n\n\t/* This code is duplicated from the end of this function */\n\tfp->read_op = pcap_read_rpcap;\n\tfp->save_current_filter_op = pcap_save_current_filter_rpcap;\n\tfp->setfilter_op = pcap_setfilter_rpcap;\n\tfp->getnonblock_op = pcap_getnonblock_rpcap;\n\tfp->setnonblock_op = pcap_setnonblock_rpcap;\n\tfp->stats_op = pcap_stats_rpcap;\n#ifdef _WIN32\n\tfp->stats_ex_op = pcap_stats_ex_rpcap;\n#endif\n\tfp->cleanup_op = pcap_cleanup_rpcap;\n\n\tfp->activated = 1;\n\treturn fp;\n\nerror:\n\t/*\n\t * When the connection has been established, we have to close it. So, at the\n\t * beginning of this function, if an error occur we return immediately with\n\t * a return NULL; when the connection is established, we have to come here\n\t * ('goto error;') in order to close everything properly.\n\t */\n\n\t/*\n\t * Discard the rest of the message.\n\t * We already reported an error; if this gets an error, just\n\t * drive on.\n\t */\n\t(void)rpcap_discard(pr->rmt_sockctrl, plen, NULL);\n\nerror_nodiscard:\n\tif (!active)\n\t\tsock_close(sockctrl, NULL, 0);\n\n\tpcap_close(fp);\n\treturn NULL;\n}",
+      "fn_code_pos": [
+        [
+          2101,
+          0
+        ],
+        [
+          2325,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_open_rpcap",
+        "parameters": {
+          "source": "char",
+          "snaplen": "int",
+          "flags": "int",
+          "read_timeout": "int",
+          "auth": "struct pcap_rmtauth",
+          "errbuf": "char"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "static void\nfreeaddr(struct pcap_addr *addr)\n{\n\tfree(addr->addr);\n\tfree(addr->netmask);\n\tfree(addr->broadaddr);\n\tfree(addr->dstaddr);\n\tfree(addr);\n}",
+      "fn_code_pos": [
+        [
+          2332,
+          0
+        ],
+        [
+          2340,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "freeaddr",
+        "parameters": {
+          "addr": "struct pcap_addr"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\npcap_findalldevs_ex_remote(char *source, struct pcap_rmtauth *auth, pcap_if_t **alldevs, char *errbuf)\n{\n\tstruct activehosts *activeconn;\t/* active connection, if there is one */\n\tint error;\t\t\t/* '1' if rpcap_remoteact_getsock returned an error */\n\tuint8 protocol_version;\t\t/* protocol version */\n\tSOCKET sockctrl;\t\t/* socket descriptor of the control connection */\n\tuint32 plen;\n\tstruct rpcap_header header;\t/* structure that keeps the general header of the rpcap protocol */\n\tint i, j;\t\t/* temp variables */\n\tint nif;\t\t/* Number of interfaces listed */\n\tint active;\t\t\t/* 'true' if we the other end-party is in active mode */\n\tint type;\n\tchar host[PCAP_BUF_SIZE], port[PCAP_BUF_SIZE];\n\tchar tmpstring[PCAP_BUF_SIZE + 1];\t\t/* Needed to convert names and descriptions from 'old' syntax to the 'new' one */\n\tpcap_if_t *lastdev;\t/* Last device in the pcap_if_t list */\n\tpcap_if_t *dev;\t\t/* Device we're adding to the pcap_if_t list */\n\n\t/* List starts out empty. */\n\t(*alldevs) = NULL;\n\tlastdev = NULL;\n\n\t/* Retrieve the needed data for getting adapter list */\n\tif (pcap_parsesrcstr(source, &type, host, port, NULL, errbuf) == -1)\n\t\treturn -1;\n\n\t/* Warning: this call can be the first one called by the user. */\n\t/* For this reason, we have to initialize the WinSock support. */\n\tif (sock_init(errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t\treturn -1;\n\n\t/* Check for active mode */\n\tactiveconn = rpcap_remoteact_getsock(host, &error, errbuf);\n\tif (activeconn != NULL)\n\t{\n\t\tsockctrl = activeconn->sockctrl;\n\t\tprotocol_version = activeconn->protocol_version;\n\t\tactive = 1;\n\t}\n\telse\n\t{\n\t\tstruct addrinfo hints;\t\t/* temp variable needed to resolve hostnames into to socket representation */\n\t\tstruct addrinfo *addrinfo;\t/* temp variable needed to resolve hostnames into to socket representation */\n\n\t\tif (error)\n\t\t{\n\t\t\t/*\n\t\t\t * Call failed.\n\t\t\t */\n\t\t\treturn -1;\n\t\t}\n\n\t\t/*\n\t\t * We're not in active mode; let's try to open a new\n\t\t * control connection.\n\t\t */\n\t\tmemset(&hints, 0, sizeof(struct addrinfo));\n\t\thints.ai_family = PF_UNSPEC;\n\t\thints.ai_socktype = SOCK_STREAM;\n\n\t\tif (port[0] == 0)\n\t\t{\n\t\t\t/* the user chose not to specify the port */\n\t\t\tif (sock_initaddress(host, RPCAP_DEFAULT_NETPORT, &hints, &addrinfo, errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t\t\t\treturn -1;\n\t\t}\n\t\telse\n\t\t{\n\t\t\tif (sock_initaddress(host, port, &hints, &addrinfo, errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t\t\t\treturn -1;\n\t\t}\n\n\t\tif ((sockctrl = sock_open(addrinfo, SOCKOPEN_CLIENT, 0, errbuf, PCAP_ERRBUF_SIZE)) == INVALID_SOCKET)\n\t\t{\n\t\t\tfreeaddrinfo(addrinfo);\n\t\t\treturn -1;\n\t\t}\n\n\t\t/* addrinfo is no longer used */\n\t\tfreeaddrinfo(addrinfo);\n\t\taddrinfo = NULL;\n\n\t\tif (rpcap_doauth(sockctrl, &protocol_version, auth, errbuf) == -1)\n\t\t{\n\t\t\tsock_close(sockctrl, NULL, 0);\n\t\t\treturn -1;\n\t\t}\n\t\tactive = 0;\n\t}\n\n\t/* RPCAP findalldevs command */\n\trpcap_createhdr(&header, protocol_version, RPCAP_MSG_FINDALLIF_REQ,\n\t    0, 0);\n\n\tif (sock_send(sockctrl, (char *)&header, sizeof(struct rpcap_header),\n\t    errbuf, PCAP_ERRBUF_SIZE) < 0)\n\t\tgoto error_nodiscard;\n\n\t/* Receive and process the reply message header. */\n\tif (rpcap_process_msg_header(sockctrl, protocol_version,\n\t    RPCAP_MSG_FINDALLIF_REQ, &header, errbuf) == -1)\n\t\tgoto error_nodiscard;\n\n\tplen = header.plen;\n\n\t/* read the number of interfaces */\n\tnif = ntohs(header.value);\n\n\t/* loop until all interfaces have been received */\n\tfor (i = 0; i < nif; i++)\n\t{\n\t\tstruct rpcap_findalldevs_if findalldevs_if;\n\t\tchar tmpstring2[PCAP_BUF_SIZE + 1];\t\t/* Needed to convert names and descriptions from 'old' syntax to the 'new' one */\n\t\tsize_t stringlen;\n\t\tstruct pcap_addr *addr, *prevaddr;\n\n\t\ttmpstring2[PCAP_BUF_SIZE] = 0;\n\n\t\t/* receive the findalldevs structure from remote host */\n\t\tif (rpcap_recv(sockctrl, (char *)&findalldevs_if,\n\t\t    sizeof(struct rpcap_findalldevs_if), &plen, errbuf) == -1)\n\t\t\tgoto error;\n\n\t\tfindalldevs_if.namelen = ntohs(findalldevs_if.namelen);\n\t\tfindalldevs_if.desclen = ntohs(findalldevs_if.desclen);\n\t\tfindalldevs_if.naddr = ntohs(findalldevs_if.naddr);\n\n\t\t/* allocate the main structure */\n\t\tdev = (pcap_if_t *)malloc(sizeof(pcap_if_t));\n\t\tif (dev == NULL)\n\t\t{\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"malloc() failed\");\n\t\t\tgoto error;\n\t\t}\n\n\t\t/* Initialize the structure to 'zero' */\n\t\tmemset(dev, 0, sizeof(pcap_if_t));\n\n\t\t/* Append it to the list. */\n\t\tif (lastdev == NULL)\n\t\t{\n\t\t\t/*\n\t\t\t * List is empty, so it's also the first device.\n\t\t\t */\n\t\t\t*alldevs = dev;\n\t\t}\n\t\telse\n\t\t{\n\t\t\t/*\n\t\t\t * Append after the last device.\n\t\t\t */\n\t\t\tlastdev->next = dev;\n\t\t}\n\t\t/* It's now the last device. */\n\t\tlastdev = dev;\n\n\t\t/* allocate mem for name and description */\n\t\tif (findalldevs_if.namelen)\n\t\t{\n\n\t\t\tif (findalldevs_if.namelen >= sizeof(tmpstring))\n\t\t\t{\n\t\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"Interface name too long\");\n\t\t\t\tgoto error;\n\t\t\t}\n\n\t\t\t/* Retrieve adapter name */\n\t\t\tif (rpcap_recv(sockctrl, tmpstring,\n\t\t\t    findalldevs_if.namelen, &plen, errbuf) == -1)\n\t\t\t\tgoto error;\n\n\t\t\ttmpstring[findalldevs_if.namelen] = 0;\n\n\t\t\t/* Create the new device identifier */\n\t\t\tif (pcap_createsrcstr(tmpstring2, PCAP_SRC_IFREMOTE, host, port, tmpstring, errbuf) == -1)\n\t\t\t\treturn -1;\n\n\t\t\tstringlen = strlen(tmpstring2);\n\n\t\t\tdev->name = (char *)malloc(stringlen + 1);\n\t\t\tif (dev->name == NULL)\n\t\t\t{\n\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno, \"malloc() failed\");\n\t\t\t\tgoto error;\n\t\t\t}\n\n\t\t\t/* Copy the new device name into the correct memory location */\n\t\t\tstrlcpy(dev->name, tmpstring2, stringlen + 1);\n\t\t}\n\n\t\tif (findalldevs_if.desclen)\n\t\t{\n\t\t\tif (findalldevs_if.desclen >= sizeof(tmpstring))\n\t\t\t{\n\t\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"Interface description too long\");\n\t\t\t\tgoto error;\n\t\t\t}\n\n\t\t\t/* Retrieve adapter description */\n\t\t\tif (rpcap_recv(sockctrl, tmpstring,\n\t\t\t    findalldevs_if.desclen, &plen, errbuf) == -1)\n\t\t\t\tgoto error;\n\n\t\t\ttmpstring[findalldevs_if.desclen] = 0;\n\n\t\t\tpcap_snprintf(tmpstring2, sizeof(tmpstring2) - 1, \"%s '%s' %s %s\", PCAP_TEXT_SOURCE_ADAPTER,\n\t\t\t\ttmpstring, PCAP_TEXT_SOURCE_ON_REMOTE_HOST, host);\n\n\t\t\tstringlen = strlen(tmpstring2);\n\n\t\t\tdev->description = (char *)malloc(stringlen + 1);\n\n\t\t\tif (dev->description == NULL)\n\t\t\t{\n\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno, \"malloc() failed\");\n\t\t\t\tgoto error;\n\t\t\t}\n\n\t\t\t/* Copy the new device description into the correct memory location */\n\t\t\tstrlcpy(dev->description, tmpstring2, stringlen + 1);\n\t\t}\n\n\t\tdev->flags = ntohl(findalldevs_if.flags);\n\n\t\tprevaddr = NULL;\n\t\t/* loop until all addresses have been received */\n\t\tfor (j = 0; j < findalldevs_if.naddr; j++)\n\t\t{\n\t\t\tstruct rpcap_findalldevs_ifaddr ifaddr;\n\n\t\t\t/* Retrieve the interface addresses */\n\t\t\tif (rpcap_recv(sockctrl, (char *)&ifaddr,\n\t\t\t    sizeof(struct rpcap_findalldevs_ifaddr),\n\t\t\t    &plen, errbuf) == -1)\n\t\t\t\tgoto error;\n\n\t\t\t/*\n\t\t\t * Deserialize all the address components.\n\t\t\t */\n\t\t\taddr = (struct pcap_addr *) malloc(sizeof(struct pcap_addr));\n\t\t\tif (addr == NULL)\n\t\t\t{\n\t\t\t\tpcap_fmt_errmsg_for_errno(errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno, \"malloc() failed\");\n\t\t\t\tgoto error;\n\t\t\t}\n\t\t\taddr->next = NULL;\n\t\t\taddr->addr = NULL;\n\t\t\taddr->netmask = NULL;\n\t\t\taddr->broadaddr = NULL;\n\t\t\taddr->dstaddr = NULL;\n\n\t\t\tif (rpcap_deseraddr(&ifaddr.addr,\n\t\t\t\t(struct sockaddr_storage **) &addr->addr, errbuf) == -1)\n\t\t\t{\n\t\t\t\tfreeaddr(addr);\n\t\t\t\tgoto error;\n\t\t\t}\n\t\t\tif (rpcap_deseraddr(&ifaddr.netmask,\n\t\t\t\t(struct sockaddr_storage **) &addr->netmask, errbuf) == -1)\n\t\t\t{\n\t\t\t\tfreeaddr(addr);\n\t\t\t\tgoto error;\n\t\t\t}\n\t\t\tif (rpcap_deseraddr(&ifaddr.broadaddr,\n\t\t\t\t(struct sockaddr_storage **) &addr->broadaddr, errbuf) == -1)\n\t\t\t{\n\t\t\t\tfreeaddr(addr);\n\t\t\t\tgoto error;\n\t\t\t}\n\t\t\tif (rpcap_deseraddr(&ifaddr.dstaddr,\n\t\t\t\t(struct sockaddr_storage **) &addr->dstaddr, errbuf) == -1)\n\t\t\t{\n\t\t\t\tfreeaddr(addr);\n\t\t\t\tgoto error;\n\t\t\t}\n\n\t\t\tif ((addr->addr == NULL) && (addr->netmask == NULL) &&\n\t\t\t\t(addr->broadaddr == NULL) && (addr->dstaddr == NULL))\n\t\t\t{\n\t\t\t\t/*\n\t\t\t\t * None of the addresses are IPv4 or IPv6\n\t\t\t\t * addresses, so throw this entry away.\n\t\t\t\t */\n\t\t\t\tfree(addr);\n\t\t\t}\n\t\t\telse\n\t\t\t{\n\t\t\t\t/*\n\t\t\t\t * Add this entry to the list.\n\t\t\t\t */\n\t\t\t\tif (prevaddr == NULL)\n\t\t\t\t{\n\t\t\t\t\tdev->addresses = addr;\n\t\t\t\t}\n\t\t\t\telse\n\t\t\t\t{\n\t\t\t\t\tprevaddr->next = addr;\n\t\t\t\t}\n\t\t\t\tprevaddr = addr;\n\t\t\t}\n\t\t}\n\t}\n\n\t/* Discard the rest of the message. */\n\tif (rpcap_discard(sockctrl, plen, errbuf) == 1)\n\t\tgoto error_nodiscard;\n\n\t/* Control connection has to be closed only in case the remote machine is in passive mode */\n\tif (!active)\n\t{\n\t\t/* DO not send RPCAP_CLOSE, since we did not open a pcap_t; no need to free resources */\n\t\tif (sock_close(sockctrl, errbuf, PCAP_ERRBUF_SIZE))\n\t\t\treturn -1;\n\t}\n\n\t/* To avoid inconsistencies in the number of sock_init() */\n\tsock_cleanup();\n\n\treturn 0;\n\nerror:\n\t/*\n\t * In case there has been an error, I don't want to overwrite it with a new one\n\t * if the following call fails. I want to return always the original error.\n\t *\n\t * Take care: this connection can already be closed when we try to close it.\n\t * This happens because a previous error in the rpcapd, which requested to\n\t * closed the connection. In that case, we already recognized that into the\n\t * rpspck_isheaderok() and we already acknowledged the closing.\n\t * In that sense, this call is useless here (however it is needed in case\n\t * the client generates the error).\n\t *\n\t * Checks if all the data has been read; if not, discard the data in excess\n\t */\n\t(void) rpcap_discard(sockctrl, plen, NULL);\n\nerror_nodiscard:\n\t/* Control connection has to be closed only in case the remote machine is in passive mode */\n\tif (!active)\n\t\tsock_close(sockctrl, NULL, 0);\n\n\t/* To avoid inconsistencies in the number of sock_init() */\n\tsock_cleanup();\n\n\t/* Free whatever interfaces we've allocated. */\n\tpcap_freealldevs(*alldevs);\n\n\treturn -1;\n}",
+      "fn_code_pos": [
+        [
+          2342,
+          0
+        ],
+        [
+          2694,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_findalldevs_ex_remote",
+        "parameters": {
+          "source": "char",
+          "auth": "struct pcap_rmtauth",
+          "alldevs": "pcap_if_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "SOCKET pcap_remoteact_accept(const char *address, const char *port, const char *hostlist, char *connectinghost, struct pcap_rmtauth *auth, char *errbuf)\n{\n\t/* socket-related variables */\n\tstruct addrinfo hints;\t\t\t/* temporary struct to keep settings needed to open the new socket */\n\tstruct addrinfo *addrinfo;\t\t/* keeps the addrinfo chain; required to open a new socket */\n\tstruct sockaddr_storage from;\t/* generic sockaddr_storage variable */\n\tsocklen_t fromlen;\t\t\t\t/* keeps the length of the sockaddr_storage variable */\n\tSOCKET sockctrl;\t\t\t\t/* keeps the main socket identifier */\n\tuint8 protocol_version;\t\t\t/* negotiated protocol version */\n\tstruct activehosts *temp, *prev;\t/* temp var needed to scan he host list chain */\n\n\t*connectinghost = 0;\t\t/* just in case */\n\n\t/* Prepare to open a new server socket */\n\tmemset(&hints, 0, sizeof(struct addrinfo));\n\t/* WARNING Currently it supports only ONE socket family among ipv4 and IPv6  */\n\thints.ai_family = AF_INET;\t\t/* PF_UNSPEC to have both IPv4 and IPv6 server */\n\thints.ai_flags = AI_PASSIVE;\t/* Ready to a bind() socket */\n\thints.ai_socktype = SOCK_STREAM;\n\n\t/* Warning: this call can be the first one called by the user. */\n\t/* For this reason, we have to initialize the WinSock support. */\n\tif (sock_init(errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t\treturn (SOCKET)-1;\n\n\t/* Do the work */\n\tif ((port == NULL) || (port[0] == 0))\n\t{\n\t\tif (sock_initaddress(address, RPCAP_DEFAULT_NETPORT_ACTIVE, &hints, &addrinfo, errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t\t{\n\t\t\tSOCK_DEBUG_MESSAGE(errbuf);\n\t\t\treturn (SOCKET)-2;\n\t\t}\n\t}\n\telse\n\t{\n\t\tif (sock_initaddress(address, port, &hints, &addrinfo, errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t\t{\n\t\t\tSOCK_DEBUG_MESSAGE(errbuf);\n\t\t\treturn (SOCKET)-2;\n\t\t}\n\t}\n\n\n\tif ((sockmain = sock_open(addrinfo, SOCKOPEN_SERVER, 1, errbuf, PCAP_ERRBUF_SIZE)) == INVALID_SOCKET)\n\t{\n\t\tSOCK_DEBUG_MESSAGE(errbuf);\n\t\tfreeaddrinfo(addrinfo);\n\t\treturn (SOCKET)-2;\n\t}\n\tfreeaddrinfo(addrinfo);\n\n\t/* Connection creation */\n\tfromlen = sizeof(struct sockaddr_storage);\n\n\tsockctrl = accept(sockmain, (struct sockaddr *) &from, &fromlen);\n\n\t/* We're not using sock_close, since we do not want to send a shutdown */\n\t/* (which is not allowed on a non-connected socket) */\n\tclosesocket(sockmain);\n\tsockmain = 0;\n\n\tif (sockctrl == INVALID_SOCKET)\n\t{\n\t\tsock_geterror(\"accept(): \", errbuf, PCAP_ERRBUF_SIZE);\n\t\treturn (SOCKET)-2;\n\t}\n\n\t/* Get the numeric for of the name of the connecting host */\n\tif (getnameinfo((struct sockaddr *) &from, fromlen, connectinghost, RPCAP_HOSTLIST_SIZE, NULL, 0, NI_NUMERICHOST))\n\t{\n\t\tsock_geterror(\"getnameinfo(): \", errbuf, PCAP_ERRBUF_SIZE);\n\t\trpcap_senderror(sockctrl, 0, PCAP_ERR_REMOTEACCEPT, errbuf, NULL);\n\t\tsock_close(sockctrl, NULL, 0);\n\t\treturn (SOCKET)-1;\n\t}\n\n\t/* checks if the connecting host is among the ones allowed */\n\tif (sock_check_hostlist((char *)hostlist, RPCAP_HOSTLIST_SEP, &from, errbuf, PCAP_ERRBUF_SIZE) < 0)\n\t{\n\t\trpcap_senderror(sockctrl, 0, PCAP_ERR_REMOTEACCEPT, errbuf, NULL);\n\t\tsock_close(sockctrl, NULL, 0);\n\t\treturn (SOCKET)-1;\n\t}\n\n\t/*\n\t * Send authentication to the remote machine.\n\t */\n\tif (rpcap_doauth(sockctrl, &protocol_version, auth, errbuf) == -1)\n\t{\n\t\t/* Unrecoverable error. */\n\t\trpcap_senderror(sockctrl, 0, PCAP_ERR_REMOTEACCEPT, errbuf, NULL);\n\t\tsock_close(sockctrl, NULL, 0);\n\t\treturn (SOCKET)-3;\n\t}\n\n\t/* Checks that this host does not already have a cntrl connection in place */\n\n\t/* Initialize pointers */\n\ttemp = activeHosts;\n\tprev = NULL;\n\n\twhile (temp)\n\t{\n\t\t/* This host already has an active connection in place, so I don't have to update the host list */\n\t\tif (sock_cmpaddr(&temp->host, &from) == 0)\n\t\t\treturn sockctrl;\n\n\t\tprev = temp;\n\t\ttemp = temp->next;\n\t}\n\n\t/* The host does not exist in the list; so I have to update the list */\n\tif (prev)\n\t{\n\t\tprev->next = (struct activehosts *) malloc(sizeof(struct activehosts));\n\t\ttemp = prev->next;\n\t}\n\telse\n\t{\n\t\tactiveHosts = (struct activehosts *) malloc(sizeof(struct activehosts));\n\t\ttemp = activeHosts;\n\t}\n\n\tif (temp == NULL)\n\t{\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"malloc() failed\");\n\t\trpcap_senderror(sockctrl, protocol_version, PCAP_ERR_REMOTEACCEPT, errbuf, NULL);\n\t\tsock_close(sockctrl, NULL, 0);\n\t\treturn (SOCKET)-1;\n\t}\n\n\tmemcpy(&temp->host, &from, fromlen);\n\ttemp->sockctrl = sockctrl;\n\ttemp->protocol_version = protocol_version;\n\ttemp->next = NULL;\n\n\treturn sockctrl;\n}",
+      "fn_code_pos": [
+        [
+          2703,
+          0
+        ],
+        [
+          2842,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_remoteact_accept",
+        "parameters": {
+          "address": "char",
+          "port": "char",
+          "hostlist": "char",
+          "connectinghost": "char",
+          "auth": "struct pcap_rmtauth",
+          "errbuf": "char"
+        },
+        "return_type": "SOCKET"
+      }
+    },
+    {
+      "fn_code": "int pcap_remoteact_close(const char *host, char *errbuf)\n{\n\tstruct activehosts *temp, *prev;\t/* temp var needed to scan the host list chain */\n\tstruct addrinfo hints, *addrinfo, *ai_next;\t/* temp var needed to translate between hostname to its address */\n\tint retval;\n\n\ttemp = activeHosts;\n\tprev = NULL;\n\n\t/* retrieve the network address corresponding to 'host' */\n\taddrinfo = NULL;\n\tmemset(&hints, 0, sizeof(struct addrinfo));\n\thints.ai_family = PF_UNSPEC;\n\thints.ai_socktype = SOCK_STREAM;\n\n\tretval = getaddrinfo(host, \"0\", &hints, &addrinfo);\n\tif (retval != 0)\n\t{\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"getaddrinfo() %s\", gai_strerror(retval));\n\t\treturn -1;\n\t}\n\n\twhile (temp)\n\t{\n\t\tai_next = addrinfo;\n\t\twhile (ai_next)\n\t\t{\n\t\t\tif (sock_cmpaddr(&temp->host, (struct sockaddr_storage *) ai_next->ai_addr) == 0)\n\t\t\t{\n\t\t\t\tstruct rpcap_header header;\n\t\t\t\tint status = 0;\n\n\t\t\t\t/* Close this connection */\n\t\t\t\trpcap_createhdr(&header, temp->protocol_version,\n\t\t\t\t    RPCAP_MSG_CLOSE, 0, 0);\n\n\t\t\t\t/*\n\t\t\t\t * Don't check for errors, since we're\n\t\t\t\t * just cleaning up.\n\t\t\t\t */\n\t\t\t\tif (sock_send(temp->sockctrl,\n\t\t\t\t    (char *)&header,\n\t\t\t\t    sizeof(struct rpcap_header), errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE) < 0)\n\t\t\t\t{\n\t\t\t\t\t/*\n\t\t\t\t\t * Let that error be the one we\n\t\t\t\t\t * report.\n\t\t\t\t\t */\n\t\t\t\t\t(void)sock_close(temp->sockctrl, NULL,\n\t\t\t\t\t   0);\n\t\t\t\t\tstatus = -1;\n\t\t\t\t}\n\t\t\t\telse\n\t\t\t\t{\n\t\t\t\t\tif (sock_close(temp->sockctrl, errbuf,\n\t\t\t\t\t   PCAP_ERRBUF_SIZE) == -1)\n\t\t\t\t\t\tstatus = -1;\n\t\t\t\t}\n\n\t\t\t\t/*\n\t\t\t\t * Remove the host from the list of active\n\t\t\t\t * hosts.\n\t\t\t\t */\n\t\t\t\tif (prev)\n\t\t\t\t\tprev->next = temp->next;\n\t\t\t\telse\n\t\t\t\t\tactiveHosts = temp->next;\n\n\t\t\t\tfreeaddrinfo(addrinfo);\n\n\t\t\t\tfree(temp);\n\n\t\t\t\t/* To avoid inconsistencies in the number of sock_init() */\n\t\t\t\tsock_cleanup();\n\n\t\t\t\treturn status;\n\t\t\t}\n\n\t\t\tai_next = ai_next->ai_next;\n\t\t}\n\t\tprev = temp;\n\t\ttemp = temp->next;\n\t}\n\n\tif (addrinfo)\n\t\tfreeaddrinfo(addrinfo);\n\n\t/* To avoid inconsistencies in the number of sock_init() */\n\tsock_cleanup();\n\n\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"The host you want to close the active connection is not known\");\n\treturn -1;\n}",
+      "fn_code_pos": [
+        [
+          2844,
+          0
+        ],
+        [
+          2937,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_remoteact_close",
+        "parameters": {
+          "host": "char",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void pcap_remoteact_cleanup(void)\n{\n\t/* Very dirty, but it works */\n\tif (sockmain)\n\t{\n\t\tclosesocket(sockmain);\n\n\t\t/* To avoid inconsistencies in the number of sock_init() */\n\t\tsock_cleanup();\n\t}\n\n}",
+      "fn_code_pos": [
+        [
+          2939,
+          0
+        ],
+        [
+          2950,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_remoteact_cleanup",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int pcap_remoteact_list(char *hostlist, char sep, int size, char *errbuf)\n{\n\tstruct activehosts *temp;\t/* temp var needed to scan the host list chain */\n\tsize_t len;\n\tchar hoststr[RPCAP_HOSTLIST_SIZE + 1];\n\n\ttemp = activeHosts;\n\n\tlen = 0;\n\t*hostlist = 0;\n\n\twhile (temp)\n\t{\n\t\t/*int sock_getascii_addrport(const struct sockaddr_storage *sockaddr, char *address, int addrlen, char *port, int portlen, int flags, char *errbuf, int errbuflen) */\n\n\t\t/* Get the numeric form of the name of the connecting host */\n\t\tif (sock_getascii_addrport((struct sockaddr_storage *) &temp->host, hoststr,\n\t\t\tRPCAP_HOSTLIST_SIZE, NULL, 0, NI_NUMERICHOST, errbuf, PCAP_ERRBUF_SIZE) != -1)\n\t\t\t/*\tif (getnameinfo( (struct sockaddr *) &temp->host, sizeof (struct sockaddr_storage), hoststr, */\n\t\t\t/*\t\tRPCAP_HOSTLIST_SIZE, NULL, 0, NI_NUMERICHOST) ) */\n\t\t{\n\t\t\t/*\tsock_geterror(\"getnameinfo(): \", errbuf, PCAP_ERRBUF_SIZE); */\n\t\t\treturn -1;\n\t\t}\n\n\t\tlen = len + strlen(hoststr) + 1 /* the separator */;\n\n\t\tif ((size < 0) || (len >= (size_t)size))\n\t\t{\n\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"The string you provided is not able to keep \"\n\t\t\t\t\"the hostnames for all the active connections\");\n\t\t\treturn -1;\n\t\t}\n\n\t\tstrlcat(hostlist, hoststr, PCAP_ERRBUF_SIZE);\n\t\thostlist[len - 1] = sep;\n\t\thostlist[len] = 0;\n\n\t\ttemp = temp->next;\n\t}\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          2952,
+          0
+        ],
+        [
+          2994,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_remoteact_list",
+        "parameters": {
+          "hostlist": "char",
+          "sep": "char",
+          "size": "int",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int rpcap_recv_msg_header(SOCKET sock, struct rpcap_header *header, char *errbuf)\n{\n\tint nrecv;\n\n\tnrecv = sock_recv(sock, (char *) header, sizeof(struct rpcap_header),\n\t    SOCK_RECEIVEALL_YES|SOCK_EOF_IS_ERROR, errbuf,\n\t    PCAP_ERRBUF_SIZE);\n\tif (nrecv == -1)\n\t{\n\t\t/* Network error. */\n\t\treturn -1;\n\t}\n\theader->plen = ntohl(header->plen);\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          2999,
+          0
+        ],
+        [
+          3013,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_recv_msg_header",
+        "parameters": {
+          "sock": "SOCKET",
+          "header": "struct rpcap_header",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int rpcap_check_msg_ver(SOCKET sock, uint8 expected_ver, struct rpcap_header *header, char *errbuf)\n{\n\t/*\n\t * Did the server specify the version we negotiated?\n\t */\n\tif (header->ver != expected_ver)\n\t{\n\t\t/*\n\t\t * Discard the rest of the message.\n\t\t */\n\t\tif (rpcap_discard(sock, header->plen, errbuf) == -1)\n\t\t\treturn -1;\n\n\t\t/*\n\t\t * Tell our caller that it's not the negotiated version.\n\t\t */\n\t\tif (errbuf != NULL)\n\t\t{\n\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"Server sent us a message with version %u when we were expecting %u\",\n\t\t\t    header->ver, expected_ver);\n\t\t}\n\t\treturn -1;\n\t}\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          3019,
+          0
+        ],
+        [
+          3044,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_check_msg_ver",
+        "parameters": {
+          "sock": "SOCKET",
+          "expected_ver": "uint8",
+          "header": "struct rpcap_header",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int rpcap_check_msg_type(SOCKET sock, uint8 request_type, struct rpcap_header *header, uint16 *errcode, char *errbuf)\n{\n\tconst char *request_type_string;\n\tconst char *msg_type_string;\n\n\t/*\n\t * What type of message is it?\n\t */\n\tif (header->type == RPCAP_MSG_ERROR)\n\t{\n\t\t/*\n\t\t * The server reported an error.\n\t\t * Hand that error back to our caller.\n\t\t */\n\t\t*errcode = ntohs(header->value);\n\t\trpcap_msg_err(sock, header->plen, errbuf);\n\t\treturn -1;\n\t}\n\n\t*errcode = 0;\n\n\t/*\n\t * For a given request type value, the expected reply type value\n\t * is the request type value with ORed with RPCAP_MSG_IS_REPLY.\n\t */\n\tif (header->type != (request_type | RPCAP_MSG_IS_REPLY))\n\t{\n\t\t/*\n\t\t * This isn't a reply to the request we sent.\n\t\t */\n\n\t\t/*\n\t\t * Discard the rest of the message.\n\t\t */\n\t\tif (rpcap_discard(sock, header->plen, errbuf) == -1)\n\t\t\treturn -1;\n\n\t\t/*\n\t\t * Tell our caller about it.\n\t\t */\n\t\trequest_type_string = rpcap_msg_type_string(request_type);\n\t\tmsg_type_string = rpcap_msg_type_string(header->type);\n\t\tif (errbuf != NULL)\n\t\t{\n\t\t\tif (request_type_string == NULL)\n\t\t\t{\n\t\t\t\t/* This should not happen. */\n\t\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"rpcap_check_msg_type called for request message with type %u\",\n\t\t\t\t    request_type);\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t\tif (msg_type_string != NULL)\n\t\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"%s message received in response to a %s message\",\n\t\t\t\t    msg_type_string, request_type_string);\n\t\t\telse\n\t\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"Message of unknown type %u message received in response to a %s request\",\n\t\t\t\t    header->type, request_type_string);\n\t\t}\n\t\treturn -1;\n\t}\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          3050,
+          0
+        ],
+        [
+          3115,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_check_msg_type",
+        "parameters": {
+          "sock": "SOCKET",
+          "request_type": "uint8",
+          "header": "struct rpcap_header",
+          "errcode": "uint16",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int rpcap_process_msg_header(SOCKET sock, uint8 expected_ver, uint8 request_type, struct rpcap_header *header, char *errbuf)\n{\n\tuint16 errcode;\n\n\tif (rpcap_recv_msg_header(sock, header, errbuf) == -1)\n\t{\n\t\t/* Network error. */\n\t\treturn -1;\n\t}\n\n\t/*\n\t * Did the server specify the version we negotiated?\n\t */\n\tif (rpcap_check_msg_ver(sock, expected_ver, header, errbuf) == -1)\n\t\treturn -1;\n\n\t/*\n\t * Check the message type.\n\t */\n\treturn rpcap_check_msg_type(sock, request_type, header,\n\t    &errcode, errbuf);\n}",
+      "fn_code_pos": [
+        [
+          3120,
+          0
+        ],
+        [
+          3141,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_process_msg_header",
+        "parameters": {
+          "sock": "SOCKET",
+          "expected_ver": "uint8",
+          "request_type": "uint8",
+          "header": "struct rpcap_header",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int rpcap_recv(SOCKET sock, void *buffer, size_t toread, uint32 *plen, char *errbuf)\n{\n\tint nread;\n\n\tif (toread > *plen)\n\t{\n\t\t/* The server sent us a bad message */\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"Message payload is too short\");\n\t\treturn -1;\n\t}\n\tnread = sock_recv(sock, buffer, toread,\n\t    SOCK_RECEIVEALL_YES|SOCK_EOF_IS_ERROR, errbuf, PCAP_ERRBUF_SIZE);\n\tif (nread == -1)\n\t{\n\t\treturn -1;\n\t}\n\t*plen -= nread;\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          3152,
+          0
+        ],
+        [
+          3170,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_recv",
+        "parameters": {
+          "sock": "SOCKET",
+          "buffer": "void",
+          "toread": "size_t",
+          "plen": "uint32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void rpcap_msg_err(SOCKET sockctrl, uint32 plen, char *remote_errbuf)\n{\n\tchar errbuf[PCAP_ERRBUF_SIZE];\n\n\tif (plen >= PCAP_ERRBUF_SIZE)\n\t{\n\t\t/*\n\t\t * Message is too long; just read as much of it as we\n\t\t * can into the buffer provided, and discard the rest.\n\t\t */\n\t\tif (sock_recv(sockctrl, remote_errbuf, PCAP_ERRBUF_SIZE - 1,\n\t\t    SOCK_RECEIVEALL_YES|SOCK_EOF_IS_ERROR, errbuf,\n\t\t    PCAP_ERRBUF_SIZE) == -1)\n\t\t{\n\t\t\t// Network error.\n\t\t\tpcap_snprintf(remote_errbuf, PCAP_ERRBUF_SIZE, \"Read of error message from client failed: %s\", errbuf);\n\t\t\treturn;\n\t\t}\n\n\t\t/*\n\t\t * Null-terminate it.\n\t\t */\n\t\tremote_errbuf[PCAP_ERRBUF_SIZE - 1] = '\\0';\n\n\t\t/*\n\t\t * Throw away the rest.\n\t\t */\n\t\t(void)rpcap_discard(sockctrl, plen - (PCAP_ERRBUF_SIZE - 1), remote_errbuf);\n\t}\n\telse if (plen == 0)\n\t{\n\t\t/* Empty error string. */\n\t\tremote_errbuf[0] = '\\0';\n\t}\n\telse\n\t{\n\t\tif (sock_recv(sockctrl, remote_errbuf, plen,\n\t\t    SOCK_RECEIVEALL_YES|SOCK_EOF_IS_ERROR, errbuf,\n\t\t    PCAP_ERRBUF_SIZE) == -1)\n\t\t{\n\t\t\t// Network error.\n\t\t\tpcap_snprintf(remote_errbuf, PCAP_ERRBUF_SIZE, \"Read of error message from client failed: %s\", errbuf);\n\t\t\treturn;\n\t\t}\n\n\t\t/*\n\t\t * Null-terminate it.\n\t\t */\n\t\tremote_errbuf[plen] = '\\0';\n\t}\n}",
+      "fn_code_pos": [
+        [
+          3175,
+          0
+        ],
+        [
+          3225,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_msg_err",
+        "parameters": {
+          "sockctrl": "SOCKET",
+          "plen": "uint32",
+          "remote_errbuf": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int rpcap_discard(SOCKET sock, uint32 len, char *errbuf)\n{\n\tif (len != 0)\n\t{\n\t\tif (sock_discard(sock, len, errbuf, PCAP_ERRBUF_SIZE) == -1)\n\t\t{\n\t\t\t// Network error.\n\t\t\treturn -1;\n\t\t}\n\t}\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          3233,
+          0
+        ],
+        [
+          3244,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_discard",
+        "parameters": {
+          "sock": "SOCKET",
+          "len": "uint32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int rpcap_read_packet_msg(SOCKET sock, pcap_t *p, size_t size)\n{\n\tu_char *bp;\n\tint cc;\n\tint bytes_read;\n\n\tbp = p->bp;\n\tcc = p->cc;\n\n\t/*\n\t * Loop until we have the amount of data requested or we get\n\t * an error or interrupt.\n\t */\n\twhile ((size_t)cc < size)\n\t{\n\t\t/*\n\t\t * We haven't read all of the packet header yet.\n\t\t * Read what remains, which could be all of it.\n\t\t */\n\t\tbytes_read = sock_recv(sock, bp, size - cc,\n\t\t    SOCK_RECEIVEALL_NO|SOCK_EOF_IS_ERROR, p->errbuf,\n\t\t    PCAP_ERRBUF_SIZE);\n\t\tif (bytes_read == -1)\n\t\t{\n\t\t\t/*\n\t\t\t * Network error.  Update the read pointer and\n\t\t\t * byte count, and return an error indication.\n\t\t\t */\n\t\t\tp->bp = bp;\n\t\t\tp->cc = cc;\n\t\t\treturn -1;\n\t\t}\n\t\tif (bytes_read == -3)\n\t\t{\n\t\t\t/*\n\t\t\t * Interrupted receive.  Update the read\n\t\t\t * pointer and byte count, and return\n\t\t\t * an interrupted indication.\n\t\t\t */\n\t\t\tp->bp = bp;\n\t\t\tp->cc = cc;\n\t\t\treturn -3;\n\t\t}\n\t\tif (bytes_read == 0)\n\t\t{\n\t\t\t/*\n\t\t\t * EOF - server terminated the connection.\n\t\t\t * Update the read pointer and byte count, and\n\t\t\t * return an error indication.\n\t\t\t */\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"The server terminated the connection.\");\n\t\t\treturn -1;\n\t\t}\n\t\tbp += bytes_read;\n\t\tcc += bytes_read;\n\t}\n\tp->bp = bp;\n\tp->cc = cc;\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          3250,
+          0
+        ],
+        [
+          3310,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_read_packet_msg",
+        "parameters": {
+          "sock": "SOCKET",
+          "p": "pcap_t",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "rpcap_stats_rpcap(pcap_t *p, struct pcap_stat *ps, int mode)",
+      "fn_dec_pos": [
+        [
+          149,
+          25
+        ],
+        [
+          149,
+          85
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_stats_rpcap",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat",
+          "mode": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_pack_bpffilter(pcap_t *fp, char *sendbuf, int *sendbufidx, struct bpf_program *prog)",
+      "fn_dec_pos": [
+        [
+          150,
+          11
+        ],
+        [
+          150,
+          100
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_pack_bpffilter",
+        "parameters": {
+          "fp": "pcap_t",
+          "sendbuf": "char",
+          "sendbufidx": "int",
+          "prog": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_createfilter_norpcappkt(pcap_t *fp, struct bpf_program *prog)",
+      "fn_dec_pos": [
+        [
+          151,
+          11
+        ],
+        [
+          151,
+          77
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_createfilter_norpcappkt",
+        "parameters": {
+          "fp": "pcap_t",
+          "prog": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_updatefilter_remote(pcap_t *fp, struct bpf_program *prog)",
+      "fn_dec_pos": [
+        [
+          152,
+          11
+        ],
+        [
+          152,
+          73
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_updatefilter_remote",
+        "parameters": {
+          "fp": "pcap_t",
+          "prog": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_save_current_filter_rpcap(pcap_t *fp, const char *filter)",
+      "fn_dec_pos": [
+        [
+          153,
+          12
+        ],
+        [
+          153,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_save_current_filter_rpcap",
+        "parameters": {
+          "fp": "pcap_t",
+          "filter": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pcap_setfilter_rpcap(pcap_t *fp, struct bpf_program *prog)",
+      "fn_dec_pos": [
+        [
+          154,
+          11
+        ],
+        [
+          154,
+          69
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setfilter_rpcap",
+        "parameters": {
+          "fp": "pcap_t",
+          "prog": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_setsampling_remote(pcap_t *fp)",
+      "fn_dec_pos": [
+        [
+          155,
+          11
+        ],
+        [
+          155,
+          46
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setsampling_remote",
+        "parameters": {
+          "fp": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_startcapture_remote(pcap_t *fp)",
+      "fn_dec_pos": [
+        [
+          156,
+          11
+        ],
+        [
+          156,
+          47
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_startcapture_remote",
+        "parameters": {
+          "fp": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "rpcap_sendauth(SOCKET sock, uint8 *ver, struct pcap_rmtauth *auth, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          157,
+          11
+        ],
+        [
+          157,
+          91
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_sendauth",
+        "parameters": {
+          "sock": "SOCKET",
+          "ver": "uint8",
+          "auth": "struct pcap_rmtauth",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "rpcap_recv_msg_header(SOCKET sock, struct rpcap_header *header, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          158,
+          11
+        ],
+        [
+          158,
+          88
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_recv_msg_header",
+        "parameters": {
+          "sock": "SOCKET",
+          "header": "struct rpcap_header",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "rpcap_check_msg_ver(SOCKET sock, uint8 expected_ver, struct rpcap_header *header, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          159,
+          11
+        ],
+        [
+          159,
+          106
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_check_msg_ver",
+        "parameters": {
+          "sock": "SOCKET",
+          "expected_ver": "uint8",
+          "header": "struct rpcap_header",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "rpcap_check_msg_type(SOCKET sock, uint8 request_type, struct rpcap_header *header, uint16 *errcode, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          160,
+          11
+        ],
+        [
+          160,
+          124
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_check_msg_type",
+        "parameters": {
+          "sock": "SOCKET",
+          "request_type": "uint8",
+          "header": "struct rpcap_header",
+          "errcode": "uint16",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "rpcap_process_msg_header(SOCKET sock, uint8 ver, uint8 request_type, struct rpcap_header *header, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          161,
+          11
+        ],
+        [
+          161,
+          122
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_process_msg_header",
+        "parameters": {
+          "sock": "SOCKET",
+          "ver": "uint8",
+          "request_type": "uint8",
+          "header": "struct rpcap_header",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "rpcap_recv(SOCKET sock, void *buffer, size_t toread, uint32 *plen, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          162,
+          11
+        ],
+        [
+          162,
+          91
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_recv",
+        "parameters": {
+          "sock": "SOCKET",
+          "buffer": "void",
+          "toread": "size_t",
+          "plen": "uint32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "rpcap_msg_err(SOCKET sockctrl, uint32 plen, char *remote_errbuf)",
+      "fn_dec_pos": [
+        [
+          163,
+          12
+        ],
+        [
+          163,
+          76
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_msg_err",
+        "parameters": {
+          "sockctrl": "SOCKET",
+          "plen": "uint32",
+          "remote_errbuf": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "rpcap_discard(SOCKET sock, uint32 len, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          164,
+          11
+        ],
+        [
+          164,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_discard",
+        "parameters": {
+          "sock": "SOCKET",
+          "len": "uint32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "rpcap_read_packet_msg(SOCKET sock, pcap_t *p, size_t size)",
+      "fn_dec_pos": [
+        [
+          165,
+          11
+        ],
+        [
+          165,
+          69
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_read_packet_msg",
+        "parameters": {
+          "sock": "SOCKET",
+          "p": "pcap_t",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_stats_ex_rpcap(pcap_t *p, int *pcap_stat_size)",
+      "fn_dec_pos": [
+        [
+          790,
+          25
+        ],
+        [
+          790,
+          76
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stats_ex_rpcap",
+        "parameters": {
+          "p": "pcap_t",
+          "pcap_stat_size": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "rpcap_stats_rpcap(pcap_t *p, struct pcap_stat *ps, int mode)",
+      "fn_dec_pos": [
+        [
+          836,
+          25
+        ],
+        [
+          836,
+          85
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_stats_rpcap",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat",
+          "mode": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "rpcap_remoteact_getsock(const char *host, int *error, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          946,
+          0
+        ],
+        [
+          946,
+          67
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpcap_remoteact_getsock",
+        "parameters": {
+          "host": "char",
+          "error": "int",
+          "errbuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_open_rpcap(const char *source, int snaplen, int flags, int read_timeout, struct pcap_rmtauth *auth, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          2101,
+          8
+        ],
+        [
+          2101,
+          126
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_open_rpcap",
+        "parameters": {
+          "source": "char",
+          "snaplen": "int",
+          "flags": "int",
+          "read_timeout": "int",
+          "auth": "struct pcap_rmtauth",
+          "errbuf": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct activehosts\n{\n\tstruct sockaddr_storage host;\n\tSOCKET sockctrl;\n\tuint8 protocol_version;\n\tstruct activehosts *next;\n}",
+      {
+        "host": "struct sockaddr_storage",
+        "sockctrl": "SOCKET",
+        "protocol_version": "uint8",
+        "*next": "struct activehosts"
+      },
+      "activehosts",
+      [
+        81,
+        0
+      ],
+      [
+        87,
+        1
+      ]
+    ],
+    [
+      "struct pcap_rpcap {\n\t/*\n\t * This is '1' if we're the network client; it is needed by several\n\t * functions (such as pcap_setfilter()) to know whether they have\n\t * to use the socket or have to open the local adapter.\n\t */\n\tint rmt_clientside;\n\n\tSOCKET rmt_sockctrl;\t\t/* socket ID of the socket used for the control connection */\n\tSOCKET rmt_sockdata;\t\t/* socket ID of the socket used for the data connection */\n\tint rmt_flags;\t\t\t/* we have to save flags, since they are passed by the pcap_open_live(), but they are used by the pcap_startcapture() */\n\tint rmt_capstarted;\t\t/* 'true' if the capture is already started (needed to knoe if we have to call the pcap_startcapture() */\n\tchar *currentfilter;\t\t/* Pointer to a buffer (allocated at run-time) that stores the current filter. Needed when flag PCAP_OPENFLAG_NOCAPTURE_RPCAP is turned on. */\n\n\tuint8 protocol_version;\t\t/* negotiated protocol version */\n\n\tunsigned int TotNetDrops;\t/* keeps the number of packets that have been dropped by the network */\n\n\t/*\n\t * This keeps the number of packets that have been received by the\n\t * application.\n\t *\n\t * Packets dropped by the kernel buffer are not counted in this\n\t * variable. It is always equal to (TotAccepted - TotDrops),\n\t * except for the case of remote capture, in which we have also\n\t * packets in flight, i.e. that have been transmitted by the remote\n\t * host, but that have not been received (yet) from the client.\n\t * In this case, (TotAccepted - TotDrops - TotNetDrops) gives a\n\t * wrong result, since this number does not corresponds always to\n\t * the number of packet received by the application. For this reason,\n\t * in the remote capture we need another variable that takes into\n\t * account of the number of packets actually received by the\n\t * application.\n\t */\n\tunsigned int TotCapt;\n\n\tstruct pcap_stat stat;\n\t/* XXX */\n\tstruct pcap *next;\t\t/* list of open pcaps that need stuff cleared on close */\n}",
+      {
+        "rmt_clientside": "int",
+        "rmt_sockctrl": "SOCKET",
+        "rmt_sockdata": "SOCKET",
+        "rmt_flags": "int",
+        "rmt_capstarted": "int",
+        "*currentfilter": "char",
+        "protocol_version": "uint8",
+        "TotNetDrops": "unsigned int",
+        "TotCapt": "unsigned int",
+        "stat": "struct pcap_stat",
+        "*next": "struct pcap"
+      },
+      "pcap_rpcap",
+      [
+        103,
+        0
+      ],
+      [
+        142,
+        1
+      ]
+    ],
+    [
+      "struct activehosts\n{\n\tstruct sockaddr_storage host;\n\tSOCKET sockctrl;\n\tuint8 protocol_version;\n\tstruct activehosts *next;\n}",
+      {
+        "host": "struct sockaddr_storage",
+        "sockctrl": "SOCKET",
+        "protocol_version": "uint8",
+        "*next": "struct activehosts"
+      },
+      "activehosts",
+      [
+        81,
+        0
+      ],
+      [
+        87,
+        1
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        83,
+        1
+      ],
+      [
+        83,
+        24
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        86,
+        1
+      ],
+      [
+        86,
+        19
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        90,
+        7
+      ],
+      [
+        90,
+        25
+      ]
+    ],
+    [
+      "struct pcap_rpcap {\n\t/*\n\t * This is '1' if we're the network client; it is needed by several\n\t * functions (such as pcap_setfilter()) to know whether they have\n\t * to use the socket or have to open the local adapter.\n\t */\n\tint rmt_clientside;\n\n\tSOCKET rmt_sockctrl;\t\t/* socket ID of the socket used for the control connection */\n\tSOCKET rmt_sockdata;\t\t/* socket ID of the socket used for the data connection */\n\tint rmt_flags;\t\t\t/* we have to save flags, since they are passed by the pcap_open_live(), but they are used by the pcap_startcapture() */\n\tint rmt_capstarted;\t\t/* 'true' if the capture is already started (needed to knoe if we have to call the pcap_startcapture() */\n\tchar *currentfilter;\t\t/* Pointer to a buffer (allocated at run-time) that stores the current filter. Needed when flag PCAP_OPENFLAG_NOCAPTURE_RPCAP is turned on. */\n\n\tuint8 protocol_version;\t\t/* negotiated protocol version */\n\n\tunsigned int TotNetDrops;\t/* keeps the number of packets that have been dropped by the network */\n\n\t/*\n\t * This keeps the number of packets that have been received by the\n\t * application.\n\t *\n\t * Packets dropped by the kernel buffer are not counted in this\n\t * variable. It is always equal to (TotAccepted - TotDrops),\n\t * except for the case of remote capture, in which we have also\n\t * packets in flight, i.e. that have been transmitted by the remote\n\t * host, but that have not been received (yet) from the client.\n\t * In this case, (TotAccepted - TotDrops - TotNetDrops) gives a\n\t * wrong result, since this number does not corresponds always to\n\t * the number of packet received by the application. For this reason,\n\t * in the remote capture we need another variable that takes into\n\t * account of the number of packets actually received by the\n\t * application.\n\t */\n\tunsigned int TotCapt;\n\n\tstruct pcap_stat stat;\n\t/* XXX */\n\tstruct pcap *next;\t\t/* list of open pcaps that need stuff cleared on close */\n}",
+      {
+        "rmt_clientside": "int",
+        "rmt_sockctrl": "SOCKET",
+        "rmt_sockdata": "SOCKET",
+        "rmt_flags": "int",
+        "rmt_capstarted": "int",
+        "*currentfilter": "char",
+        "protocol_version": "uint8",
+        "TotNetDrops": "unsigned int",
+        "TotCapt": "unsigned int",
+        "stat": "struct pcap_stat",
+        "*next": "struct pcap"
+      },
+      "pcap_rpcap",
+      [
+        103,
+        0
+      ],
+      [
+        142,
+        1
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        139,
+        1
+      ],
+      [
+        139,
+        17
+      ]
+    ],
+    [
+      "struct pcap",
+      {},
+      "",
+      [
+        141,
+        1
+      ],
+      [
+        141,
+        12
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        149,
+        7
+      ],
+      [
+        149,
+        23
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        149,
+        54
+      ],
+      [
+        149,
+        70
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        150,
+        75
+      ],
+      [
+        150,
+        93
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        151,
+        52
+      ],
+      [
+        151,
+        70
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        152,
+        48
+      ],
+      [
+        152,
+        66
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        154,
+        44
+      ],
+      [
+        154,
+        62
+      ]
+    ],
+    [
+      "struct pcap_rmtauth",
+      {},
+      "",
+      [
+        157,
+        51
+      ],
+      [
+        157,
+        70
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        158,
+        46
+      ],
+      [
+        158,
+        65
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        159,
+        64
+      ],
+      [
+        159,
+        83
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        160,
+        65
+      ],
+      [
+        160,
+        84
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        161,
+        80
+      ],
+      [
+        161,
+        99
+      ]
+    ],
+    [
+      "struct rpcap_sockaddr",
+      {},
+      "",
+      [
+        281,
+        16
+      ],
+      [
+        281,
+        37
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        281,
+        51
+      ],
+      [
+        281,
+        74
+      ]
+    ],
+    [
+      "struct rpcap_sockaddr_in",
+      {},
+      "",
+      [
+        290,
+        2
+      ],
+      [
+        290,
+        26
+      ]
+    ],
+    [
+      "struct sockaddr_in",
+      {},
+      "",
+      [
+        291,
+        2
+      ],
+      [
+        291,
+        20
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        293,
+        20
+      ],
+      [
+        293,
+        43
+      ]
+    ],
+    [
+      "struct sockaddr_in",
+      {},
+      "",
+      [
+        293,
+        61
+      ],
+      [
+        293,
+        79
+      ]
+    ],
+    [
+      "struct rpcap_sockaddr_in",
+      {},
+      "",
+      [
+        300,
+        21
+      ],
+      [
+        300,
+        45
+      ]
+    ],
+    [
+      "struct sockaddr_in",
+      {},
+      "",
+      [
+        301,
+        22
+      ],
+      [
+        301,
+        40
+      ]
+    ],
+    [
+      "struct rpcap_sockaddr_in6",
+      {},
+      "",
+      [
+        320,
+        2
+      ],
+      [
+        320,
+        27
+      ]
+    ],
+    [
+      "struct sockaddr_in6",
+      {},
+      "",
+      [
+        321,
+        2
+      ],
+      [
+        321,
+        21
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        323,
+        20
+      ],
+      [
+        323,
+        43
+      ]
+    ],
+    [
+      "struct sockaddr_in6",
+      {},
+      "",
+      [
+        323,
+        61
+      ],
+      [
+        323,
+        80
+      ]
+    ],
+    [
+      "struct rpcap_sockaddr_in6",
+      {},
+      "",
+      [
+        330,
+        21
+      ],
+      [
+        330,
+        46
+      ]
+    ],
+    [
+      "struct sockaddr_in6",
+      {},
+      "",
+      [
+        331,
+        22
+      ],
+      [
+        331,
+        41
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        371,
+        44
+      ],
+      [
+        371,
+        62
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        373,
+        1
+      ],
+      [
+        373,
+        18
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        374,
+        1
+      ],
+      [
+        374,
+        20
+      ]
+    ],
+    [
+      "struct rpcap_pkthdr",
+      {},
+      "",
+      [
+        375,
+        1
+      ],
+      [
+        375,
+        20
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        382,
+        1
+      ],
+      [
+        382,
+        15
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        423,
+        11
+      ],
+      [
+        423,
+        30
+      ]
+    ],
+    [
+      "struct rpcap_pkthdr",
+      {},
+      "",
+      [
+        424,
+        19
+      ],
+      [
+        424,
+        38
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        424,
+        70
+      ],
+      [
+        424,
+        89
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        425,
+        45
+      ],
+      [
+        425,
+        64
+      ]
+    ],
+    [
+      "struct rpcap_pkthdr",
+      {},
+      "",
+      [
+        425,
+        75
+      ],
+      [
+        425,
+        94
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        442,
+        30
+      ],
+      [
+        442,
+        49
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        452,
+        30
+      ],
+      [
+        452,
+        49
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        467,
+        29
+      ],
+      [
+        467,
+        48
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        475,
+        14
+      ],
+      [
+        475,
+        33
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        495,
+        33
+      ],
+      [
+        495,
+        52
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        508,
+        13
+      ],
+      [
+        508,
+        32
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        600,
+        1
+      ],
+      [
+        600,
+        18
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        601,
+        1
+      ],
+      [
+        601,
+        19
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        690,
+        1
+      ],
+      [
+        690,
+        18
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        691,
+        1
+      ],
+      [
+        691,
+        20
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        692,
+        1
+      ],
+      [
+        692,
+        19
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        718,
+        13
+      ],
+      [
+        718,
+        32
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        731,
+        13
+      ],
+      [
+        731,
+        32
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        773,
+        39
+      ],
+      [
+        773,
+        55
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        775,
+        1
+      ],
+      [
+        775,
+        17
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        790,
+        7
+      ],
+      [
+        790,
+        23
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        836,
+        7
+      ],
+      [
+        836,
+        23
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        836,
+        54
+      ],
+      [
+        836,
+        70
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        838,
+        1
+      ],
+      [
+        838,
+        18
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        839,
+        1
+      ],
+      [
+        839,
+        20
+      ]
+    ],
+    [
+      "struct rpcap_stats",
+      {},
+      "",
+      [
+        840,
+        1
+      ],
+      [
+        840,
+        19
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        881,
+        12
+      ],
+      [
+        881,
+        31
+      ]
+    ],
+    [
+      "struct rpcap_stats",
+      {},
+      "",
+      [
+        893,
+        12
+      ],
+      [
+        893,
+        30
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        945,
+        7
+      ],
+      [
+        945,
+        25
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        948,
+        1
+      ],
+      [
+        948,
+        19
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        949,
+        1
+      ],
+      [
+        949,
+        16
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        954,
+        26
+      ],
+      [
+        954,
+        41
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        974,
+        34
+      ],
+      [
+        974,
+        57
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        1012,
+        1
+      ],
+      [
+        1012,
+        18
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        1018,
+        1
+      ],
+      [
+        1018,
+        19
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        1022,
+        1
+      ],
+      [
+        1022,
+        16
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        1023,
+        1
+      ],
+      [
+        1023,
+        16
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        1025,
+        1
+      ],
+      [
+        1025,
+        24
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1030,
+        1
+      ],
+      [
+        1030,
+        20
+      ]
+    ],
+    [
+      "struct rpcap_startcapreq",
+      {},
+      "",
+      [
+        1031,
+        1
+      ],
+      [
+        1031,
+        25
+      ]
+    ],
+    [
+      "struct rpcap_startcapreply",
+      {},
+      "",
+      [
+        1032,
+        1
+      ],
+      [
+        1032,
+        27
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        1068,
+        19
+      ],
+      [
+        1068,
+        42
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        1069,
+        36
+      ],
+      [
+        1069,
+        51
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        1074,
+        15
+      ],
+      [
+        1074,
+        38
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        1077,
+        18
+      ],
+      [
+        1077,
+        33
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        1096,
+        27
+      ],
+      [
+        1096,
+        42
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        1115,
+        20
+      ],
+      [
+        1115,
+        43
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        1116,
+        29
+      ],
+      [
+        1116,
+        44
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        1123,
+        19
+      ],
+      [
+        1123,
+        34
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1135,
+        33
+      ],
+      [
+        1135,
+        52
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1139,
+        18
+      ],
+      [
+        1139,
+        37
+      ]
+    ],
+    [
+      "struct rpcap_startcapreq",
+      {},
+      "",
+      [
+        1141,
+        12
+      ],
+      [
+        1141,
+        36
+      ]
+    ],
+    [
+      "struct rpcap_filter",
+      {},
+      "",
+      [
+        1141,
+        47
+      ],
+      [
+        1141,
+        66
+      ]
+    ],
+    [
+      "struct rpcap_filterbpf_insn",
+      {},
+      "",
+      [
+        1141,
+        96
+      ],
+      [
+        1141,
+        123
+      ]
+    ],
+    [
+      "struct rpcap_startcapreq",
+      {},
+      "",
+      [
+        1144,
+        16
+      ],
+      [
+        1144,
+        40
+      ]
+    ],
+    [
+      "struct rpcap_startcapreq",
+      {},
+      "",
+      [
+        1146,
+        33
+      ],
+      [
+        1146,
+        57
+      ]
+    ],
+    [
+      "struct rpcap_startcapreq",
+      {},
+      "",
+      [
+        1150,
+        31
+      ],
+      [
+        1150,
+        55
+      ]
+    ],
+    [
+      "struct rpcap_startcapreply",
+      {},
+      "",
+      [
+        1191,
+        12
+      ],
+      [
+        1191,
+        38
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        1209,
+        28
+      ],
+      [
+        1209,
+        43
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        1230,
+        21
+      ],
+      [
+        1230,
+        44
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        1232,
+        32
+      ],
+      [
+        1232,
+        47
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        1277,
+        31
+      ],
+      [
+        1277,
+        49
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1319,
+        22
+      ],
+      [
+        1319,
+        41
+      ]
+    ],
+    [
+      "struct rpcap_pkthdr",
+      {},
+      "",
+      [
+        1319,
+        52
+      ],
+      [
+        1319,
+        71
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        1347,
+        2
+      ],
+      [
+        1347,
+        20
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        1427,
+        75
+      ],
+      [
+        1427,
+        93
+      ]
+    ],
+    [
+      "struct rpcap_filter",
+      {},
+      "",
+      [
+        1429,
+        1
+      ],
+      [
+        1429,
+        20
+      ]
+    ],
+    [
+      "struct rpcap_filterbpf_insn",
+      {},
+      "",
+      [
+        1430,
+        1
+      ],
+      [
+        1430,
+        28
+      ]
+    ],
+    [
+      "struct bpf_insn",
+      {},
+      "",
+      [
+        1431,
+        1
+      ],
+      [
+        1431,
+        16
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        1432,
+        1
+      ],
+      [
+        1432,
+        19
+      ]
+    ],
+    [
+      "struct rpcap_filter",
+      {},
+      "",
+      [
+        1443,
+        11
+      ],
+      [
+        1443,
+        30
+      ]
+    ],
+    [
+      "struct rpcap_filter",
+      {},
+      "",
+      [
+        1445,
+        33
+      ],
+      [
+        1445,
+        52
+      ]
+    ],
+    [
+      "struct rpcap_filterbpf_insn",
+      {},
+      "",
+      [
+        1452,
+        48
+      ],
+      [
+        1452,
+        75
+      ]
+    ],
+    [
+      "struct rpcap_filterbpf_insn",
+      {},
+      "",
+      [
+        1456,
+        9
+      ],
+      [
+        1456,
+        36
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        1498,
+        48
+      ],
+      [
+        1498,
+        66
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        1500,
+        1
+      ],
+      [
+        1500,
+        18
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1503,
+        1
+      ],
+      [
+        1503,
+        20
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1505,
+        33
+      ],
+      [
+        1505,
+        52
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1509,
+        18
+      ],
+      [
+        1509,
+        37
+      ]
+    ],
+    [
+      "struct rpcap_filter",
+      {},
+      "",
+      [
+        1511,
+        12
+      ],
+      [
+        1511,
+        31
+      ]
+    ],
+    [
+      "struct rpcap_filterbpf_insn",
+      {},
+      "",
+      [
+        1511,
+        57
+      ],
+      [
+        1511,
+        84
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        1537,
+        1
+      ],
+      [
+        1537,
+        18
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        1569,
+        44
+      ],
+      [
+        1569,
+        62
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        1571,
+        1
+      ],
+      [
+        1571,
+        18
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        1598,
+        52
+      ],
+      [
+        1598,
+        70
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        1600,
+        1
+      ],
+      [
+        1600,
+        18
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        1606,
+        2
+      ],
+      [
+        1606,
+        25
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        1618,
+        20
+      ],
+      [
+        1618,
+        43
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        1619,
+        37
+      ],
+      [
+        1619,
+        52
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        1625,
+        19
+      ],
+      [
+        1625,
+        34
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        1634,
+        37
+      ],
+      [
+        1634,
+        52
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        1641,
+        19
+      ],
+      [
+        1641,
+        34
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        1649,
+        37
+      ],
+      [
+        1649,
+        52
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        1656,
+        19
+      ],
+      [
+        1656,
+        34
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        1715,
+        1
+      ],
+      [
+        1715,
+        18
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1718,
+        1
+      ],
+      [
+        1718,
+        20
+      ]
+    ],
+    [
+      "struct rpcap_sampling",
+      {},
+      "",
+      [
+        1719,
+        1
+      ],
+      [
+        1719,
+        22
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1741,
+        33
+      ],
+      [
+        1741,
+        52
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1745,
+        18
+      ],
+      [
+        1745,
+        37
+      ]
+    ],
+    [
+      "struct rpcap_sampling",
+      {},
+      "",
+      [
+        1747,
+        12
+      ],
+      [
+        1747,
+        33
+      ]
+    ],
+    [
+      "struct rpcap_sampling",
+      {},
+      "",
+      [
+        1750,
+        18
+      ],
+      [
+        1750,
+        39
+      ]
+    ],
+    [
+      "struct rpcap_sampling",
+      {},
+      "",
+      [
+        1752,
+        33
+      ],
+      [
+        1752,
+        54
+      ]
+    ],
+    [
+      "struct rpcap_sampling",
+      {},
+      "",
+      [
+        1756,
+        33
+      ],
+      [
+        1756,
+        54
+      ]
+    ],
+    [
+      "struct pcap_rmtauth",
+      {},
+      "",
+      [
+        1808,
+        53
+      ],
+      [
+        1808,
+        72
+      ]
+    ],
+    [
+      "struct pcap_rmtauth",
+      {},
+      "",
+      [
+        1889,
+        51
+      ],
+      [
+        1889,
+        70
+      ]
+    ],
+    [
+      "struct rpcap_auth",
+      {},
+      "",
+      [
+        1895,
+        1
+      ],
+      [
+        1895,
+        18
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1897,
+        1
+      ],
+      [
+        1897,
+        20
+      ]
+    ],
+    [
+      "struct rpcap_auth",
+      {},
+      "",
+      [
+        1905,
+        19
+      ],
+      [
+        1905,
+        36
+      ]
+    ],
+    [
+      "struct rpcap_auth",
+      {},
+      "",
+      [
+        1909,
+        19
+      ],
+      [
+        1909,
+        36
+      ]
+    ],
+    [
+      "struct rpcap_auth",
+      {},
+      "",
+      [
+        1942,
+        18
+      ],
+      [
+        1942,
+        35
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1946,
+        33
+      ],
+      [
+        1946,
+        52
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        1950,
+        18
+      ],
+      [
+        1950,
+        37
+      ]
+    ],
+    [
+      "struct rpcap_auth",
+      {},
+      "",
+      [
+        1953,
+        11
+      ],
+      [
+        1953,
+        28
+      ]
+    ],
+    [
+      "struct rpcap_auth",
+      {},
+      "",
+      [
+        1955,
+        33
+      ],
+      [
+        1955,
+        50
+      ]
+    ],
+    [
+      "struct rpcap_auth",
+      {},
+      "",
+      [
+        1959,
+        26
+      ],
+      [
+        1959,
+        43
+      ]
+    ],
+    [
+      "struct pcap_rmtauth",
+      {},
+      "",
+      [
+        2101,
+        86
+      ],
+      [
+        2101,
+        105
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        2105,
+        1
+      ],
+      [
+        2105,
+        18
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        2107,
+        1
+      ],
+      [
+        2107,
+        19
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        2118,
+        1
+      ],
+      [
+        2118,
+        20
+      ]
+    ],
+    [
+      "struct rpcap_openreply",
+      {},
+      "",
+      [
+        2119,
+        1
+      ],
+      [
+        2119,
+        23
+      ]
+    ],
+    [
+      "struct pcap_rpcap",
+      {},
+      "",
+      [
+        2121,
+        41
+      ],
+      [
+        2121,
+        58
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        2191,
+        2
+      ],
+      [
+        2191,
+        17
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        2192,
+        2
+      ],
+      [
+        2192,
+        17
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        2207,
+        27
+      ],
+      [
+        2207,
+        42
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        2252,
+        33
+      ],
+      [
+        2252,
+        52
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        2256,
+        18
+      ],
+      [
+        2256,
+        37
+      ]
+    ],
+    [
+      "struct rpcap_openreply",
+      {},
+      "",
+      [
+        2275,
+        12
+      ],
+      [
+        2275,
+        34
+      ]
+    ],
+    [
+      "struct pcap_addr",
+      {},
+      "",
+      [
+        2333,
+        9
+      ],
+      [
+        2333,
+        25
+      ]
+    ],
+    [
+      "struct pcap_rmtauth",
+      {},
+      "",
+      [
+        2343,
+        41
+      ],
+      [
+        2343,
+        60
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        2345,
+        1
+      ],
+      [
+        2345,
+        19
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        2350,
+        1
+      ],
+      [
+        2350,
+        20
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        2383,
+        2
+      ],
+      [
+        2383,
+        17
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        2384,
+        2
+      ],
+      [
+        2384,
+        17
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        2398,
+        27
+      ],
+      [
+        2398,
+        42
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        2436,
+        49
+      ],
+      [
+        2436,
+        68
+      ]
+    ],
+    [
+      "struct rpcap_findalldevs_if",
+      {},
+      "",
+      [
+        2453,
+        2
+      ],
+      [
+        2453,
+        29
+      ]
+    ],
+    [
+      "struct pcap_addr",
+      {},
+      "",
+      [
+        2456,
+        2
+      ],
+      [
+        2456,
+        18
+      ]
+    ],
+    [
+      "struct rpcap_findalldevs_if",
+      {},
+      "",
+      [
+        2462,
+        13
+      ],
+      [
+        2462,
+        40
+      ]
+    ],
+    [
+      "struct rpcap_findalldevs_ifaddr",
+      {},
+      "",
+      [
+        2573,
+        3
+      ],
+      [
+        2573,
+        34
+      ]
+    ],
+    [
+      "struct rpcap_findalldevs_ifaddr",
+      {},
+      "",
+      [
+        2577,
+        14
+      ],
+      [
+        2577,
+        45
+      ]
+    ],
+    [
+      "struct pcap_addr",
+      {},
+      "",
+      [
+        2584,
+        11
+      ],
+      [
+        2584,
+        27
+      ]
+    ],
+    [
+      "struct pcap_addr",
+      {},
+      "",
+      [
+        2584,
+        45
+      ],
+      [
+        2584,
+        61
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        2598,
+        5
+      ],
+      [
+        2598,
+        28
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        2604,
+        5
+      ],
+      [
+        2604,
+        28
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        2610,
+        5
+      ],
+      [
+        2610,
+        28
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        2616,
+        5
+      ],
+      [
+        2616,
+        28
+      ]
+    ],
+    [
+      "struct pcap_rmtauth",
+      {},
+      "",
+      [
+        2703,
+        112
+      ],
+      [
+        2703,
+        131
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        2706,
+        1
+      ],
+      [
+        2706,
+        16
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        2707,
+        1
+      ],
+      [
+        2707,
+        16
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        2708,
+        1
+      ],
+      [
+        2708,
+        24
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        2712,
+        1
+      ],
+      [
+        2712,
+        19
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        2717,
+        26
+      ],
+      [
+        2717,
+        41
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        2756,
+        18
+      ],
+      [
+        2756,
+        41
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        2758,
+        30
+      ],
+      [
+        2758,
+        45
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        2772,
+        18
+      ],
+      [
+        2772,
+        33
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        2818,
+        16
+      ],
+      [
+        2818,
+        34
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        2818,
+        52
+      ],
+      [
+        2818,
+        70
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        2823,
+        17
+      ],
+      [
+        2823,
+        35
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        2823,
+        53
+      ],
+      [
+        2823,
+        71
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        2846,
+        1
+      ],
+      [
+        2846,
+        19
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        2847,
+        1
+      ],
+      [
+        2847,
+        16
+      ]
+    ],
+    [
+      "struct addrinfo",
+      {},
+      "",
+      [
+        2855,
+        26
+      ],
+      [
+        2855,
+        41
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        2871,
+        34
+      ],
+      [
+        2871,
+        57
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        2873,
+        4
+      ],
+      [
+        2873,
+        23
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        2886,
+        15
+      ],
+      [
+        2886,
+        34
+      ]
+    ],
+    [
+      "struct activehosts",
+      {},
+      "",
+      [
+        2954,
+        1
+      ],
+      [
+        2954,
+        19
+      ]
+    ],
+    [
+      "struct sockaddr_storage",
+      {},
+      "",
+      [
+        2968,
+        30
+      ],
+      [
+        2968,
+        53
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        2999,
+        46
+      ],
+      [
+        2999,
+        65
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        3003,
+        49
+      ],
+      [
+        3003,
+        68
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        3019,
+        64
+      ],
+      [
+        3019,
+        83
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        3050,
+        65
+      ],
+      [
+        3050,
+        84
+      ]
+    ],
+    [
+      "struct rpcap_header",
+      {},
+      "",
+      [
+        3120,
+        89
+      ],
+      [
+        3120,
+        108
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"ftmacros.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\t\t/* for strlen(), ... */\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\t\t/* for malloc(), free(), ... */\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include <stdarg.h>\t\t/* for functions with variable number of arguments */\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\t\t/* for the errno variable */\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include \"sockutils.h\"\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include \"rpcap-protocol.h\"\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-rpcap.h\"\n",
+      [
+        46,
+        0
+      ],
+      [
+        47,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

@@ -1,0 +1,555 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "STATIC_INLINE_EVENTS\\\n(void)\nsim_events_poll (void *data)\n{\n  event_queue *queue = data;\n  /* just re-schedule in 1000 million ticks time */\n  event_queue_schedule (queue, SIM_EVENTS_POLL_RATE, sim_events_poll, queue);\n  sim_io_poll_quit ();\n}",
+      "fn_code_pos": [
+        [
+          71,
+          0
+        ],
+        [
+          79,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "event_queue_create(void)\n{\n  event_queue *new_event_queue = ZALLOC(event_queue);\n\n  new_event_queue->processing = 0;\n  new_event_queue->queue = NULL;\n  new_event_queue->held = NULL;\n  new_event_queue->held_end = &new_event_queue->held;\n\n  /* both times are already zero */\n  return new_event_queue;\n}",
+      "fn_code_pos": [
+        [
+          84,
+          0
+        ],
+        [
+          95,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "event_queue_create",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "event_queue_init(event_queue *queue)\n{\n  event_entry *event;\n\n  /* drain the interrupt queue */\n  {\n#if defined(HAVE_SIGPROCMASK) && defined(SIG_SETMASK)\n    sigset_t old_mask;\n    sigset_t new_mask;\n    sigfillset(&new_mask);\n    /*-LOCK-*/ sigprocmask(SIG_SETMASK, &new_mask, &old_mask);\n#endif\n    event = queue->held;\n    while (event != NULL) {\n      event_entry *dead = event;\n      event = event->next;\n      free(dead);\n    }\n    queue->held = NULL;\n    queue->held_end = &queue->held;\n#if defined(HAVE_SIGPROCMASK) && defined(SIG_SETMASK)\n    /*-UNLOCK-*/ sigprocmask(SIG_SETMASK, &old_mask, NULL);\n#endif\n  }\n\n  /* drain the normal queue */\n  event = queue->queue;\n  while (event != NULL) {\n    event_entry *dead = event;\n    event = event->next;\n    free(dead);\n  }\n  queue->queue = NULL;\n    \n  /* wind time back to one */\n  queue->processing = 0;\n  queue->time_of_event = 0;\n  queue->time_from_event = -1;\n\n  /* schedule our initial counter event */\n  event_queue_schedule (queue, 0, sim_events_poll, queue);\n}",
+      "fn_code_pos": [
+        [
+          100,
+          0
+        ],
+        [
+          141,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "event_queue_init",
+        "parameters": {
+          "queue": "event_queue"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "event_queue_time(event_queue *queue)\n{\n  return queue->time_of_event - queue->time_from_event;\n}",
+      "fn_code_pos": [
+        [
+          145,
+          0
+        ],
+        [
+          148,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "event_queue_time",
+        "parameters": {
+          "queue": "event_queue"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "update_time_from_event(event_queue *events)\n{\n  signed64 current_time = event_queue_time(events);\n  if (events->queue != NULL) {\n    events->time_from_event = (events->queue->time_of_event - current_time);\n    events->time_of_event = events->queue->time_of_event;\n  }\n  else {\n    events->time_of_event = current_time - 1;\n    events->time_from_event = -1;\n  }\n  if (WITH_TRACE && ppc_trace[trace_events])\n    {\n      event_entry *event;\n      int i;\n      for (event = events->queue, i = 0;\n\t   event != NULL;\n\t   event = event->next, i++)\n\t{\n\t  TRACE(trace_events, (\"event time-from-event - time %ld, delta %ld - event %d, tag 0x%lx, time %ld, handler 0x%lx, data 0x%lx\\n\",\n\t\t\t       (long)current_time,\n\t\t\t       (long)events->time_from_event,\n\t\t\t       i,\n\t\t\t       (long)event,\n\t\t\t       (long)event->time_of_event,\n\t\t\t       (long)event->handler,\n\t\t\t       (long)event->data));\n\t}\n    }\n  ASSERT(current_time == event_queue_time(events));\n}",
+      "fn_code_pos": [
+        [
+          152,
+          0
+        ],
+        [
+          182,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "update_time_from_event",
+        "parameters": {
+          "events": "event_queue"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "insert_event_entry(event_queue *events,\n\t\t   event_entry *new_event,\n\t\t   signed64 delta)\n{\n  event_entry *curr;\n  event_entry **prev;\n  signed64 time_of_event;\n\n  if (delta < 0)\n    error(\"what is past is past!\\n\");\n\n  /* compute when the event should occure */\n  time_of_event = event_queue_time(events) + delta;\n\n  /* find the queue insertion point - things are time ordered */\n  prev = &events->queue;\n  curr = events->queue;\n  while (curr != NULL && time_of_event >= curr->time_of_event) {\n    ASSERT(curr->next == NULL\n\t   || curr->time_of_event <= curr->next->time_of_event);\n    prev = &curr->next;\n    curr = curr->next;\n  }\n  ASSERT(curr == NULL || time_of_event < curr->time_of_event);\n\n  /* insert it */\n  new_event->next = curr;\n  *prev = new_event;\n  new_event->time_of_event = time_of_event;\n\n  /* adjust the time until the first event */\n  update_time_from_event(events);\n}",
+      "fn_code_pos": [
+        [
+          186,
+          0
+        ],
+        [
+          218,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insert_event_entry",
+        "parameters": {
+          "events": "event_queue",
+          "new_event": "event_entry",
+          "delta": "signed64"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "event_queue_schedule(event_queue *events,\n\t\t     signed64 delta_time,\n\t\t     event_handler *handler,\n\t\t     void *data)\n{\n  event_entry *new_event = ZALLOC(event_entry);\n  new_event->data = data;\n  new_event->handler = handler;\n  insert_event_entry(events, new_event, delta_time);\n  TRACE(trace_events, (\"event scheduled at %ld - tag 0x%lx - time %ld, handler 0x%lx, data 0x%lx\\n\",\n\t\t       (long)event_queue_time(events),\n\t\t       (long)new_event,\n\t\t       (long)new_event->time_of_event,\n\t\t       (long)new_event->handler,\n\t\t       (long)new_event->data));\n  return (event_entry_tag)new_event;\n}",
+      "fn_code_pos": [
+        [
+          222,
+          0
+        ],
+        [
+          238,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "event_queue_schedule",
+        "parameters": {
+          "events": "event_queue",
+          "delta_time": "signed64",
+          "handler": "event_handler",
+          "data": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "event_queue_schedule_after_signal(event_queue *events,\n\t\t\t\t  signed64 delta_time,\n\t\t\t\t  event_handler *handler,\n\t\t\t\t  void *data)\n{\n  event_entry *new_event = ZALLOC(event_entry);\n\n  new_event->data = data;\n  new_event->handler = handler;\n  new_event->time_of_event = delta_time; /* work it out later */\n  new_event->next = NULL;\n\n  {\n#if defined(HAVE_SIGPROCMASK) && defined(SIG_SETMASK)\n    sigset_t old_mask;\n    sigset_t new_mask;\n    sigfillset(&new_mask);\n    /*-LOCK-*/ sigprocmask(SIG_SETMASK, &new_mask, &old_mask);\n#endif\n    if (events->held == NULL) {\n      events->held = new_event;\n    }\n    else {\n      *events->held_end = new_event;\n    }\n    events->held_end = &new_event->next;\n#if defined(HAVE_SIGPROCMASK) && defined(SIG_SETMASK)\n    /*-UNLOCK-*/ sigprocmask(SIG_SETMASK, &old_mask, NULL);\n#endif\n  }\n\n  TRACE(trace_events, (\"event scheduled at %ld - tag 0x%lx - time %ld, handler 0x%lx, data 0x%lx\\n\",\n\t\t       (long)event_queue_time(events),\n\t\t       (long)new_event,\n\t\t       (long)new_event->time_of_event,\n\t\t       (long)new_event->handler,\n\t\t       (long)new_event->data));\n\n  return (event_entry_tag)new_event;\n}",
+      "fn_code_pos": [
+        [
+          243,
+          0
+        ],
+        [
+          282,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "event_queue_schedule_after_signal",
+        "parameters": {
+          "events": "event_queue",
+          "delta_time": "signed64",
+          "handler": "event_handler",
+          "data": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "event_queue_deschedule(event_queue *events,\n\t\t       event_entry_tag event_to_remove)\n{\n  event_entry *to_remove = (event_entry*)event_to_remove;\n  ASSERT((events->time_from_event >= 0) == (events->queue != NULL));\n  if (event_to_remove != NULL) {\n    event_entry *current;\n    event_entry **ptr_to_current;\n    for (ptr_to_current = &events->queue, current = *ptr_to_current;\n\t current != NULL && current != to_remove;\n\t ptr_to_current = &current->next, current = *ptr_to_current);\n    if (current == to_remove) {\n      *ptr_to_current = current->next;\n      TRACE(trace_events, (\"event descheduled at %ld - tag 0x%lx - time %ld, handler 0x%lx, data 0x%lx\\n\",\n\t\t\t   (long)event_queue_time(events),\n\t\t\t   (long)event_to_remove,\n\t\t\t   (long)current->time_of_event,\n\t\t\t   (long)current->handler,\n\t\t\t   (long)current->data));\n      free(current);\n      update_time_from_event(events);\n    }\n    else {\n      TRACE(trace_events, (\"event descheduled at %ld - tag 0x%lx - not found\\n\",\n\t\t\t   (long)event_queue_time(events),\n\t\t\t   (long)event_to_remove));\n    }\n  }\n  ASSERT((events->time_from_event >= 0) == (events->queue != NULL));\n}",
+      "fn_code_pos": [
+        [
+          287,
+          0
+        ],
+        [
+          316,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "event_queue_deschedule",
+        "parameters": {
+          "events": "event_queue",
+          "event_to_remove": "event_entry_tag"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "event_queue_tick(event_queue *events)\n{\n  signed64 time_from_event;\n\n  /* we should only be here when the previous tick has been fully processed */\n  ASSERT(!events->processing);\n\n  /* move any events that were queued by any signal handlers onto the\n     real event queue.  BTW: When inlining, having this code here,\n     instead of in event_queue_process() causes GCC to put greater\n     weight on keeping the pointer EVENTS in a register.  This, in\n     turn results in better code being output. */\n  if (events->held != NULL) {\n    event_entry *held_events;\n    event_entry *curr_event;\n\n    {\n#if defined(HAVE_SIGPROCMASK) && defined(SIG_SETMASK)\n      sigset_t old_mask;\n      sigset_t new_mask;\n      sigfillset(&new_mask);\n      /*-LOCK-*/ sigprocmask(SIG_SETMASK, &new_mask, &old_mask);\n#endif\n      held_events = events->held;\n      events->held = NULL;\n      events->held_end = &events->held;\n#if defined(HAVE_SIGPROCMASK) && defined(SIG_SETMASK)\n      /*-UNLOCK-*/ sigprocmask(SIG_SETMASK, &old_mask, NULL);\n#endif\n    }\n\n    do {\n      curr_event = held_events;\n      held_events = curr_event->next;\n      insert_event_entry(events, curr_event, curr_event->time_of_event);\n    } while (held_events != NULL);\n  }\n\n  /* advance time, checking to see if we've reached time zero which\n     would indicate the time for the next event has arrived */\n  time_from_event = events->time_from_event;\n  events->time_from_event = time_from_event - 1;\n  return time_from_event == 0;\n}",
+      "fn_code_pos": [
+        [
+          323,
+          0
+        ],
+        [
+          366,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "event_queue_tick",
+        "parameters": {
+          "events": "event_queue"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "event_queue_process(event_queue *events)\n{\n  signed64 event_time = event_queue_time(events);\n\n  ASSERT((events->time_from_event == -1 && events->queue != NULL)\n\t || events->processing); /* something to do */\n\n  /* consume all events for this or earlier times.  Be careful to\n     allow a new event to appear under our feet */\n  events->processing = 1;\n  while (events->queue != NULL\n\t && events->queue->time_of_event <= event_time) {\n    event_entry *to_do = events->queue;\n    event_handler *handler = to_do->handler;\n    void *data = to_do->data;\n    events->queue = to_do->next;\n    TRACE(trace_events, (\"event issued at %ld - tag 0x%lx - time %ld, handler 0x%lx, data 0x%lx\\n\",\n\t\t\t (long)event_time,\n\t\t\t (long)to_do,\n\t\t\t (long)to_do->time_of_event,\n\t\t\t (long)handler,\n\t\t\t (long)data));\n    free(to_do);\n    /* Always re-compute the time to the next event so that HANDLER()\n       can safely insert new events into the queue. */\n    update_time_from_event(events);\n    handler(data);\n  }\n  events->processing = 0;\n\n  ASSERT(events->time_from_event > 0);\n  ASSERT(events->queue != NULL); /* always poll event */\n}",
+      "fn_code_pos": [
+        [
+          372,
+          0
+        ],
+        [
+          404,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "event_queue_process",
+        "parameters": {
+          "events": "event_queue"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "STATIC_INLINE_EVENTS\\\n(void)",
+      "fn_dec_pos": [
+        [
+          71,
+          0
+        ],
+        [
+          72,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_EVENTS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_EVENTS\\\n(event_queue *)",
+      "fn_dec_pos": [
+        [
+          82,
+          0
+        ],
+        [
+          83,
+          15
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_EVENTS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_EVENTS\\\n(void)",
+      "fn_dec_pos": [
+        [
+          98,
+          0
+        ],
+        [
+          99,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_EVENTS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_EVENTS\\\n(void)",
+      "fn_dec_pos": [
+        [
+          150,
+          0
+        ],
+        [
+          151,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_EVENTS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_EVENTS\\\n(void)",
+      "fn_dec_pos": [
+        [
+          184,
+          0
+        ],
+        [
+          185,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_EVENTS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_EVENTS\\\n(void)",
+      "fn_dec_pos": [
+        [
+          285,
+          0
+        ],
+        [
+          286,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_EVENTS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_EVENTS\\\n(int)",
+      "fn_dec_pos": [
+        [
+          321,
+          0
+        ],
+        [
+          322,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_EVENTS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_EVENTS\\\n(void)",
+      "fn_dec_pos": [
+        [
+          370,
+          0
+        ],
+        [
+          371,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_EVENTS",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct _event_entry {\n  void *data;\n  event_handler *handler;\n  signed64 time_of_event;  \n  event_entry *next;\n}",
+      {
+        "*data": "void",
+        "*handler": "event_handler",
+        "time_of_event": "signed64",
+        "*next": "event_entry"
+      },
+      "_event_entry",
+      [
+        54,
+        0
+      ],
+      [
+        59,
+        1
+      ]
+    ],
+    [
+      "struct _event_queue {\n  int processing;\n  event_entry *queue;\n  event_entry *volatile held;\n  event_entry *volatile *volatile held_end;\n  signed64 time_of_event;\n  signed64 time_from_event;\n}",
+      {
+        "processing": "int",
+        "*queue": "event_entry",
+        "*volatile held": "event_entry",
+        "*volatile *volatile held_end": "event_entry",
+        "time_of_event": "signed64",
+        "time_from_event": "signed64"
+      },
+      "_event_queue",
+      [
+        61,
+        0
+      ],
+      [
+        68,
+        1
+      ]
+    ],
+    [
+      "typedef struct _event_entry event_entry;",
+      {},
+      "event_entry",
+      [
+        53,
+        0
+      ],
+      [
+        53,
+        40
+      ]
+    ],
+    [
+      "struct _event_entry {\n  void *data;\n  event_handler *handler;\n  signed64 time_of_event;  \n  event_entry *next;\n}",
+      {
+        "*data": "void",
+        "*handler": "event_handler",
+        "time_of_event": "signed64",
+        "*next": "event_entry"
+      },
+      "_event_entry",
+      [
+        54,
+        0
+      ],
+      [
+        59,
+        1
+      ]
+    ],
+    [
+      "struct _event_queue {\n  int processing;\n  event_entry *queue;\n  event_entry *volatile held;\n  event_entry *volatile *volatile held_end;\n  signed64 time_of_event;\n  signed64 time_from_event;\n}",
+      {
+        "processing": "int",
+        "*queue": "event_entry",
+        "*volatile held": "event_entry",
+        "*volatile *volatile held_end": "event_entry",
+        "time_of_event": "signed64",
+        "time_from_event": "signed64"
+      },
+      "_event_queue",
+      [
+        61,
+        0
+      ],
+      [
+        68,
+        1
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"basics.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"events.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

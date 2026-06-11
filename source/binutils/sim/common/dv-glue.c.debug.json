@@ -1,0 +1,452 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nhw_glue_finish (struct hw *me)\n{\n  struct hw_glue *glue = HW_ZALLOC (me, struct hw_glue);\n  const char *name = hw_name (me);\n\n  /* establish our own methods */\n  set_hw_data (me, glue);\n  set_hw_io_read_buffer (me, hw_glue_io_read_buffer);\n  set_hw_io_write_buffer (me, hw_glue_io_write_buffer);\n  set_hw_ports (me, hw_glue_ports);\n  set_hw_port_event (me, hw_glue_port_event);\n\n  /* attach to our parent bus */\n  do_hw_attach_regs (me);\n\n  /* establish the output registers */\n  if (hw_find_property (me, \"reg\"))\n    {\n      reg_property_spec unit;\n      int reg_nr;\n\n      /* Find a relevant reg entry.  */\n      reg_nr = 0;\n      while (hw_find_reg_array_property (me, \"reg\", reg_nr, &unit)\n\t     && !hw_unit_size_to_attach_size (hw_parent (me),\n\t\t\t\t\t      &unit.size,\n\t\t\t\t\t      &glue->sizeof_output,\n\t\t\t\t\t      me))\n\treg_nr++;\n\n      /* Check out the size ...  */\n      if (glue->sizeof_output == 0)\n\thw_abort (me, \"at least one reg property size must be nonzero\");\n      if (glue->sizeof_output % sizeof (unsigned_word) != 0)\n\thw_abort (me, \"reg property size must be %ld aligned\",\n\t\t  (long) sizeof (unsigned_word));\n\n      /* ... and the address.  */\n      hw_unit_address_to_attach_address (hw_parent (me),\n\t\t\t\t\t &unit.address,\n\t\t\t\t\t &glue->space,\n\t\t\t\t\t &glue->address,\n\t\t\t\t\t me);\n      if (glue->address % (sizeof (unsigned_word) * max_nr_ports) != 0)\n\thw_abort (me, \"reg property address must be %ld aligned\",\n\t\t  (long) (sizeof (unsigned_word) * max_nr_ports));\n\n      glue->nr_outputs = glue->sizeof_output / sizeof (unsigned_word);\n    }\n  else\n    {\n      /* Allow bitwise glue devices to declare only ports.  */\n      if (!strcmp (name, \"glue\"))\n\thw_abort (me, \"Missing \\\"reg\\\" property\");\n\n      glue->nr_outputs = 1;\n      glue->sizeof_output = sizeof (unsigned_word);\n    }\n  glue->output = hw_zalloc (me, glue->sizeof_output);\n\n  /* establish the input ports */\n  {\n    const struct hw_property *ranges;\n\n    ranges = hw_find_property (me, \"interrupt-ranges\");\n    if (ranges == NULL)\n      {\n\tglue->int_number = 0;\n\tglue->nr_inputs = glue->nr_outputs;\n      }\n    else if (ranges->sizeof_array != sizeof (unsigned_cell) * 2)\n      {\n\thw_abort (me, \"invalid interrupt-ranges property (incorrect size)\");\n      }\n    else\n      {\n\tconst unsigned_cell *int_range = ranges->array;\n\n\tglue->int_number = BE2H_cell (int_range[0]);\n\tglue->nr_inputs = BE2H_cell (int_range[1]);\n      }\n    glue->sizeof_input = glue->nr_inputs * sizeof (unsigned);\n    glue->input = hw_zalloc (me, glue->sizeof_input);\n  }\n\n  /* determine our type */\n  if (strcmp (name, \"glue\") == 0)\n    glue->type = glue_io;\n  else if (strcmp (name, \"glue-and\") == 0)\n    glue->type = glue_and;\n  else if (strcmp (name, \"glue-or\") == 0)\n    glue->type = glue_or;\n  else if (strcmp (name, \"glue-xor\") == 0)\n    glue->type = glue_xor;\n  else\n    hw_abort (me, \"unimplemented glue type\");\n\n  HW_TRACE ((me, \"int-number %d, nr_inputs %d, nr_outputs %d\",\n\t     glue->int_number, glue->nr_inputs, glue->nr_outputs));\n}",
+      "fn_code_pos": [
+        [
+          193,
+          0
+        ],
+        [
+          293,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_glue_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_glue_io_read_buffer (struct hw *me,\n\t\t\tvoid *dest,\n\t\t\tint space,\n\t\t\tunsigned_word addr,\n\t\t\tunsigned nr_bytes)\n{\n  struct hw_glue *glue = (struct hw_glue *) hw_data (me);\n  int reg = ((addr - glue->address) / sizeof (unsigned_word)) % glue->nr_outputs;\n\n  if (nr_bytes != sizeof (unsigned_word)\n      || (addr % sizeof (unsigned_word)) != 0)\n    hw_abort (me, \"missaligned read access (%d:0x%lx:%d) not supported\",\n\t      space, (unsigned long)addr, nr_bytes);\n\n  *(unsigned_word *)dest = H2BE_4 (glue->output[reg]);\n\n  HW_TRACE ((me, \"read - port %d (0x%lx), level %d\",\n\t     reg, (unsigned long) addr, glue->output[reg]));\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          295,
+          0
+        ],
+        [
+          316,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_glue_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_glue_io_write_buffer (struct hw *me,\n\t\t\t const void *source,\n\t\t\t int space,\n\t\t\t unsigned_word addr,\n\t\t\t unsigned nr_bytes)\n{\n  struct hw_glue *glue = (struct hw_glue *) hw_data (me);\n  int reg = ((addr - glue->address) / sizeof (unsigned_word)) % max_nr_ports;\n\n  if (nr_bytes != sizeof (unsigned_word)\n      || (addr % sizeof (unsigned_word)) != 0)\n    hw_abort (me, \"missaligned write access (%d:0x%lx:%d) not supported\",\n\t      space, (unsigned long) addr, nr_bytes);\n\n  glue->output[reg] = H2BE_4 (*(unsigned_word *)source);\n\n  HW_TRACE ((me, \"write - port %d (0x%lx), level %d\",\n\t     reg, (unsigned long) addr, glue->output[reg]));\n\n  hw_port_event (me, reg, glue->output[reg]);\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          319,
+          0
+        ],
+        [
+          342,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_glue_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nhw_glue_port_event (struct hw *me,\n\t\t    int my_port,\n\t\t    struct hw *source,\n\t\t    int source_port,\n\t\t    int level)\n{\n  struct hw_glue *glue = (struct hw_glue *) hw_data (me);\n  int i;\n\n  if (my_port < glue->int_number\n      || my_port >= glue->int_number + glue->nr_inputs)\n    hw_abort (me, \"port %d outside of valid range\", my_port);\n\n  glue->input[my_port - glue->int_number] = level;\n  switch (glue->type)\n    {\n    case glue_io:\n      {\n\tint port = my_port % glue->nr_outputs;\n\n\tglue->output[port] = level;\n\n\tHW_TRACE ((me, \"input - port %d (0x%lx), level %d\",\n\t\t   my_port,\n\t\t   (unsigned long) glue->address + port * sizeof (unsigned_word),\n\t\t   level));\n\treturn;\n      }\n    case glue_and:\n      {\n\tglue->output[0] = glue->input[0];\n\tfor (i = 1; i < glue->nr_inputs; i++)\n\t  glue->output[0] &= glue->input[i];\n\tbreak;\n      }\n    case glue_or:\n      {\n\tglue->output[0] = glue->input[0];\n\tfor (i = 1; i < glue->nr_inputs; i++)\n\t  glue->output[0] |= glue->input[i];\n\tbreak;\n      }\n    case glue_xor:\n      {\n\tglue->output[0] = glue->input[0];\n\tfor (i = 1; i < glue->nr_inputs; i++)\n\t  glue->output[0] ^= glue->input[i];\n\tbreak;\n      }\n    default:\n      {\n\thw_abort (me, \"operator not implemented\");\n\treturn;\n      }\n    }\n\n  /* If we fell through, we want to generate a port event.  */\n  HW_TRACE ((me, \"port %d, level %d arrived - output %d\",\n\t     my_port, level, glue->output[0]));\n\n  hw_port_event (me, 0, glue->output[0]);\n}",
+      "fn_code_pos": [
+        [
+          344,
+          0
+        ],
+        [
+          406,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_glue_port_event",
+        "parameters": {
+          "me": "struct hw",
+          "my_port": "int",
+          "source": "struct hw",
+          "source_port": "int",
+          "level": "int"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct hw_glue\n{\n  enum hw_glue_type type;\n  int int_number;\n  int *input;\n  int nr_inputs;\n  unsigned sizeof_input;\n  /* our output registers */\n  int space;\n  unsigned_word address;\n  unsigned sizeof_output;\n  int *output;\n  int nr_outputs;\n}",
+      {
+        "type": "enum hw_glue_type",
+        "int_number": "int",
+        "*input": "int",
+        "nr_inputs": "int",
+        "sizeof_input": "unsigned",
+        "space": "int",
+        "address": "unsigned_word",
+        "sizeof_output": "unsigned",
+        "*output": "int",
+        "nr_outputs": "int"
+      },
+      "hw_glue",
+      [
+        172,
+        0
+      ],
+      [
+        185,
+        1
+      ]
+    ],
+    [
+      "struct hw_glue\n{\n  enum hw_glue_type type;\n  int int_number;\n  int *input;\n  int nr_inputs;\n  unsigned sizeof_input;\n  /* our output registers */\n  int space;\n  unsigned_word address;\n  unsigned sizeof_output;\n  int *output;\n  int nr_outputs;\n}",
+      {
+        "type": "enum hw_glue_type",
+        "int_number": "int",
+        "*input": "int",
+        "nr_inputs": "int",
+        "sizeof_input": "unsigned",
+        "space": "int",
+        "address": "unsigned_word",
+        "sizeof_output": "unsigned",
+        "*output": "int",
+        "nr_outputs": "int"
+      },
+      "hw_glue",
+      [
+        172,
+        0
+      ],
+      [
+        185,
+        1
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        191,
+        13
+      ],
+      [
+        191,
+        38
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        194,
+        16
+      ],
+      [
+        194,
+        25
+      ]
+    ],
+    [
+      "struct hw_glue",
+      {},
+      "",
+      [
+        196,
+        2
+      ],
+      [
+        196,
+        16
+      ]
+    ],
+    [
+      "struct hw_property",
+      {},
+      "",
+      [
+        256,
+        10
+      ],
+      [
+        256,
+        28
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        296,
+        24
+      ],
+      [
+        296,
+        33
+      ]
+    ],
+    [
+      "struct hw_glue",
+      {},
+      "",
+      [
+        302,
+        2
+      ],
+      [
+        302,
+        16
+      ]
+    ],
+    [
+      "struct hw_glue",
+      {},
+      "",
+      [
+        302,
+        26
+      ],
+      [
+        302,
+        40
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        320,
+        25
+      ],
+      [
+        320,
+        34
+      ]
+    ],
+    [
+      "struct hw_glue",
+      {},
+      "",
+      [
+        326,
+        2
+      ],
+      [
+        326,
+        16
+      ]
+    ],
+    [
+      "struct hw_glue",
+      {},
+      "",
+      [
+        326,
+        26
+      ],
+      [
+        326,
+        40
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        345,
+        20
+      ],
+      [
+        345,
+        29
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        347,
+        6
+      ],
+      [
+        347,
+        15
+      ]
+    ],
+    [
+      "struct hw_glue",
+      {},
+      "",
+      [
+        351,
+        2
+      ],
+      [
+        351,
+        16
+      ]
+    ],
+    [
+      "struct hw_glue",
+      {},
+      "",
+      [
+        351,
+        26
+      ],
+      [
+        351,
+        40
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        409,
+        13
+      ],
+      [
+        409,
+        38
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        416,
+        6
+      ],
+      [
+        416,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <strings.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum\n{\n  max_nr_ports = 2048,\n}",
+      {
+        "max_nr_ports": ""
+      },
+      "",
+      [
+        155,
+        0
+      ],
+      [
+        158,
+        1
+      ]
+    ],
+    [
+      "enum hw_glue_type\n{\n  glue_undefined = 0,\n  glue_io,\n  glue_and,\n  glue_nand,\n  glue_or,\n  glue_xor,\n  glue_nor,\n  glue_not,\n}",
+      {
+        "glue_undefined": "",
+        "glue_io": "",
+        "glue_and": "",
+        "glue_nand": "",
+        "glue_or": "",
+        "glue_xor": "",
+        "glue_nor": "",
+        "glue_not": ""
+      },
+      "hw_glue_type",
+      [
+        160,
+        0
+      ],
+      [
+        170,
+        1
+      ]
+    ],
+    [
+      "enum hw_glue_type",
+      {},
+      "",
+      [
+        174,
+        2
+      ],
+      [
+        174,
+        19
+      ]
+    ]
+  ]
+}

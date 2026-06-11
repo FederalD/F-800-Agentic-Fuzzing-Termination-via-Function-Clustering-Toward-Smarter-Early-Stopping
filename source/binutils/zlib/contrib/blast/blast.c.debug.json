@@ -1,0 +1,454 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "local int bits(struct state *s, int need)\n{\n    int val;            /* bit accumulator */\n\n    /* load at least need bits into val */\n    val = s->bitbuf;\n    while (s->bitcnt < need) {\n        if (s->left == 0) {\n            s->left = s->infun(s->inhow, &(s->in));\n            if (s->left == 0) longjmp(s->env, 1);       /* out of input */\n        }\n        val |= (int)(*(s->in)++) << s->bitcnt;          /* load eight bits */\n        s->left--;\n        s->bitcnt += 8;\n    }\n\n    /* drop need bits and update buffer, always zero to seven bits left */\n    s->bitbuf = val >> need;\n    s->bitcnt -= need;\n\n    /* return need bits, zeroing the bits above that */\n    return val & ((1 << need) - 1);\n}",
+      "fn_code_pos": [
+        [
+          71,
+          0
+        ],
+        [
+          93,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bits",
+        "parameters": {
+          "s": "struct state",
+          "need": "int"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int decode(struct state *s, struct huffman *h)\n{\n    int len;            /* current number of bits in code */\n    int code;           /* len bits being decoded */\n    int first;          /* first code of length len */\n    int count;          /* number of codes of length len */\n    int index;          /* index of first code of length len in symbol table */\n    int bitbuf;         /* bits from stream */\n    int left;           /* bits left in next or left to process */\n    short *next;        /* next number of codes */\n\n    bitbuf = s->bitbuf;\n    left = s->bitcnt;\n    code = first = index = 0;\n    len = 1;\n    next = h->count + 1;\n    while (1) {\n        while (left--) {\n            code |= (bitbuf & 1) ^ 1;   /* invert code */\n            bitbuf >>= 1;\n            count = *next++;\n            if (code < first + count) { /* if length len, return symbol */\n                s->bitbuf = bitbuf;\n                s->bitcnt = (s->bitcnt - len) & 7;\n                return h->symbol[index + (code - first)];\n            }\n            index += count;             /* else update for next length */\n            first += count;\n            first <<= 1;\n            code <<= 1;\n            len++;\n        }\n        left = (MAXBITS+1) - len;\n        if (left == 0) break;\n        if (s->left == 0) {\n            s->left = s->infun(s->inhow, &(s->in));\n            if (s->left == 0) longjmp(s->env, 1);       /* out of input */\n        }\n        bitbuf = *(s->in)++;\n        s->left--;\n        if (left > 8) left = 8;\n    }\n    return -9;                          /* ran out of codes */\n}",
+      "fn_code_pos": [
+        [
+          128,
+          0
+        ],
+        [
+          171,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decode",
+        "parameters": {
+          "s": "struct state",
+          "h": "struct huffman"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int construct(struct huffman *h, const unsigned char *rep, int n)\n{\n    int symbol;         /* current symbol when stepping through length[] */\n    int len;            /* current length when stepping through h->count[] */\n    int left;           /* number of possible codes left of current length */\n    short offs[MAXBITS+1];      /* offsets in symbol table for each length */\n    short length[256];  /* code lengths */\n\n    /* convert compact repeat counts into symbol bit length list */\n    symbol = 0;\n    do {\n        len = *rep++;\n        left = (len >> 4) + 1;\n        len &= 15;\n        do {\n            length[symbol++] = len;\n        } while (--left);\n    } while (--n);\n    n = symbol;\n\n    /* count number of codes of each length */\n    for (len = 0; len <= MAXBITS; len++)\n        h->count[len] = 0;\n    for (symbol = 0; symbol < n; symbol++)\n        (h->count[length[symbol]])++;   /* assumes lengths are within bounds */\n    if (h->count[0] == n)               /* no codes! */\n        return 0;                       /* complete, but decode() will fail */\n\n    /* check for an over-subscribed or incomplete set of lengths */\n    left = 1;                           /* one possible code of zero length */\n    for (len = 1; len <= MAXBITS; len++) {\n        left <<= 1;                     /* one more bit, double codes left */\n        left -= h->count[len];          /* deduct count from possible codes */\n        if (left < 0) return left;      /* over-subscribed--return negative */\n    }                                   /* left > 0 means incomplete */\n\n    /* generate offsets into symbol table for each length for sorting */\n    offs[1] = 0;\n    for (len = 1; len < MAXBITS; len++)\n        offs[len + 1] = offs[len] + h->count[len];\n\n    /*\n     * put symbols in table sorted by length, by symbol order within each\n     * length\n     */\n    for (symbol = 0; symbol < n; symbol++)\n        if (length[symbol] != 0)\n            h->symbol[offs[length[symbol]]++] = symbol;\n\n    /* return zero for complete set, positive for incomplete set */\n    return left;\n}",
+      "fn_code_pos": [
+        [
+          190,
+          0
+        ],
+        [
+          241,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "construct",
+        "parameters": {
+          "h": "struct huffman",
+          "rep": "unsigned char",
+          "n": "int"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int decomp(struct state *s)\n{\n    int lit;            /* true if literals are coded */\n    int dict;           /* log2(dictionary size) - 6 */\n    int symbol;         /* decoded symbol, extra bits for distance */\n    int len;            /* length for copy */\n    unsigned dist;      /* distance for copy */\n    int copy;           /* copy counter */\n    unsigned char *from, *to;   /* copy pointers */\n    static int virgin = 1;                              /* build tables once */\n    static short litcnt[MAXBITS+1], litsym[256];        /* litcode memory */\n    static short lencnt[MAXBITS+1], lensym[16];         /* lencode memory */\n    static short distcnt[MAXBITS+1], distsym[64];       /* distcode memory */\n    static struct huffman litcode = {litcnt, litsym};   /* length code */\n    static struct huffman lencode = {lencnt, lensym};   /* length code */\n    static struct huffman distcode = {distcnt, distsym};/* distance code */\n        /* bit lengths of literal codes */\n    static const unsigned char litlen[] = {\n        11, 124, 8, 7, 28, 7, 188, 13, 76, 4, 10, 8, 12, 10, 12, 10, 8, 23, 8,\n        9, 7, 6, 7, 8, 7, 6, 55, 8, 23, 24, 12, 11, 7, 9, 11, 12, 6, 7, 22, 5,\n        7, 24, 6, 11, 9, 6, 7, 22, 7, 11, 38, 7, 9, 8, 25, 11, 8, 11, 9, 12,\n        8, 12, 5, 38, 5, 38, 5, 11, 7, 5, 6, 21, 6, 10, 53, 8, 7, 24, 10, 27,\n        44, 253, 253, 253, 252, 252, 252, 13, 12, 45, 12, 45, 12, 61, 12, 45,\n        44, 173};\n        /* bit lengths of length codes 0..15 */\n    static const unsigned char lenlen[] = {2, 35, 36, 53, 38, 23};\n        /* bit lengths of distance codes 0..63 */\n    static const unsigned char distlen[] = {2, 20, 53, 230, 247, 151, 248};\n    static const short base[16] = {     /* base for length codes */\n        3, 2, 4, 5, 6, 7, 8, 9, 10, 12, 16, 24, 40, 72, 136, 264};\n    static const char extra[16] = {     /* extra bits for length codes */\n        0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8};\n\n    /* set up decoding tables (once--might not be thread-safe) */\n    if (virgin) {\n        construct(&litcode, litlen, sizeof(litlen));\n        construct(&lencode, lenlen, sizeof(lenlen));\n        construct(&distcode, distlen, sizeof(distlen));\n        virgin = 0;\n    }\n\n    /* read header */\n    lit = bits(s, 8);\n    if (lit > 1) return -1;\n    dict = bits(s, 8);\n    if (dict < 4 || dict > 6) return -2;\n\n    /* decode literals and length/distance pairs */\n    do {\n        if (bits(s, 1)) {\n            /* get length */\n            symbol = decode(s, &lencode);\n            len = base[symbol] + bits(s, extra[symbol]);\n            if (len == 519) break;              /* end code */\n\n            /* get distance */\n            symbol = len == 2 ? 2 : dict;\n            dist = decode(s, &distcode) << symbol;\n            dist += bits(s, symbol);\n            dist++;\n            if (s->first && dist > s->next)\n                return -3;              /* distance too far back */\n\n            /* copy length bytes from distance bytes back */\n            do {\n                to = s->out + s->next;\n                from = to - dist;\n                copy = MAXWIN;\n                if (s->next < dist) {\n                    from += copy;\n                    copy = dist;\n                }\n                copy -= s->next;\n                if (copy > len) copy = len;\n                len -= copy;\n                s->next += copy;\n                do {\n                    *to++ = *from++;\n                } while (--copy);\n                if (s->next == MAXWIN) {\n                    if (s->outfun(s->outhow, s->out, s->next)) return 1;\n                    s->next = 0;\n                    s->first = 0;\n                }\n            } while (len != 0);\n        }\n        else {\n            /* get literal and write it */\n            symbol = lit ? decode(s, &litcode) : bits(s, 8);\n            s->out[s->next++] = symbol;\n            if (s->next == MAXWIN) {\n                if (s->outfun(s->outhow, s->out, s->next)) return 1;\n                s->next = 0;\n                s->first = 0;\n            }\n        }\n    } while (1);\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          281,
+          0
+        ],
+        [
+          379,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decomp",
+        "parameters": {
+          "s": "struct state"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "int blast(blast_in infun, void *inhow, blast_out outfun, void *outhow,\n          unsigned *left, unsigned char **in)\n{\n    struct state s;             /* input/output state */\n    int err;                    /* return value */\n\n    /* initialize input state */\n    s.infun = infun;\n    s.inhow = inhow;\n    if (left != NULL && *left) {\n        s.left = *left;\n        s.in = *in;\n    }\n    else\n        s.left = 0;\n    s.bitbuf = 0;\n    s.bitcnt = 0;\n\n    /* initialize output state */\n    s.outfun = outfun;\n    s.outhow = outhow;\n    s.next = 0;\n    s.first = 1;\n\n    /* return if bits() or decode() tries to read past available input */\n    if (setjmp(s.env) != 0)             /* if came back here via longjmp(), */\n        err = 2;                        /*  then skip decomp(), return error */\n    else\n        err = decomp(&s);               /* decompress */\n\n    /* return unused input */\n    if (left != NULL)\n        *left = s.left;\n    if (in != NULL)\n        *in = s.left ? s.in : NULL;\n\n    /* write any leftover output and update the error code if needed */\n    if (err != 1 && s.next && s.outfun(s.outhow, s.out, s.next) && err == 0)\n        err = 1;\n    return err;\n}",
+      "fn_code_pos": [
+        [
+          382,
+          0
+        ],
+        [
+          422,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "blast",
+        "parameters": {
+          "infun": "blast_in",
+          "inhow": "void",
+          "outfun": "blast_out",
+          "outhow": "void",
+          "left": "unsigned",
+          "in": "unsigned char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "local unsigned inf(void *how, unsigned char **buf)\n{\n    static unsigned char hold[CHUNK];\n\n    *buf = hold;\n    return fread(hold, 1, CHUNK, (FILE *)how);\n}",
+      "fn_code_pos": [
+        [
+          431,
+          0
+        ],
+        [
+          437,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inf",
+        "parameters": {
+          "how": "void",
+          "buf": "unsigned char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "local int outf(void *how, unsigned char *buf, unsigned len)\n{\n    return fwrite(buf, 1, len, (FILE *)how) != len;\n}",
+      "fn_code_pos": [
+        [
+          439,
+          0
+        ],
+        [
+          442,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "outf",
+        "parameters": {
+          "how": "void",
+          "buf": "unsigned char",
+          "len": "unsigned"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "int main(void)\n{\n    int ret;\n    unsigned left;\n\n    /* decompress to stdout */\n    left = 0;\n    ret = blast(inf, stdin, outf, stdout, &left, NULL);\n    if (ret != 0)\n        fprintf(stderr, \"blast error: %d\\n\", ret);\n\n    /* count any leftover bytes */\n    while (getchar() != EOF)\n        left++;\n    if (left)\n        fprintf(stderr, \"blast warning: %u unused bytes of input\\n\", left);\n\n    /* return blast() error code */\n    return ret;\n}",
+      "fn_code_pos": [
+        [
+          445,
+          0
+        ],
+        [
+          464,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {},
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct state {\n    /* input state */\n    blast_in infun;             /* input function provided by user */\n    void *inhow;                /* opaque information passed to infun() */\n    unsigned char *in;          /* next input location */\n    unsigned left;              /* available input at in */\n    int bitbuf;                 /* bit buffer */\n    int bitcnt;                 /* number of bits in bit buffer */\n\n    /* input limit error return state for bits() and decode() */\n    jmp_buf env;\n\n    /* output state */\n    blast_out outfun;           /* output function provided by user */\n    void *outhow;               /* opaque information passed to outfun() */\n    unsigned next;              /* index of next write location in out[] */\n    int first;                  /* true to check distances (for first 4K) */\n    unsigned char out[MAXWIN];  /* output buffer and sliding window */\n}",
+      {
+        "infun": "blast_in",
+        "*inhow": "void",
+        "*in": "unsigned char",
+        "left": "unsigned",
+        "bitbuf": "int",
+        "bitcnt": "int",
+        "env": "jmp_buf",
+        "outfun": "blast_out",
+        "*outhow": "void",
+        "next": "unsigned",
+        "first": "int",
+        "out[MAXWIN]": "unsigned char"
+      },
+      "state",
+      [
+        40,
+        0
+      ],
+      [
+        58,
+        1
+      ]
+    ],
+    [
+      "struct huffman {\n    short *count;       /* number of symbols of each length */\n    short *symbol;      /* canonically ordered symbols */\n}",
+      {
+        "*count": "short",
+        "*symbol": "short"
+      },
+      "huffman",
+      [
+        102,
+        0
+      ],
+      [
+        105,
+        1
+      ]
+    ],
+    [
+      "struct state {\n    /* input state */\n    blast_in infun;             /* input function provided by user */\n    void *inhow;                /* opaque information passed to infun() */\n    unsigned char *in;          /* next input location */\n    unsigned left;              /* available input at in */\n    int bitbuf;                 /* bit buffer */\n    int bitcnt;                 /* number of bits in bit buffer */\n\n    /* input limit error return state for bits() and decode() */\n    jmp_buf env;\n\n    /* output state */\n    blast_out outfun;           /* output function provided by user */\n    void *outhow;               /* opaque information passed to outfun() */\n    unsigned next;              /* index of next write location in out[] */\n    int first;                  /* true to check distances (for first 4K) */\n    unsigned char out[MAXWIN];  /* output buffer and sliding window */\n}",
+      {
+        "infun": "blast_in",
+        "*inhow": "void",
+        "*in": "unsigned char",
+        "left": "unsigned",
+        "bitbuf": "int",
+        "bitcnt": "int",
+        "env": "jmp_buf",
+        "outfun": "blast_out",
+        "*outhow": "void",
+        "next": "unsigned",
+        "first": "int",
+        "out[MAXWIN]": "unsigned char"
+      },
+      "state",
+      [
+        40,
+        0
+      ],
+      [
+        58,
+        1
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        71,
+        15
+      ],
+      [
+        71,
+        27
+      ]
+    ],
+    [
+      "struct huffman {\n    short *count;       /* number of symbols of each length */\n    short *symbol;      /* canonically ordered symbols */\n}",
+      {
+        "*count": "short",
+        "*symbol": "short"
+      },
+      "huffman",
+      [
+        102,
+        0
+      ],
+      [
+        105,
+        1
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        128,
+        17
+      ],
+      [
+        128,
+        29
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        128,
+        34
+      ],
+      [
+        128,
+        48
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        190,
+        20
+      ],
+      [
+        190,
+        34
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        281,
+        17
+      ],
+      [
+        281,
+        29
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        294,
+        11
+      ],
+      [
+        294,
+        25
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        295,
+        11
+      ],
+      [
+        295,
+        25
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        296,
+        11
+      ],
+      [
+        296,
+        25
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        385,
+        4
+      ],
+      [
+        385,
+        16
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <stddef.h>             /* for NULL */\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <setjmp.h>             /* for setjmp(), longjmp(), and jmp_buf */\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"blast.h\"              /* prototype for blast() */\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        426,
+        0
+      ],
+      [
+        427,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        427,
+        0
+      ],
+      [
+        428,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

@@ -1,0 +1,437 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\ndo_uart_tx_event (struct hw *me, void *data)\n{\n  struct lm32uart *uart = hw_data (me);\n  char c;\n\n  /* Generate interrupt when transmission is complete.  */\n  if (uart->ier & LM32_UART_IER_TX_INT)\n    {\n      /* Generate interrupt */\n      hw_port_event (me, INT_PORT, 1);\n    }\n\n  /* Indicate which interrupt has occured.  */\n  uart->iir = MICOUART_IIR_TXRDY;\n\n  /* Indicate THR is empty.  */\n  uart->lsr |= LM32_UART_LSR_TX_RDY;\n\n  /* Output the character in the THR.  */\n  c = (char) uart->thr;\n\n  /* WLS field in LCR register specifies the number of bits to output.  */\n  switch (uart->lcr & LM32_UART_LCR_WLS_MASK)\n    {\n    case LM32_UART_LCR_WLS_5:\n      c &= 0x1f;\n      break;\n    case LM32_UART_LCR_WLS_6:\n      c &= 0x3f;\n      break;\n    case LM32_UART_LCR_WLS_7:\n      c &= 0x7f;\n      break;\n    }\n  printf (\"%c\", c);\n}",
+      "fn_code_pos": [
+        [
+          82,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_uart_tx_event",
+        "parameters": {
+          "me": "struct hw",
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nlm32uart_io_write_buffer (struct hw *me,\n\t\t\t  const void *source,\n\t\t\t  int space, unsigned_word base, unsigned nr_bytes)\n{\n  struct lm32uart *uart = hw_data (me);\n  int uart_reg;\n  const unsigned char *source_bytes = source;\n  int value = 0;\n\n  HW_TRACE ((me, \"write to 0x%08lx length %d with 0x%x\", (long) base,\n\t     (int) nr_bytes, value));\n\n  if (nr_bytes == 4)\n    value = (source_bytes[0] << 24)\n      | (source_bytes[1] << 16) | (source_bytes[2] << 8) | (source_bytes[3]);\n  else\n    hw_abort (me, \"write of unsupported number of bytes: %d.\", nr_bytes);\n\n  uart_reg = base - uart->base;\n\n  switch (uart_reg)\n    {\n    case LM32_UART_THR:\n      /* Buffer the character to output.  */\n      uart->thr = value;\n\n      /* Indicate the THR is full.  */\n      uart->lsr &= ~LM32_UART_LSR_TX_RDY;\n\n      /* deassert interrupt when IER is loaded.  */\n      uart->iir &= ~MICOUART_IIR_TXRDY;\n\n      /* schedule an event to output the character.  */\n      hw_event_queue_schedule (me, 1, do_uart_tx_event, 0);\n\n      break;\n    case LM32_UART_IER:\n      uart->ier = value;\n      if ((value & LM32_UART_IER_TX_INT)\n\t  && (uart->lsr & LM32_UART_LSR_TX_RDY))\n\t{\n\t  /* hw_event_queue_schedule (me, 1, do_uart_tx_event, 0); */\n\t  uart->lsr |= LM32_UART_LSR_TX_RDY;\n\t  uart->iir |= MICOUART_IIR_TXRDY;\n\t  hw_port_event (me, INT_PORT, 1);\n\t}\n      else if ((value & LM32_UART_IER_TX_INT) == 0)\n\t{\n\t  hw_port_event (me, INT_PORT, 0);\n\t}\n      break;\n    case LM32_UART_IIR:\n      uart->iir = value;\n      break;\n    case LM32_UART_LCR:\n      uart->lcr = value;\n      break;\n    case LM32_UART_MCR:\n      uart->mcr = value;\n      break;\n    case LM32_UART_LSR:\n      uart->lsr = value;\n      break;\n    case LM32_UART_MSR:\n      uart->msr = value;\n      break;\n    case LM32_UART_DIV:\n      uart->div = value;\n      break;\n    default:\n      hw_abort (me, \"write to invalid register address: 0x%x.\", uart_reg);\n    }\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          120,
+          0
+        ],
+        [
+          195,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "lm32uart_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nlm32uart_io_read_buffer (struct hw *me,\n\t\t\t void *dest,\n\t\t\t int space, unsigned_word base, unsigned nr_bytes)\n{\n  struct lm32uart *uart = hw_data (me);\n  int uart_reg;\n  int value;\n  unsigned char *dest_bytes = dest;\n  fd_set fd;\n  struct timeval tv;\n\n  HW_TRACE ((me, \"read 0x%08lx length %d\", (long) base, (int) nr_bytes));\n\n  uart_reg = base - uart->base;\n\n  switch (uart_reg)\n    {\n    case LM32_UART_RBR:\n      value = getchar ();\n      uart->lsr &= ~LM32_UART_LSR_RX_RDY;\n      break;\n    case LM32_UART_IER:\n      value = uart->ier;\n      break;\n    case LM32_UART_IIR:\n      value = uart->iir;\n      break;\n    case LM32_UART_LCR:\n      value = uart->lcr;\n      break;\n    case LM32_UART_MCR:\n      value = uart->mcr;\n      break;\n    case LM32_UART_LSR:\n      /* Check to see if any data waiting in stdin.  */\n      FD_ZERO (&fd);\n      FD_SET (fileno (stdin), &fd);\n      tv.tv_sec = 0;\n      tv.tv_usec = 1;\n      if (select (fileno (stdin) + 1, &fd, NULL, NULL, &tv))\n\tuart->lsr |= LM32_UART_LSR_RX_RDY;\n      value = uart->lsr;\n      break;\n    case LM32_UART_MSR:\n      value = uart->msr;\n      break;\n    case LM32_UART_DIV:\n      value = uart->div;\n      break;\n    default:\n      hw_abort (me, \"read from invalid register address: 0x%x.\", uart_reg);\n    }\n\n  if (nr_bytes == 4)\n    {\n      dest_bytes[0] = value >> 24;\n      dest_bytes[1] = value >> 16;\n      dest_bytes[2] = value >> 8;\n      dest_bytes[3] = value;\n    }\n  else\n    hw_abort (me, \"read of unsupported number of bytes: %d\", nr_bytes);\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          197,
+          0
+        ],
+        [
+          262,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "lm32uart_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nattach_lm32uart_regs (struct hw *me, struct lm32uart *uart)\n{\n  unsigned_word attach_address;\n  int attach_space;\n  unsigned attach_size;\n  reg_property_spec reg;\n\n  if (hw_find_property (me, \"reg\") == NULL)\n    hw_abort (me, \"Missing \\\"reg\\\" property\");\n  if (!hw_find_reg_array_property (me, \"reg\", 0, &reg))\n    hw_abort (me, \"\\\"reg\\\" property must contain three addr/size entries\");\n  hw_unit_address_to_attach_address (hw_parent (me),\n\t\t\t\t     &reg.address,\n\t\t\t\t     &attach_space, &attach_address, me);\n  uart->base = attach_address;\n  hw_unit_size_to_attach_size (hw_parent (me), &reg.size, &attach_size, me);\n  uart->limit = attach_address + (attach_size - 1);\n  hw_attach_address (hw_parent (me),\n\t\t     0, attach_space, attach_address, attach_size, me);\n}",
+      "fn_code_pos": [
+        [
+          264,
+          0
+        ],
+        [
+          284,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_lm32uart_regs",
+        "parameters": {
+          "me": "struct hw",
+          "uart": "struct lm32uart"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nlm32uart_finish (struct hw *me)\n{\n  struct lm32uart *uart;\n  int i;\n\n  uart = HW_ZALLOC (me, struct lm32uart);\n  set_hw_data (me, uart);\n  set_hw_io_read_buffer (me, lm32uart_io_read_buffer);\n  set_hw_io_write_buffer (me, lm32uart_io_write_buffer);\n  set_hw_ports (me, lm32uart_ports);\n\n  /* Attach ourself to our parent bus.  */\n  attach_lm32uart_regs (me, uart);\n\n  /* Initialize the UART.  */\n  uart->rbr = 0;\n  uart->thr = 0;\n  uart->ier = 0;\n  uart->iir = 0;\n  uart->lcr = 0;\n  uart->mcr = 0;\n  uart->lsr = LM32_UART_LSR_TX_RDY;\n  uart->msr = 0;\n  uart->div = 0;\t\t/* By setting to zero, characters are output immediately.  */\n}",
+      "fn_code_pos": [
+        [
+          286,
+          0
+        ],
+        [
+          311,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "lm32uart_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct lm32uart\n{\n  unsigned base;\t\t/* Base address of this UART.  */\n  unsigned limit;\t\t/* Limit address of this UART.  */\n  unsigned char rbr;\n  unsigned char thr;\n  unsigned char ier;\n  unsigned char iir;\n  unsigned char lcr;\n  unsigned char mcr;\n  unsigned char lsr;\n  unsigned char msr;\n  unsigned char div;\n  struct hw_event *event;\n}",
+      {
+        "base": "unsigned",
+        "limit": "unsigned",
+        "rbr": "unsigned char",
+        "thr": "unsigned char",
+        "ier": "unsigned char",
+        "iir": "unsigned char",
+        "lcr": "unsigned char",
+        "mcr": "unsigned char",
+        "lsr": "unsigned char",
+        "msr": "unsigned char",
+        "div": "unsigned char",
+        "*event": "struct hw_event"
+      },
+      "lm32uart",
+      [
+        27,
+        0
+      ],
+      [
+        41,
+        1
+      ]
+    ],
+    [
+      "struct lm32uart\n{\n  unsigned base;\t\t/* Base address of this UART.  */\n  unsigned limit;\t\t/* Limit address of this UART.  */\n  unsigned char rbr;\n  unsigned char thr;\n  unsigned char ier;\n  unsigned char iir;\n  unsigned char lcr;\n  unsigned char mcr;\n  unsigned char lsr;\n  unsigned char msr;\n  unsigned char div;\n  struct hw_event *event;\n}",
+      {
+        "base": "unsigned",
+        "limit": "unsigned",
+        "rbr": "unsigned char",
+        "thr": "unsigned char",
+        "ier": "unsigned char",
+        "iir": "unsigned char",
+        "lcr": "unsigned char",
+        "mcr": "unsigned char",
+        "lsr": "unsigned char",
+        "msr": "unsigned char",
+        "div": "unsigned char",
+        "*event": "struct hw_event"
+      },
+      "lm32uart",
+      [
+        27,
+        0
+      ],
+      [
+        41,
+        1
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        40,
+        2
+      ],
+      [
+        40,
+        17
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        77,
+        13
+      ],
+      [
+        77,
+        38
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        83,
+        18
+      ],
+      [
+        83,
+        27
+      ]
+    ],
+    [
+      "struct lm32uart",
+      {},
+      "",
+      [
+        85,
+        2
+      ],
+      [
+        85,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        121,
+        26
+      ],
+      [
+        121,
+        35
+      ]
+    ],
+    [
+      "struct lm32uart",
+      {},
+      "",
+      [
+        125,
+        2
+      ],
+      [
+        125,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        198,
+        25
+      ],
+      [
+        198,
+        34
+      ]
+    ],
+    [
+      "struct lm32uart",
+      {},
+      "",
+      [
+        202,
+        2
+      ],
+      [
+        202,
+        17
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        207,
+        2
+      ],
+      [
+        207,
+        16
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        265,
+        22
+      ],
+      [
+        265,
+        31
+      ]
+    ],
+    [
+      "struct lm32uart",
+      {},
+      "",
+      [
+        265,
+        37
+      ],
+      [
+        265,
+        52
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        287,
+        17
+      ],
+      [
+        287,
+        26
+      ]
+    ],
+    [
+      "struct lm32uart",
+      {},
+      "",
+      [
+        289,
+        2
+      ],
+      [
+        289,
+        17
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        313,
+        6
+      ],
+      [
+        313,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-assert.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum\n{\n  INT_PORT\n}",
+      {
+        "INT_PORT": ""
+      },
+      "",
+      [
+        72,
+        0
+      ],
+      [
+        75,
+        1
+      ]
+    ]
+  ]
+}

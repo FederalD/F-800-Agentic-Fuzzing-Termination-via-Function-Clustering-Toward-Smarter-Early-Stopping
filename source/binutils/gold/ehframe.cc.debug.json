@@ -1,0 +1,727 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nEh_frame_hdr::do_sized_write(Output_file* of)\n{\n  const off_t off = this->offset();\n  const off_t oview_size = this->data_size();\n  unsigned char* const oview = of->get_output_view(off, oview_size);\n\n  // Version number.\n  oview[0] = 1;\n\n  // Write out a 4 byte PC relative offset to the address of the\n  // .eh_frame section.\n  oview[1] = elfcpp::DW_EH_PE_pcrel | elfcpp::DW_EH_PE_sdata4;\n  uint64_t eh_frame_address = this->eh_frame_section_->address();\n  uint64_t eh_frame_hdr_address = this->address();\n  uint64_t eh_frame_offset = (eh_frame_address -\n\t\t\t      (eh_frame_hdr_address + 4));\n  elfcpp::Swap<32, big_endian>::writeval(oview + 4, eh_frame_offset);\n\n  if (this->any_unrecognized_eh_frame_sections_\n      || this->fde_offsets_.empty())\n    {\n      // There are no FDEs, or we didn't recognize the format of the\n      // some of the .eh_frame sections, so we can't write out the\n      // sorted table.\n      oview[2] = elfcpp::DW_EH_PE_omit;\n      oview[3] = elfcpp::DW_EH_PE_omit;\n\n      gold_assert(oview_size == 8);\n    }\n  else\n    {\n      oview[2] = elfcpp::DW_EH_PE_udata4;\n      oview[3] = elfcpp::DW_EH_PE_datarel | elfcpp::DW_EH_PE_sdata4;\n\n      elfcpp::Swap<32, big_endian>::writeval(oview + 8,\n\t\t\t\t\t     this->fde_offsets_.size());\n\n      // We have the offsets of the FDEs in the .eh_frame section.  We\n      // couldn't easily get the PC values before, as they depend on\n      // relocations which are, of course, target specific.  This code\n      // is run after all those relocations have been applied to the\n      // output file.  Here we read the output file again to find the\n      // PC values.  Then we sort the list and write it out.\n\n      Fde_addresses<size> fde_addresses(this->fde_offsets_.size());\n      this->get_fde_addresses<size, big_endian>(of, &this->fde_offsets_,\n\t\t\t\t\t\t&fde_addresses);\n\n      std::sort(fde_addresses.begin(), fde_addresses.end(),\n\t\tFde_address_compare<size>());\n\n      typename elfcpp::Elf_types<size>::Elf_Addr output_address;\n      output_address = this->address();\n\n      unsigned char* pfde = oview + 12;\n      for (typename Fde_addresses<size>::iterator p = fde_addresses.begin();\n\t   p != fde_addresses.end();\n\t   ++p)\n\t{\n\t  elfcpp::Swap<32, big_endian>::writeval(pfde,\n\t\t\t\t\t\t p->first - output_address);\n\t  elfcpp::Swap<32, big_endian>::writeval(pfde + 4,\n\t\t\t\t\t\t p->second - output_address);\n\t  pfde += 8;\n\t}\n\n      gold_assert(pfde - oview == oview_size);\n    }\n\n  of->write_output_view(off, oview_size, oview);\n}",
+      "fn_code_pos": [
+        [
+          140,
+          0
+        ],
+        [
+          212,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\ntypename elfcpp::Elf_types<size>::Elf_Addr\nEh_frame_hdr::get_fde_pc(\n    typename elfcpp::Elf_types<size>::Elf_Addr eh_frame_address,\n    const unsigned char* eh_frame_contents,\n    section_offset_type fde_offset,\n    unsigned char fde_encoding)\n{\n  // The FDE starts with a 4 byte length and a 4 byte offset to the\n  // CIE.  The PC follows.\n  const unsigned char* p = eh_frame_contents + fde_offset + 8;\n\n  typename elfcpp::Elf_types<size>::Elf_Addr pc;\n  bool is_signed = (fde_encoding & elfcpp::DW_EH_PE_signed) != 0;\n  int pc_size = fde_encoding & 7;\n  if (pc_size == elfcpp::DW_EH_PE_absptr)\n    {\n      if (size == 32)\n\tpc_size = elfcpp::DW_EH_PE_udata4;\n      else if (size == 64)\n\tpc_size = elfcpp::DW_EH_PE_udata8;\n      else\n\tgold_unreachable();\n    }\n\n  switch (pc_size)\n    {\n    case elfcpp::DW_EH_PE_udata2:\n      pc = elfcpp::Swap<16, big_endian>::readval(p);\n      if (is_signed)\n\tpc = (pc ^ 0x8000) - 0x8000;\n      break;\n\n    case elfcpp::DW_EH_PE_udata4:\n      pc = elfcpp::Swap<32, big_endian>::readval(p);\n      if (size > 32 && is_signed)\n\tpc = (pc ^ 0x80000000) - 0x80000000;\n      break;\n\n    case elfcpp::DW_EH_PE_udata8:\n      gold_assert(size == 64);\n      pc = elfcpp::Swap_unaligned<64, big_endian>::readval(p);\n      break;\n\n    default:\n      // All other cases were rejected in Eh_frame::read_cie.\n      gold_unreachable();\n    }\n\n  switch (fde_encoding & 0x70)\n    {\n    case 0:\n      break;\n\n    case elfcpp::DW_EH_PE_pcrel:\n      pc += eh_frame_address + fde_offset + 8;\n      break;\n\n    case elfcpp::DW_EH_PE_datarel:\n      pc += parameters->target().ehframe_datarel_base();\n      break;\n\n    default:\n      // If other cases arise, then we have to handle them, or we have\n      // to reject them by returning false in Eh_frame::read_cie.\n      gold_unreachable();\n    }\n\n  gold_assert((fde_encoding & elfcpp::DW_EH_PE_indirect) == 0);\n\n  return pc;\n}",
+      "fn_code_pos": [
+        [
+          219,
+          0
+        ],
+        [
+          290,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nEh_frame_hdr::get_fde_addresses(Output_file* of,\n\t\t\t\tconst Fde_offsets* fde_offsets,\n\t\t\t\tFde_addresses<size>* fde_addresses)\n{\n  typename elfcpp::Elf_types<size>::Elf_Addr eh_frame_address;\n  eh_frame_address = this->eh_frame_section_->address();\n  off_t eh_frame_offset = this->eh_frame_section_->offset();\n  off_t eh_frame_size = this->eh_frame_section_->data_size();\n  const unsigned char* eh_frame_contents = of->get_input_view(eh_frame_offset,\n\t\t\t\t\t\t\t      eh_frame_size);\n\n  for (Fde_offsets::const_iterator p = fde_offsets->begin();\n       p != fde_offsets->end();\n       ++p)\n    {\n      typename elfcpp::Elf_types<size>::Elf_Addr fde_pc;\n      fde_pc = this->get_fde_pc<size, big_endian>(eh_frame_address,\n\t\t\t\t\t\t  eh_frame_contents,\n\t\t\t\t\t\t  p->first, p->second);\n      fde_addresses->push_back(fde_pc, eh_frame_address + p->first);\n    }\n\n  of->free_input_view(eh_frame_offset, eh_frame_size, eh_frame_contents);\n}",
+      "fn_code_pos": [
+        [
+          298,
+          0
+        ],
+        [
+          323,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nsection_offset_type\nFde::write(unsigned char* oview, section_offset_type output_offset,\n\t   section_offset_type offset, uint64_t address, unsigned int addralign,\n\t   section_offset_type cie_offset, unsigned char fde_encoding,\n\t   Eh_frame_hdr* eh_frame_hdr)\n{\n  gold_assert((offset & (addralign - 1)) == 0);\n\n  size_t length = this->contents_.length();\n\n  // We add 8 when getting the aligned length to account for the\n  // length word and the CIE offset.\n  size_t aligned_full_length = align_address(length + 8, addralign);\n\n  // Write the length of the FDE as a 32-bit word.  The length word\n  // does not include the four bytes of the length word itself, but it\n  // does include the offset to the CIE.\n  elfcpp::Swap<32, big_endian>::writeval(oview + offset,\n                                         aligned_full_length - 4);\n\n  // Write the offset to the CIE as a 32-bit word.  This is the\n  // difference between the address of the offset word itself and the\n  // CIE address.\n  elfcpp::Swap<32, big_endian>::writeval(oview + offset + 4,\n\t\t\t\t\t offset + 4 - cie_offset);\n\n  // Copy the rest of the FDE.  Note that this is run before\n  // relocation processing is done on this section, so the relocations\n  // will later be applied to the FDE data.\n  memcpy(oview + offset + 8, this->contents_.data(), length);\n\n  // If this FDE is associated with a PLT, fill in the PLT's address\n  // and size.\n  if (this->object_ == NULL)\n    {\n      gold_assert(memcmp(oview + offset + 8, \"\\0\\0\\0\\0\\0\\0\\0\\0\", 8) == 0);\n      uint64_t paddress;\n      off_t psize;\n      parameters->target().plt_fde_location(this->u_.from_linker.plt,\n\t\t\t\t\t    oview + offset + 8,\n\t\t\t\t\t    &paddress, &psize);\n      uint64_t poffset = paddress - (address + offset + 8);\n      int32_t spoffset = static_cast<int32_t>(poffset);\n      uint32_t upsize = static_cast<uint32_t>(psize);\n      if (static_cast<uint64_t>(static_cast<int64_t>(spoffset)) != poffset\n\t  || static_cast<off_t>(upsize) != psize)\n\tgold_warning(_(\"overflow in PLT unwind data; \"\n\t\t       \"unwinding through PLT may fail\"));\n      elfcpp::Swap<32, big_endian>::writeval(oview + offset + 8, spoffset);\n      elfcpp::Swap<32, big_endian>::writeval(oview + offset + 12, upsize);\n    }\n\n  if (aligned_full_length > length + 8)\n    memset(oview + offset + length + 8, 0, aligned_full_length - (length + 8));\n\n  // Tell the exception frame header about this FDE.\n  if (eh_frame_hdr != NULL)\n    eh_frame_hdr->record_fde(output_offset + offset, fde_encoding);\n\n  return offset + aligned_full_length;\n}",
+      "fn_code_pos": [
+        [
+          334,
+          0
+        ],
+        [
+          395,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nsection_offset_type\nCie::write(unsigned char* oview, section_offset_type output_offset,\n\t   section_offset_type offset, uint64_t address,\n\t   unsigned int addralign, Eh_frame_hdr* eh_frame_hdr,\n\t   Post_fdes* post_fdes)\n{\n  gold_assert((offset & (addralign - 1)) == 0);\n\n  section_offset_type cie_offset = offset;\n\n  size_t length = this->contents_.length();\n\n  // We add 8 when getting the aligned length to account for the\n  // length word and the CIE tag.\n  size_t aligned_full_length = align_address(length + 8, addralign);\n\n  // Write the length of the CIE as a 32-bit word.  The length word\n  // does not include the four bytes of the length word itself.\n  elfcpp::Swap<32, big_endian>::writeval(oview + offset,\n                                         aligned_full_length - 4);\n\n  // Write the tag which marks this as a CIE: a 32-bit zero.\n  elfcpp::Swap<32, big_endian>::writeval(oview + offset + 4, 0);\n\n  // Write out the CIE data.\n  memcpy(oview + offset + 8, this->contents_.data(), length);\n\n  if (aligned_full_length > length + 8)\n    memset(oview + offset + length + 8, 0, aligned_full_length - (length + 8));\n\n  offset += aligned_full_length;\n\n  // Write out the associated FDEs.\n  unsigned char fde_encoding = this->fde_encoding_;\n  for (std::vector<Fde*>::const_iterator p = this->fdes_.begin();\n       p != this->fdes_.end();\n       ++p)\n    {\n      if ((*p)->post_map())\n\tpost_fdes->push_back(Post_fde(*p, cie_offset, fde_encoding));\n      else\n\toffset = (*p)->write<size, big_endian>(oview, output_offset, offset,\n\t\t\t\t\t       address, addralign, cie_offset,\n\t\t\t\t\t       fde_encoding, eh_frame_hdr);\n    }\n\n  return offset;\n}",
+      "fn_code_pos": [
+        [
+          452,
+          0
+        ],
+        [
+          500,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nEh_frame::Eh_frame_section_disposition\nEh_frame::add_ehframe_input_section(\n    Sized_relobj_file<size, big_endian>* object,\n    const unsigned char* symbols,\n    section_size_type symbols_size,\n    const unsigned char* symbol_names,\n    section_size_type symbol_names_size,\n    unsigned int shndx,\n    unsigned int reloc_shndx,\n    unsigned int reloc_type)\n{\n  // Get the section contents.\n  section_size_type contents_len;\n  const unsigned char* pcontents = object->section_contents(shndx,\n\t\t\t\t\t\t\t    &contents_len,\n\t\t\t\t\t\t\t    false);\n  if (contents_len == 0)\n    return EH_EMPTY_SECTION;\n\n  // If this is the marker section for the end of the data, then\n  // return false to force it to be handled as an ordinary input\n  // section.  If we don't do this, we won't correctly handle the case\n  // of unrecognized .eh_frame sections.\n  if (contents_len == 4\n      && elfcpp::Swap<32, big_endian>::readval(pcontents) == 0)\n    return EH_END_MARKER_SECTION;\n\n  New_cies new_cies;\n  if (!this->do_add_ehframe_input_section(object, symbols, symbols_size,\n\t\t\t\t\t  symbol_names, symbol_names_size,\n\t\t\t\t\t  shndx, reloc_shndx,\n\t\t\t\t\t  reloc_type, pcontents,\n\t\t\t\t\t  contents_len, &new_cies))\n    {\n      if (this->eh_frame_hdr_ != NULL)\n\tthis->eh_frame_hdr_->found_unrecognized_eh_frame_section();\n\n      for (New_cies::iterator p = new_cies.begin();\n\t   p != new_cies.end();\n\t   ++p)\n\tdelete p->first;\n\n      return EH_UNRECOGNIZED_SECTION;\n    }\n\n  // Now that we know we are using this section, record any new CIEs\n  // that we found.\n  for (New_cies::const_iterator p = new_cies.begin();\n       p != new_cies.end();\n       ++p)\n    {\n      if (p->second)\n\tthis->cie_offsets_.insert(p->first);\n      else\n\tthis->unmergeable_cie_offsets_.push_back(p->first);\n    }\n\n  return EH_OPTIMIZABLE_SECTION;\n}",
+      "fn_code_pos": [
+        [
+          568,
+          0
+        ],
+        [
+          627,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nbool\nEh_frame::do_add_ehframe_input_section(\n    Sized_relobj_file<size, big_endian>* object,\n    const unsigned char* symbols,\n    section_size_type symbols_size,\n    const unsigned char* symbol_names,\n    section_size_type symbol_names_size,\n    unsigned int shndx,\n    unsigned int reloc_shndx,\n    unsigned int reloc_type,\n    const unsigned char* pcontents,\n    section_size_type contents_len,\n    New_cies* new_cies)\n{\n  Track_relocs<size, big_endian> relocs;\n\n  const unsigned char* p = pcontents;\n  const unsigned char* pend = p + contents_len;\n\n  // Get the contents of the reloc section if any.\n  if (!relocs.initialize(object, reloc_shndx, reloc_type))\n    return false;\n\n  // Keep track of which CIEs are at which offsets.\n  Offsets_to_cie cies;\n\n  while (p < pend)\n    {\n      if (pend - p < 4)\n\treturn false;\n\n      // There shouldn't be any relocations here.\n      if (relocs.advance(p + 4 - pcontents) > 0)\n\treturn false;\n\n      unsigned int len = elfcpp::Swap<32, big_endian>::readval(p);\n      p += 4;\n      if (len == 0)\n\t{\n\t  // We should only find a zero-length entry at the end of the\n\t  // section.\n\t  if (p < pend)\n\t    return false;\n\t  break;\n\t}\n      // We don't support a 64-bit .eh_frame.\n      if (len == 0xffffffff)\n\treturn false;\n      if (static_cast<unsigned int>(pend - p) < len)\n\treturn false;\n\n      const unsigned char* const pentend = p + len;\n\n      if (pend - p < 4)\n\treturn false;\n      if (relocs.advance(p + 4 - pcontents) > 0)\n\treturn false;\n\n      unsigned int id = elfcpp::Swap<32, big_endian>::readval(p);\n      p += 4;\n\n      if (id == 0)\n\t{\n\t  // CIE.\n\t  if (!this->read_cie(object, shndx, symbols, symbols_size,\n\t\t\t      symbol_names, symbol_names_size,\n\t\t\t      pcontents, p, pentend, &relocs, &cies,\n\t\t\t      new_cies))\n\t    return false;\n\t}\n      else\n\t{\n\t  // FDE.\n\t  if (!this->read_fde(object, shndx, symbols, symbols_size,\n\t\t\t      pcontents, id, p, pentend, &relocs, &cies))\n\t    return false;\n\t}\n\n      p = pentend;\n    }\n\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          631,
+          0
+        ],
+        [
+          714,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nbool\nEh_frame::read_cie(Sized_relobj_file<size, big_endian>* object,\n\t\t   unsigned int shndx,\n\t\t   const unsigned char* symbols,\n\t\t   section_size_type symbols_size,\n\t\t   const unsigned char* symbol_names,\n\t\t   section_size_type symbol_names_size,\n\t\t   const unsigned char* pcontents,\n\t\t   const unsigned char* pcie,\n\t\t   const unsigned char* pcieend,\n\t\t   Track_relocs<size, big_endian>* relocs,\n\t\t   Offsets_to_cie* cies,\n\t\t   New_cies* new_cies)\n{\n  bool mergeable = true;\n\n  // We need to find the personality routine if there is one, since we\n  // can only merge CIEs which use the same routine.  We also need to\n  // find the FDE encoding if there is one, so that we can read the PC\n  // from the FDE.\n\n  const unsigned char* p = pcie;\n\n  if (pcieend - p < 1)\n    return false;\n  unsigned char version = *p++;\n  if (version != 1 && version != 3)\n    return false;\n\n  const unsigned char* paug = p;\n  const void* paugendv = memchr(p, '\\0', pcieend - p);\n  const unsigned char* paugend = static_cast<const unsigned char*>(paugendv);\n  if (paugend == NULL)\n    return false;\n  p = paugend + 1;\n\n  if (paug[0] == 'e' && paug[1] == 'h')\n    {\n      // This is a CIE from gcc before version 3.0.  We can't merge\n      // these.  We can still read the FDEs.\n      mergeable = false;\n      paug += 2;\n      if (*paug != '\\0')\n\treturn false;\n      if (pcieend - p < size / 8)\n\treturn false;\n      p += size / 8;\n    }\n\n  // Skip the code alignment.\n  if (!skip_leb128(&p, pcieend))\n    return false;\n\n  // Skip the data alignment.\n  if (!skip_leb128(&p, pcieend))\n    return false;\n\n  // Skip the return column.\n  if (version == 1)\n    {\n      if (pcieend - p < 1)\n\treturn false;\n      ++p;\n    }\n  else\n    {\n      if (!skip_leb128(&p, pcieend))\n\treturn false;\n    }\n\n  if (*paug == 'z')\n    {\n      ++paug;\n      // Skip the augmentation size.\n      if (!skip_leb128(&p, pcieend))\n\treturn false;\n    }\n\n  unsigned char fde_encoding = elfcpp::DW_EH_PE_absptr;\n  int per_offset = -1;\n  while (*paug != '\\0')\n    {\n      switch (*paug)\n\t{\n\tcase 'L': // LSDA encoding.\n\t  if (pcieend - p < 1)\n\t    return false;\n\t  ++p;\n\t  break;\n\n\tcase 'R': // FDE encoding.\n\t  if (pcieend - p < 1)\n\t    return false;\n\t  fde_encoding = *p;\n\t  switch (fde_encoding & 7)\n\t    {\n\t    case elfcpp::DW_EH_PE_absptr:\n\t    case elfcpp::DW_EH_PE_udata2:\n\t    case elfcpp::DW_EH_PE_udata4:\n\t    case elfcpp::DW_EH_PE_udata8:\n\t      break;\n\t    default:\n\t      // We don't expect to see any other cases here, and\n\t      // we're not prepared to handle them.\n\t      return false;\n\t    }\n\t  ++p;\n\t  break;\n\n\tcase 'S':\n\t  break;\n\n\tcase 'P':\n\t  // Personality encoding.\n\t  {\n\t    if (pcieend - p < 1)\n\t      return false;\n\t    unsigned char per_encoding = *p;\n\t    ++p;\n\n\t    if ((per_encoding & 0x60) == 0x60)\n\t      return false;\n\t    unsigned int per_width;\n\t    switch (per_encoding & 7)\n\t      {\n\t      case elfcpp::DW_EH_PE_udata2:\n\t\tper_width = 2;\n\t\tbreak;\n\t      case elfcpp::DW_EH_PE_udata4:\n\t\tper_width = 4;\n\t\tbreak;\n\t      case elfcpp::DW_EH_PE_udata8:\n\t\tper_width = 8;\n\t\tbreak;\n\t      case elfcpp::DW_EH_PE_absptr:\n\t\tper_width = size / 8;\n\t\tbreak;\n\t      default:\n\t\treturn false;\n\t      }\n\n\t    if ((per_encoding & 0xf0) == elfcpp::DW_EH_PE_aligned)\n\t      {\n\t\tunsigned int len = p - pcie;\n\t\tlen += per_width - 1;\n\t\tlen &= ~ (per_width - 1);\n\t\tif (static_cast<unsigned int>(pcieend - p) < len)\n\t\t  return false;\n\t\tp += len;\n\t      }\n\n\t    per_offset = p - pcontents;\n\n\t    if (static_cast<unsigned int>(pcieend - p) < per_width)\n\t      return false;\n\t    p += per_width;\n\t  }\n\t  break;\n\n\tdefault:\n\t  return false;\n\t}\n\n      ++paug;\n    }\n\n  const char* personality_name = \"\";\n  if (per_offset != -1)\n    {\n      if (relocs->advance(per_offset) > 0)\n\treturn false;\n      if (relocs->next_offset() != per_offset)\n\treturn false;\n\n      unsigned int personality_symndx = relocs->next_symndx();\n      if (personality_symndx == -1U)\n\treturn false;\n\n      if (personality_symndx < object->local_symbol_count())\n\t{\n\t  // We can only merge this CIE if the personality routine is\n\t  // a global symbol.  We can still read the FDEs.\n\t  mergeable = false;\n\t}\n      else\n\t{\n\t  const int sym_size = elfcpp::Elf_sizes<size>::sym_size;\n\t  if (personality_symndx >= symbols_size / sym_size)\n\t    return false;\n\t  elfcpp::Sym<size, big_endian> sym(symbols\n\t\t\t\t\t    + (personality_symndx * sym_size));\n\t  unsigned int name_offset = sym.get_st_name();\n\t  if (name_offset >= symbol_names_size)\n\t    return false;\n\t  personality_name = (reinterpret_cast<const char*>(symbol_names)\n\t\t\t      + name_offset);\n\t}\n\n      int r = relocs->advance(per_offset + 1);\n      gold_assert(r == 1);\n    }\n\n  if (relocs->advance(pcieend - pcontents) > 0)\n    return false;\n\n  Cie cie(object, shndx, (pcie - 8) - pcontents, fde_encoding, \n\t  personality_name, pcie, pcieend - pcie);\n  Cie* cie_pointer = NULL;\n  if (mergeable)\n    {\n      Cie_offsets::iterator find_cie = this->cie_offsets_.find(&cie);\n      if (find_cie != this->cie_offsets_.end())\n\tcie_pointer = *find_cie;\n      else\n\t{\n\t  // See if we already saw this CIE in this object file.\n\t  for (New_cies::const_iterator pc = new_cies->begin();\n\t       pc != new_cies->end();\n\t       ++pc)\n\t    {\n\t      if (*(pc->first) == cie)\n\t\t{\n\t\t  cie_pointer = pc->first;\n\t\t  break;\n\t\t}\n\t    }\n\t}\n    }\n\n  if (cie_pointer == NULL)\n    {\n      cie_pointer = new Cie(cie);\n      new_cies->push_back(std::make_pair(cie_pointer, mergeable));\n    }\n  else\n    {\n      // We are deleting this CIE.  Record that in our mapping from\n      // input sections to the output section.  At this point we don't\n      // know for sure that we are doing a special mapping for this\n      // input section, but that's OK--if we don't do a special\n      // mapping, nobody will ever ask for the mapping we add here.\n      object->add_merge_mapping(this, shndx, (pcie - 8) - pcontents,\n                                pcieend - (pcie - 8), -1);\n    }\n\n  // Record this CIE plus the offset in the input section.\n  cies->insert(std::make_pair(pcie - pcontents, cie_pointer));\n\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          718,
+          0
+        ],
+        [
+          968,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nbool\nEh_frame::read_fde(Sized_relobj_file<size, big_endian>* object,\n\t\t   unsigned int shndx,\n\t\t   const unsigned char* symbols,\n\t\t   section_size_type symbols_size,\n\t\t   const unsigned char* pcontents,\n\t\t   unsigned int offset,\n\t\t   const unsigned char* pfde,\n\t\t   const unsigned char* pfdeend,\n\t\t   Track_relocs<size, big_endian>* relocs,\n\t\t   Offsets_to_cie* cies)\n{\n  // OFFSET is the distance between the 4 bytes before PFDE to the\n  // start of the CIE.  The offset we recorded for the CIE is 8 bytes\n  // after the start of the CIE--after the length and the zero tag.\n  unsigned int cie_offset = (pfde - 4 - pcontents) - offset + 8;\n  Offsets_to_cie::const_iterator pcie = cies->find(cie_offset);\n  if (pcie == cies->end())\n    return false;\n  Cie* cie = pcie->second;\n\n  int pc_size = 0;\n  switch (cie->fde_encoding() & 7)\n    {\n    case elfcpp::DW_EH_PE_udata2:\n      pc_size = 2;\n      break;\n    case elfcpp::DW_EH_PE_udata4:\n      pc_size = 4;\n      break;\n    case elfcpp::DW_EH_PE_udata8:\n      gold_assert(size == 64);\n      pc_size = 8;\n      break;\n    case elfcpp::DW_EH_PE_absptr:\n      pc_size = size == 32 ? 4 : 8;\n      break;\n    default:\n      // All other cases were rejected in Eh_frame::read_cie.\n      gold_unreachable();\n    }\n\n  // The FDE should start with a reloc to the start of the code which\n  // it describes.\n  if (relocs->advance(pfde - pcontents) > 0)\n    return false;\n  if (relocs->next_offset() != pfde - pcontents)\n    {\n      // In an object produced by a relocatable link, gold may have\n      // discarded a COMDAT group in the previous link, but not the\n      // corresponding FDEs. In that case, gold will have discarded\n      // the relocations, so the FDE will have a non-relocatable zero\n      // (regardless of whether the PC encoding is absolute, pc-relative,\n      // or data-relative) instead of a pointer to the start of the code.\n\n      uint64_t pc_value = 0;\n      switch (pc_size)\n\t{\n\tcase 2:\n\t  pc_value = elfcpp::Swap<16, big_endian>::readval(pfde);\n\t  break;\n\tcase 4:\n\t  pc_value = elfcpp::Swap<32, big_endian>::readval(pfde);\n\t  break;\n\tcase 8:\n\t  pc_value = elfcpp::Swap_unaligned<64, big_endian>::readval(pfde);\n\t  break;\n\tdefault:\n\t  gold_unreachable();\n\t}\n\n      if (pc_value == 0)\n\t{\n\t  // This FDE applies to a discarded function.  We\n\t  // can discard this FDE.\n\t  object->add_merge_mapping(this, shndx, (pfde - 8) - pcontents,\n\t\t\t\t    pfdeend - (pfde - 8), -1);\n\t  return true;\n\t}\n\n      // Otherwise, reject the FDE.\n      return false;\n    }\n\n  unsigned int symndx = relocs->next_symndx();\n  if (symndx == -1U)\n    return false;\n\n  // There can be another reloc in the FDE, if the CIE specifies an\n  // LSDA (language specific data area).  We currently don't care.  We\n  // will care later if we want to optimize the LSDA from an absolute\n  // pointer to a PC relative offset when generating a shared library.\n  relocs->advance(pfdeend - pcontents);\n\n  // Find the section index for code that this FDE describes.\n  // If we have discarded the section, we can also discard the FDE.\n  unsigned int fde_shndx;\n  const int sym_size = elfcpp::Elf_sizes<size>::sym_size;\n  if (symndx >= symbols_size / sym_size)\n    return false;\n  elfcpp::Sym<size, big_endian> sym(symbols + symndx * sym_size);\n  bool is_ordinary;\n  fde_shndx = object->adjust_sym_shndx(symndx, sym.get_st_shndx(),\n\t\t\t\t       &is_ordinary);\n  bool is_discarded = (is_ordinary\n\t\t       && fde_shndx != elfcpp::SHN_UNDEF\n\t\t       && fde_shndx < object->shnum()\n\t\t       && !object->is_section_included(fde_shndx));\n\n  // Fetch the address range field from the FDE. The offset and size\n  // of the field depends on the PC encoding given in the CIE, but\n  // it is always an absolute value. If the address range is 0, this\n  // FDE corresponds to a function that was discarded during optimization\n  // (too late to discard the corresponding FDE).\n  uint64_t address_range = 0;\n  switch (pc_size)\n    {\n    case 2:\n      address_range = elfcpp::Swap<16, big_endian>::readval(pfde + 2);\n      break;\n    case 4:\n      address_range = elfcpp::Swap<32, big_endian>::readval(pfde + 4);\n      break;\n    case 8:\n      address_range = elfcpp::Swap_unaligned<64, big_endian>::readval(pfde + 8);\n      break;\n    default:\n      gold_unreachable();\n    }\n\n  if (is_discarded || address_range == 0)\n    {\n      // This FDE applies to a discarded function.  We\n      // can discard this FDE.\n      object->add_merge_mapping(this, shndx, (pfde - 8) - pcontents,\n                                pfdeend - (pfde - 8), -1);\n      return true;\n    }\n\n  cie->add_fde(new Fde(object, shndx, (pfde - 8) - pcontents,\n\t\t       pfde, pfdeend - pfde));\n\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          972,
+          0
+        ],
+        [
+          1116,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nEh_frame::do_sized_write(unsigned char* oview)\n{\n  uint64_t address = this->address();\n  unsigned int addralign = this->addralign();\n  section_offset_type o = 0;\n  const off_t output_offset = this->offset() - this->output_section()->offset();\n  Post_fdes post_fdes;\n  for (Unmergeable_cie_offsets::iterator p =\n\t this->unmergeable_cie_offsets_.begin();\n       p != this->unmergeable_cie_offsets_.end();\n       ++p)\n    o = (*p)->write<size, big_endian>(oview, output_offset, o, address,\n\t\t\t\t      addralign, this->eh_frame_hdr_,\n\t\t\t\t      &post_fdes);\n  for (Cie_offsets::iterator p = this->cie_offsets_.begin();\n       p != this->cie_offsets_.end();\n       ++p)\n    o = (*p)->write<size, big_endian>(oview, output_offset, o, address,\n\t\t\t\t      addralign, this->eh_frame_hdr_,\n\t\t\t\t      &post_fdes);\n  for (Post_fdes::iterator p = post_fdes.begin();\n       p != post_fdes.end();\n       ++p)\n    o = (*p).fde->write<size, big_endian>(oview, output_offset, o, address,\n\t\t\t\t\t  addralign, (*p).cie_offset,\n\t\t\t\t\t  (*p).fde_encoding,\n\t\t\t\t\t  this->eh_frame_hdr_);\n}",
+      "fn_code_pos": [
+        [
+          1254,
+          0
+        ],
+        [
+          1283,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Eh_frame_hdr::Eh_frame_hdr(Output_section* eh_frame_section,\n\t\t\t   const Eh_frame* eh_frame_data)\n  : Output_section_data(4),\n    eh_frame_section_(eh_frame_section),\n    eh_frame_data_(eh_frame_data),\n    fde_offsets_(),\n    any_unrecognized_eh_frame_sections_(false)\n{\n}",
+      "fn_code_pos": [
+        [
+          80,
+          0
+        ],
+        [
+          88,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame_hdr::Eh_frame_hdr",
+        "parameters": {
+          "eh_frame_section": "Output_section",
+          "eh_frame_data": "Eh_frame"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\nEh_frame_hdr::set_final_data_size()\n{\n  unsigned int data_size = eh_frame_hdr_size + 4;\n  if (!this->any_unrecognized_eh_frame_sections_)\n    {\n      unsigned int fde_count = this->eh_frame_data_->fde_count();\n      if (fde_count != 0)\n\tdata_size += 4 + 8 * fde_count;\n      this->fde_offsets_.reserve(fde_count);\n    }\n  this->set_data_size(data_size);\n}",
+      "fn_code_pos": [
+        [
+          92,
+          0
+        ],
+        [
+          104,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame_hdr::set_final_data_size",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nEh_frame_hdr::do_write(Output_file* of)\n{\n  switch (parameters->size_and_endianness())\n    {\n#ifdef HAVE_TARGET_32_LITTLE\n    case Parameters::TARGET_32_LITTLE:\n      this->do_sized_write<32, false>(of);\n      break;\n#endif\n#ifdef HAVE_TARGET_32_BIG\n    case Parameters::TARGET_32_BIG:\n      this->do_sized_write<32, true>(of);\n      break;\n#endif\n#ifdef HAVE_TARGET_64_LITTLE\n    case Parameters::TARGET_64_LITTLE:\n      this->do_sized_write<64, false>(of);\n      break;\n#endif\n#ifdef HAVE_TARGET_64_BIG\n    case Parameters::TARGET_64_BIG:\n      this->do_sized_write<64, true>(of);\n      break;\n#endif\n    default:\n      gold_unreachable();\n    }\n}",
+      "fn_code_pos": [
+        [
+          108,
+          0
+        ],
+        [
+          136,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame_hdr::do_write",
+        "parameters": {
+          "of": "Output_file"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Cie::~Cie()\n{\n  for (std::vector<Fde*>::iterator p = this->fdes_.begin();\n       p != this->fdes_.end();\n       ++p)\n    delete *p;\n}",
+      "fn_code_pos": [
+        [
+          401,
+          0
+        ],
+        [
+          407,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Cie::~Cie",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "section_offset_type\nCie::set_output_offset(section_offset_type output_offset,\n\t\t       unsigned int addralign,\n\t\t       Output_section_data *output_data)\n{\n  size_t length = this->contents_.length();\n\n  // Add 4 for length and 4 for zero CIE identifier tag.\n  length += 8;\n\n  if (this->object_ != NULL)\n    {\n      // Add a mapping so that relocations are applied correctly.\n      this->object_->add_merge_mapping(output_data, this->shndx_,\n                                       this->input_offset_, length,\n                                       output_offset);\n    }\n\n  length = align_address(length, addralign);\n\n  for (std::vector<Fde*>::const_iterator p = this->fdes_.begin();\n       p != this->fdes_.end();\n       ++p)\n    {\n      (*p)->add_mapping(output_offset + length, output_data);\n\n      size_t fde_length = (*p)->length();\n      fde_length = align_address(fde_length, addralign);\n      length += fde_length;\n    }\n\n  return output_offset + length;\n}",
+      "fn_code_pos": [
+        [
+          411,
+          0
+        ],
+        [
+          443,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Cie::set_output_offset",
+        "parameters": {
+          "output_offset": "section_offset_type",
+          "addralign": "unsigned int",
+          "output_data": "Output_section_data"
+        },
+        "return_type": "section_offset_type"
+      }
+    },
+    {
+      "fn_code": "bool\noperator==(const Cie& cie1, const Cie& cie2)\n{\n  return (cie1.personality_name_ == cie2.personality_name_\n\t  && cie1.contents_ == cie2.contents_);\n}",
+      "fn_code_pos": [
+        [
+          510,
+          0
+        ],
+        [
+          515,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "cie1": "Cie",
+          "cie2": "Cie"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "bool\noperator<(const Cie& cie1, const Cie& cie2)\n{\n  if (cie1.personality_name_ != cie2.personality_name_)\n    return cie1.personality_name_ < cie2.personality_name_;\n  return cie1.contents_ < cie2.contents_;\n}",
+      "fn_code_pos": [
+        [
+          519,
+          0
+        ],
+        [
+          525,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "cie1": "Cie",
+          "cie2": "Cie"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "Eh_frame::Eh_frame()\n  : Output_section_data(Output_data::default_alignment()),\n    eh_frame_hdr_(NULL),\n    cie_offsets_(),\n    unmergeable_cie_offsets_(),\n    mappings_are_done_(false),\n    final_data_size_(0)\n{\n}",
+      "fn_code_pos": [
+        [
+          529,
+          0
+        ],
+        [
+          537,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame::Eh_frame",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "bool\nEh_frame::skip_leb128(const unsigned char** pp, const unsigned char* pend)\n{\n  const unsigned char* p;\n  for (p = *pp; p < pend; ++p)\n    {\n      if ((*p & 0x80) == 0)\n\t{\n\t  *pp = p + 1;\n\t  return true;\n\t}\n    }\n  return false;\n}",
+      "fn_code_pos": [
+        [
+          542,
+          0
+        ],
+        [
+          555,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame::skip_leb128",
+        "parameters": {
+          "pp": "unsigned char",
+          "pend": "unsigned char"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "void\nEh_frame::add_ehframe_for_plt(Output_data* plt, const unsigned char* cie_data,\n\t\t\t      size_t cie_length, const unsigned char* fde_data,\n\t\t\t      size_t fde_length)\n{\n  Cie cie(NULL, 0, 0, elfcpp::DW_EH_PE_pcrel | elfcpp::DW_EH_PE_sdata4, \"\",\n\t  cie_data, cie_length);\n  Cie_offsets::iterator find_cie = this->cie_offsets_.find(&cie);\n  Cie* pcie;\n  if (find_cie != this->cie_offsets_.end())\n    pcie = *find_cie;\n  else\n    {\n      gold_assert(!this->mappings_are_done_);\n      pcie = new Cie(cie);\n      this->cie_offsets_.insert(pcie);\n    }\n\n  Fde* fde = new Fde(plt, fde_data, fde_length, this->mappings_are_done_);\n  pcie->add_fde(fde);\n\n  if (this->mappings_are_done_)\n    this->final_data_size_ += align_address(fde_length + 8, this->addralign());\n}",
+      "fn_code_pos": [
+        [
+          1120,
+          0
+        ],
+        [
+          1143,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame::add_ehframe_for_plt",
+        "parameters": {
+          "plt": "Output_data",
+          "cie_data": "unsigned char",
+          "cie_length": "size_t",
+          "fde_data": "unsigned char",
+          "fde_length": "size_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "unsigned int\nEh_frame::fde_count() const\n{\n  unsigned int ret = 0;\n  for (Unmergeable_cie_offsets::const_iterator p =\n\t this->unmergeable_cie_offsets_.begin();\n       p != this->unmergeable_cie_offsets_.end();\n       ++p)\n    ret += (*p)->fde_count();\n  for (Cie_offsets::const_iterator p = this->cie_offsets_.begin();\n       p != this->cie_offsets_.end();\n       ++p)\n    ret += (*p)->fde_count();\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          1147,
+          0
+        ],
+        [
+          1161,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame::fde_count",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\nEh_frame::set_final_data_size()\n{\n  // We can be called more than once if Layout::set_segment_offsets\n  // finds a better mapping.  We don't want to add all the mappings\n  // again.\n  if (this->mappings_are_done_)\n    {\n      this->set_data_size(this->final_data_size_);\n      return;\n    }\n\n  section_offset_type output_start = 0;\n  if (this->is_offset_valid())\n    output_start = this->offset() - this->output_section()->offset();\n  section_offset_type output_offset = output_start;\n\n  for (Unmergeable_cie_offsets::iterator p =\n\t this->unmergeable_cie_offsets_.begin();\n       p != this->unmergeable_cie_offsets_.end();\n       ++p)\n    output_offset = (*p)->set_output_offset(output_offset,\n\t\t\t\t\t    this->addralign(),\n\t\t\t\t\t    this);\n\n  for (Cie_offsets::iterator p = this->cie_offsets_.begin();\n       p != this->cie_offsets_.end();\n       ++p)\n    output_offset = (*p)->set_output_offset(output_offset,\n\t\t\t\t\t    this->addralign(),\n\t\t\t\t\t    this);\n\n  this->mappings_are_done_ = true;\n  this->final_data_size_ = output_offset - output_start;\n\n  gold_assert((output_offset & (this->addralign() - 1)) == 0);\n  this->set_data_size(this->final_data_size_);\n}",
+      "fn_code_pos": [
+        [
+          1165,
+          0
+        ],
+        [
+          1202,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame::set_final_data_size",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "bool\nEh_frame::do_output_offset(const Relobj* object, unsigned int shndx,\n\t\t\t   section_offset_type offset,\n\t\t\t   section_offset_type* poutput) const\n{\n  return object->merge_output_offset(shndx, offset, poutput);\n}",
+      "fn_code_pos": [
+        [
+          1206,
+          0
+        ],
+        [
+          1212,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame::do_output_offset",
+        "parameters": {
+          "object": "Relobj",
+          "shndx": "unsigned int",
+          "offset": "section_offset_type",
+          "poutput": "section_offset_type"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "void\nEh_frame::do_write(Output_file* of)\n{\n  const off_t offset = this->offset();\n  const off_t oview_size = this->data_size();\n  unsigned char* const oview = of->get_output_view(offset, oview_size);\n\n  switch (parameters->size_and_endianness())\n    {\n#ifdef HAVE_TARGET_32_LITTLE\n    case Parameters::TARGET_32_LITTLE:\n      this->do_sized_write<32, false>(oview);\n      break;\n#endif\n#ifdef HAVE_TARGET_32_BIG\n    case Parameters::TARGET_32_BIG:\n      this->do_sized_write<32, true>(oview);\n      break;\n#endif\n#ifdef HAVE_TARGET_64_LITTLE\n    case Parameters::TARGET_64_LITTLE:\n      this->do_sized_write<64, false>(oview);\n      break;\n#endif\n#ifdef HAVE_TARGET_64_BIG\n    case Parameters::TARGET_64_BIG:\n      this->do_sized_write<64, true>(oview);\n      break;\n#endif\n    default:\n      gold_unreachable();\n    }\n\n  of->write_output_view(offset, oview_size, oview);\n}",
+      "fn_code_pos": [
+        [
+          1216,
+          0
+        ],
+        [
+          1250,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame::do_write",
+        "parameters": {
+          "of": "Output_file"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "Eh_frame::add_ehframe_input_section<32, false>(\n    Sized_relobj_file<32, false>* object,\n    const unsigned char* symbols,\n    section_size_type symbols_size,\n    const unsigned char* symbol_names,\n    section_size_type symbol_names_size,\n    unsigned int shndx,\n    unsigned int reloc_shndx,\n    unsigned int reloc_type)",
+      "fn_dec_pos": [
+        [
+          1288,
+          0
+        ],
+        [
+          1296,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame::add_ehframe_input_section<32, false>",
+        "parameters": {
+          "object": "Sized_relobj_file<32, false>",
+          "symbols": "unsigned char",
+          "symbols_size": "section_size_type",
+          "symbol_names": "unsigned char",
+          "symbol_names_size": "section_size_type",
+          "shndx": "unsigned int",
+          "reloc_shndx": "unsigned int",
+          "reloc_type": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Eh_frame::add_ehframe_input_section<32, true>(\n    Sized_relobj_file<32, true>* object,\n    const unsigned char* symbols,\n    section_size_type symbols_size,\n    const unsigned char* symbol_names,\n    section_size_type symbol_names_size,\n    unsigned int shndx,\n    unsigned int reloc_shndx,\n    unsigned int reloc_type)",
+      "fn_dec_pos": [
+        [
+          1302,
+          0
+        ],
+        [
+          1310,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame::add_ehframe_input_section<32, true>",
+        "parameters": {
+          "object": "Sized_relobj_file<32, true>",
+          "symbols": "unsigned char",
+          "symbols_size": "section_size_type",
+          "symbol_names": "unsigned char",
+          "symbol_names_size": "section_size_type",
+          "shndx": "unsigned int",
+          "reloc_shndx": "unsigned int",
+          "reloc_type": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Eh_frame::add_ehframe_input_section<64, false>(\n    Sized_relobj_file<64, false>* object,\n    const unsigned char* symbols,\n    section_size_type symbols_size,\n    const unsigned char* symbol_names,\n    section_size_type symbol_names_size,\n    unsigned int shndx,\n    unsigned int reloc_shndx,\n    unsigned int reloc_type)",
+      "fn_dec_pos": [
+        [
+          1316,
+          0
+        ],
+        [
+          1324,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame::add_ehframe_input_section<64, false>",
+        "parameters": {
+          "object": "Sized_relobj_file<64, false>",
+          "symbols": "unsigned char",
+          "symbols_size": "section_size_type",
+          "symbol_names": "unsigned char",
+          "symbol_names_size": "section_size_type",
+          "shndx": "unsigned int",
+          "reloc_shndx": "unsigned int",
+          "reloc_type": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Eh_frame::add_ehframe_input_section<64, true>(\n    Sized_relobj_file<64, true>* object,\n    const unsigned char* symbols,\n    section_size_type symbols_size,\n    const unsigned char* symbol_names,\n    section_size_type symbol_names_size,\n    unsigned int shndx,\n    unsigned int reloc_shndx,\n    unsigned int reloc_type)",
+      "fn_dec_pos": [
+        [
+          1330,
+          0
+        ],
+        [
+          1338,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Eh_frame::add_ehframe_input_section<64, true>",
+        "parameters": {
+          "object": "Sized_relobj_file<64, true>",
+          "symbols": "unsigned char",
+          "symbols_size": "section_size_type",
+          "symbol_names": "unsigned char",
+          "symbol_names_size": "section_size_type",
+          "shndx": "unsigned int",
+          "reloc_shndx": "unsigned int",
+          "reloc_type": "unsigned int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"gold.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <cstring>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <algorithm>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"elfcpp.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"dwarf.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"reloc.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"ehframe.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

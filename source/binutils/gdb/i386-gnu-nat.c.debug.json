@@ -1,0 +1,914 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nfetch_fpregs (struct regcache *regcache, struct proc *thread)\n{\n  mach_msg_type_number_t count = i386_FLOAT_STATE_COUNT;\n  struct i386_float_state state;\n  kern_return_t err;\n\n  err = thread_get_state (thread->port, i386_FLOAT_STATE,\n\t\t\t  (thread_state_t) &state, &count);\n  if (err)\n    {\n      warning (_(\"Couldn't fetch floating-point state from %s\"),\n\t       proc_string (thread));\n      return;\n    }\n\n  if (!state.initialized)\n    {\n      /* The floating-point state isn't initialized.  */\n      i387_supply_fsave (regcache, -1, NULL);\n    }\n  else\n    {\n      /* Supply the floating-point registers.  */\n      i387_supply_fsave (regcache, -1, state.hw_state);\n    }\n}",
+      "fn_code_pos": [
+        [
+          59,
+          0
+        ],
+        [
+          85,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_fpregs",
+        "parameters": {
+          "regcache": "struct regcache",
+          "thread": "struct proc"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ngnu_fetch_registers (struct target_ops *ops,\n\t\t     struct regcache *regcache, int regno)\n{\n  struct proc *thread;\n  ptid_t ptid = regcache_get_ptid (regcache);\n\n  /* Make sure we know about new threads.  */\n  inf_update_procs (gnu_current_inf);\n\n  thread = inf_tid_to_thread (gnu_current_inf, ptid_get_lwp (ptid));\n  if (!thread)\n    error (_(\"Can't fetch registers from thread %s: No such thread\"),\n\t   target_pid_to_str (ptid));\n\n  if (regno < I386_NUM_GREGS || regno == -1)\n    {\n      thread_state_t state;\n\n      /* This does the dirty work for us.  */\n      state = proc_get_state (thread, 0);\n      if (!state)\n\t{\n\t  warning (_(\"Couldn't fetch registers from %s\"),\n\t\t   proc_string (thread));\n\t  return;\n\t}\n\n      if (regno == -1)\n\t{\n\t  int i;\n\n\t  proc_debug (thread, \"fetching all register\");\n\n\t  for (i = 0; i < I386_NUM_GREGS; i++)\n\t    regcache_raw_supply (regcache, i, REG_ADDR (state, i));\n\t  thread->fetched_regs = ~0;\n\t}\n      else\n\t{\n\t  proc_debug (thread, \"fetching register %s\",\n\t\t      gdbarch_register_name (get_regcache_arch (regcache),\n\t\t\t\t\t     regno));\n\n\t  regcache_raw_supply (regcache, regno,\n\t\t\t       REG_ADDR (state, regno));\n\t  thread->fetched_regs |= (1 << regno);\n\t}\n    }\n\n  if (regno >= I386_NUM_GREGS || regno == -1)\n    {\n      proc_debug (thread, \"fetching floating-point registers\");\n\n      fetch_fpregs (regcache, thread);\n    }\n}",
+      "fn_code_pos": [
+        [
+          88,
+          0
+        ],
+        [
+          144,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gnu_fetch_registers",
+        "parameters": {
+          "ops": "struct target_ops",
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstore_fpregs (const struct regcache *regcache, struct proc *thread, int regno)\n{\n  mach_msg_type_number_t count = i386_FLOAT_STATE_COUNT;\n  struct i386_float_state state;\n  kern_return_t err;\n\n  err = thread_get_state (thread->port, i386_FLOAT_STATE,\n\t\t\t  (thread_state_t) &state, &count);\n  if (err)\n    {\n      warning (_(\"Couldn't fetch floating-point state from %s\"),\n\t       proc_string (thread));\n      return;\n    }\n\n  /* FIXME: kettenis/2001-07-15: Is this right?  Should we somehow\n     take into account DEPRECATED_REGISTER_VALID like the old code did?  */\n  i387_collect_fsave (regcache, regno, state.hw_state);\n\n  err = thread_set_state (thread->port, i386_FLOAT_STATE,\n\t\t\t  (thread_state_t) &state, i386_FLOAT_STATE_COUNT);\n  if (err)\n    {\n      warning (_(\"Couldn't store floating-point state into %s\"),\n\t       proc_string (thread));\n      return;\n    }\n}",
+      "fn_code_pos": [
+        [
+          149,
+          0
+        ],
+        [
+          177,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_fpregs",
+        "parameters": {
+          "regcache": "struct regcache",
+          "thread": "struct proc",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ngnu_store_registers (struct target_ops *ops,\n\t\t     struct regcache *regcache, int regno)\n{\n  struct proc *thread;\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  ptid_t ptid = regcache_get_ptid (regcache);\n\n  /* Make sure we know about new threads.  */\n  inf_update_procs (gnu_current_inf);\n\n  thread = inf_tid_to_thread (gnu_current_inf, ptid_get_lwp (ptid));\n  if (!thread)\n    error (_(\"Couldn't store registers into thread %s: No such thread\"),\n\t   target_pid_to_str (ptid));\n\n  if (regno < I386_NUM_GREGS || regno == -1)\n    {\n      thread_state_t state;\n      thread_state_data_t old_state;\n      int was_aborted = thread->aborted;\n      int was_valid = thread->state_valid;\n      int trace;\n\n      if (!was_aborted && was_valid)\n\tmemcpy (&old_state, &thread->state, sizeof (old_state));\n\n      state = proc_get_state (thread, 1);\n      if (!state)\n\t{\n\t  warning (_(\"Couldn't store registers into %s\"),\n\t\t   proc_string (thread));\n\t  return;\n\t}\n\n      /* Save the T bit.  We might try to restore the %eflags register\n         below, but changing the T bit would seriously confuse GDB.  */\n      trace = ((struct i386_thread_state *)state)->efl & 0x100;\n\n      if (!was_aborted && was_valid)\n\t/* See which registers have changed after aborting the thread.  */\n\t{\n\t  int check_regno;\n\n\t  for (check_regno = 0; check_regno < I386_NUM_GREGS; check_regno++)\n\t    if ((thread->fetched_regs & (1 << check_regno))\n\t\t&& memcpy (REG_ADDR (&old_state, check_regno),\n\t\t\t   REG_ADDR (state, check_regno),\n\t\t\t   register_size (gdbarch, check_regno)))\n\t      /* Register CHECK_REGNO has changed!  Ack!  */\n\t      {\n\t\twarning (_(\"Register %s changed after the thread was aborted\"),\n\t\t\t gdbarch_register_name (gdbarch, check_regno));\n\t\tif (regno >= 0 && regno != check_regno)\n\t\t  /* Update GDB's copy of the register.  */\n\t\t  regcache_raw_supply (regcache, check_regno,\n\t\t\t\t       REG_ADDR (state, check_regno));\n\t\telse\n\t\t  warning (_(\"... also writing this register!  \"\n\t\t\t     \"Suspicious...\"));\n\t      }\n\t}\n\n      if (regno == -1)\n\t{\n\t  int i;\n\n\t  proc_debug (thread, \"storing all registers\");\n\n\t  for (i = 0; i < I386_NUM_GREGS; i++)\n\t    if (REG_VALID == regcache_register_status (regcache, i))\n\t      regcache_raw_collect (regcache, i, REG_ADDR (state, i));\n\t}\n      else\n\t{\n\t  proc_debug (thread, \"storing register %s\",\n\t\t      gdbarch_register_name (gdbarch, regno));\n\n\t  gdb_assert (REG_VALID == regcache_register_status (regcache, regno));\n\t  regcache_raw_collect (regcache, regno, REG_ADDR (state, regno));\n\t}\n\n      /* Restore the T bit.  */\n      ((struct i386_thread_state *)state)->efl &= ~0x100;\n      ((struct i386_thread_state *)state)->efl |= trace;\n    }\n\n  if (regno >= I386_NUM_GREGS || regno == -1)\n    {\n      proc_debug (thread, \"storing floating-point registers\");\n\n      store_fpregs (regcache, thread, regno);\n    }\n}",
+      "fn_code_pos": [
+        [
+          180,
+          0
+        ],
+        [
+          273,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gnu_store_registers",
+        "parameters": {
+          "ops": "struct target_ops",
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ni386_gnu_dr_get (struct i386_debug_state *regs, struct proc *thread)\n{\n  mach_msg_type_number_t count = i386_DEBUG_STATE_COUNT;\n  kern_return_t err;\n\n  err = thread_get_state (thread->port, i386_DEBUG_STATE,\n\t\t\t  (thread_state_t) regs, &count);\n  if (err != 0 || count != i386_DEBUG_STATE_COUNT)\n    warning (_(\"Couldn't fetch debug state from %s\"),\n\t     proc_string (thread));\n}",
+      "fn_code_pos": [
+        [
+          281,
+          0
+        ],
+        [
+          292,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_gnu_dr_get",
+        "parameters": {
+          "regs": "struct i386_debug_state",
+          "thread": "struct proc"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ni386_gnu_dr_set (const struct i386_debug_state *regs, struct proc *thread)\n{\n  kern_return_t err;\n\n  err = thread_set_state (thread->port, i386_DEBUG_STATE,\n\t\t\t  (thread_state_t) regs, i386_DEBUG_STATE_COUNT);\n  if (err != 0)\n    warning (_(\"Couldn't store debug state into %s\"),\n\t     proc_string (thread));\n}",
+      "fn_code_pos": [
+        [
+          296,
+          0
+        ],
+        [
+          306,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_gnu_dr_set",
+        "parameters": {
+          "regs": "struct i386_debug_state",
+          "thread": "struct proc"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ni386_gnu_dr_set_control_one (struct proc *thread, void *arg)\n{\n  unsigned long *control = (unsigned long *) arg;\n  struct i386_debug_state regs;\n\n  i386_gnu_dr_get (&regs, thread);\n  regs.dr[DR_CONTROL] = *control;\n  i386_gnu_dr_set (&regs, thread);\n}",
+      "fn_code_pos": [
+        [
+          310,
+          0
+        ],
+        [
+          319,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_gnu_dr_set_control_one",
+        "parameters": {
+          "thread": "struct proc",
+          "arg": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ni386_gnu_dr_set_control (unsigned long control)\n{\n  inf_update_procs (gnu_current_inf);\n  inf_threads (gnu_current_inf, i386_gnu_dr_set_control_one, &control);\n}",
+      "fn_code_pos": [
+        [
+          323,
+          0
+        ],
+        [
+          328,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_gnu_dr_set_control",
+        "parameters": {
+          "control": "unsigned long"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ni386_gnu_dr_set_addr_one (struct proc *thread, void *arg)\n{\n  struct reg_addr *reg_addr = (struct reg_addr *) arg;\n  struct i386_debug_state regs;\n\n  i386_gnu_dr_get (&regs, thread);\n  regs.dr[reg_addr->regnum] = reg_addr->addr;\n  i386_gnu_dr_set (&regs, thread);\n}",
+      "fn_code_pos": [
+        [
+          340,
+          0
+        ],
+        [
+          349,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_gnu_dr_set_addr_one",
+        "parameters": {
+          "thread": "struct proc",
+          "arg": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ni386_gnu_dr_set_addr (int regnum, CORE_ADDR addr)\n{\n  struct reg_addr reg_addr;\n\n  gdb_assert (DR_FIRSTADDR <= regnum && regnum <= DR_LASTADDR);\n\n  reg_addr.regnum = regnum;\n  reg_addr.addr = addr;\n\n  inf_update_procs (gnu_current_inf);\n  inf_threads (gnu_current_inf, i386_gnu_dr_set_addr_one, &reg_addr);\n}",
+      "fn_code_pos": [
+        [
+          353,
+          0
+        ],
+        [
+          365,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_gnu_dr_set_addr",
+        "parameters": {
+          "regnum": "int",
+          "addr": "CORE_ADDR"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned long\ni386_gnu_dr_get_reg (ptid_t ptid, int regnum)\n{\n  struct i386_debug_state regs;\n  struct proc *thread;\n\n  /* Make sure we know about new threads.  */\n  inf_update_procs (gnu_current_inf);\n\n  thread = inf_tid_to_thread (gnu_current_inf, ptid_get_lwp (ptid));\n  i386_gnu_dr_get (&regs, thread);\n\n  return regs.dr[regnum];\n}",
+      "fn_code_pos": [
+        [
+          369,
+          0
+        ],
+        [
+          382,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_gnu_dr_get_reg",
+        "parameters": {
+          "ptid": "ptid_t",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\ni386_gnu_dr_get_addr (int regnum)\n{\n  gdb_assert (DR_FIRSTADDR <= regnum && regnum <= DR_LASTADDR);\n\n  return i386_gnu_dr_get_reg (inferior_ptid, regnum);\n}",
+      "fn_code_pos": [
+        [
+          386,
+          0
+        ],
+        [
+          392,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_gnu_dr_get_addr",
+        "parameters": {
+          "regnum": "int"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static unsigned long\ni386_gnu_dr_get_status (void)\n{\n  return i386_gnu_dr_get_reg (inferior_ptid, DR_STATUS);\n}",
+      "fn_code_pos": [
+        [
+          396,
+          0
+        ],
+        [
+          400,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_gnu_dr_get_status",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned long\ni386_gnu_dr_get_control (void)\n{\n  return i386_gnu_dr_get_reg (inferior_ptid, DR_CONTROL);\n}",
+      "fn_code_pos": [
+        [
+          404,
+          0
+        ],
+        [
+          408,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386_gnu_dr_get_control",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_i386gnu_nat (void)\n{\n  struct target_ops *t;\n\n  /* Fill in the generic GNU/Hurd methods.  */\n  t = gnu_target ();\n\n#ifdef i386_DEBUG_STATE\n  x86_use_watchpoints (t);\n\n  x86_dr_low.set_control = i386_gnu_dr_set_control;\n  gdb_assert (DR_FIRSTADDR == 0 && DR_LASTADDR < i386_DEBUG_STATE_COUNT);\n  x86_dr_low.set_addr = i386_gnu_dr_set_addr;\n  x86_dr_low.get_addr = i386_gnu_dr_get_addr;\n  x86_dr_low.get_status = i386_gnu_dr_get_status;\n  x86_dr_low.get_control = i386_gnu_dr_get_control;\n  x86_set_debug_register_length (4);\n#endif /* i386_DEBUG_STATE */\n\n  t->to_fetch_registers = gnu_fetch_registers;\n  t->to_store_registers = gnu_store_registers;\n\n  /* Register the target.  */\n  add_target (t);\n}",
+      "fn_code_pos": [
+        [
+          414,
+          0
+        ],
+        [
+          439,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_i386gnu_nat",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct reg_addr\n{\n  int regnum;\t\t/* Register number (zero based).  */\n  CORE_ADDR addr;\t/* Address.  */\n}",
+      {
+        "regnum": "int",
+        "addr": "CORE_ADDR"
+      },
+      "reg_addr",
+      [
+        332,
+        0
+      ],
+      [
+        336,
+        1
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        60,
+        14
+      ],
+      [
+        60,
+        29
+      ]
+    ],
+    [
+      "struct proc",
+      {},
+      "",
+      [
+        60,
+        41
+      ],
+      [
+        60,
+        52
+      ]
+    ],
+    [
+      "struct i386_float_state",
+      {},
+      "",
+      [
+        63,
+        2
+      ],
+      [
+        63,
+        25
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        89,
+        21
+      ],
+      [
+        89,
+        38
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        90,
+        7
+      ],
+      [
+        90,
+        22
+      ]
+    ],
+    [
+      "struct proc",
+      {},
+      "",
+      [
+        92,
+        2
+      ],
+      [
+        92,
+        13
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        150,
+        20
+      ],
+      [
+        150,
+        35
+      ]
+    ],
+    [
+      "struct proc",
+      {},
+      "",
+      [
+        150,
+        47
+      ],
+      [
+        150,
+        58
+      ]
+    ],
+    [
+      "struct i386_float_state",
+      {},
+      "",
+      [
+        153,
+        2
+      ],
+      [
+        153,
+        25
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        181,
+        21
+      ],
+      [
+        181,
+        38
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        182,
+        7
+      ],
+      [
+        182,
+        22
+      ]
+    ],
+    [
+      "struct proc",
+      {},
+      "",
+      [
+        184,
+        2
+      ],
+      [
+        184,
+        13
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        185,
+        2
+      ],
+      [
+        185,
+        16
+      ]
+    ],
+    [
+      "struct i386_thread_state",
+      {},
+      "",
+      [
+        217,
+        16
+      ],
+      [
+        217,
+        40
+      ]
+    ],
+    [
+      "struct i386_thread_state",
+      {},
+      "",
+      [
+        263,
+        8
+      ],
+      [
+        263,
+        32
+      ]
+    ],
+    [
+      "struct i386_thread_state",
+      {},
+      "",
+      [
+        264,
+        8
+      ],
+      [
+        264,
+        32
+      ]
+    ],
+    [
+      "struct i386_debug_state",
+      {},
+      "",
+      [
+        282,
+        17
+      ],
+      [
+        282,
+        40
+      ]
+    ],
+    [
+      "struct proc",
+      {},
+      "",
+      [
+        282,
+        48
+      ],
+      [
+        282,
+        59
+      ]
+    ],
+    [
+      "struct i386_debug_state",
+      {},
+      "",
+      [
+        297,
+        23
+      ],
+      [
+        297,
+        46
+      ]
+    ],
+    [
+      "struct proc",
+      {},
+      "",
+      [
+        297,
+        54
+      ],
+      [
+        297,
+        65
+      ]
+    ],
+    [
+      "struct proc",
+      {},
+      "",
+      [
+        311,
+        29
+      ],
+      [
+        311,
+        40
+      ]
+    ],
+    [
+      "struct i386_debug_state",
+      {},
+      "",
+      [
+        314,
+        2
+      ],
+      [
+        314,
+        25
+      ]
+    ],
+    [
+      "struct reg_addr\n{\n  int regnum;\t\t/* Register number (zero based).  */\n  CORE_ADDR addr;\t/* Address.  */\n}",
+      {
+        "regnum": "int",
+        "addr": "CORE_ADDR"
+      },
+      "reg_addr",
+      [
+        332,
+        0
+      ],
+      [
+        336,
+        1
+      ]
+    ],
+    [
+      "struct proc",
+      {},
+      "",
+      [
+        341,
+        26
+      ],
+      [
+        341,
+        37
+      ]
+    ],
+    [
+      "struct reg_addr",
+      {},
+      "",
+      [
+        343,
+        2
+      ],
+      [
+        343,
+        17
+      ]
+    ],
+    [
+      "struct reg_addr",
+      {},
+      "",
+      [
+        343,
+        31
+      ],
+      [
+        343,
+        46
+      ]
+    ],
+    [
+      "struct i386_debug_state",
+      {},
+      "",
+      [
+        344,
+        2
+      ],
+      [
+        344,
+        25
+      ]
+    ],
+    [
+      "struct reg_addr",
+      {},
+      "",
+      [
+        356,
+        2
+      ],
+      [
+        356,
+        17
+      ]
+    ],
+    [
+      "struct i386_debug_state",
+      {},
+      "",
+      [
+        372,
+        2
+      ],
+      [
+        372,
+        25
+      ]
+    ],
+    [
+      "struct proc",
+      {},
+      "",
+      [
+        373,
+        2
+      ],
+      [
+        373,
+        13
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        417,
+        2
+      ],
+      [
+        417,
+        19
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <mach.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <mach_error.h>\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <mach/message.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <mach/exception.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"defs.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"x86-nat.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"floatformat.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"i386-tdep.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"gnu-nat.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"inf-child.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"i387-tdep.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

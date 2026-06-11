@@ -1,0 +1,304 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nfetch_data (struct disassemble_info *info, bfd_vma memaddr)\n{\n  int length, status = 0;\n  struct dis_private *priv = (struct dis_private *) info->private_data;\n  int insn_size = xtensa_isa_maxlength (xtensa_default_isa);\n\n  /* Read the maximum instruction size, padding with zeros if we go past\n     the end of the text section.  This code will automatically adjust\n     length when we hit the end of the buffer.  */\n\n  memset (priv->byte_buf, 0, insn_size);\n  for (length = insn_size; length > 0; length--)\n    {\n      status = (*info->read_memory_func) (memaddr, priv->byte_buf, length,\n\t\t\t\t\t  info);\n      if (status == 0)\n\treturn length;\n    }\n  (*info->memory_error_func) (status, memaddr, info);\n  OPCODES_SIGLONGJMP (priv->bailout, 1);\n  /*NOTREACHED*/\n}",
+      "fn_code_pos": [
+        [
+          48,
+          0
+        ],
+        [
+          70,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_data",
+        "parameters": {
+          "info": "struct disassemble_info",
+          "memaddr": "bfd_vma"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nprint_xtensa_operand (bfd_vma memaddr,\n\t\t      struct disassemble_info *info,\n\t\t      xtensa_opcode opc,\n\t\t      int opnd,\n\t\t      unsigned operand_val)\n{\n  xtensa_isa isa = xtensa_default_isa;\n  int signed_operand_val;\n\n  if (show_raw_fields)\n    {\n      if (operand_val < 0xa)\n\t(*info->fprintf_func) (info->stream, \"%u\", operand_val);\n      else\n\t(*info->fprintf_func) (info->stream, \"0x%x\", operand_val);\n      return;\n    }\n\n  (void) xtensa_operand_decode (isa, opc, opnd, &operand_val);\n  signed_operand_val = (int) operand_val;\n\n  if (xtensa_operand_is_register (isa, opc, opnd) == 0)\n    {\n      if (xtensa_operand_is_PCrelative (isa, opc, opnd) == 1)\n\t{\n\t  (void) xtensa_operand_undo_reloc (isa, opc, opnd,\n\t\t\t\t\t    &operand_val, memaddr);\n\t  info->target = operand_val;\n\t  (*info->print_address_func) (info->target, info);\n\t}\n      else\n\t{\n\t  if ((signed_operand_val > -256) && (signed_operand_val < 256))\n\t    (*info->fprintf_func) (info->stream, \"%d\", signed_operand_val);\n\t  else\n\t    (*info->fprintf_func) (info->stream, \"0x%x\", signed_operand_val);\n\t}\n    }\n  else\n    {\n      int i = 1;\n      xtensa_regfile opnd_rf = xtensa_operand_regfile (isa, opc, opnd);\n      (*info->fprintf_func) (info->stream, \"%s%u\",\n\t\t\t     xtensa_regfile_shortname (isa, opnd_rf),\n\t\t\t     operand_val);\n      while (i < xtensa_operand_num_regs (isa, opc, opnd))\n\t{\n\t  operand_val++;\n\t  (*info->fprintf_func) (info->stream, \":%s%u\",\n\t\t\t\t xtensa_regfile_shortname (isa, opnd_rf),\n\t\t\t\t operand_val);\n\t  i++;\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          73,
+          0
+        ],
+        [
+          128,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_xtensa_operand",
+        "parameters": {
+          "memaddr": "bfd_vma",
+          "info": "struct disassemble_info",
+          "opc": "xtensa_opcode",
+          "opnd": "int",
+          "operand_val": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\nprint_insn_xtensa (bfd_vma memaddr, struct disassemble_info *info)\n{\n  unsigned operand_val;\n  int bytes_fetched, size, maxsize, i, n, noperands, nslots;\n  xtensa_isa isa;\n  xtensa_opcode opc;\n  xtensa_format fmt;\n  struct dis_private priv;\n  static bfd_byte *byte_buf = NULL;\n  static xtensa_insnbuf insn_buffer = NULL;\n  static xtensa_insnbuf slot_buffer = NULL;\n  int first, first_slot, valid_insn;\n\n  if (!xtensa_default_isa)\n    xtensa_default_isa = xtensa_isa_init (0, 0);\n\n  info->target = 0;\n  maxsize = xtensa_isa_maxlength (xtensa_default_isa);\n\n  /* Set bytes_per_line to control the amount of whitespace between the hex\n     values and the opcode.  For Xtensa, we always print one \"chunk\" and we\n     vary bytes_per_chunk to determine how many bytes to print.  (objdump\n     would apparently prefer that we set bytes_per_chunk to 1 and vary\n     bytes_per_line but that makes it hard to fit 64-bit instructions on\n     an 80-column screen.)  The value of bytes_per_line here is not exactly\n     right, because objdump adds an extra space for each chunk so that the\n     amount of whitespace depends on the chunk size.  Oh well, it's good\n     enough....  Note that we set the minimum size to 4 to accomodate\n     literal pools.  */\n  info->bytes_per_line = MAX (maxsize, 4);\n\n  /* Allocate buffers the first time through.  */\n  if (!insn_buffer)\n    {\n      insn_buffer = xtensa_insnbuf_alloc (xtensa_default_isa);\n      slot_buffer = xtensa_insnbuf_alloc (xtensa_default_isa);\n      byte_buf = (bfd_byte *) xmalloc (MAX (maxsize, 4));\n    }\n\n  priv.byte_buf = byte_buf;\n\n  info->private_data = (void *) &priv;\n  if (OPCODES_SIGSETJMP (priv.bailout) != 0)\n      /* Error return.  */\n      return -1;\n\n  /* Don't set \"isa\" before the setjmp to keep the compiler from griping.  */\n  isa = xtensa_default_isa;\n  size = 0;\n  nslots = 0;\n\n  /* Fetch the maximum size instruction.  */\n  bytes_fetched = fetch_data (info, memaddr);\n\n  /* Copy the bytes into the decode buffer.  */\n  memset (insn_buffer, 0, (xtensa_insnbuf_size (isa) *\n\t\t\t   sizeof (xtensa_insnbuf_word)));\n  xtensa_insnbuf_from_chars (isa, insn_buffer, priv.byte_buf, bytes_fetched);\n\n  fmt = xtensa_format_decode (isa, insn_buffer);\n  if (fmt == XTENSA_UNDEFINED\n      || ((size = xtensa_format_length (isa, fmt)) > bytes_fetched))\n    valid_insn = 0;\n  else\n    {\n      /* Make sure all the opcodes are valid.  */\n      valid_insn = 1;\n      nslots = xtensa_format_num_slots (isa, fmt);\n      for (n = 0; n < nslots; n++)\n\t{\n\t  xtensa_format_get_slot (isa, fmt, n, insn_buffer, slot_buffer);\n\t  if (xtensa_opcode_decode (isa, fmt, n, slot_buffer)\n\t      == XTENSA_UNDEFINED)\n\t    {\n\t      valid_insn = 0;\n\t      break;\n\t    }\n\t}\n    }\n\n  if (!valid_insn)\n    {\n      (*info->fprintf_func) (info->stream, \".byte %#02x\", priv.byte_buf[0]);\n      return 1;\n    }\n\n  if (nslots > 1)\n    (*info->fprintf_func) (info->stream, \"{ \");\n\n  first_slot = 1;\n  for (n = 0; n < nslots; n++)\n    {\n      if (first_slot)\n\tfirst_slot = 0;\n      else\n\t(*info->fprintf_func) (info->stream, \"; \");\n\n      xtensa_format_get_slot (isa, fmt, n, insn_buffer, slot_buffer);\n      opc = xtensa_opcode_decode (isa, fmt, n, slot_buffer);\n      (*info->fprintf_func) (info->stream, \"%s\",\n\t\t\t     xtensa_opcode_name (isa, opc));\n\n      /* Print the operands (if any).  */\n      noperands = xtensa_opcode_num_operands (isa, opc);\n      first = 1;\n      for (i = 0; i < noperands; i++)\n\t{\n\t  if (xtensa_operand_is_visible (isa, opc, i) == 0)\n\t    continue;\n\t  if (first)\n\t    {\n\t      (*info->fprintf_func) (info->stream, \"\\t\");\n\t      first = 0;\n\t    }\n\t  else\n\t    (*info->fprintf_func) (info->stream, \", \");\n\t  (void) xtensa_operand_get_field (isa, opc, i, fmt, n,\n\t\t\t\t\t   slot_buffer, &operand_val);\n\n\t  print_xtensa_operand (memaddr, info, opc, i, operand_val);\n\t}\n    }\n\n  if (nslots > 1)\n    (*info->fprintf_func) (info->stream, \" }\");\n\n  info->bytes_per_chunk = size;\n  info->display_endian = info->endian;\n\n  return size;\n}",
+      "fn_code_pos": [
+        [
+          134,
+          0
+        ],
+        [
+          265,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_insn_xtensa",
+        "parameters": {
+          "memaddr": "bfd_vma",
+          "info": "struct disassemble_info"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct dis_private\n{\n  bfd_byte *byte_buf;\n  OPCODES_SIGJMP_BUF bailout;\n}",
+      {
+        "*byte_buf": "bfd_byte",
+        "bailout": "OPCODES_SIGJMP_BUF"
+      },
+      "dis_private",
+      [
+        41,
+        0
+      ],
+      [
+        45,
+        1
+      ]
+    ],
+    [
+      "struct dis_private\n{\n  bfd_byte *byte_buf;\n  OPCODES_SIGJMP_BUF bailout;\n}",
+      {
+        "*byte_buf": "bfd_byte",
+        "bailout": "OPCODES_SIGJMP_BUF"
+      },
+      "dis_private",
+      [
+        41,
+        0
+      ],
+      [
+        45,
+        1
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        49,
+        12
+      ],
+      [
+        49,
+        35
+      ]
+    ],
+    [
+      "struct dis_private",
+      {},
+      "",
+      [
+        52,
+        2
+      ],
+      [
+        52,
+        20
+      ]
+    ],
+    [
+      "struct dis_private",
+      {},
+      "",
+      [
+        52,
+        30
+      ],
+      [
+        52,
+        48
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        75,
+        8
+      ],
+      [
+        75,
+        31
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        135,
+        36
+      ],
+      [
+        135,
+        59
+      ]
+    ],
+    [
+      "struct dis_private",
+      {},
+      "",
+      [
+        142,
+        2
+      ],
+      [
+        142,
+        20
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"xtensa-isa.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"ansidecl.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"disassemble.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <setjmp.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

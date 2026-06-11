@@ -1,0 +1,769 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nbreakpoint_notify (struct breakpoint *b)\n{\n  if (mi_can_breakpoint_notify)\n    gdb_breakpoint_query (current_uiout, b->number, NULL);\n}",
+      "fn_code_pos": [
+        [
+          51,
+          0
+        ],
+        [
+          56,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "breakpoint_notify",
+        "parameters": {
+          "b": "struct breakpoint"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "struct cleanup *\nsetup_breakpoint_reporting (void)\n{\n  struct cleanup *rev_flag;\n\n  if (! mi_breakpoint_observers_installed)\n    {\n      observer_attach_breakpoint_created (breakpoint_notify);\n      mi_breakpoint_observers_installed = 1;\n    }\n\n  rev_flag = make_cleanup_restore_integer (&mi_can_breakpoint_notify);\n  mi_can_breakpoint_notify = 1;\n\n  return rev_flag;\n}",
+      "fn_code_pos": [
+        [
+          71,
+          0
+        ],
+        [
+          86,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "setup_breakpoint_reporting",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static char *\nmi_argv_to_format (char **argv, int argc)\n{\n  int i;\n  struct obstack obstack;\n  char *ret;\n\n  obstack_init (&obstack);\n\n  /* Convert ARGV[OIND + 1] to format string and save to FORMAT.  */\n  obstack_1grow (&obstack, '\\\"');\n  for (i = 0; i < strlen (argv[0]); i++)\n    {\n      switch (argv[0][i])\n\t{\n\tcase '\\\\':\n\t  obstack_grow (&obstack, \"\\\\\\\\\", 2);\n\t  break;\n\tcase '\\a':\n\t  obstack_grow (&obstack, \"\\\\a\", 2);\n\t  break;\n\tcase '\\b':\n\t  obstack_grow (&obstack, \"\\\\b\", 2);\n\t  break;\n\tcase '\\f':\n\t  obstack_grow (&obstack, \"\\\\f\", 2);\n\t  break;\n\tcase '\\n':\n\t  obstack_grow (&obstack, \"\\\\n\", 2);\n\t  break;\n\tcase '\\r':\n\t  obstack_grow (&obstack, \"\\\\r\", 2);\n\t  break;\n\tcase '\\t':\n\t  obstack_grow (&obstack, \"\\\\t\", 2);\n\t  break;\n\tcase '\\v':\n\t  obstack_grow (&obstack, \"\\\\v\", 2);\n\t  break;\n\tcase '\"':\n\t  obstack_grow (&obstack, \"\\\\\\\"\", 2);\n\t  break;\n\tdefault:\n\t  if (isprint (argv[0][i]))\n\t    obstack_grow (&obstack, argv[0] + i, 1);\n\t  else\n\t    {\n\t      char tmp[5];\n\n\t      xsnprintf (tmp, sizeof (tmp), \"\\\\%o\",\n\t\t\t (unsigned char) argv[0][i]);\n\t      obstack_grow_str (&obstack, tmp);\n\t    }\n\t  break;\n\t}\n    }\n  obstack_1grow (&obstack, '\\\"');\n\n  /* Apply other argv to FORMAT.  */\n  for (i = 1; i < argc; i++)\n    {\n      obstack_1grow (&obstack, ',');\n      obstack_grow_str (&obstack, argv[i]);\n    }\n  obstack_1grow (&obstack, '\\0');\n\n  ret = xstrdup ((const char *) obstack_finish (&obstack));\n  obstack_free (&obstack, NULL);\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          92,
+          0
+        ],
+        [
+          162,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mi_argv_to_format",
+        "parameters": {
+          "argv": "char",
+          "argc": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nmi_cmd_break_insert_1 (int dprintf, const char *command, char **argv, int argc)\n{\n  char *address = NULL;\n  int hardware = 0;\n  int temp_p = 0;\n  int thread = -1;\n  int ignore_count = 0;\n  char *condition = NULL;\n  int pending = 0;\n  int enabled = 1;\n  int tracepoint = 0;\n  struct cleanup *back_to = make_cleanup (null_cleanup, NULL);\n  enum bptype type_wanted;\n  event_location_up location;\n  struct breakpoint_ops *ops;\n  int is_explicit = 0;\n  struct explicit_location explicit_loc;\n  char *extra_string = NULL;\n\n  enum opt\n    {\n      HARDWARE_OPT, TEMP_OPT, CONDITION_OPT,\n      IGNORE_COUNT_OPT, THREAD_OPT, PENDING_OPT, DISABLE_OPT,\n      TRACEPOINT_OPT,\n      EXPLICIT_SOURCE_OPT, EXPLICIT_FUNC_OPT,\n      EXPLICIT_LABEL_OPT, EXPLICIT_LINE_OPT\n    };\n  static const struct mi_opt opts[] =\n  {\n    {\"h\", HARDWARE_OPT, 0},\n    {\"t\", TEMP_OPT, 0},\n    {\"c\", CONDITION_OPT, 1},\n    {\"i\", IGNORE_COUNT_OPT, 1},\n    {\"p\", THREAD_OPT, 1},\n    {\"f\", PENDING_OPT, 0},\n    {\"d\", DISABLE_OPT, 0},\n    {\"a\", TRACEPOINT_OPT, 0},\n    {\"-source\" , EXPLICIT_SOURCE_OPT, 1},\n    {\"-function\", EXPLICIT_FUNC_OPT, 1},\n    {\"-label\", EXPLICIT_LABEL_OPT, 1},\n    {\"-line\", EXPLICIT_LINE_OPT, 1},\n    { 0, 0, 0 }\n  };\n\n  /* Parse arguments. It could be -r or -h or -t, <location> or ``--''\n     to denote the end of the option list. */\n  int oind = 0;\n  char *oarg;\n\n  initialize_explicit_location (&explicit_loc);\n\n  while (1)\n    {\n      int opt = mi_getopt (\"-break-insert\", argc, argv,\n\t\t\t   opts, &oind, &oarg);\n      if (opt < 0)\n\tbreak;\n      switch ((enum opt) opt)\n\t{\n\tcase TEMP_OPT:\n\t  temp_p = 1;\n\t  break;\n\tcase HARDWARE_OPT:\n\t  hardware = 1;\n\t  break;\n\tcase CONDITION_OPT:\n\t  condition = oarg;\n\t  break;\n\tcase IGNORE_COUNT_OPT:\n\t  ignore_count = atol (oarg);\n\t  break;\n\tcase THREAD_OPT:\n\t  thread = atol (oarg);\n\t  break;\n\tcase PENDING_OPT:\n\t  pending = 1;\n\t  break;\n\tcase DISABLE_OPT:\n\t  enabled = 0;\n\t  break;\n\tcase TRACEPOINT_OPT:\n\t  tracepoint = 1;\n\t  break;\n\tcase EXPLICIT_SOURCE_OPT:\n\t  is_explicit = 1;\n\t  explicit_loc.source_filename = oarg;\n\t  break;\n\tcase EXPLICIT_FUNC_OPT:\n\t  is_explicit = 1;\n\t  explicit_loc.function_name = oarg;\n\t  break;\n\tcase EXPLICIT_LABEL_OPT:\n\t  is_explicit = 1;\n\t  explicit_loc.label_name = oarg;\n\t  break;\n\tcase EXPLICIT_LINE_OPT:\n\t  is_explicit = 1;\n\t  explicit_loc.line_offset = linespec_parse_line_offset (oarg);\n\t  break;\n\t}\n    }\n\n  if (oind >= argc && !is_explicit)\n    error (_(\"-%s-insert: Missing <location>\"),\n\t   dprintf ? \"dprintf\" : \"break\");\n  if (dprintf)\n    {\n      int format_num = is_explicit ? oind : oind + 1;\n\n      if (hardware || tracepoint)\n\terror (_(\"-dprintf-insert: does not support -h or -a\"));\n      if (format_num >= argc)\n\terror (_(\"-dprintf-insert: Missing <format>\"));\n\n      extra_string = mi_argv_to_format (argv + format_num, argc - format_num);\n      make_cleanup (xfree, extra_string);\n      address = argv[oind];\n    }\n  else\n    {\n      if (is_explicit)\n\t{\n\t  if (oind < argc)\n\t    error (_(\"-break-insert: Garbage following explicit location\"));\n\t}\n      else\n\t{\n\t  if (oind < argc - 1)\n\t    error (_(\"-break-insert: Garbage following <location>\"));\n\t  address = argv[oind];\n\t}\n    }\n\n  /* Now we have what we need, let's insert the breakpoint!  */\n  setup_breakpoint_reporting ();\n\n  if (tracepoint)\n    {\n      /* Note that to request a fast tracepoint, the client uses the\n\t \"hardware\" flag, although there's nothing of hardware related to\n\t fast tracepoints -- one can implement slow tracepoints with\n\t hardware breakpoints, but fast tracepoints are always software.\n\t \"fast\" is a misnomer, actually, \"jump\" would be more appropriate.\n\t A simulator or an emulator could conceivably implement fast\n\t regular non-jump based tracepoints.  */\n      type_wanted = hardware ? bp_fast_tracepoint : bp_tracepoint;\n      ops = &tracepoint_breakpoint_ops;\n    }\n  else if (dprintf)\n    {\n      type_wanted = bp_dprintf;\n      ops = &dprintf_breakpoint_ops;\n    }\n  else\n    {\n      type_wanted = hardware ? bp_hardware_breakpoint : bp_breakpoint;\n      ops = &bkpt_breakpoint_ops;\n    }\n\n  if (is_explicit)\n    {\n      /* Error check -- we must have one of the other\n\t parameters specified.  */\n      if (explicit_loc.source_filename != NULL\n\t  && explicit_loc.function_name == NULL\n\t  && explicit_loc.label_name == NULL\n\t  && explicit_loc.line_offset.sign == LINE_OFFSET_UNKNOWN)\n\terror (_(\"-%s-insert: --source option requires --function, --label,\"\n\t\t \" or --line\"), dprintf ? \"dprintf\" : \"break\");\n\n      location = new_explicit_location (&explicit_loc);\n    }\n  else\n    {\n      location = string_to_event_location_basic (&address, current_language);\n      if (*address)\n\terror (_(\"Garbage '%s' at end of location\"), address);\n    }\n\n  create_breakpoint (get_current_arch (), location.get (), condition, thread,\n\t\t     extra_string,\n\t\t     0 /* condition and thread are valid.  */,\n\t\t     temp_p, type_wanted,\n\t\t     ignore_count,\n\t\t     pending ? AUTO_BOOLEAN_TRUE : AUTO_BOOLEAN_FALSE,\n\t\t     ops, 0, enabled, 0, 0);\n  do_cleanups (back_to);\n}",
+      "fn_code_pos": [
+        [
+          168,
+          0
+        ],
+        [
+          356,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mi_cmd_break_insert_1",
+        "parameters": {
+          "dprintf": "int",
+          "command": "char",
+          "argv": "char",
+          "argc": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nmi_cmd_break_insert (const char *command, char **argv, int argc)\n{\n  mi_cmd_break_insert_1 (0, command, argv, argc);\n}",
+      "fn_code_pos": [
+        [
+          361,
+          0
+        ],
+        [
+          365,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mi_cmd_break_insert",
+        "parameters": {
+          "command": "char",
+          "argv": "char",
+          "argc": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nmi_cmd_dprintf_insert (const char *command, char **argv, int argc)\n{\n  mi_cmd_break_insert_1 (1, command, argv, argc);\n}",
+      "fn_code_pos": [
+        [
+          370,
+          0
+        ],
+        [
+          374,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mi_cmd_dprintf_insert",
+        "parameters": {
+          "command": "char",
+          "argv": "char",
+          "argc": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nmi_cmd_break_passcount (const char *command, char **argv, int argc)\n{\n  int n;\n  int p;\n  struct tracepoint *t;\n\n  if (argc != 2)\n    error (_(\"Usage: tracepoint-number passcount\"));\n\n  n = atoi (argv[0]);\n  p = atoi (argv[1]);\n  t = get_tracepoint (n);\n\n  if (t)\n    {\n      t->pass_count = p;\n      observer_notify_breakpoint_modified (t);\n    }\n  else\n    {\n      error (_(\"Could not find tracepoint %d\"), n);\n    }\n}",
+      "fn_code_pos": [
+        [
+          383,
+          0
+        ],
+        [
+          406,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mi_cmd_break_passcount",
+        "parameters": {
+          "command": "char",
+          "argv": "char",
+          "argc": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nmi_cmd_break_watch (const char *command, char **argv, int argc)\n{\n  char *expr = NULL;\n  enum wp_type type = REG_WP;\n  enum opt\n    {\n      READ_OPT, ACCESS_OPT\n    };\n  static const struct mi_opt opts[] =\n  {\n    {\"r\", READ_OPT, 0},\n    {\"a\", ACCESS_OPT, 0},\n    { 0, 0, 0 }\n  };\n\n  /* Parse arguments. */\n  int oind = 0;\n  char *oarg;\n\n  while (1)\n    {\n      int opt = mi_getopt (\"-break-watch\", argc, argv,\n\t\t\t   opts, &oind, &oarg);\n\n      if (opt < 0)\n\tbreak;\n      switch ((enum opt) opt)\n\t{\n\tcase READ_OPT:\n\t  type = READ_WP;\n\t  break;\n\tcase ACCESS_OPT:\n\t  type = ACCESS_WP;\n\t  break;\n\t}\n    }\n  if (oind >= argc)\n    error (_(\"-break-watch: Missing <expression>\"));\n  if (oind < argc - 1)\n    error (_(\"-break-watch: Garbage following <expression>\"));\n  expr = argv[oind];\n\n  /* Now we have what we need, let's insert the watchpoint!  */\n  switch (type)\n    {\n    case REG_WP:\n      watch_command_wrapper (expr, FROM_TTY, 0);\n      break;\n    case READ_WP:\n      rwatch_command_wrapper (expr, FROM_TTY, 0);\n      break;\n    case ACCESS_WP:\n      awatch_command_wrapper (expr, FROM_TTY, 0);\n      break;\n    default:\n      error (_(\"-break-watch: Unknown watchpoint type.\"));\n    }\n}",
+      "fn_code_pos": [
+        [
+          414,
+          0
+        ],
+        [
+          472,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mi_cmd_break_watch",
+        "parameters": {
+          "command": "char",
+          "argv": "char",
+          "argc": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\nmi_read_next_line (void)\n{\n  if (mi_command_line_array_ptr == mi_command_line_array_cnt)\n    return NULL;\n  else\n    return mi_command_line_array[mi_command_line_array_ptr++];\n}",
+      "fn_code_pos": [
+        [
+          483,
+          0
+        ],
+        [
+          490,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mi_read_next_line",
+        "parameters": {},
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "void\nmi_cmd_break_commands (const char *command, char **argv, int argc)\n{\n  command_line_up break_command;\n  char *endptr;\n  int bnum;\n  struct breakpoint *b;\n\n  if (argc < 1)\n    error (_(\"USAGE: %s <BKPT> [<COMMAND> [<COMMAND>...]]\"), command);\n\n  bnum = strtol (argv[0], &endptr, 0);\n  if (endptr == argv[0])\n    error (_(\"breakpoint number argument \\\"%s\\\" is not a number.\"),\n\t   argv[0]);\n  else if (*endptr != '\\0')\n    error (_(\"junk at the end of breakpoint number argument \\\"%s\\\".\"),\n\t   argv[0]);\n\n  b = get_breakpoint (bnum);\n  if (b == NULL)\n    error (_(\"breakpoint %d not found.\"), bnum);\n\n  mi_command_line_array = argv;\n  mi_command_line_array_ptr = 1;\n  mi_command_line_array_cnt = argc;\n\n  if (is_tracepoint (b))\n    break_command = read_command_lines_1 (mi_read_next_line, 1,\n\t\t\t\t\t  check_tracepoint_command, b);\n  else\n    break_command = read_command_lines_1 (mi_read_next_line, 1, 0, 0);\n\n  breakpoint_set_commands (b, std::move (break_command));\n}",
+      "fn_code_pos": [
+        [
+          492,
+          0
+        ],
+        [
+          526,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mi_cmd_break_commands",
+        "parameters": {
+          "command": "char",
+          "argv": "char",
+          "argc": "int"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "setup_breakpoint_reporting (void)",
+      "fn_dec_pos": [
+        [
+          72,
+          0
+        ],
+        [
+          72,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "setup_breakpoint_reporting",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "mi_argv_to_format (char **argv, int argc)",
+      "fn_dec_pos": [
+        [
+          93,
+          0
+        ],
+        [
+          93,
+          41
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mi_argv_to_format",
+        "parameters": {
+          "argv": "char",
+          "argc": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "mi_read_next_line (void)",
+      "fn_dec_pos": [
+        [
+          484,
+          0
+        ],
+        [
+          484,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mi_read_next_line",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct breakpoint",
+      {},
+      "",
+      [
+        52,
+        19
+      ],
+      [
+        52,
+        36
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        71,
+        0
+      ],
+      [
+        71,
+        14
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        74,
+        2
+      ],
+      [
+        74,
+        16
+      ]
+    ],
+    [
+      "struct obstack",
+      {},
+      "",
+      [
+        96,
+        2
+      ],
+      [
+        96,
+        16
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        180,
+        2
+      ],
+      [
+        180,
+        16
+      ]
+    ],
+    [
+      "struct breakpoint_ops",
+      {},
+      "",
+      [
+        183,
+        2
+      ],
+      [
+        183,
+        23
+      ]
+    ],
+    [
+      "struct explicit_location",
+      {},
+      "",
+      [
+        185,
+        2
+      ],
+      [
+        185,
+        26
+      ]
+    ],
+    [
+      "struct mi_opt",
+      {},
+      "",
+      [
+        196,
+        15
+      ],
+      [
+        196,
+        28
+      ]
+    ],
+    [
+      "struct tracepoint",
+      {},
+      "",
+      [
+        388,
+        2
+      ],
+      [
+        388,
+        19
+      ]
+    ],
+    [
+      "struct mi_opt",
+      {},
+      "",
+      [
+        423,
+        15
+      ],
+      [
+        423,
+        28
+      ]
+    ],
+    [
+      "struct breakpoint",
+      {},
+      "",
+      [
+        498,
+        2
+      ],
+      [
+        498,
+        19
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"arch-utils.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"mi-cmds.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"ui-out.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"mi-out.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"breakpoint.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"mi-getopt.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"observer.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"mi-main.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"mi-cmd-break.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"language.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"location.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"linespec.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_obstack.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum\n  {\n    FROM_TTY = 0\n  }",
+      {
+        "FROM_TTY": ""
+      },
+      "",
+      [
+        36,
+        0
+      ],
+      [
+        39,
+        3
+      ]
+    ],
+    [
+      "enum bp_type\n  {\n    REG_BP,\n    HW_BP,\n    REGEXP_BP\n  }",
+      {
+        "REG_BP": "",
+        "HW_BP": "",
+        "REGEXP_BP": ""
+      },
+      "bp_type",
+      [
+        58,
+        0
+      ],
+      [
+        63,
+        3
+      ]
+    ],
+    [
+      "enum bptype",
+      {},
+      "",
+      [
+        181,
+        2
+      ],
+      [
+        181,
+        13
+      ]
+    ],
+    [
+      "enum opt\n    {\n      HARDWARE_OPT, TEMP_OPT, CONDITION_OPT,\n      IGNORE_COUNT_OPT, THREAD_OPT, PENDING_OPT, DISABLE_OPT,\n      TRACEPOINT_OPT,\n      EXPLICIT_SOURCE_OPT, EXPLICIT_FUNC_OPT,\n      EXPLICIT_LABEL_OPT, EXPLICIT_LINE_OPT\n    }",
+      {
+        "HARDWARE_OPT": "",
+        "TEMP_OPT": "",
+        "CONDITION_OPT": "",
+        "IGNORE_COUNT_OPT": "",
+        "THREAD_OPT": "",
+        "PENDING_OPT": "",
+        "DISABLE_OPT": "",
+        "TRACEPOINT_OPT": "",
+        "EXPLICIT_SOURCE_OPT": "",
+        "EXPLICIT_FUNC_OPT": "",
+        "EXPLICIT_LABEL_OPT": "",
+        "EXPLICIT_LINE_OPT": ""
+      },
+      "opt",
+      [
+        188,
+        2
+      ],
+      [
+        195,
+        5
+      ]
+    ],
+    [
+      "enum opt",
+      {},
+      "",
+      [
+        226,
+        15
+      ],
+      [
+        226,
+        23
+      ]
+    ],
+    [
+      "enum wp_type\n{\n  REG_WP,\n  READ_WP,\n  ACCESS_WP\n}",
+      {
+        "REG_WP": "",
+        "READ_WP": "",
+        "ACCESS_WP": ""
+      },
+      "wp_type",
+      [
+        376,
+        0
+      ],
+      [
+        381,
+        1
+      ]
+    ],
+    [
+      "enum wp_type",
+      {},
+      "",
+      [
+        418,
+        2
+      ],
+      [
+        418,
+        14
+      ]
+    ],
+    [
+      "enum opt\n    {\n      READ_OPT, ACCESS_OPT\n    }",
+      {
+        "READ_OPT": "",
+        "ACCESS_OPT": ""
+      },
+      "opt",
+      [
+        419,
+        2
+      ],
+      [
+        422,
+        5
+      ]
+    ],
+    [
+      "enum opt",
+      {},
+      "",
+      [
+        441,
+        15
+      ],
+      [
+        441,
+        23
+      ]
+    ]
+  ]
+}

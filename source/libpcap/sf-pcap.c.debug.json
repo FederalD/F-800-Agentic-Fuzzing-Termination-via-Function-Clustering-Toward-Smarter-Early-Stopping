@@ -1,0 +1,931 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "pcap_t *\npcap_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,\n\t\t  int *err)\n{\n\tstruct pcap_file_header hdr;\n\tsize_t amt_read;\n\tpcap_t *p;\n\tint swapped = 0;\n\tstruct pcap_sf *ps;\n\n\t/*\n\t * Assume no read errors.\n\t */\n\t*err = 0;\n\n\t/*\n\t * Check whether the first 4 bytes of the file are the magic\n\t * number for a pcap savefile, or for a byte-swapped pcap\n\t * savefile.\n\t */\n\tif (magic != TCPDUMP_MAGIC && magic != KUZNETZOV_TCPDUMP_MAGIC &&\n\t    magic != NSEC_TCPDUMP_MAGIC) {\n\t\tmagic = SWAPLONG(magic);\n\t\tif (magic != TCPDUMP_MAGIC && magic != KUZNETZOV_TCPDUMP_MAGIC &&\n\t\t    magic != NSEC_TCPDUMP_MAGIC)\n\t\t\treturn (NULL);\t/* nope */\n\t\tswapped = 1;\n\t}\n\n\t/*\n\t * They are.  Put the magic number in the header, and read\n\t * the rest of the header.\n\t */\n\thdr.magic = magic;\n\tamt_read = fread(((char *)&hdr) + sizeof hdr.magic, 1,\n\t    sizeof(hdr) - sizeof(hdr.magic), fp);\n\tif (amt_read != sizeof(hdr) - sizeof(hdr.magic)) {\n\t\tif (ferror(fp)) {\n\t\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"error reading dump file\");\n\t\t} else {\n\t\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"truncated dump file; tried to read %lu file header bytes, only got %lu\",\n\t\t\t    (unsigned long)sizeof(hdr),\n\t\t\t    (unsigned long)amt_read);\n\t\t}\n\t\t*err = 1;\n\t\treturn (NULL);\n\t}\n\n\t/*\n\t * If it's a byte-swapped capture file, byte-swap the header.\n\t */\n\tif (swapped) {\n\t\thdr.version_major = SWAPSHORT(hdr.version_major);\n\t\thdr.version_minor = SWAPSHORT(hdr.version_minor);\n\t\thdr.thiszone = SWAPLONG(hdr.thiszone);\n\t\thdr.sigfigs = SWAPLONG(hdr.sigfigs);\n\t\thdr.snaplen = SWAPLONG(hdr.snaplen);\n\t\thdr.linktype = SWAPLONG(hdr.linktype);\n\t}\n\n\tif (hdr.version_major < PCAP_VERSION_MAJOR) {\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"archaic pcap savefile format\");\n\t\t*err = 1;\n\t\treturn (NULL);\n\t}\n\n\t/*\n\t * currently only versions 2.[0-4] are supported with\n\t * the exception of 543.0 for DG/UX tcpdump.\n\t */\n\tif (! ((hdr.version_major == PCAP_VERSION_MAJOR &&\n\t\thdr.version_minor <= PCAP_VERSION_MINOR) ||\n\t       (hdr.version_major == 543 &&\n\t\thdr.version_minor == 0))) {\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t \"unsupported pcap savefile version %u.%u\",\n\t\t\t hdr.version_major, hdr.version_minor);\n\t\t*err = 1;\n\t\treturn NULL;\n\t}\n\n\t/*\n\t * OK, this is a good pcap file.\n\t * Allocate a pcap_t for it.\n\t */\n\tp = pcap_open_offline_common(errbuf, sizeof (struct pcap_sf));\n\tif (p == NULL) {\n\t\t/* Allocation failed. */\n\t\t*err = 1;\n\t\treturn (NULL);\n\t}\n\tp->swapped = swapped;\n\tp->version_major = hdr.version_major;\n\tp->version_minor = hdr.version_minor;\n\tp->tzoff = hdr.thiszone;\n\tp->snapshot = hdr.snaplen;\n\tif (p->snapshot <= 0) {\n\t\t/*\n\t\t * Bogus snapshot length; use the maximum for this\n\t\t * link-layer type as a fallback.\n\t\t *\n\t\t * XXX - the only reason why snapshot is signed is\n\t\t * that pcap_snapshot() returns an int, not an\n\t\t * unsigned int.\n\t\t */\n\t\tp->snapshot = max_snaplen_for_dlt(hdr.linktype);\n\t}\n\tp->linktype = linktype_to_dlt(LT_LINKTYPE(hdr.linktype));\n\tp->linktype_ext = LT_LINKTYPE_EXT(hdr.linktype);\n\n\tp->next_packet_op = pcap_next_packet;\n\n\tps = p->priv;\n\n\tp->opt.tstamp_precision = precision;\n\n\t/*\n\t * Will we need to scale the timestamps to match what the\n\t * user wants?\n\t */\n\tswitch (precision) {\n\n\tcase PCAP_TSTAMP_PRECISION_MICRO:\n\t\tif (magic == NSEC_TCPDUMP_MAGIC) {\n\t\t\t/*\n\t\t\t * The file has nanoseconds, the user\n\t\t\t * wants microseconds; scale the\n\t\t\t * precision down.\n\t\t\t */\n\t\t\tps->scale_type = SCALE_DOWN;\n\t\t} else {\n\t\t\t/*\n\t\t\t * The file has microseconds, the\n\t\t\t * user wants microseconds; nothing to do.\n\t\t\t */\n\t\t\tps->scale_type = PASS_THROUGH;\n\t\t}\n\t\tbreak;\n\n\tcase PCAP_TSTAMP_PRECISION_NANO:\n\t\tif (magic == NSEC_TCPDUMP_MAGIC) {\n\t\t\t/*\n\t\t\t * The file has nanoseconds, the\n\t\t\t * user wants nanoseconds; nothing to do.\n\t\t\t */\n\t\t\tps->scale_type = PASS_THROUGH;\n\t\t} else {\n\t\t\t/*\n\t\t\t * The file has microoseconds, the user\n\t\t\t * wants nanoseconds; scale the\n\t\t\t * precision up.\n\t\t\t */\n\t\t\tps->scale_type = SCALE_UP;\n\t\t}\n\t\tbreak;\n\n\tdefault:\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"unknown time stamp resolution %u\", precision);\n\t\tfree(p);\n\t\t*err = 1;\n\t\treturn (NULL);\n\t}\n\n\t/*\n\t * We interchanged the caplen and len fields at version 2.3,\n\t * in order to match the bpf header layout.  But unfortunately\n\t * some files were written with version 2.3 in their headers\n\t * but without the interchanged fields.\n\t *\n\t * In addition, DG/UX tcpdump writes out files with a version\n\t * number of 543.0, and with the caplen and len fields in the\n\t * pre-2.3 order.\n\t */\n\tswitch (hdr.version_major) {\n\n\tcase 2:\n\t\tif (hdr.version_minor < 3)\n\t\t\tps->lengths_swapped = SWAPPED;\n\t\telse if (hdr.version_minor == 3)\n\t\t\tps->lengths_swapped = MAYBE_SWAPPED;\n\t\telse\n\t\t\tps->lengths_swapped = NOT_SWAPPED;\n\t\tbreak;\n\n\tcase 543:\n\t\tps->lengths_swapped = SWAPPED;\n\t\tbreak;\n\n\tdefault:\n\t\tps->lengths_swapped = NOT_SWAPPED;\n\t\tbreak;\n\t}\n\n\tif (magic == KUZNETZOV_TCPDUMP_MAGIC) {\n\t\t/*\n\t\t * XXX - the patch that's in some versions of libpcap\n\t\t * changes the packet header but not the magic number,\n\t\t * and some other versions with this magic number have\n\t\t * some extra debugging information in the packet header;\n\t\t * we'd have to use some hacks^H^H^H^H^Hheuristics to\n\t\t * detect those variants.\n\t\t *\n\t\t * Ethereal does that, but it does so by trying to read\n\t\t * the first two packets of the file with each of the\n\t\t * record header formats.  That currently means it seeks\n\t\t * backwards and retries the reads, which doesn't work\n\t\t * on pipes.  We want to be able to read from a pipe, so\n\t\t * that strategy won't work; we'd have to buffer some\n\t\t * data ourselves and read from that buffer in order to\n\t\t * make that work.\n\t\t */\n\t\tps->hdrsize = sizeof(struct pcap_sf_patched_pkthdr);\n\n\t\tif (p->linktype == DLT_EN10MB) {\n\t\t\t/*\n\t\t\t * This capture might have been done in raw mode\n\t\t\t * or cooked mode.\n\t\t\t *\n\t\t\t * If it was done in cooked mode, p->snapshot was\n\t\t\t * passed to recvfrom() as the buffer size, meaning\n\t\t\t * that the most packet data that would be copied\n\t\t\t * would be p->snapshot.  However, a faked Ethernet\n\t\t\t * header would then have been added to it, so the\n\t\t\t * most data that would be in a packet in the file\n\t\t\t * would be p->snapshot + 14.\n\t\t\t *\n\t\t\t * We can't easily tell whether the capture was done\n\t\t\t * in raw mode or cooked mode, so we'll assume it was\n\t\t\t * cooked mode, and add 14 to the snapshot length.\n\t\t\t * That means that, for a raw capture, the snapshot\n\t\t\t * length will be misleading if you use it to figure\n\t\t\t * out why a capture doesn't have all the packet data,\n\t\t\t * but there's not much we can do to avoid that.\n\t\t\t */\n\t\t\tp->snapshot += 14;\n\t\t}\n\t} else\n\t\tps->hdrsize = sizeof(struct pcap_sf_pkthdr);\n\n\t/*\n\t * Allocate a buffer for the packet data.\n\t * Choose the minimum of the file's snapshot length and 2K bytes;\n\t * that should be enough for most network packets - we'll grow it\n\t * if necessary.  That way, we don't allocate a huge chunk of\n\t * memory just because there's a huge snapshot length, as the\n\t * snapshot length might be larger than the size of the largest\n\t * packet.\n\t */\n\tp->bufsize = p->snapshot;\n\tif (p->bufsize > 2048)\n\t\tp->bufsize = 2048;\n\tp->buffer = malloc(p->bufsize);\n\tif (p->buffer == NULL) {\n\t\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"out of memory\");\n\t\tfree(p);\n\t\t*err = 1;\n\t\treturn (NULL);\n\t}\n\n\tp->cleanup_op = sf_cleanup;\n\n\treturn (p);\n}",
+      "fn_code_pos": [
+        [
+          136,
+          0
+        ],
+        [
+          402,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_check_header",
+        "parameters": {
+          "magic": "bpf_u_int32",
+          "fp": "FILE",
+          "precision": "u_int",
+          "errbuf": "char",
+          "err": "int"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "static int\ngrow_buffer(pcap_t *p, u_int bufsize)\n{\n\tvoid *bigger_buffer;\n\n\tbigger_buffer = realloc(p->buffer, bufsize);\n\tif (bigger_buffer == NULL) {\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE, \"out of memory\");\n\t\treturn (0);\n\t}\n\tp->buffer = bigger_buffer;\n\tp->bufsize = bufsize;\n\treturn (1);\n}",
+      "fn_code_pos": [
+        [
+          407,
+          0
+        ],
+        [
+          420,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "grow_buffer",
+        "parameters": {
+          "p": "pcap_t",
+          "bufsize": "u_int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_next_packet(pcap_t *p, struct pcap_pkthdr *hdr, u_char **data)\n{\n\tstruct pcap_sf *ps = p->priv;\n\tstruct pcap_sf_patched_pkthdr sf_hdr;\n\tFILE *fp = p->rfile;\n\tsize_t amt_read;\n\tbpf_u_int32 t;\n\n\t/*\n\t * Read the packet header; the structure we use as a buffer\n\t * is the longer structure for files generated by the patched\n\t * libpcap, but if the file has the magic number for an\n\t * unpatched libpcap we only read as many bytes as the regular\n\t * header has.\n\t */\n\tamt_read = fread(&sf_hdr, 1, ps->hdrsize, fp);\n\tif (amt_read != ps->hdrsize) {\n\t\tif (ferror(fp)) {\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"error reading dump file\");\n\t\t\treturn (-1);\n\t\t} else {\n\t\t\tif (amt_read != 0) {\n\t\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"truncated dump file; tried to read %lu header bytes, only got %lu\",\n\t\t\t\t    (unsigned long)ps->hdrsize,\n\t\t\t\t    (unsigned long)amt_read);\n\t\t\t\treturn (-1);\n\t\t\t}\n\t\t\t/* EOF */\n\t\t\treturn (1);\n\t\t}\n\t}\n\n\tif (p->swapped) {\n\t\t/* these were written in opposite byte order */\n\t\thdr->caplen = SWAPLONG(sf_hdr.caplen);\n\t\thdr->len = SWAPLONG(sf_hdr.len);\n\t\thdr->ts.tv_sec = SWAPLONG(sf_hdr.ts.tv_sec);\n\t\thdr->ts.tv_usec = SWAPLONG(sf_hdr.ts.tv_usec);\n\t} else {\n\t\thdr->caplen = sf_hdr.caplen;\n\t\thdr->len = sf_hdr.len;\n\t\thdr->ts.tv_sec = sf_hdr.ts.tv_sec;\n\t\thdr->ts.tv_usec = sf_hdr.ts.tv_usec;\n\t}\n\n\tswitch (ps->scale_type) {\n\n\tcase PASS_THROUGH:\n\t\t/*\n\t\t * Just pass the time stamp through.\n\t\t */\n\t\tbreak;\n\n\tcase SCALE_UP:\n\t\t/*\n\t\t * File has microseconds, user wants nanoseconds; convert\n\t\t * it.\n\t\t */\n\t\thdr->ts.tv_usec = hdr->ts.tv_usec * 1000;\n\t\tbreak;\n\n\tcase SCALE_DOWN:\n\t\t/*\n\t\t * File has nanoseconds, user wants microseconds; convert\n\t\t * it.\n\t\t */\n\t\thdr->ts.tv_usec = hdr->ts.tv_usec / 1000;\n\t\tbreak;\n\t}\n\n\t/* Swap the caplen and len fields, if necessary. */\n\tswitch (ps->lengths_swapped) {\n\n\tcase NOT_SWAPPED:\n\t\tbreak;\n\n\tcase MAYBE_SWAPPED:\n\t\tif (hdr->caplen <= hdr->len) {\n\t\t\t/*\n\t\t\t * The captured length is <= the actual length,\n\t\t\t * so presumably they weren't swapped.\n\t\t\t */\n\t\t\tbreak;\n\t\t}\n\t\t/* FALLTHROUGH */\n\n\tcase SWAPPED:\n\t\tt = hdr->caplen;\n\t\thdr->caplen = hdr->len;\n\t\thdr->len = t;\n\t\tbreak;\n\t}\n\n\t/*\n\t * Is the packet bigger than we consider sane?\n\t */\n\tif (hdr->caplen > max_snaplen_for_dlt(p->linktype)) {\n\t\t/*\n\t\t * Yes.  This may be a damaged or fuzzed file.\n\t\t *\n\t\t * Is it bigger than the snapshot length?\n\t\t * (We don't treat that as an error if it's not\n\t\t * bigger than the maximum we consider sane; see\n\t\t * below.)\n\t\t */\n\t\tif (hdr->caplen > (bpf_u_int32)p->snapshot) {\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"invalid packet capture length %u, bigger than \"\n\t\t\t    \"snaplen of %d\", hdr->caplen, p->snapshot);\n\t\t} else {\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"invalid packet capture length %u, bigger than \"\n\t\t\t    \"maximum of %u\", hdr->caplen,\n\t\t\t    max_snaplen_for_dlt(p->linktype));\n\t\t}\n\t\treturn (-1);\n\t}\n\n\tif (hdr->caplen > (bpf_u_int32)p->snapshot) {\n\t\t/*\n\t\t * The packet is bigger than the snapshot length\n\t\t * for this file.\n\t\t *\n\t\t * This can happen due to Solaris 2.3 systems tripping\n\t\t * over the BUFMOD problem and not setting the snapshot\n\t\t * length correctly in the savefile header.\n\t\t *\n\t\t * libpcap 0.4 and later on Solaris 2.3 should set the\n\t\t * snapshot length correctly in the pcap file header,\n\t\t * even though they don't set a snapshot length in bufmod\n\t\t * (the buggy bufmod chops off the *beginning* of the\n\t\t * packet if a snapshot length is specified); they should\n\t\t * also reduce the captured length, as supplied to the\n\t\t * per-packet callback, to the snapshot length if it's\n\t\t * greater than the snapshot length, so the code using\n\t\t * libpcap should see the packet cut off at the snapshot\n\t\t * length, even though the full packet is copied up to\n\t\t * userland.\n\t\t *\n\t\t * However, perhaps some versions of libpcap failed to\n\t\t * set the snapshot length currectly in the file header\n\t\t * or the per-packet header, or perhaps this is a\n\t\t * corrupted safefile or a savefile built/modified by a\n\t\t * fuzz tester, so we check anyway.  We grow the buffer\n\t\t * to be big enough for the snapshot length, read up\n\t\t * to the snapshot length, discard the rest of the\n\t\t * packet, and report the snapshot length as the captured\n\t\t * length; we don't want to hand our caller a packet\n\t\t * bigger than the snapshot length, because they might\n\t\t * be assuming they'll never be handed such a packet,\n\t\t * and might copy the packet into a snapshot-length-\n\t\t * sized buffer, assuming it'll fit.\n\t\t */\n\t\tsize_t bytes_to_discard;\n\t\tsize_t bytes_to_read, bytes_read;\n\t\tchar discard_buf[4096];\n\n\t\tif (hdr->caplen > p->bufsize) {\n\t\t\t/*\n\t\t\t * Grow the buffer to the snapshot length.\n\t\t\t */\n\t\t\tif (!grow_buffer(p, p->snapshot))\n\t\t\t\treturn (-1);\n\t\t}\n\n\t\t/*\n\t\t * Read the first p->snapshot bytes into the buffer.\n\t\t */\n\t\tamt_read = fread(p->buffer, 1, p->snapshot, fp);\n\t\tif (amt_read != (bpf_u_int32)p->snapshot) {\n\t\t\tif (ferror(fp)) {\n\t\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf,\n\t\t\t\t     PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"error reading dump file\");\n\t\t\t} else {\n\t\t\t\t/*\n\t\t\t\t * Yes, this uses hdr->caplen; technically,\n\t\t\t\t * it's true, because we would try to read\n\t\t\t\t * and discard the rest of those bytes, and\n\t\t\t\t * that would fail because we got EOF before\n\t\t\t\t * the read finished.\n\t\t\t\t */\n\t\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"truncated dump file; tried to read %u captured bytes, only got %lu\",\n\t\t\t\t    p->snapshot, (unsigned long)amt_read);\n\t\t\t}\n\t\t\treturn (-1);\n\t\t}\n\n\t\t/*\n\t\t * Now read and discard what's left.\n\t\t */\n\t\tbytes_to_discard = hdr->caplen - p->snapshot;\n\t\tbytes_read = amt_read;\n\t\twhile (bytes_to_discard != 0) {\n\t\t\tbytes_to_read = bytes_to_discard;\n\t\t\tif (bytes_to_read > sizeof (discard_buf))\n\t\t\t\tbytes_to_read = sizeof (discard_buf);\n\t\t\tamt_read = fread(discard_buf, 1, bytes_to_read, fp);\n\t\t\tbytes_read += amt_read;\n\t\t\tif (amt_read != bytes_to_read) {\n\t\t\t\tif (ferror(fp)) {\n\t\t\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf,\n\t\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t\t    \"error reading dump file\");\n\t\t\t\t} else {\n\t\t\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t\t    \"truncated dump file; tried to read %u captured bytes, only got %lu\",\n\t\t\t\t\t    hdr->caplen, (unsigned long)bytes_read);\n\t\t\t\t}\n\t\t\t\treturn (-1);\n\t\t\t}\n\t\t\tbytes_to_discard -= amt_read;\n\t\t}\n\n\t\t/*\n\t\t * Adjust caplen accordingly, so we don't get confused later\n\t\t * as to how many bytes we have to play with.\n\t\t */\n\t\thdr->caplen = p->snapshot;\n\t} else {\n\t\tif (hdr->caplen > p->bufsize) {\n\t\t\t/*\n\t\t\t * Grow the buffer to the next power of 2, or\n\t\t\t * the snaplen, whichever is lower.\n\t\t\t */\n\t\t\tu_int new_bufsize;\n\n\t\t\tnew_bufsize = hdr->caplen;\n\t\t\t/*\n\t\t\t * http://graphics.stanford.edu/~seander/bithacks.html#RoundUpPowerOf2\n\t\t\t */\n\t\t\tnew_bufsize--;\n\t\t\tnew_bufsize |= new_bufsize >> 1;\n\t\t\tnew_bufsize |= new_bufsize >> 2;\n\t\t\tnew_bufsize |= new_bufsize >> 4;\n\t\t\tnew_bufsize |= new_bufsize >> 8;\n\t\t\tnew_bufsize |= new_bufsize >> 16;\n\t\t\tnew_bufsize++;\n\n\t\t\tif (new_bufsize > (u_int)p->snapshot)\n\t\t\t\tnew_bufsize = p->snapshot;\n\n\t\t\tif (!grow_buffer(p, new_bufsize))\n\t\t\t\treturn (-1);\n\t\t}\n\n\t\t/* read the packet itself */\n\t\tamt_read = fread(p->buffer, 1, hdr->caplen, fp);\n\t\tif (amt_read != hdr->caplen) {\n\t\t\tif (ferror(fp)) {\n\t\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf,\n\t\t\t\t    PCAP_ERRBUF_SIZE, errno,\n\t\t\t\t    \"error reading dump file\");\n\t\t\t} else {\n\t\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"truncated dump file; tried to read %u captured bytes, only got %lu\",\n\t\t\t\t    hdr->caplen, (unsigned long)amt_read);\n\t\t\t}\n\t\t\treturn (-1);\n\t\t}\n\t}\n\t*data = p->buffer;\n\n\tif (p->swapped)\n\t\tswap_pseudo_headers(p->linktype, hdr, *data);\n\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          427,
+          0
+        ],
+        [
+          698,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_next_packet",
+        "parameters": {
+          "p": "pcap_t",
+          "hdr": "struct pcap_pkthdr",
+          "data": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nsf_write_header(pcap_t *p, FILE *fp, int linktype, int thiszone, int snaplen)\n{\n\tstruct pcap_file_header hdr;\n\n\thdr.magic = p->opt.tstamp_precision == PCAP_TSTAMP_PRECISION_NANO ? NSEC_TCPDUMP_MAGIC : TCPDUMP_MAGIC;\n\thdr.version_major = PCAP_VERSION_MAJOR;\n\thdr.version_minor = PCAP_VERSION_MINOR;\n\n\thdr.thiszone = thiszone;\n\thdr.snaplen = snaplen;\n\thdr.sigfigs = 0;\n\thdr.linktype = linktype;\n\n\tif (fwrite((char *)&hdr, sizeof(hdr), 1, fp) != 1)\n\t\treturn (-1);\n\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          700,
+          0
+        ],
+        [
+          718,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sf_write_header",
+        "parameters": {
+          "p": "pcap_t",
+          "fp": "FILE",
+          "linktype": "int",
+          "thiszone": "int",
+          "snaplen": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\npcap_dump(u_char *user, const struct pcap_pkthdr *h, const u_char *sp)\n{\n\tregister FILE *f;\n\tstruct pcap_sf_pkthdr sf_hdr;\n\n\tf = (FILE *)user;\n\tsf_hdr.ts.tv_sec  = h->ts.tv_sec;\n\tsf_hdr.ts.tv_usec = h->ts.tv_usec;\n\tsf_hdr.caplen     = h->caplen;\n\tsf_hdr.len        = h->len;\n\t/* XXX we should check the return status */\n\t(void)fwrite(&sf_hdr, sizeof(sf_hdr), 1, f);\n\t(void)fwrite(sp, h->caplen, 1, f);\n}",
+      "fn_code_pos": [
+        [
+          723,
+          0
+        ],
+        [
+          737,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump",
+        "parameters": {
+          "user": "u_char",
+          "h": "struct pcap_pkthdr",
+          "sp": "u_char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static pcap_dumper_t *\npcap_setup_dump(pcap_t *p, int linktype, FILE *f, const char *fname)\n{\n\n#if defined(_WIN32) || defined(MSDOS)\n\t/*\n\t * If we're writing to the standard output, put it in binary\n\t * mode, as savefiles are binary files.\n\t *\n\t * Otherwise, we turn off buffering.\n\t * XXX - why?  And why not on the standard output?\n\t */\n\tif (f == stdout)\n\t\tSET_BINMODE(f);\n\telse\n\t\tsetvbuf(f, NULL, _IONBF, 0);\n#endif\n\tif (sf_write_header(p, f, linktype, p->tzoff, p->snapshot) == -1) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't write to %s\", fname);\n\t\tif (f != stdout)\n\t\t\t(void)fclose(f);\n\t\treturn (NULL);\n\t}\n\treturn ((pcap_dumper_t *)f);\n}",
+      "fn_code_pos": [
+        [
+          739,
+          0
+        ],
+        [
+          764,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setup_dump",
+        "parameters": {
+          "p": "pcap_t",
+          "linktype": "int",
+          "f": "FILE",
+          "fname": "char"
+        },
+        "return_type": "pcap_dumper_t"
+      }
+    },
+    {
+      "fn_code": "pcap_dumper_t *\npcap_dump_open(pcap_t *p, const char *fname)\n{\n\tFILE *f;\n\tint linktype;\n\n\t/*\n\t * If this pcap_t hasn't been activated, it doesn't have a\n\t * link-layer type, so we can't use it.\n\t */\n\tif (!p->activated) {\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"%s: not-yet-activated pcap_t passed to pcap_dump_open\",\n\t\t    fname);\n\t\treturn (NULL);\n\t}\n\tlinktype = dlt_to_linktype(p->linktype);\n\tif (linktype == -1) {\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"%s: link-layer type %d isn't supported in savefiles\",\n\t\t    fname, p->linktype);\n\t\treturn (NULL);\n\t}\n\tlinktype |= p->linktype_ext;\n\n\tif (fname == NULL) {\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"A null pointer was supplied as the file name\");\n\t\treturn NULL;\n\t}\n\tif (fname[0] == '-' && fname[1] == '\\0') {\n\t\tf = stdout;\n\t\tfname = \"standard output\";\n\t} else {\n\t\t/*\n\t\t * \"b\" is supported as of C90, so *all* UN*Xes should\n\t\t * support it, even though it does nothing.  It's\n\t\t * required on Windows, as the file is a binary file\n\t\t * and must be written in binary mode.\n\t\t */\n\t\tf = fopen(fname, \"wb\");\n\t\tif (f == NULL) {\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"%s\", fname);\n\t\t\treturn (NULL);\n\t\t}\n\t}\n\treturn (pcap_setup_dump(p, linktype, f, fname));\n}",
+      "fn_code_pos": [
+        [
+          769,
+          0
+        ],
+        [
+          817,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_open",
+        "parameters": {
+          "p": "pcap_t",
+          "fname": "char"
+        },
+        "return_type": "pcap_dumper_t"
+      }
+    },
+    {
+      "fn_code": "pcap_dumper_t *\npcap_dump_fopen(pcap_t *p, FILE *f)\n{\n\tint linktype;\n\n\tlinktype = dlt_to_linktype(p->linktype);\n\tif (linktype == -1) {\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"stream: link-layer type %d isn't supported in savefiles\",\n\t\t    p->linktype);\n\t\treturn (NULL);\n\t}\n\tlinktype |= p->linktype_ext;\n\n\treturn (pcap_setup_dump(p, linktype, f, \"stream\"));\n}",
+      "fn_code_pos": [
+        [
+          822,
+          0
+        ],
+        [
+          837,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_fopen",
+        "parameters": {
+          "p": "pcap_t",
+          "f": "FILE"
+        },
+        "return_type": "pcap_dumper_t"
+      }
+    },
+    {
+      "fn_code": "pcap_dumper_t *\npcap_dump_open_append(pcap_t *p, const char *fname)\n{\n\tFILE *f;\n\tint linktype;\n\tsize_t amt_read;\n\tstruct pcap_file_header ph;\n\n\tlinktype = dlt_to_linktype(p->linktype);\n\tif (linktype == -1) {\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"%s: link-layer type %d isn't supported in savefiles\",\n\t\t    fname, linktype);\n\t\treturn (NULL);\n\t}\n\n\tif (fname == NULL) {\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"A null pointer was supplied as the file name\");\n\t\treturn NULL;\n\t}\n\tif (fname[0] == '-' && fname[1] == '\\0')\n\t\treturn (pcap_setup_dump(p, linktype, stdout, \"standard output\"));\n\n\t/*\n\t * \"b\" is supported as of C90, so *all* UN*Xes should support it,\n\t * even though it does nothing.  It's required on Windows, as the\n\t * file is a binary file and must be read in binary mode.\n\t */\n\tf = fopen(fname, \"rb+\");\n\tif (f == NULL) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"%s\", fname);\n\t\treturn (NULL);\n\t}\n\n\t/*\n\t * Try to read a pcap header.\n\t */\n\tamt_read = fread(&ph, 1, sizeof (ph), f);\n\tif (amt_read != sizeof (ph)) {\n\t\tif (ferror(f)) {\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"%s\", fname);\n\t\t\tfclose(f);\n\t\t\treturn (NULL);\n\t\t} else if (feof(f) && amt_read > 0) {\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"%s: truncated pcap file header\", fname);\n\t\t\tfclose(f);\n\t\t\treturn (NULL);\n\t\t}\n\t}\n\n#if defined(_WIN32) || defined(MSDOS)\n\t/*\n\t * We turn off buffering.\n\t * XXX - why?  And why not on the standard output?\n\t */\n\tsetvbuf(f, NULL, _IONBF, 0);\n#endif\n\n\t/*\n\t * If a header is already present and:\n\t *\n\t *\tit's not for a pcap file of the appropriate resolution\n\t *\tand the right byte order for this machine;\n\t *\n\t *\tthe link-layer header types don't match;\n\t *\n\t *\tthe snapshot lengths don't match;\n\t *\n\t * return an error.\n\t */\n\tif (amt_read > 0) {\n\t\t/*\n\t\t * A header is already present.\n\t\t * Do the checks.\n\t\t */\n\t\tswitch (ph.magic) {\n\n\t\tcase TCPDUMP_MAGIC:\n\t\t\tif (p->opt.tstamp_precision != PCAP_TSTAMP_PRECISION_MICRO) {\n\t\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"%s: different time stamp precision, cannot append to file\", fname);\n\t\t\t\tfclose(f);\n\t\t\t\treturn (NULL);\n\t\t\t}\n\t\t\tbreak;\n\n\t\tcase NSEC_TCPDUMP_MAGIC:\n\t\t\tif (p->opt.tstamp_precision != PCAP_TSTAMP_PRECISION_NANO) {\n\t\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\t    \"%s: different time stamp precision, cannot append to file\", fname);\n\t\t\t\tfclose(f);\n\t\t\t\treturn (NULL);\n\t\t\t}\n\t\t\tbreak;\n\n\t\tcase SWAPLONG(TCPDUMP_MAGIC):\n\t\tcase SWAPLONG(NSEC_TCPDUMP_MAGIC):\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"%s: different byte order, cannot append to file\", fname);\n\t\t\tfclose(f);\n\t\t\treturn (NULL);\n\n\t\tcase KUZNETZOV_TCPDUMP_MAGIC:\n\t\tcase SWAPLONG(KUZNETZOV_TCPDUMP_MAGIC):\n\t\tcase NAVTEL_TCPDUMP_MAGIC:\n\t\tcase SWAPLONG(NAVTEL_TCPDUMP_MAGIC):\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"%s: not a pcap file to which we can append\", fname);\n\t\t\tfclose(f);\n\t\t\treturn (NULL);\n\n\t\tdefault:\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"%s: not a pcap file\", fname);\n\t\t\tfclose(f);\n\t\t\treturn (NULL);\n\t\t}\n\n\t\t/*\n\t\t * Good version?\n\t\t */\n\t\tif (ph.version_major != PCAP_VERSION_MAJOR ||\n\t\t    ph.version_minor != PCAP_VERSION_MINOR) {\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"%s: version is %u.%u, cannot append to file\", fname,\n\t\t\t    ph.version_major, ph.version_minor);\n\t\t\tfclose(f);\n\t\t\treturn (NULL);\n\t\t}\n\t\tif ((bpf_u_int32)linktype != ph.linktype) {\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"%s: different linktype, cannot append to file\", fname);\n\t\t\tfclose(f);\n\t\t\treturn (NULL);\n\t\t}\n\t\tif ((bpf_u_int32)p->snapshot != ph.snaplen) {\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"%s: different snaplen, cannot append to file\", fname);\n\t\t\tfclose(f);\n\t\t\treturn (NULL);\n\t\t}\n\t} else {\n\t\t/*\n\t\t * A header isn't present; attempt to write it.\n\t\t */\n\t\tif (sf_write_header(p, f, linktype, p->tzoff, p->snapshot) == -1) {\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"Can't write to %s\", fname);\n\t\t\t(void)fclose(f);\n\t\t\treturn (NULL);\n\t\t}\n\t}\n\n\t/*\n\t * Start writing at the end of the file.\n\t */\n\tif (fseek(f, 0, SEEK_END) == -1) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't seek to end of %s\", fname);\n\t\t(void)fclose(f);\n\t\treturn (NULL);\n\t}\n\treturn ((pcap_dumper_t *)f);\n}",
+      "fn_code_pos": [
+        [
+          839,
+          0
+        ],
+        [
+          1006,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_open_append",
+        "parameters": {
+          "p": "pcap_t",
+          "fname": "char"
+        },
+        "return_type": "pcap_dumper_t"
+      }
+    },
+    {
+      "fn_code": "FILE *\npcap_dump_file(pcap_dumper_t *p)\n{\n\treturn ((FILE *)p);\n}",
+      "fn_code_pos": [
+        [
+          1008,
+          0
+        ],
+        [
+          1012,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_file",
+        "parameters": {
+          "p": "pcap_dumper_t"
+        },
+        "return_type": "FILE"
+      }
+    },
+    {
+      "fn_code": "long\npcap_dump_ftell(pcap_dumper_t *p)\n{\n\treturn (ftell((FILE *)p));\n}",
+      "fn_code_pos": [
+        [
+          1014,
+          0
+        ],
+        [
+          1018,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_ftell",
+        "parameters": {
+          "p": "pcap_dumper_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "int64_t\npcap_dump_ftell64(pcap_dumper_t *p)\n{\n\treturn (ftello((FILE *)p));\n}",
+      "fn_code_pos": [
+        [
+          1027,
+          0
+        ],
+        [
+          1031,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_ftell64",
+        "parameters": {
+          "p": "pcap_dumper_t"
+        },
+        "return_type": "int64_t"
+      }
+    },
+    {
+      "fn_code": "int64_t\npcap_dump_ftell64(pcap_dumper_t *p)\n{\n\treturn (_ftelli64((FILE *)p));\n}",
+      "fn_code_pos": [
+        [
+          1037,
+          0
+        ],
+        [
+          1041,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_ftell64",
+        "parameters": {
+          "p": "pcap_dumper_t"
+        },
+        "return_type": "int64_t"
+      }
+    },
+    {
+      "fn_code": "int64_t\npcap_dump_ftell64(pcap_dumper_t *p)\n{\n\treturn (ftell((FILE *)p));\n}",
+      "fn_code_pos": [
+        [
+          1052,
+          0
+        ],
+        [
+          1056,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_ftell64",
+        "parameters": {
+          "p": "pcap_dumper_t"
+        },
+        "return_type": "int64_t"
+      }
+    },
+    {
+      "fn_code": "int\npcap_dump_flush(pcap_dumper_t *p)\n{\n\n\tif (fflush((FILE *)p) == EOF)\n\t\treturn (-1);\n\telse\n\t\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          1059,
+          0
+        ],
+        [
+          1067,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_flush",
+        "parameters": {
+          "p": "pcap_dumper_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\npcap_dump_close(pcap_dumper_t *p)\n{\n\n#ifdef notyet\n\tif (ferror((FILE *)p))\n\t\treturn-an-error;\n\t/* XXX should check return from fclose() too */\n#endif\n\t(void)fclose((FILE *)p);\n}",
+      "fn_code_pos": [
+        [
+          1069,
+          0
+        ],
+        [
+          1079,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_close",
+        "parameters": {
+          "p": "pcap_dumper_t"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "pcap_next_packet(pcap_t *p, struct pcap_pkthdr *hdr, u_char **datap)",
+      "fn_dec_pos": [
+        [
+          109,
+          11
+        ],
+        [
+          109,
+          79
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_next_packet",
+        "parameters": {
+          "p": "pcap_t",
+          "hdr": "struct pcap_pkthdr",
+          "datap": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_check_header(bpf_u_int32 magic, FILE *fp, u_int precision, char *errbuf,\n\t\t  int *err)",
+      "fn_dec_pos": [
+        [
+          137,
+          0
+        ],
+        [
+          138,
+          13
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_check_header",
+        "parameters": {
+          "magic": "bpf_u_int32",
+          "fp": "FILE",
+          "precision": "u_int",
+          "errbuf": "char",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_setup_dump(pcap_t *p, int linktype, FILE *f, const char *fname)",
+      "fn_dec_pos": [
+        [
+          740,
+          0
+        ],
+        [
+          740,
+          68
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setup_dump",
+        "parameters": {
+          "p": "pcap_t",
+          "linktype": "int",
+          "f": "FILE",
+          "fname": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_dump_open(pcap_t *p, const char *fname)",
+      "fn_dec_pos": [
+        [
+          770,
+          0
+        ],
+        [
+          770,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_open",
+        "parameters": {
+          "p": "pcap_t",
+          "fname": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_dump_fopen(pcap_t *p, FILE *f)",
+      "fn_dec_pos": [
+        [
+          823,
+          0
+        ],
+        [
+          823,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_fopen",
+        "parameters": {
+          "p": "pcap_t",
+          "f": "FILE"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_dump_open_append(pcap_t *p, const char *fname)",
+      "fn_dec_pos": [
+        [
+          840,
+          0
+        ],
+        [
+          840,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_open_append",
+        "parameters": {
+          "p": "pcap_t",
+          "fname": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_dump_file(pcap_dumper_t *p)",
+      "fn_dec_pos": [
+        [
+          1009,
+          0
+        ],
+        [
+          1009,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_dump_file",
+        "parameters": {
+          "p": "pcap_dumper_t"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_sf {\n\tsize_t hdrsize;\n\tswapped_type_t lengths_swapped;\n\ttstamp_scale_type_t scale_type;\n}",
+      {
+        "hdrsize": "size_t",
+        "lengths_swapped": "swapped_type_t",
+        "scale_type": "tstamp_scale_type_t"
+      },
+      "pcap_sf",
+      [
+        126,
+        0
+      ],
+      [
+        130,
+        1
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        109,
+        39
+      ],
+      [
+        109,
+        57
+      ]
+    ],
+    [
+      "struct pcap_sf {\n\tsize_t hdrsize;\n\tswapped_type_t lengths_swapped;\n\ttstamp_scale_type_t scale_type;\n}",
+      {
+        "hdrsize": "size_t",
+        "lengths_swapped": "swapped_type_t",
+        "scale_type": "tstamp_scale_type_t"
+      },
+      "pcap_sf",
+      [
+        126,
+        0
+      ],
+      [
+        130,
+        1
+      ]
+    ],
+    [
+      "struct pcap_file_header",
+      {},
+      "",
+      [
+        140,
+        1
+      ],
+      [
+        140,
+        24
+      ]
+    ],
+    [
+      "struct pcap_sf",
+      {},
+      "",
+      [
+        144,
+        1
+      ],
+      [
+        144,
+        15
+      ]
+    ],
+    [
+      "struct pcap_sf",
+      {},
+      "",
+      [
+        224,
+        46
+      ],
+      [
+        224,
+        60
+      ]
+    ],
+    [
+      "struct pcap_sf_patched_pkthdr",
+      {},
+      "",
+      [
+        351,
+        23
+      ],
+      [
+        351,
+        52
+      ]
+    ],
+    [
+      "struct pcap_sf_pkthdr",
+      {},
+      "",
+      [
+        377,
+        23
+      ],
+      [
+        377,
+        44
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        428,
+        28
+      ],
+      [
+        428,
+        46
+      ]
+    ],
+    [
+      "struct pcap_sf",
+      {},
+      "",
+      [
+        430,
+        1
+      ],
+      [
+        430,
+        15
+      ]
+    ],
+    [
+      "struct pcap_sf_patched_pkthdr",
+      {},
+      "",
+      [
+        431,
+        1
+      ],
+      [
+        431,
+        30
+      ]
+    ],
+    [
+      "struct pcap_file_header",
+      {},
+      "",
+      [
+        703,
+        1
+      ],
+      [
+        703,
+        24
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        724,
+        30
+      ],
+      [
+        724,
+        48
+      ]
+    ],
+    [
+      "struct pcap_sf_pkthdr",
+      {},
+      "",
+      [
+        727,
+        1
+      ],
+      [
+        727,
+        22
+      ]
+    ],
+    [
+      "struct pcap_file_header",
+      {},
+      "",
+      [
+        845,
+        1
+      ],
+      [
+        845,
+        24
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <pcap-types.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include <io.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include <memory.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        46,
+        0
+      ],
+      [
+        47,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-common.h\"\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include \"os-proto.h\"\n",
+      [
+        51,
+        0
+      ],
+      [
+        52,
+        0
+      ]
+    ],
+    [
+      "#include \"sf-pcap.h\"\n",
+      [
+        54,
+        0
+      ],
+      [
+        55,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "typedef enum {\n\tNOT_SWAPPED,\n\tSWAPPED,\n\tMAYBE_SWAPPED\n} swapped_type_t;",
+      {
+        "NOT_SWAPPED": "",
+        "SWAPPED": "",
+        "MAYBE_SWAPPED": ""
+      },
+      "swapped_type_t",
+      [
+        114,
+        0
+      ],
+      [
+        118,
+        17
+      ]
+    ],
+    [
+      "typedef enum {\n\tPASS_THROUGH,\n\tSCALE_UP,\n\tSCALE_DOWN\n} tstamp_scale_type_t;",
+      {
+        "PASS_THROUGH": "",
+        "SCALE_UP": "",
+        "SCALE_DOWN": ""
+      },
+      "tstamp_scale_type_t",
+      [
+        120,
+        0
+      ],
+      [
+        124,
+        22
+      ]
+    ]
+  ]
+}

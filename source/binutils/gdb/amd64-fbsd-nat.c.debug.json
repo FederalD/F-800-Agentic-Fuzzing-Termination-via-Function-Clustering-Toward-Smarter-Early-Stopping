@@ -1,0 +1,461 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\namd64fbsd_supply_pcb (struct regcache *regcache, struct pcb *pcb)\n{\n  /* The following is true for FreeBSD 5.2:\n\n     The pcb contains %rip, %rbx, %rsp, %rbp, %r12, %r13, %r14, %r15,\n     %ds, %es, %fs and %gs.  This accounts for all callee-saved\n     registers specified by the psABI and then some.  Here %esp\n     contains the stack pointer at the point just after the call to\n     cpu_switch().  From this information we reconstruct the register\n     state as it would like when we just returned from cpu_switch().  */\n\n  /* The stack pointer shouldn't be zero.  */\n  if (pcb->pcb_rsp == 0)\n    return 0;\n\n  pcb->pcb_rsp += 8;\n  regcache_raw_supply (regcache, AMD64_RIP_REGNUM, &pcb->pcb_rip);\n  regcache_raw_supply (regcache, AMD64_RBX_REGNUM, &pcb->pcb_rbx);\n  regcache_raw_supply (regcache, AMD64_RSP_REGNUM, &pcb->pcb_rsp);\n  regcache_raw_supply (regcache, AMD64_RBP_REGNUM, &pcb->pcb_rbp);\n  regcache_raw_supply (regcache, 12, &pcb->pcb_r12);\n  regcache_raw_supply (regcache, 13, &pcb->pcb_r13);\n  regcache_raw_supply (regcache, 14, &pcb->pcb_r14);\n  regcache_raw_supply (regcache, 15, &pcb->pcb_r15);\n#if (__FreeBSD_version < 800075) && (__FreeBSD_kernel_version < 800075)\n  /* struct pcb provides the pcb_ds/pcb_es/pcb_fs/pcb_gs fields only\n     up until __FreeBSD_version 800074: The removal of these fields\n     occurred on 2009-04-01 while the __FreeBSD_version number was\n     bumped to 800075 on 2009-04-06.  So 800075 is the closest version\n     number where we should not try to access these fields.  */\n  regcache_raw_supply (regcache, AMD64_DS_REGNUM, &pcb->pcb_ds);\n  regcache_raw_supply (regcache, AMD64_ES_REGNUM, &pcb->pcb_es);\n  regcache_raw_supply (regcache, AMD64_FS_REGNUM, &pcb->pcb_fs);\n  regcache_raw_supply (regcache, AMD64_GS_REGNUM, &pcb->pcb_gs);\n#endif\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          101,
+          0
+        ],
+        [
+          139,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64fbsd_supply_pcb",
+        "parameters": {
+          "regcache": "struct regcache",
+          "pcb": "struct pcb"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static const struct target_desc *\namd64fbsd_read_description (struct target_ops *ops)\n{\n#ifdef PT_GETXSTATE_INFO\n  static int xsave_probed;\n  static uint64_t xcr0;\n#endif\n  struct reg regs;\n  int is64;\n\n  if (ptrace (PT_GETREGS, ptid_get_pid (inferior_ptid),\n\t      (PTRACE_TYPE_ARG3) &regs, 0) == -1)\n    perror_with_name (_(\"Couldn't get registers\"));\n  is64 = (regs.r_cs == GSEL (GUCODE_SEL, SEL_UPL));\n#ifdef PT_GETXSTATE_INFO\n  if (!xsave_probed)\n    {\n      struct ptrace_xstate_info info;\n\n      if (ptrace (PT_GETXSTATE_INFO, ptid_get_pid (inferior_ptid),\n\t\t  (PTRACE_TYPE_ARG3) &info, sizeof (info)) == 0)\n\t{\n\t  x86bsd_xsave_len = info.xsave_len;\n\t  xcr0 = info.xsave_mask;\n\t}\n      xsave_probed = 1;\n    }\n\n  if (x86bsd_xsave_len != 0)\n    {\n      if (is64)\n\treturn amd64_target_description (xcr0);\n      else\n\treturn i386_target_description (xcr0);\n    }\n#endif\n  if (is64)\n    return tdesc_amd64;\n  else\n    return tdesc_i386;\n}",
+      "fn_code_pos": [
+        [
+          144,
+          0
+        ],
+        [
+          184,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64fbsd_read_description",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_amd64fbsd_nat (void)\n{\n  struct target_ops *t;\n  int offset;\n\n  amd64_native_gregset32_reg_offset = amd64fbsd32_r_reg_offset;\n  amd64_native_gregset64_reg_offset = amd64fbsd64_r_reg_offset;\n\n  /* Add some extra features to the common *BSD/i386 target.  */\n  t = amd64bsd_target ();\n  t->to_read_description = amd64fbsd_read_description;\n\n  fbsd_nat_add_target (t);\n\n  /* Support debugging kernel virtual memory images.  */\n  bsd_kvm_add_target (amd64fbsd_supply_pcb);\n\n  /* To support the recognition of signal handlers, i386-bsd-tdep.c\n     hardcodes some constants.  Inclusion of this file means that we\n     are compiling a native debugger, which means that we can use the\n     system header files and sysctl(3) to get at the relevant\n     information.  */\n\n#define SC_REG_OFFSET amd64fbsd_sc_reg_offset\n\n  /* We only check the program counter, stack pointer and frame\n     pointer since these members of `struct sigcontext' are essential\n     for providing backtraces.  */\n\n#define SC_RIP_OFFSET SC_REG_OFFSET[AMD64_RIP_REGNUM]\n#define SC_RSP_OFFSET SC_REG_OFFSET[AMD64_RSP_REGNUM]\n#define SC_RBP_OFFSET SC_REG_OFFSET[AMD64_RBP_REGNUM]\n\n  /* Override the default value for the offset of the program counter\n     in the sigcontext structure.  */\n  offset = offsetof (struct sigcontext, sc_rip);\n\n  if (SC_RIP_OFFSET != offset)\n    {\n      warning (_(\"\\\noffsetof (struct sigcontext, sc_rip) yields %d instead of %d.\\n\\\nPlease report this to <bug-gdb@gnu.org>.\"),\n\t       offset, SC_RIP_OFFSET);\n    }\n\n  SC_RIP_OFFSET = offset;\n\n  /* Likewise for the stack pointer.  */\n  offset = offsetof (struct sigcontext, sc_rsp);\n\n  if (SC_RSP_OFFSET != offset)\n    {\n      warning (_(\"\\\noffsetof (struct sigcontext, sc_rsp) yields %d instead of %d.\\n\\\nPlease report this to <bug-gdb@gnu.org>.\"),\n\t       offset, SC_RSP_OFFSET);\n    }\n\n  SC_RSP_OFFSET = offset;\n\n  /* And the frame pointer.  */\n  offset = offsetof (struct sigcontext, sc_rbp);\n\n  if (SC_RBP_OFFSET != offset)\n    {\n      warning (_(\"\\\noffsetof (struct sigcontext, sc_rbp) yields %d instead of %d.\\n\\\nPlease report this to <bug-gdb@gnu.org>.\"),\n\t       offset, SC_RBP_OFFSET);\n    }\n\n  SC_RBP_OFFSET = offset;\n\n#ifdef KERN_PROC_SIGTRAMP\n  /* Normally signal frames are detected via amd64fbsd_sigtramp_p.\n     However, FreeBSD 9.2 through 10.1 do not include the page holding\n     the signal code in core dumps.  These releases do provide a\n     kern.proc.sigtramp.<pid> sysctl that returns the location of the\n     signal trampoline for a running process.  We fetch the location\n     of the current (gdb) process and use this to identify signal\n     frames in core dumps from these releases.  Note that this only\n     works for core dumps of 64-bit (FreeBSD/amd64) processes and does\n     not handle core dumps of 32-bit (FreeBSD/i386) processes.  */\n  {\n    int mib[4];\n    struct kinfo_sigtramp kst;\n    size_t len;\n\n    mib[0] = CTL_KERN;\n    mib[1] = KERN_PROC;\n    mib[2] = KERN_PROC_SIGTRAMP;\n    mib[3] = getpid ();\n    len = sizeof (kst);\n    if (sysctl (mib, 4, &kst, &len, NULL, 0) == 0)\n      {\n\tamd64fbsd_sigtramp_start_addr = (uintptr_t) kst.ksigtramp_start;\n\tamd64fbsd_sigtramp_end_addr = (uintptr_t) kst.ksigtramp_end;\n      }\n  }\n#endif\n}",
+      "fn_code_pos": [
+        [
+          189,
+          0
+        ],
+        [
+          290,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_amd64fbsd_nat",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "amd64fbsd_read_description (struct target_ops *ops)",
+      "fn_dec_pos": [
+        [
+          145,
+          0
+        ],
+        [
+          145,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64fbsd_read_description",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "_initialize_amd64fbsd_nat (void)",
+      "fn_dec_pos": [
+        [
+          187,
+          5
+        ],
+        [
+          187,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_amd64fbsd_nat",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        102,
+        22
+      ],
+      [
+        102,
+        37
+      ]
+    ],
+    [
+      "struct pcb",
+      {},
+      "",
+      [
+        102,
+        49
+      ],
+      [
+        102,
+        59
+      ]
+    ],
+    [
+      "struct target_desc",
+      {},
+      "",
+      [
+        144,
+        13
+      ],
+      [
+        144,
+        31
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        145,
+        28
+      ],
+      [
+        145,
+        45
+      ]
+    ],
+    [
+      "struct reg",
+      {},
+      "",
+      [
+        151,
+        2
+      ],
+      [
+        151,
+        12
+      ]
+    ],
+    [
+      "struct ptrace_xstate_info",
+      {},
+      "",
+      [
+        161,
+        6
+      ],
+      [
+        161,
+        31
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        192,
+        2
+      ],
+      [
+        192,
+        19
+      ]
+    ],
+    [
+      "struct sigcontext",
+      {},
+      "",
+      [
+        225,
+        21
+      ],
+      [
+        225,
+        38
+      ]
+    ],
+    [
+      "struct sigcontext",
+      {},
+      "",
+      [
+        238,
+        21
+      ],
+      [
+        238,
+        38
+      ]
+    ],
+    [
+      "struct sigcontext",
+      {},
+      "",
+      [
+        251,
+        21
+      ],
+      [
+        251,
+        38
+      ]
+    ],
+    [
+      "struct kinfo_sigtramp",
+      {},
+      "",
+      [
+        275,
+        4
+      ],
+      [
+        275,
+        25
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"target.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ptrace.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <sys/sysctl.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <sys/user.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <machine/reg.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"fbsd-nat.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"amd64-tdep.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"amd64-nat.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"x86-bsd-nat.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"x86-nat.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <machine/pcb.h>\n",
+      [
+        96,
+        0
+      ],
+      [
+        97,
+        0
+      ]
+    ],
+    [
+      "#include <osreldate.h>\n",
+      [
+        97,
+        0
+      ],
+      [
+        98,
+        0
+      ]
+    ],
+    [
+      "#include \"bsd-kvm.h\"\n",
+      [
+        99,
+        0
+      ],
+      [
+        100,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

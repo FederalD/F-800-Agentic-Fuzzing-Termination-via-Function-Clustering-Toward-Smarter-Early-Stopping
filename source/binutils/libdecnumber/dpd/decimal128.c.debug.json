@@ -1,0 +1,482 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "decimal128 * decimal128FromNumber(decimal128 *d128, const decNumber *dn,\n\t\t\t\t  decContext *set) {\n  uInt status=0;\t\t   /* status accumulator */\n  Int ae;\t\t\t   /* adjusted exponent */\n  decNumber  dw;\t\t   /* work */\n  decContext dc;\t\t   /* .. */\n  uInt comb, exp;\t\t   /* .. */\n  uInt uiwork;\t\t\t   /* for macros */\n  uInt targar[4]={0,0,0,0};\t   /* target 128-bit */\n  #define targhi targar[3]\t   /* name the word with the sign */\n  #define targmh targar[2]\t   /* name the words */\n  #define targml targar[1]\t   /* .. */\n  #define targlo targar[0]\t   /* .. */\n\n  /* If the number has too many digits, or the exponent could be */\n  /* out of range then reduce the number under the appropriate */\n  /* constraints.  This could push the number to Infinity or zero, */\n  /* so this check and rounding must be done before generating the */\n  /* decimal128] */\n  ae=dn->exponent+dn->digits-1; \t     /* [0 if special] */\n  if (dn->digits>DECIMAL128_Pmax\t     /* too many digits */\n   || ae>DECIMAL128_Emax\t\t     /* likely overflow */\n   || ae<DECIMAL128_Emin) {\t\t     /* likely underflow */\n    decContextDefault(&dc, DEC_INIT_DECIMAL128); /* [no traps] */\n    dc.round=set->round;\t\t     /* use supplied rounding */\n    decNumberPlus(&dw, dn, &dc);\t     /* (round and check) */\n    /* [this changes -0 to 0, so enforce the sign...] */\n    dw.bits|=dn->bits&DECNEG;\n    status=dc.status;\t\t\t     /* save status */\n    dn=&dw;\t\t\t\t     /* use the work number */\n    } /* maybe out of range */\n\n  if (dn->bits&DECSPECIAL) {\t\t\t  /* a special value */\n    if (dn->bits&DECINF) targhi=DECIMAL_Inf<<24;\n     else {\t\t\t\t\t  /* sNaN or qNaN */\n      if ((*dn->lsu!=0 || dn->digits>1) \t  /* non-zero coefficient */\n       && (dn->digits<DECIMAL128_Pmax)) {\t  /* coefficient fits */\n\tdecDigitsToDPD(dn, targar, 0);\n\t}\n      if (dn->bits&DECNAN) targhi|=DECIMAL_NaN<<24;\n       else targhi|=DECIMAL_sNaN<<24;\n      } /* a NaN */\n    } /* special */\n\n   else { /* is finite */\n    if (decNumberIsZero(dn)) {\t\t     /* is a zero */\n      /* set and clamp exponent */\n      if (dn->exponent<-DECIMAL128_Bias) {\n\texp=0;\t\t\t\t     /* low clamp */\n\tstatus|=DEC_Clamped;\n\t}\n       else {\n\texp=dn->exponent+DECIMAL128_Bias;    /* bias exponent */\n\tif (exp>DECIMAL128_Ehigh) {\t     /* top clamp */\n\t  exp=DECIMAL128_Ehigh;\n\t  status|=DEC_Clamped;\n\t  }\n\t}\n      comb=(exp>>9) & 0x18;\t\t/* msd=0, exp top 2 bits .. */\n      }\n     else {\t\t\t\t/* non-zero finite number */\n      uInt msd; \t\t\t/* work */\n      Int pad=0;\t\t\t/* coefficient pad digits */\n\n      /* the dn is known to fit, but it may need to be padded */\n      exp=(uInt)(dn->exponent+DECIMAL128_Bias);    /* bias exponent */\n      if (exp>DECIMAL128_Ehigh) {\t\t   /* fold-down case */\n\tpad=exp-DECIMAL128_Ehigh;\n\texp=DECIMAL128_Ehigh;\t\t\t   /* [to maximum] */\n\tstatus|=DEC_Clamped;\n\t}\n\n      /* [fastpath for common case is not a win, here] */\n      decDigitsToDPD(dn, targar, pad);\n      /* save and clear the top digit */\n      msd=targhi>>14;\n      targhi&=0x00003fff;\n\n      /* create the combination field */\n      if (msd>=8) comb=0x18 | ((exp>>11) & 0x06) | (msd & 0x01);\n\t     else comb=((exp>>9) & 0x18) | msd;\n      }\n    targhi|=comb<<26;\t\t   /* add combination field .. */\n    targhi|=(exp&0xfff)<<14;\t   /* .. and exponent continuation */\n    } /* finite */\n\n  if (dn->bits&DECNEG) targhi|=0x80000000; /* add sign bit */\n\n  /* now write to storage; this is endian */\n  if (DECLITEND) {\n    /* lo -> hi */\n    UBFROMUI(d128->bytes,    targlo);\n    UBFROMUI(d128->bytes+4,  targml);\n    UBFROMUI(d128->bytes+8,  targmh);\n    UBFROMUI(d128->bytes+12, targhi);\n    }\n   else {\n    /* hi -> lo */\n    UBFROMUI(d128->bytes,    targhi);\n    UBFROMUI(d128->bytes+4,  targmh);\n    UBFROMUI(d128->bytes+8,  targml);\n    UBFROMUI(d128->bytes+12, targlo);\n    }\n\n  if (status!=0) decContextSetStatus(set, status); /* pass on status */\n  /* decimal128Show(d128); */\n  return d128;\n  }",
+      "fn_code_pos": [
+        [
+          80,
+          0
+        ],
+        [
+          187,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128FromNumber",
+        "parameters": {
+          "d128": "decimal128",
+          "dn": "decNumber",
+          "set": "decContext"
+        },
+        "return_type": "decimal128"
+      }
+    },
+    {
+      "fn_code": "decNumber * decimal128ToNumber(const decimal128 *d128, decNumber *dn) {\n  uInt msd;\t\t\t   /* coefficient MSD */\n  uInt exp;\t\t\t   /* exponent top two bits */\n  uInt comb;\t\t\t   /* combination field */\n  Int  need;\t\t\t   /* work */\n  uInt uiwork;\t\t\t   /* for macros */\n  uInt sourar[4];\t\t   /* source 128-bit */\n  #define sourhi sourar[3]\t   /* name the word with the sign */\n  #define sourmh sourar[2]\t   /* and the mid-high word */\n  #define sourml sourar[1]\t   /* and the mod-low word */\n  #define sourlo sourar[0]\t   /* and the lowest word */\n\n  /* load source from storage; this is endian */\n  if (DECLITEND) {\n    sourlo=UBTOUI(d128->bytes\t); /* directly load the low int */\n    sourml=UBTOUI(d128->bytes+4 ); /* then the mid-low */\n    sourmh=UBTOUI(d128->bytes+8 ); /* then the mid-high */\n    sourhi=UBTOUI(d128->bytes+12); /* then the high int */\n    }\n   else {\n    sourhi=UBTOUI(d128->bytes\t); /* directly load the high int */\n    sourmh=UBTOUI(d128->bytes+4 ); /* then the mid-high */\n    sourml=UBTOUI(d128->bytes+8 ); /* then the mid-low */\n    sourlo=UBTOUI(d128->bytes+12); /* then the low int */\n    }\n\n  comb=(sourhi>>26)&0x1f;\t   /* combination field */\n\n  decNumberZero(dn);\t\t   /* clean number */\n  if (sourhi&0x80000000) dn->bits=DECNEG; /* set sign if negative */\n\n  msd=COMBMSD[comb];\t\t   /* decode the combination field */\n  exp=COMBEXP[comb];\t\t   /* .. */\n\n  if (exp==3) { \t\t   /* is a special */\n    if (msd==0) {\n      dn->bits|=DECINF;\n      return dn;\t\t   /* no coefficient needed */\n      }\n    else if (sourhi&0x02000000) dn->bits|=DECSNAN;\n    else dn->bits|=DECNAN;\n    msd=0;\t\t\t   /* no top digit */\n    }\n   else {\t\t\t   /* is a finite number */\n    dn->exponent=(exp<<12)+((sourhi>>14)&0xfff)-DECIMAL128_Bias; /* unbiased */\n    }\n\n  /* get the coefficient */\n  sourhi&=0x00003fff;\t\t   /* clean coefficient continuation */\n  if (msd) {\t\t\t   /* non-zero msd */\n    sourhi|=msd<<14;\t\t   /* prefix to coefficient */\n    need=12;\t\t\t   /* process 12 declets */\n    }\n   else { /* msd=0 */\n    if (sourhi) need=11;\t   /* declets to process */\n     else if (sourmh) need=10;\n     else if (sourml) need=7;\n     else if (sourlo) need=4;\n     else return dn;\t\t   /* easy: coefficient is 0 */\n    } /*msd=0 */\n\n  decDigitsFromDPD(dn, sourar, need);\t/* process declets */\n  /* decNumberShow(dn); */\n  return dn;\n  }",
+      "fn_code_pos": [
+        [
+          195,
+          0
+        ],
+        [
+          259,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128ToNumber",
+        "parameters": {
+          "d128": "decimal128",
+          "dn": "decNumber"
+        },
+        "return_type": "decNumber"
+      }
+    },
+    {
+      "fn_code": "char * decimal128ToEngString(const decimal128 *d128, char *string){\n  decNumber dn; \t\t\t/* work */\n  decimal128ToNumber(d128, &dn);\n  decNumberToEngString(&dn, string);\n  return string;\n  }",
+      "fn_code_pos": [
+        [
+          275,
+          0
+        ],
+        [
+          280,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128ToEngString",
+        "parameters": {
+          "d128": "decimal128",
+          "string": "char"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "char * decimal128ToString(const decimal128 *d128, char *string){\n  uInt msd;\t\t\t   /* coefficient MSD */\n  Int  exp;\t\t\t   /* exponent top two bits or full */\n  uInt comb;\t\t\t   /* combination field */\n  char *cstart; \t\t   /* coefficient start */\n  char *c;\t\t\t   /* output pointer in string */\n  const uByte *u;\t\t   /* work */\n  char *s, *t;\t\t\t   /* .. (source, target) */\n  Int  dpd;\t\t\t   /* .. */\n  Int  pre, e;\t\t\t   /* .. */\n  uInt uiwork;\t\t\t   /* for macros */\n\n  uInt sourar[4];\t\t   /* source 128-bit */\n  #define sourhi sourar[3]\t   /* name the word with the sign */\n  #define sourmh sourar[2]\t   /* and the mid-high word */\n  #define sourml sourar[1]\t   /* and the mod-low word */\n  #define sourlo sourar[0]\t   /* and the lowest word */\n\n  /* load source from storage; this is endian */\n  if (DECLITEND) {\n    sourlo=UBTOUI(d128->bytes\t); /* directly load the low int */\n    sourml=UBTOUI(d128->bytes+4 ); /* then the mid-low */\n    sourmh=UBTOUI(d128->bytes+8 ); /* then the mid-high */\n    sourhi=UBTOUI(d128->bytes+12); /* then the high int */\n    }\n   else {\n    sourhi=UBTOUI(d128->bytes\t); /* directly load the high int */\n    sourmh=UBTOUI(d128->bytes+4 ); /* then the mid-high */\n    sourml=UBTOUI(d128->bytes+8 ); /* then the mid-low */\n    sourlo=UBTOUI(d128->bytes+12); /* then the low int */\n    }\n\n  c=string;\t\t\t   /* where result will go */\n  if (((Int)sourhi)<0) *c++='-';   /* handle sign */\n\n  comb=(sourhi>>26)&0x1f;\t   /* combination field */\n  msd=COMBMSD[comb];\t\t   /* decode the combination field */\n  exp=COMBEXP[comb];\t\t   /* .. */\n\n  if (exp==3) {\n    if (msd==0) {\t\t   /* infinity */\n      strcpy(c,   \"Inf\");\n      strcpy(c+3, \"inity\");\n      return string;\t\t   /* easy */\n      }\n    if (sourhi&0x02000000) *c++='s'; /* sNaN */\n    strcpy(c, \"NaN\");\t\t   /* complete word */\n    c+=3;\t\t\t   /* step past */\n    if (sourlo==0 && sourml==0 && sourmh==0\n     && (sourhi&0x0003ffff)==0) return string; /* zero payload */\n    /* otherwise drop through to add integer; set correct exp */\n    exp=0; msd=0;\t\t   /* setup for following code */\n    }\n   else exp=(exp<<12)+((sourhi>>14)&0xfff)-DECIMAL128_Bias; /* unbiased */\n\n  /* convert 34 digits of significand to characters */\n  cstart=c;\t\t\t   /* save start of coefficient */\n  if (msd) *c++='0'+(char)msd;\t   /* non-zero most significant digit */\n\n  /* Now decode the declets.  After extracting each one, it is */\n  /* decoded to binary and then to a 4-char sequence by table lookup; */\n  /* the 4-chars are a 1-char length (significant digits, except 000 */\n  /* has length 0).  This allows us to left-align the first declet */\n  /* with non-zero content, then remaining ones are full 3-char */\n  /* length.  We use fixed-length memcpys because variable-length */\n  /* causes a subroutine call in GCC.  (These are length 4 for speed */\n  /* and are safe because the array has an extra terminator byte.) */\n  #define dpd2char u=&BIN2CHAR[DPD2BIN[dpd]*4]; \t\t  \\\n\t\t   if (c!=cstart) {memcpy(c, u+1, 4); c+=3;}\t  \\\n\t\t    else if (*u)  {memcpy(c, u+4-*u, 4); c+=*u;}\n  dpd=(sourhi>>4)&0x3ff;\t\t     /* declet 1 */\n  dpd2char;\n  dpd=((sourhi&0xf)<<6) | (sourmh>>26);      /* declet 2 */\n  dpd2char;\n  dpd=(sourmh>>16)&0x3ff;\t\t     /* declet 3 */\n  dpd2char;\n  dpd=(sourmh>>6)&0x3ff;\t\t     /* declet 4 */\n  dpd2char;\n  dpd=((sourmh&0x3f)<<4) | (sourml>>28);     /* declet 5 */\n  dpd2char;\n  dpd=(sourml>>18)&0x3ff;\t\t     /* declet 6 */\n  dpd2char;\n  dpd=(sourml>>8)&0x3ff;\t\t     /* declet 7 */\n  dpd2char;\n  dpd=((sourml&0xff)<<2) | (sourlo>>30);     /* declet 8 */\n  dpd2char;\n  dpd=(sourlo>>20)&0x3ff;\t\t     /* declet 9 */\n  dpd2char;\n  dpd=(sourlo>>10)&0x3ff;\t\t     /* declet 10 */\n  dpd2char;\n  dpd=(sourlo)&0x3ff;\t\t\t     /* declet 11 */\n  dpd2char;\n\n  if (c==cstart) *c++='0';\t   /* all zeros -- make 0 */\n\n  if (exp==0) { \t\t   /* integer or NaN case -- easy */\n    *c='\\0';\t\t\t   /* terminate */\n    return string;\n    }\n\n  /* non-0 exponent */\n  e=0;\t\t\t\t   /* assume no E */\n  pre=c-cstart+exp;\n  /* [here, pre-exp is the digits count (==1 for zero)] */\n  if (exp>0 || pre<-5) {\t   /* need exponential form */\n    e=pre-1;\t\t\t   /* calculate E value */\n    pre=1;\t\t\t   /* assume one digit before '.' */\n    } /* exponential form */\n\n  /* modify the coefficient, adding 0s, '.', and E+nn as needed */\n  s=c-1;\t\t\t   /* source (LSD) */\n  if (pre>0) {\t\t\t   /* ddd.ddd (plain), perhaps with E */\n    char *dotat=cstart+pre;\n    if (dotat<c) {\t\t   /* if embedded dot needed... */\n      t=c;\t\t\t\t/* target */\n      for (; s>=dotat; s--, t--) *t=*s; /* open the gap; leave t at gap */\n      *t='.';\t\t\t\t/* insert the dot */\n      c++;\t\t\t\t/* length increased by one */\n      }\n\n    /* finally add the E-part, if needed; it will never be 0, and has */\n    /* a maximum length of 4 digits */\n    if (e!=0) {\n      *c++='E'; \t\t   /* starts with E */\n      *c++='+'; \t\t   /* assume positive */\n      if (e<0) {\n\t*(c-1)='-';\t\t   /* oops, need '-' */\n\te=-e;\t\t\t   /* uInt, please */\n\t}\n      if (e<1000) {\t\t   /* 3 (or fewer) digits case */\n\tu=&BIN2CHAR[e*4];\t   /* -> length byte */\n\tmemcpy(c, u+4-*u, 4);\t   /* copy fixed 4 characters [is safe] */\n\tc+=*u;\t\t\t   /* bump pointer appropriately */\n\t}\n       else {\t\t\t   /* 4-digits */\n\tInt thou=((e>>3)*1049)>>17; /* e/1000 */\n\tInt rem=e-(1000*thou);\t    /* e%1000 */\n\t*c++='0'+(char)thou;\n\tu=&BIN2CHAR[rem*4];\t   /* -> length byte */\n\tmemcpy(c, u+1, 4);\t   /* copy fixed 3+1 characters [is safe] */\n\tc+=3;\t\t\t   /* bump pointer, always 3 digits */\n\t}\n      }\n    *c='\\0';\t\t\t   /* add terminator */\n    /*printf(\"res %s\\n\", string); */\n    return string;\n    } /* pre>0 */\n\n  /* -5<=pre<=0: here for plain 0.ddd or 0.000ddd forms (can never have E) */\n  t=c+1-pre;\n  *(t+1)='\\0';\t\t\t\t/* can add terminator now */\n  for (; s>=cstart; s--, t--) *t=*s;\t/* shift whole coefficient right */\n  c=cstart;\n  *c++='0';\t\t\t\t/* always starts with 0. */\n  *c++='.';\n  for (; pre<0; pre++) *c++='0';\t/* add any 0's after '.' */\n  /*printf(\"res %s\\n\", string); */\n  return string;\n  }",
+      "fn_code_pos": [
+        [
+          282,
+          0
+        ],
+        [
+          440,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128ToString",
+        "parameters": {
+          "d128": "decimal128",
+          "string": "char"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "decimal128 * decimal128FromString(decimal128 *result, const char *string,\n\t\t\t\t  decContext *set) {\n  decContext dc;\t\t\t     /* work */\n  decNumber dn; \t\t\t     /* .. */\n\n  decContextDefault(&dc, DEC_INIT_DECIMAL128); /* no traps, please */\n  dc.round=set->round;\t\t\t       /* use supplied rounding */\n\n  decNumberFromString(&dn, string, &dc);     /* will round if needed */\n  decimal128FromNumber(result, &dn, &dc);\n  if (dc.status!=0) {\t\t\t     /* something happened */\n    decContextSetStatus(set, dc.status);     /* .. pass it on */\n    }\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          457,
+          0
+        ],
+        [
+          471,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128FromString",
+        "parameters": {
+          "result": "decimal128",
+          "string": "char",
+          "set": "decContext"
+        },
+        "return_type": "decimal128"
+      }
+    },
+    {
+      "fn_code": "uInt decimal128IsCanonical(const decimal128 *d128) {\n  decNumber dn; \t\t\t/* work */\n  decimal128 canon;\t\t\t /* .. */\n  decContext dc;\t\t\t/* .. */\n  decContextDefault(&dc, DEC_INIT_DECIMAL128);\n  decimal128ToNumber(d128, &dn);\n  decimal128FromNumber(&canon, &dn, &dc);/* canon will now be canonical */\n  return memcmp(d128, &canon, DECIMAL128_Bytes)==0;\n  }",
+      "fn_code_pos": [
+        [
+          479,
+          0
+        ],
+        [
+          487,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128IsCanonical",
+        "parameters": {
+          "d128": "decimal128"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "decimal128 * decimal128Canonical(decimal128 *result, const decimal128 *d128) {\n  decNumber dn; \t\t\t/* work */\n  decContext dc;\t\t\t/* .. */\n  decContextDefault(&dc, DEC_INIT_DECIMAL128);\n  decimal128ToNumber(d128, &dn);\n  decimal128FromNumber(result, &dn, &dc);/* result will now be canonical */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          496,
+          0
+        ],
+        [
+          503,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128Canonical",
+        "parameters": {
+          "result": "decimal128",
+          "d128": "decimal128"
+        },
+        "return_type": "decimal128"
+      }
+    },
+    {
+      "fn_code": "void decimal128Show(const decimal128 *d128) {\n  char buf[DECIMAL128_Bytes*2+1];\n  Int i, j=0;\n\n  if (DECLITEND) {\n    for (i=0; i<DECIMAL128_Bytes; i++, j+=2) {\n      sprintf(&buf[j], \"%02x\", d128->bytes[15-i]);\n      }\n    printf(\" D128> %s [S:%d Cb:%02x Ec:%02x] LittleEndian\\n\", buf,\n\t   d128->bytes[15]>>7, (d128->bytes[15]>>2)&0x1f,\n\t   ((d128->bytes[15]&0x3)<<10)|(d128->bytes[14]<<2)|\n\t   (d128->bytes[13]>>6));\n    }\n   else {\n    for (i=0; i<DECIMAL128_Bytes; i++, j+=2) {\n      sprintf(&buf[j], \"%02x\", d128->bytes[i]);\n      }\n    printf(\" D128> %s [S:%d Cb:%02x Ec:%02x] BigEndian\\n\", buf,\n\t   decimal128Sign(d128), decimal128Comb(d128),\n\t   decimal128ExpCon(d128));\n    }\n  }",
+      "fn_code_pos": [
+        [
+          537,
+          0
+        ],
+        [
+          558,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128Show",
+        "parameters": {
+          "d128": "decimal128"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "decDigitsFromDPD(decNumber *, const uInt *, Int)",
+      "fn_dec_pos": [
+        [
+          51,
+          12
+        ],
+        [
+          51,
+          60
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decDigitsFromDPD",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "decDigitsToDPD(const decNumber *, uInt *, Int)",
+      "fn_dec_pos": [
+        [
+          52,
+          12
+        ],
+        [
+          52,
+          58
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decDigitsToDPD",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "decimal128Show(const decimal128 *)",
+      "fn_dec_pos": [
+        [
+          55,
+          5
+        ],
+        [
+          55,
+          39
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128Show",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "decNumberShow(const decNumber *)",
+      "fn_dec_pos": [
+        [
+          56,
+          12
+        ],
+        [
+          56,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decNumberShow",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "decimal128FromNumber(decimal128 *d128, const decNumber *dn,\n\t\t\t\t  decContext *set)",
+      "fn_dec_pos": [
+        [
+          80,
+          13
+        ],
+        [
+          81,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128FromNumber",
+        "parameters": {
+          "d128": "decimal128",
+          "dn": "decNumber",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decimal128ToNumber(const decimal128 *d128, decNumber *dn)",
+      "fn_dec_pos": [
+        [
+          195,
+          12
+        ],
+        [
+          195,
+          69
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128ToNumber",
+        "parameters": {
+          "d128": "decimal128",
+          "dn": "decNumber"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decimal128ToEngString(const decimal128 *d128, char *string)",
+      "fn_dec_pos": [
+        [
+          275,
+          7
+        ],
+        [
+          275,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128ToEngString",
+        "parameters": {
+          "d128": "decimal128",
+          "string": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decimal128ToString(const decimal128 *d128, char *string)",
+      "fn_dec_pos": [
+        [
+          282,
+          7
+        ],
+        [
+          282,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128ToString",
+        "parameters": {
+          "d128": "decimal128",
+          "string": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decimal128FromString(decimal128 *result, const char *string,\n\t\t\t\t  decContext *set)",
+      "fn_dec_pos": [
+        [
+          457,
+          13
+        ],
+        [
+          458,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128FromString",
+        "parameters": {
+          "result": "decimal128",
+          "string": "char",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decimal128Canonical(decimal128 *result, const decimal128 *d128)",
+      "fn_dec_pos": [
+        [
+          496,
+          13
+        ],
+        [
+          496,
+          76
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decimal128Canonical",
+        "parameters": {
+          "result": "decimal128",
+          "d128": "decimal128"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include <string.h>\t      /* [for memset/memcpy] */\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\t      /* [for printf] */\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"dconfig.h\"          /* GCC definitions */\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"decNumber.h\"\t      /* base number library */\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include \"decNumberLocal.h\"   /* decNumber local types, etc. */\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include \"decimal128.h\"       /* our primary include */\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

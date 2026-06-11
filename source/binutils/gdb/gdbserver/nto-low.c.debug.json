@@ -1,0 +1,1137 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nnto_trace (const char *fmt, ...)\n{\n  va_list arg_list;\n\n  if (debug_threads == 0)\n    return;\n  fprintf (stderr, \"nto:\");\n  va_start (arg_list, fmt);\n  vfprintf (stderr, fmt, arg_list);\n  va_end (arg_list);\n}",
+      "fn_code_pos": [
+        [
+          39,
+          0
+        ],
+        [
+          50,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_trace",
+        "parameters": {
+          "fmt": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ninit_nto_inferior (struct nto_inferior *nto_inferior)\n{\n  memset (nto_inferior, 0, sizeof (struct nto_inferior));\n  nto_inferior->ctl_fd = -1;\n  nto_inferior->pid = -1;\n}",
+      "fn_code_pos": [
+        [
+          67,
+          0
+        ],
+        [
+          73,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "init_nto_inferior",
+        "parameters": {
+          "nto_inferior": "struct nto_inferior"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_detach (void)\n{\n  if (nto_inferior.ctl_fd != -1)\n    {\n      nto_trace (\"Closing fd\\n\");\n      close (nto_inferior.ctl_fd);\n      init_nto_inferior (&nto_inferior);\n    }\n}",
+      "fn_code_pos": [
+        [
+          75,
+          0
+        ],
+        [
+          84,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_detach",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_set_thread (ptid_t ptid)\n{\n  int res = 0;\n\n  TRACE (\"%s pid: %d tid: %ld\\n\", __func__, ptid_get_pid (ptid),\n\t ptid_get_lwp (ptid));\n  if (nto_inferior.ctl_fd != -1\n      && !ptid_equal (ptid, null_ptid)\n      && !ptid_equal (ptid, minus_one_ptid))\n    {\n      pthread_t tid = ptid_get_lwp (ptid);\n\n      if (EOK == devctl (nto_inferior.ctl_fd, DCMD_PROC_CURTHREAD, &tid,\n\t  sizeof (tid), 0))\n\tres = 1;\n      else\n\tTRACE (\"%s: Error: failed to set current thread\\n\", __func__);\n    }\n  return res;\n}",
+      "fn_code_pos": [
+        [
+          88,
+          0
+        ],
+        [
+          108,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_set_thread",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nnto_find_new_threads (struct nto_inferior *nto_inferior)\n{\n  pthread_t tid;\n\n  TRACE (\"%s pid:%d\\n\", __func__, nto_inferior->pid);\n\n  if (nto_inferior->ctl_fd == -1)\n    return;\n\n  for (tid = 1;; ++tid)\n    {\n      procfs_status status;\n      ptid_t ptid;\n      int err;\n\n      status.tid = tid;\n      err = devctl (nto_inferior->ctl_fd, DCMD_PROC_TIDSTATUS, &status,\n\t\t    sizeof (status), 0);\n\n      if (err != EOK || status.tid == 0)\n\tbreak;\n\n      /* All threads in between are gone.  */\n      while (tid != status.tid || status.state == STATE_DEAD)\n\t{\n\t  struct thread_info *ti;\n\n\t  ptid = ptid_build (nto_inferior->pid, tid, 0);\n\t  ti = find_thread_ptid (ptid);\n\t  if (ti != NULL)\n\t    {\n\t      TRACE (\"Removing thread %d\\n\", tid);\n\t      remove_thread (ti);\n\t    }\n\t  if (tid == status.tid)\n\t    break;\n\t  ++tid;\n\t}\n\n      if (status.state != STATE_DEAD)\n\t{\n\t  TRACE (\"Adding thread %d\\n\", tid);\n\t  ptid = ptid_build (nto_inferior->pid, tid, 0);\n\t  if (!find_thread_ptid (ptid))\n\t    add_thread (ptid, NULL);\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          116,
+          0
+        ],
+        [
+          164,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_find_new_threads",
+        "parameters": {
+          "nto_inferior": "struct nto_inferior"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static pid_t\ndo_attach (pid_t pid)\n{\n  procfs_status status;\n  struct sigevent event;\n\n  if (nto_inferior.ctl_fd != -1)\n    {\n      close (nto_inferior.ctl_fd);\n      init_nto_inferior (&nto_inferior);\n    }\n  xsnprintf (nto_inferior.nto_procfs_path, PATH_MAX - 1, \"/proc/%d/as\", pid);\n  nto_inferior.ctl_fd = open (nto_inferior.nto_procfs_path, O_RDWR);\n  if (nto_inferior.ctl_fd == -1)\n    {\n      TRACE (\"Failed to open %s\\n\", nto_inferior.nto_procfs_path);\n      init_nto_inferior (&nto_inferior);\n      return -1;\n    }\n  if (devctl (nto_inferior.ctl_fd, DCMD_PROC_STOP, &status, sizeof (status), 0)\n      != EOK)\n    {\n      do_detach ();\n      return -1;\n    }\n  nto_inferior.pid = pid;\n  /* Define a sigevent for process stopped notification.  */\n  event.sigev_notify = SIGEV_SIGNAL_THREAD;\n  event.sigev_signo = SIGUSR1;\n  event.sigev_code = 0;\n  event.sigev_value.sival_ptr = NULL;\n  event.sigev_priority = -1;\n  devctl (nto_inferior.ctl_fd, DCMD_PROC_EVENT, &event, sizeof (event), 0);\n\n  if (devctl (nto_inferior.ctl_fd, DCMD_PROC_STATUS, &status, sizeof (status),\n\t      0) == EOK\n      && (status.flags & _DEBUG_FLAG_STOPPED))\n    {\n      ptid_t ptid;\n      struct process_info *proc;\n\n      kill (pid, SIGCONT);\n      ptid = ptid_build (status.pid, status.tid, 0);\n      the_low_target.arch_setup ();\n      proc = add_process (status.pid, 1);\n      proc->tdesc = nto_tdesc;\n      TRACE (\"Adding thread: pid=%d tid=%ld\\n\", status.pid,\n\t     ptid_get_lwp (ptid));\n      nto_find_new_threads (&nto_inferior);\n    }\n  else\n    {\n      do_detach ();\n      return -1;\n    }\n\n  return pid;\n}",
+      "fn_code_pos": [
+        [
+          168,
+          0
+        ],
+        [
+          225,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_attach",
+        "parameters": {
+          "pid": "pid_t"
+        },
+        "return_type": "pid_t"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_xfer_memory (off_t memaddr, unsigned char *myaddr, int len,\n\t\t int dowrite)\n{\n  int nbytes = 0;\n\n  if (lseek (nto_inferior.ctl_fd, memaddr, SEEK_SET) == memaddr)\n    {\n      if (dowrite)\n\tnbytes = write (nto_inferior.ctl_fd, myaddr, len);\n      else\n\tnbytes = read (nto_inferior.ctl_fd, myaddr, len);\n      if (nbytes < 0)\n\tnbytes = 0;\n    }\n  if (nbytes == 0)\n    {\n      int e = errno;\n      TRACE (\"Error in %s : errno=%d (%s)\\n\", __func__, e, strerror (e));\n    }\n  return nbytes;\n}",
+      "fn_code_pos": [
+        [
+          231,
+          0
+        ],
+        [
+          252,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_xfer_memory",
+        "parameters": {
+          "memaddr": "off_t",
+          "myaddr": "unsigned char",
+          "len": "int",
+          "dowrite": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_breakpoint (CORE_ADDR addr, int type, int size)\n{\n  procfs_break brk;\n\n  brk.type = type;\n  brk.addr = addr;\n  brk.size = size;\n  if (devctl (nto_inferior.ctl_fd, DCMD_PROC_BREAK, &brk, sizeof (brk), 0)\n      != EOK)\n    return 1;\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          260,
+          0
+        ],
+        [
+          272,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_breakpoint",
+        "parameters": {
+          "addr": "CORE_ADDR",
+          "type": "int",
+          "size": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_read_auxv_from_initial_stack (CORE_ADDR initial_stack,\n\t\t\t\t  unsigned char *myaddr,\n\t\t\t\t  unsigned int len)\n{\n  int data_ofs = 0;\n  int anint;\n  unsigned int len_read = 0;\n\n  /* Skip over argc, argv and envp... Comment from ldd.c:\n\n     The startup frame is set-up so that we have:\n     auxv\n     NULL\n     ...\n     envp2\n     envp1 <----- void *frame + (argc + 2) * sizeof(char *)\n     NULL\n     ...\n     argv2\n     argv1\n     argc  <------ void * frame\n\n     On entry to ldd, frame gives the address of argc on the stack.  */\n  if (nto_xfer_memory (initial_stack, (unsigned char *)&anint,\n\t\t       sizeof (anint), 0) != sizeof (anint))\n    return 0;\n\n  /* Size of pointer is assumed to be 4 bytes (32 bit arch. ) */\n  data_ofs += (anint + 2) * sizeof (void *); /* + 2 comes from argc itself and\n\t\t\t\t\t\tNULL terminating pointer in\n\t\t\t\t\t\targv.  */\n\n  /* Now loop over env table:  */\n  while (nto_xfer_memory (initial_stack + data_ofs,\n\t\t\t  (unsigned char *)&anint, sizeof (anint), 0)\n\t == sizeof (anint))\n    {\n      data_ofs += sizeof (anint);\n      if (anint == 0)\n\tbreak;\n    }\n  initial_stack += data_ofs;\n\n  memset (myaddr, 0, len);\n  while (len_read <= len - sizeof (auxv_t))\n    {\n      auxv_t *auxv = (auxv_t *)myaddr;\n\n      /* Search backwards until we have read AT_PHDR (num. 3),\n\t AT_PHENT (num 4), AT_PHNUM (num 5)  */\n      if (nto_xfer_memory (initial_stack, (unsigned char *)auxv,\n\t\t\t   sizeof (auxv_t), 0) == sizeof (auxv_t))\n\t{\n\t  if (auxv->a_type != AT_NULL)\n\t    {\n\t      auxv++;\n\t      len_read += sizeof (auxv_t);\n\t    }\n\t  if (auxv->a_type == AT_PHNUM) /* That's all we need.  */\n\t    break;\n\t  initial_stack += sizeof (auxv_t);\n\t}\n      else\n\tbreak;\n    }\n  TRACE (\"auxv: len_read: %d\\n\", len_read);\n  return len_read;\n}",
+      "fn_code_pos": [
+        [
+          279,
+          0
+        ],
+        [
+          347,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_read_auxv_from_initial_stack",
+        "parameters": {
+          "initial_stack": "CORE_ADDR",
+          "myaddr": "unsigned char",
+          "len": "unsigned int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_create_inferior (const char *program,\n\t\t     const std::vector<char *> &program_args)\n{\n  struct inheritance inherit;\n  pid_t pid;\n  sigset_t set;\n  std::string str_program_args = stringify_argv (program_args);\n\n  TRACE (\"%s %s\\n\", __func__, program);\n  /* Clear any pending SIGUSR1's but keep the behavior the same.  */\n  signal (SIGUSR1, signal (SIGUSR1, SIG_IGN));\n\n  sigemptyset (&set);\n  sigaddset (&set, SIGUSR1);\n  sigprocmask (SIG_UNBLOCK, &set, NULL);\n\n  memset (&inherit, 0, sizeof (inherit));\n  inherit.flags |= SPAWN_SETGROUP | SPAWN_HOLD;\n  inherit.pgroup = SPAWN_NEWPGROUP;\n  pid = spawnp (program, 0, NULL, &inherit,\n\t\t(char *) str_program_args.c_str (), 0);\n  sigprocmask (SIG_BLOCK, &set, NULL);\n\n  if (pid == -1)\n    return -1;\n\n  if (do_attach (pid) != pid)\n    return -1;\n\n  return pid;\n}",
+      "fn_code_pos": [
+        [
+          352,
+          0
+        ],
+        [
+          383,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_create_inferior",
+        "parameters": {
+          "program": "char",
+          "program_args": "std::vector<char *>"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_attach (unsigned long pid)\n{\n  TRACE (\"%s %ld\\n\", __func__, pid);\n  if (do_attach (pid) != pid)\n    error (\"Unable to attach to %ld\\n\", pid);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          387,
+          0
+        ],
+        [
+          394,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_attach",
+        "parameters": {
+          "pid": "unsigned long"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_kill (int pid)\n{\n  TRACE (\"%s %d\\n\", __func__, pid);\n  kill (pid, SIGKILL);\n  do_detach ();\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          398,
+          0
+        ],
+        [
+          405,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_kill",
+        "parameters": {
+          "pid": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_detach (int pid)\n{\n  TRACE (\"%s %d\\n\", __func__, pid);\n  do_detach ();\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          409,
+          0
+        ],
+        [
+          415,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_detach",
+        "parameters": {
+          "pid": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nnto_mourn (struct process_info *process)\n{\n  remove_process (process);\n}",
+      "fn_code_pos": [
+        [
+          417,
+          0
+        ],
+        [
+          421,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_mourn",
+        "parameters": {
+          "process": "struct process_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_thread_alive (ptid_t ptid)\n{\n  int res;\n\n  TRACE (\"%s pid:%d tid:%d\\n\", __func__, ptid_get_pid (ptid),\n\t ptid_get_lwp (ptid));\n  if (SignalKill (0, ptid_get_pid (ptid), ptid_get_lwp (ptid),\n\t\t  0, 0, 0) == -1)\n    res = 0;\n  else\n    res = 1;\n  TRACE (\"%s: %s\\n\", __func__, res ? \"yes\" : \"no\");\n  return res;\n}",
+      "fn_code_pos": [
+        [
+          427,
+          0
+        ],
+        [
+          441,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_thread_alive",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nnto_resume (struct thread_resume *resume_info, size_t n)\n{\n  /* We can only work in all-stop mode.  */\n  procfs_status status;\n  procfs_run run;\n  int err;\n\n  TRACE (\"%s\\n\", __func__);\n  /* Workaround for aliasing rules violation. */\n  sigset_t *run_fault = (sigset_t *) (void *) &run.fault;\n\n  nto_set_thread (resume_info->thread);\n\n  run.flags = _DEBUG_RUN_FAULT | _DEBUG_RUN_TRACE;\n  if (resume_info->kind == resume_step)\n    run.flags |= _DEBUG_RUN_STEP;\n  run.flags |= _DEBUG_RUN_ARM;\n\n  sigemptyset (run_fault);\n  sigaddset (run_fault, FLTBPT);\n  sigaddset (run_fault, FLTTRACE);\n  sigaddset (run_fault, FLTILL);\n  sigaddset (run_fault, FLTPRIV);\n  sigaddset (run_fault, FLTBOUNDS);\n  sigaddset (run_fault, FLTIOVF);\n  sigaddset (run_fault, FLTIZDIV);\n  sigaddset (run_fault, FLTFPE);\n  sigaddset (run_fault, FLTPAGE);\n  sigaddset (run_fault, FLTSTACK);\n  sigaddset (run_fault, FLTACCESS);\n\n  sigemptyset (&run.trace);\n  if (resume_info->sig)\n    {\n      int signal_to_pass;\n\n      devctl (nto_inferior.ctl_fd, DCMD_PROC_STATUS, &status, sizeof (status),\n\t      0);\n      signal_to_pass = resume_info->sig;\n      if (status.why & (_DEBUG_WHY_SIGNALLED | _DEBUG_WHY_FAULTED))\n\t{\n\t  if (signal_to_pass != status.info.si_signo)\n\t    {\n\t      kill (status.pid, signal_to_pass);\n\t      run.flags |= _DEBUG_RUN_CLRFLT | _DEBUG_RUN_CLRSIG;\n\t    }\n\t  else\t\t/* Let it kill the program without telling us.  */\n\t    sigdelset (&run.trace, signal_to_pass);\n\t}\n    }\n  else\n    run.flags |= _DEBUG_RUN_CLRSIG | _DEBUG_RUN_CLRFLT;\n\n  sigfillset (&run.trace);\n\n  regcache_invalidate ();\n\n  err = devctl (nto_inferior.ctl_fd, DCMD_PROC_RUN, &run, sizeof (run), 0);\n  if (err != EOK)\n    TRACE (\"Error: %d \\\"%s\\\"\\n\", err, strerror (err));\n}",
+      "fn_code_pos": [
+        [
+          445,
+          0
+        ],
+        [
+          506,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_resume",
+        "parameters": {
+          "resume_info": "struct thread_resume",
+          "n": "size_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static ptid_t\nnto_wait (ptid_t ptid,\n\t  struct target_waitstatus *ourstatus, int target_options)\n{\n  sigset_t set;\n  siginfo_t info;\n  procfs_status status;\n  const int trace_mask = (_DEBUG_FLAG_TRACE_EXEC | _DEBUG_FLAG_TRACE_RD\n\t\t\t  | _DEBUG_FLAG_TRACE_WR | _DEBUG_FLAG_TRACE_MODIFY);\n\n  TRACE (\"%s\\n\", __func__);\n\n  ourstatus->kind = TARGET_WAITKIND_SPURIOUS;\n\n  sigemptyset (&set);\n  sigaddset (&set, SIGUSR1);\n\n  devctl (nto_inferior.ctl_fd, DCMD_PROC_STATUS, &status, sizeof (status), 0);\n  while (!(status.flags & _DEBUG_FLAG_ISTOP))\n    {\n      sigwaitinfo (&set, &info);\n      devctl (nto_inferior.ctl_fd, DCMD_PROC_STATUS, &status, sizeof (status),\n\t      0);\n    }\n  nto_find_new_threads (&nto_inferior);\n\n  if (status.flags & _DEBUG_FLAG_SSTEP)\n    {\n      TRACE (\"SSTEP\\n\");\n      ourstatus->kind = TARGET_WAITKIND_STOPPED;\n      ourstatus->value.sig = GDB_SIGNAL_TRAP;\n    }\n  /* Was it a breakpoint?  */\n  else if (status.flags & trace_mask)\n    {\n      TRACE (\"STOPPED\\n\");\n      ourstatus->kind = TARGET_WAITKIND_STOPPED;\n      ourstatus->value.sig = GDB_SIGNAL_TRAP;\n    }\n  else if (status.flags & _DEBUG_FLAG_ISTOP)\n    {\n      TRACE (\"ISTOP\\n\");\n      switch (status.why)\n\t{\n\tcase _DEBUG_WHY_SIGNALLED:\n\t  TRACE (\"  SIGNALLED\\n\");\n\t  ourstatus->kind = TARGET_WAITKIND_STOPPED;\n\t  ourstatus->value.sig =\n\t    gdb_signal_from_host (status.info.si_signo);\n\t  nto_inferior.exit_signo = ourstatus->value.sig;\n\t  break;\n\tcase _DEBUG_WHY_FAULTED:\n\t  TRACE (\"  FAULTED\\n\");\n\t  ourstatus->kind = TARGET_WAITKIND_STOPPED;\n\t  if (status.info.si_signo == SIGTRAP)\n\t    {\n\t      ourstatus->value.sig = 0;\n\t      nto_inferior.exit_signo = 0;\n\t    }\n\t  else\n\t    {\n\t      ourstatus->value.sig =\n\t\tgdb_signal_from_host (status.info.si_signo);\n\t      nto_inferior.exit_signo = ourstatus->value.sig;\n\t    }\n\t  break;\n\n\tcase _DEBUG_WHY_TERMINATED:\n\t  {\n\t    int waitval = 0;\n\n\t    TRACE (\"  TERMINATED\\n\");\n\t    waitpid (ptid_get_pid (ptid), &waitval, WNOHANG);\n\t    if (nto_inferior.exit_signo)\n\t      {\n\t\t/* Abnormal death.  */\n\t\tourstatus->kind = TARGET_WAITKIND_SIGNALLED;\n\t\tourstatus->value.sig = nto_inferior.exit_signo;\n\t      }\n\t    else\n\t      {\n\t\t/* Normal death.  */\n\t\tourstatus->kind = TARGET_WAITKIND_EXITED;\n\t\tourstatus->value.integer = WEXITSTATUS (waitval);\n\t      }\n\t    nto_inferior.exit_signo = 0;\n\t    break;\n\t  }\n\n\tcase _DEBUG_WHY_REQUESTED:\n\t  TRACE (\"REQUESTED\\n\");\n\t  /* We are assuming a requested stop is due to a SIGINT.  */\n\t  ourstatus->kind = TARGET_WAITKIND_STOPPED;\n\t  ourstatus->value.sig = GDB_SIGNAL_INT;\n\t  nto_inferior.exit_signo = 0;\n\t  break;\n\t}\n    }\n\n  return ptid_build (status.pid, status.tid, 0);\n}",
+      "fn_code_pos": [
+        [
+          512,
+          0
+        ],
+        [
+          612,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_wait",
+        "parameters": {
+          "ptid": "ptid_t",
+          "ourstatus": "struct target_waitstatus",
+          "target_options": "int"
+        },
+        "return_type": "ptid_t"
+      }
+    },
+    {
+      "fn_code": "static void\nnto_fetch_registers (struct regcache *regcache, int regno)\n{\n  int regsize;\n  procfs_greg greg;\n  ptid_t ptid;\n\n  TRACE (\"%s (regno=%d)\\n\", __func__, regno);\n  if (regno >= the_low_target.num_regs)\n    return;\n\n  if (current_thread == NULL)\n    {\n      TRACE (\"current_thread is NULL\\n\");\n      return;\n    }\n  ptid = thread_to_gdb_id (current_thread);\n  if (!nto_set_thread (ptid))\n    return;\n\n  if (devctl (nto_inferior.ctl_fd, DCMD_PROC_GETGREG, &greg, sizeof (greg),\n\t      &regsize) == EOK)\n    {\n      if (regno == -1) /* All registers. */\n\t{\n\t  for (regno = 0; regno != the_low_target.num_regs; ++regno)\n\t    {\n\t      const unsigned int registeroffset\n\t\t= the_low_target.register_offset (regno);\n\t      supply_register (regcache, regno,\n\t\t\t       ((char *)&greg) + registeroffset);\n\t    }\n\t}\n      else\n\t{\n\t  const unsigned int registeroffset\n\t    = the_low_target.register_offset (regno);\n\t  if (registeroffset == -1)\n\t    return;\n\t  supply_register (regcache, regno, ((char *)&greg) + registeroffset);\n\t}\n    }\n  else\n    TRACE (\"ERROR reading registers from inferior.\\n\");\n}",
+      "fn_code_pos": [
+        [
+          617,
+          0
+        ],
+        [
+          661,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_fetch_registers",
+        "parameters": {
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nnto_store_registers (struct regcache *regcache, int regno)\n{\n  procfs_greg greg;\n  int err;\n  ptid_t ptid;\n\n  TRACE (\"%s (regno:%d)\\n\", __func__, regno);\n\n  if (current_thread == NULL)\n    {\n      TRACE (\"current_thread is NULL\\n\");\n      return;\n    }\n  ptid = thread_to_gdb_id (current_thread);\n  if (!nto_set_thread (ptid))\n    return;\n\n  memset (&greg, 0, sizeof (greg));\n  for  (regno = 0; regno != the_low_target.num_regs; ++regno)\n    {\n      const unsigned int regoffset\n\t= the_low_target.register_offset (regno);\n      collect_register (regcache, regno, ((char *)&greg) + regoffset);\n    }\n  err = devctl (nto_inferior.ctl_fd, DCMD_PROC_SETGREG, &greg, sizeof (greg),\n\t\t0);\n  if (err != EOK)\n    TRACE (\"Error: setting registers.\\n\");\n}",
+      "fn_code_pos": [
+        [
+          666,
+          0
+        ],
+        [
+          695,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_store_registers",
+        "parameters": {
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_read_memory (CORE_ADDR memaddr, unsigned char *myaddr, int len)\n{\n  TRACE (\"%s memaddr:0x%08lx, len:%d\\n\", __func__, memaddr, len);\n\n  if (nto_xfer_memory (memaddr, myaddr, len, 0) != len)\n    {\n      TRACE (\"Failed to read memory\\n\");\n      return -1;\n    }\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          702,
+          0
+        ],
+        [
+          714,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_read_memory",
+        "parameters": {
+          "memaddr": "CORE_ADDR",
+          "myaddr": "unsigned char",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_write_memory (CORE_ADDR memaddr, const unsigned char *myaddr, int len)\n{\n  int len_written;\n\n  TRACE (\"%s memaddr: 0x%08llx len: %d\\n\", __func__, memaddr, len);\n  if ((len_written = nto_xfer_memory (memaddr, (unsigned char *)myaddr, len,\n\t\t\t\t      1))\n      != len)\n    {\n      TRACE (\"Wanted to write: %d but written: %d\\n\", len, len_written);\n      return -1;\n    }\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          721,
+          0
+        ],
+        [
+          736,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_write_memory",
+        "parameters": {
+          "memaddr": "CORE_ADDR",
+          "myaddr": "unsigned char",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nnto_request_interrupt (void)\n{\n  TRACE (\"%s\\n\", __func__);\n  nto_set_thread (ptid_build (nto_inferior.pid, 1, 0));\n  if (EOK != devctl (nto_inferior.ctl_fd, DCMD_PROC_STOP, NULL, 0, 0))\n    TRACE (\"Error stopping inferior.\\n\");\n}",
+      "fn_code_pos": [
+        [
+          740,
+          0
+        ],
+        [
+          747,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_request_interrupt",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_read_auxv (CORE_ADDR offset, unsigned char *myaddr, unsigned int len)\n{\n  int err;\n  CORE_ADDR initial_stack;\n  procfs_info procinfo;\n\n  TRACE (\"%s\\n\", __func__);\n  if (offset > 0)\n    return 0;\n\n  err = devctl (nto_inferior.ctl_fd, DCMD_PROC_INFO, &procinfo,\n\t\tsizeof procinfo, 0);\n  if (err != EOK)\n    return -1;\n\n  initial_stack = procinfo.initial_stack;\n\n  return nto_read_auxv_from_initial_stack (initial_stack, myaddr, len);\n}",
+      "fn_code_pos": [
+        [
+          755,
+          0
+        ],
+        [
+          774,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_read_auxv",
+        "parameters": {
+          "offset": "CORE_ADDR",
+          "myaddr": "unsigned char",
+          "len": "unsigned int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_supports_z_point_type (char z_type)\n{\n  switch (z_type)\n    {\n    case Z_PACKET_SW_BP:\n    case Z_PACKET_HW_BP:\n    case Z_PACKET_WRITE_WP:\n    case Z_PACKET_READ_WP:\n    case Z_PACKET_ACCESS_WP:\n      return 1;\n    default:\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          776,
+          0
+        ],
+        [
+          790,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_supports_z_point_type",
+        "parameters": {
+          "z_type": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_insert_point (enum raw_bkpt_type type, CORE_ADDR addr,\n\t\t  int size, struct raw_breakpoint *bp)\n{\n  int wtype = _DEBUG_BREAK_HW; /* Always request HW.  */\n\n  TRACE (\"%s type:%c addr: 0x%08lx len:%d\\n\", __func__, (int)type, addr, size);\n  switch (type)\n    {\n    case raw_bkpt_type_sw:\n      wtype = _DEBUG_BREAK_EXEC;\n      break;\n    case raw_bkpt_type_hw:\n      wtype |= _DEBUG_BREAK_EXEC;\n      break;\n    case raw_bkpt_type_write_wp:\n      wtype |= _DEBUG_BREAK_RW;\n      break;\n    case raw_bkpt_type_read_wp:\n      wtype |= _DEBUG_BREAK_RD;\n      break;\n    case raw_bkpt_type_access_wp:\n      wtype |= _DEBUG_BREAK_RW;\n      break;\n    default:\n      return 1; /* Not supported.  */\n    }\n  return nto_breakpoint (addr, wtype, 0);\n}",
+      "fn_code_pos": [
+        [
+          794,
+          0
+        ],
+        [
+          822,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_insert_point",
+        "parameters": {
+          "type": "enum raw_bkpt_type",
+          "addr": "CORE_ADDR",
+          "size": "int",
+          "bp": "struct raw_breakpoint"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_remove_point (enum raw_bkpt_type type, CORE_ADDR addr,\n\t\t  int size, struct raw_breakpoint *bp)\n{\n  int wtype = _DEBUG_BREAK_HW; /* Always request HW.  */\n\n  TRACE (\"%s type:%c addr: 0x%08lx len:%d\\n\", __func__, (int)type, addr, size);\n  switch (type)\n    {\n    case raw_bkpt_type_sw:\n      wtype = _DEBUG_BREAK_EXEC;\n      break;\n    case raw_bkpt_type_hw:\n      wtype |= _DEBUG_BREAK_EXEC;\n      break;\n    case raw_bkpt_type_write_wp:\n      wtype |= _DEBUG_BREAK_RW;\n      break;\n    case raw_bkpt_type_read_wp:\n      wtype |= _DEBUG_BREAK_RD;\n      break;\n    case raw_bkpt_type_access_wp:\n      wtype |= _DEBUG_BREAK_RW;\n      break;\n    default:\n      return 1; /* Not supported.  */\n    }\n  return nto_breakpoint (addr, wtype, -1);\n}",
+      "fn_code_pos": [
+        [
+          826,
+          0
+        ],
+        [
+          854,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_remove_point",
+        "parameters": {
+          "type": "enum raw_bkpt_type",
+          "addr": "CORE_ADDR",
+          "size": "int",
+          "bp": "struct raw_breakpoint"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_stopped_by_watchpoint (void)\n{\n  int ret = 0;\n\n  TRACE (\"%s\\n\", __func__);\n  if (nto_inferior.ctl_fd != -1 && current_thread != NULL)\n    {\n      ptid_t ptid;\n\n      ptid = thread_to_gdb_id (current_thread);\n      if (nto_set_thread (ptid))\n\t{\n\t  const int watchmask = _DEBUG_FLAG_TRACE_RD | _DEBUG_FLAG_TRACE_WR\n\t\t\t\t| _DEBUG_FLAG_TRACE_MODIFY;\n\t  procfs_status status;\n\t  int err;\n\n\t  err = devctl (nto_inferior.ctl_fd, DCMD_PROC_STATUS, &status,\n\t\t\tsizeof (status), 0);\n\t  if (err == EOK && (status.flags & watchmask))\n\t    ret = 1;\n\t}\n    }\n  TRACE (\"%s: %s\\n\", __func__, ret ? \"yes\" : \"no\");\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          861,
+          0
+        ],
+        [
+          887,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_stopped_by_watchpoint",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\nnto_stopped_data_address (void)\n{\n  CORE_ADDR ret = (CORE_ADDR)0;\n\n  TRACE (\"%s\\n\", __func__);\n  if (nto_inferior.ctl_fd != -1 && current_thread != NULL)\n    {\n      ptid_t ptid;\n\n      ptid = thread_to_gdb_id (current_thread);\n\n      if (nto_set_thread (ptid))\n\t{\n\t  procfs_status status;\n\n\t  if (devctl (nto_inferior.ctl_fd, DCMD_PROC_STATUS, &status,\n\t\t      sizeof (status), 0) == EOK)\n\t    ret = status.ip;\n\t}\n    }\n  TRACE (\"%s: 0x%08lx\\n\", __func__, ret);\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          893,
+          0
+        ],
+        [
+          916,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_stopped_data_address",
+        "parameters": {},
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static int\nnto_supports_non_stop (void)\n{\n  TRACE (\"%s\\n\", __func__);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          920,
+          0
+        ],
+        [
+          925,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_supports_non_stop",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static const gdb_byte *\nnto_sw_breakpoint_from_kind (int kind, int *size)\n{\n  *size = the_low_target.breakpoint_len;\n  return the_low_target.breakpoint;\n}",
+      "fn_code_pos": [
+        [
+          929,
+          0
+        ],
+        [
+          934,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_sw_breakpoint_from_kind",
+        "parameters": {
+          "kind": "int",
+          "size": "int"
+        },
+        "return_type": "gdb_byte"
+      }
+    },
+    {
+      "fn_code": "void\ninitialize_low (void)\n{\n  sigset_t set;\n\n  TRACE (\"%s\\n\", __func__);\n  set_target_ops (&nto_target_ops);\n\n  /* We use SIGUSR1 to gain control after we block waiting for a process.\n     We use sigwaitevent to wait.  */\n  sigemptyset (&set);\n  sigaddset (&set, SIGUSR1);\n  sigprocmask (SIG_BLOCK, &set, NULL);\n}",
+      "fn_code_pos": [
+        [
+          1017,
+          0
+        ],
+        [
+          1030,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "initialize_low",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "nto_sw_breakpoint_from_kind (int kind, int *size)",
+      "fn_dec_pos": [
+        [
+          930,
+          0
+        ],
+        [
+          930,
+          49
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nto_sw_breakpoint_from_kind",
+        "parameters": {
+          "kind": "int",
+          "size": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct nto_inferior\n{\n  char nto_procfs_path[PATH_MAX];\n  int ctl_fd;\n  pid_t pid;\n  int exit_signo; /* For tracking exit status.  */\n}",
+      {
+        "nto_procfs_path[PATH_MAX]": "char",
+        "ctl_fd": "int",
+        "pid": "pid_t",
+        "exit_signo": "int"
+      },
+      "nto_inferior",
+      [
+        57,
+        0
+      ],
+      [
+        63,
+        1
+      ]
+    ],
+    [
+      "struct target_desc",
+      {},
+      "",
+      [
+        37,
+        6
+      ],
+      [
+        37,
+        24
+      ]
+    ],
+    [
+      "struct nto_inferior\n{\n  char nto_procfs_path[PATH_MAX];\n  int ctl_fd;\n  pid_t pid;\n  int exit_signo; /* For tracking exit status.  */\n}",
+      {
+        "nto_procfs_path[PATH_MAX]": "char",
+        "ctl_fd": "int",
+        "pid": "pid_t",
+        "exit_signo": "int"
+      },
+      "nto_inferior",
+      [
+        57,
+        0
+      ],
+      [
+        63,
+        1
+      ]
+    ],
+    [
+      "struct nto_inferior",
+      {},
+      "",
+      [
+        65,
+        7
+      ],
+      [
+        65,
+        26
+      ]
+    ],
+    [
+      "struct nto_inferior",
+      {},
+      "",
+      [
+        68,
+        19
+      ],
+      [
+        68,
+        38
+      ]
+    ],
+    [
+      "struct nto_inferior",
+      {},
+      "",
+      [
+        70,
+        35
+      ],
+      [
+        70,
+        54
+      ]
+    ],
+    [
+      "struct nto_inferior",
+      {},
+      "",
+      [
+        117,
+        22
+      ],
+      [
+        117,
+        41
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        142,
+        3
+      ],
+      [
+        142,
+        21
+      ]
+    ],
+    [
+      "struct sigevent",
+      {},
+      "",
+      [
+        172,
+        2
+      ],
+      [
+        172,
+        17
+      ]
+    ],
+    [
+      "struct process_info",
+      {},
+      "",
+      [
+        207,
+        6
+      ],
+      [
+        207,
+        25
+      ]
+    ],
+    [
+      "struct inheritance",
+      {},
+      "",
+      [
+        356,
+        2
+      ],
+      [
+        356,
+        20
+      ]
+    ],
+    [
+      "struct process_info",
+      {},
+      "",
+      [
+        418,
+        11
+      ],
+      [
+        418,
+        30
+      ]
+    ],
+    [
+      "struct thread_resume",
+      {},
+      "",
+      [
+        446,
+        12
+      ],
+      [
+        446,
+        32
+      ]
+    ],
+    [
+      "struct target_waitstatus",
+      {},
+      "",
+      [
+        514,
+        3
+      ],
+      [
+        514,
+        27
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        618,
+        21
+      ],
+      [
+        618,
+        36
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        667,
+        21
+      ],
+      [
+        667,
+        36
+      ]
+    ],
+    [
+      "struct raw_breakpoint",
+      {},
+      "",
+      [
+        796,
+        14
+      ],
+      [
+        796,
+        35
+      ]
+    ],
+    [
+      "struct raw_breakpoint",
+      {},
+      "",
+      [
+        828,
+        14
+      ],
+      [
+        828,
+        35
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        937,
+        7
+      ],
+      [
+        937,
+        24
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"server.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbthread.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"nto-low.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"hostio.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <limits.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <spawn.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <sys/procfs.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <sys/auxv.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <sys/iomgr.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <sys/neutrino.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum raw_bkpt_type",
+      {},
+      "",
+      [
+        795,
+        18
+      ],
+      [
+        795,
+        36
+      ]
+    ],
+    [
+      "enum raw_bkpt_type",
+      {},
+      "",
+      [
+        827,
+        18
+      ],
+      [
+        827,
+        36
+      ]
+    ]
+  ]
+}

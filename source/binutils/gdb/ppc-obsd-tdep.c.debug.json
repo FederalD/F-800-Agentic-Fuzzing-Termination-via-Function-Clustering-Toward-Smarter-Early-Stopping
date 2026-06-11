@@ -1,0 +1,829 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "void\nppcobsd_supply_gregset (const struct regset *regset,\n\t\t\tstruct regcache *regcache, int regnum,\n\t\t\tconst void *gregs, size_t len)\n{\n  ppc_supply_gregset (regset, regcache, regnum, gregs, len);\n  ppc_supply_fpregset (regset, regcache, regnum, gregs, len);\n}",
+      "fn_code_pos": [
+        [
+          45,
+          0
+        ],
+        [
+          52,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppcobsd_supply_gregset",
+        "parameters": {
+          "regset": "struct regset",
+          "regcache": "struct regcache",
+          "regnum": "int",
+          "gregs": "void",
+          "len": "size_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nppcobsd_collect_gregset (const struct regset *regset,\n\t\t\t const struct regcache *regcache, int regnum,\n\t\t\t void *gregs, size_t len)\n{\n  ppc_collect_gregset (regset, regcache, regnum, gregs, len);\n  ppc_collect_fpregset (regset, regcache, regnum, gregs, len);\n}",
+      "fn_code_pos": [
+        [
+          59,
+          0
+        ],
+        [
+          66,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppcobsd_collect_gregset",
+        "parameters": {
+          "regset": "struct regset",
+          "regcache": "struct regcache",
+          "regnum": "int",
+          "gregs": "void",
+          "len": "size_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nppcobsd_iterate_over_regset_sections (struct gdbarch *gdbarch,\n\t\t\t\t      iterate_over_regset_sections_cb *cb,\n\t\t\t\t      void *cb_data,\n\t\t\t\t      const struct regcache *regcache)\n{\n  cb (\".reg\", 412, &ppcobsd_gregset, NULL, cb_data);\n}",
+      "fn_code_pos": [
+        [
+          84,
+          0
+        ],
+        [
+          91,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppcobsd_iterate_over_regset_sections",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "cb": "iterate_over_regset_sections_cb",
+          "cb_data": "void",
+          "regcache": "struct regcache"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nppcobsd_sigtramp_frame_sniffer (const struct frame_unwind *self,\n\t\t\t\tstruct frame_info *this_frame,\n\t\t\t\tvoid **this_cache)\n{\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  CORE_ADDR pc = get_frame_pc (this_frame);\n  CORE_ADDR start_pc = (pc & ~(ppcobsd_page_size - 1));\n  const int *offset;\n  const char *name;\n\n  find_pc_partial_function (pc, &name, NULL, NULL);\n  if (name)\n    return 0;\n\n  for (offset = ppcobsd_sigreturn_offset; *offset != -1; offset++)\n    {\n      gdb_byte buf[2 * PPC_INSN_SIZE];\n      unsigned long insn;\n\n      if (!safe_frame_unwind_memory (this_frame, start_pc + *offset,\n\t\t\t\t     buf, sizeof buf))\n\tcontinue;\n\n      /* Check for \"li r0,SYS_sigreturn\".  */\n      insn = extract_unsigned_integer (buf, PPC_INSN_SIZE, byte_order);\n      if (insn != 0x38000067)\n\tcontinue;\n\n      /* Check for \"sc\".  */\n      insn = extract_unsigned_integer (buf + PPC_INSN_SIZE,\n\t\t\t\t       PPC_INSN_SIZE, byte_order);\n      if (insn != 0x44000002)\n\tcontinue;\n\n      return 1;\n    }\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          117,
+          0
+        ],
+        [
+          157,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppcobsd_sigtramp_frame_sniffer",
+        "parameters": {
+          "self": "struct frame_unwind",
+          "this_frame": "struct frame_info",
+          "this_cache": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static struct trad_frame_cache *\nppcobsd_sigtramp_frame_cache (struct frame_info *this_frame, void **this_cache)\n{\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  struct trad_frame_cache *cache;\n  CORE_ADDR addr, base, func;\n  gdb_byte buf[PPC_INSN_SIZE];\n  unsigned long insn, sigcontext_offset;\n  int i;\n\n  if (*this_cache)\n    return (struct trad_frame_cache *) *this_cache;\n\n  cache = trad_frame_cache_zalloc (this_frame);\n  *this_cache = cache;\n\n  func = get_frame_pc (this_frame);\n  func &= ~(ppcobsd_page_size - 1);\n  if (!safe_frame_unwind_memory (this_frame, func, buf, sizeof buf))\n    return cache;\n\n  /* Calculate the offset where we can find `struct sigcontext'.  We\n     base our calculation on the amount of stack space reserved by the\n     first instruction of the signal trampoline.  */\n  insn = extract_unsigned_integer (buf, PPC_INSN_SIZE, byte_order);\n  sigcontext_offset = (0x10000 - (insn & 0x0000ffff)) + 8;\n\n  base = get_frame_register_unsigned (this_frame, gdbarch_sp_regnum (gdbarch));\n  addr = base + sigcontext_offset + 2 * tdep->wordsize;\n  for (i = 0; i < ppc_num_gprs; i++, addr += tdep->wordsize)\n    {\n      int regnum = i + tdep->ppc_gp0_regnum;\n      trad_frame_set_reg_addr (cache, regnum, addr);\n    }\n  trad_frame_set_reg_addr (cache, tdep->ppc_lr_regnum, addr);\n  addr += tdep->wordsize;\n  trad_frame_set_reg_addr (cache, tdep->ppc_cr_regnum, addr);\n  addr += tdep->wordsize;\n  trad_frame_set_reg_addr (cache, tdep->ppc_xer_regnum, addr);\n  addr += tdep->wordsize;\n  trad_frame_set_reg_addr (cache, tdep->ppc_ctr_regnum, addr);\n  addr += tdep->wordsize;\n  trad_frame_set_reg_addr (cache, gdbarch_pc_regnum (gdbarch), addr);\n  /* SRR0?  */\n  addr += tdep->wordsize;\n\n  /* Construct the frame ID using the function start.  */\n  trad_frame_set_id (cache, frame_id_build (base, func));\n\n  return cache;\n}",
+      "fn_code_pos": [
+        [
+          159,
+          0
+        ],
+        [
+          211,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppcobsd_sigtramp_frame_cache",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nppcobsd_sigtramp_frame_this_id (struct frame_info *this_frame,\n\t\t\t\tvoid **this_cache, struct frame_id *this_id)\n{\n  struct trad_frame_cache *cache =\n    ppcobsd_sigtramp_frame_cache (this_frame, this_cache);\n\n  trad_frame_get_id (cache, this_id);\n}",
+      "fn_code_pos": [
+        [
+          213,
+          0
+        ],
+        [
+          221,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppcobsd_sigtramp_frame_this_id",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "this_id": "struct frame_id"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static struct value *\nppcobsd_sigtramp_frame_prev_register (struct frame_info *this_frame,\n\t\t\t\t      void **this_cache, int regnum)\n{\n  struct trad_frame_cache *cache =\n    ppcobsd_sigtramp_frame_cache (this_frame, this_cache);\n\n  return trad_frame_get_register (cache, this_frame, regnum);\n}",
+      "fn_code_pos": [
+        [
+          223,
+          0
+        ],
+        [
+          231,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppcobsd_sigtramp_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nppcobsd_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)\n{\n  /* OpenBSD doesn't support the 128-bit `long double' from the psABI.  */\n  set_gdbarch_long_double_bit (gdbarch, 64);\n  set_gdbarch_long_double_format (gdbarch, floatformats_ieee_double);\n\n  /* OpenBSD currently uses a broken GCC.  */\n  set_gdbarch_return_value (gdbarch, ppc_sysv_abi_broken_return_value);\n\n  /* OpenBSD uses SVR4-style shared libraries.  */\n  set_solib_svr4_fetch_link_map_offsets\n    (gdbarch, svr4_ilp32_fetch_link_map_offsets);\n\n  set_gdbarch_iterate_over_regset_sections\n    (gdbarch, ppcobsd_iterate_over_regset_sections);\n\n  frame_unwind_append_unwinder (gdbarch, &ppcobsd_sigtramp_frame_unwind);\n}",
+      "fn_code_pos": [
+        [
+          243,
+          0
+        ],
+        [
+          261,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppcobsd_init_abi",
+        "parameters": {
+          "info": "struct gdbarch_info",
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_ppcobsd_tdep (void)\n{\n  gdbarch_register_osabi (bfd_arch_rs6000, 0, GDB_OSABI_OPENBSD,\n\t\t\t  ppcobsd_init_abi);\n  gdbarch_register_osabi (bfd_arch_powerpc, 0, GDB_OSABI_OPENBSD,\n\t\t\t  ppcobsd_init_abi);\n\n  /* Avoid initializing the register offsets again if they were\n     already initialized by ppcobsd-nat.c.  */\n  if (ppcobsd_reg_offsets.pc_offset == 0)\n    {\n      /* General-purpose registers.  */\n      ppcobsd_reg_offsets.r0_offset = 0;\n      ppcobsd_reg_offsets.gpr_size = 4;\n      ppcobsd_reg_offsets.xr_size = 4;\n      ppcobsd_reg_offsets.pc_offset = 384;\n      ppcobsd_reg_offsets.ps_offset = 388;\n      ppcobsd_reg_offsets.cr_offset = 392;\n      ppcobsd_reg_offsets.lr_offset = 396;\n      ppcobsd_reg_offsets.ctr_offset = 400;\n      ppcobsd_reg_offsets.xer_offset = 404;\n      ppcobsd_reg_offsets.mq_offset = 408;\n\n      /* Floating-point registers.  */\n      ppcobsd_reg_offsets.f0_offset = 128;\n      ppcobsd_reg_offsets.fpscr_offset = -1;\n\n      /* AltiVec registers.  */\n      ppcobsd_reg_offsets.vr0_offset = 0;\n      ppcobsd_reg_offsets.vscr_offset = 512;\n      ppcobsd_reg_offsets.vrsave_offset = 520;\n    }\n\n  if (ppcobsd_fpreg_offsets.fpscr_offset == 0)\n    {\n      /* Floating-point registers.  */\n      ppcobsd_reg_offsets.f0_offset = 0;\n      ppcobsd_reg_offsets.fpscr_offset = 256;\n      ppcobsd_reg_offsets.fpscr_size = 4;\n    }\n}",
+      "fn_code_pos": [
+        [
+          267,
+          0
+        ],
+        [
+          308,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_ppcobsd_tdep",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "ppcobsd_sigtramp_frame_cache (struct frame_info *this_frame, void **this_cache)",
+      "fn_dec_pos": [
+        [
+          160,
+          0
+        ],
+        [
+          160,
+          79
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppcobsd_sigtramp_frame_cache",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "ppcobsd_sigtramp_frame_prev_register (struct frame_info *this_frame,\n\t\t\t\t      void **this_cache, int regnum)",
+      "fn_dec_pos": [
+        [
+          224,
+          0
+        ],
+        [
+          225,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppcobsd_sigtramp_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "_initialize_ppcobsd_tdep (void)",
+      "fn_dec_pos": [
+        [
+          265,
+          5
+        ],
+        [
+          265,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_ppcobsd_tdep",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct ppc_reg_offsets",
+      {},
+      "",
+      [
+        35,
+        0
+      ],
+      [
+        35,
+        22
+      ]
+    ],
+    [
+      "struct ppc_reg_offsets",
+      {},
+      "",
+      [
+        36,
+        0
+      ],
+      [
+        36,
+        22
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        46,
+        30
+      ],
+      [
+        46,
+        43
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        47,
+        3
+      ],
+      [
+        47,
+        18
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        60,
+        31
+      ],
+      [
+        60,
+        44
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        61,
+        10
+      ],
+      [
+        61,
+        25
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        70,
+        6
+      ],
+      [
+        70,
+        19
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        76,
+        6
+      ],
+      [
+        76,
+        19
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        85,
+        38
+      ],
+      [
+        85,
+        52
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        88,
+        16
+      ],
+      [
+        88,
+        31
+      ]
+    ],
+    [
+      "struct frame_unwind",
+      {},
+      "",
+      [
+        118,
+        38
+      ],
+      [
+        118,
+        57
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        119,
+        4
+      ],
+      [
+        119,
+        21
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        122,
+        2
+      ],
+      [
+        122,
+        16
+      ]
+    ],
+    [
+      "struct trad_frame_cache",
+      {},
+      "",
+      [
+        159,
+        7
+      ],
+      [
+        159,
+        30
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        160,
+        30
+      ],
+      [
+        160,
+        47
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        162,
+        2
+      ],
+      [
+        162,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        163,
+        2
+      ],
+      [
+        163,
+        21
+      ]
+    ],
+    [
+      "struct trad_frame_cache",
+      {},
+      "",
+      [
+        165,
+        2
+      ],
+      [
+        165,
+        25
+      ]
+    ],
+    [
+      "struct trad_frame_cache",
+      {},
+      "",
+      [
+        172,
+        12
+      ],
+      [
+        172,
+        35
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        214,
+        32
+      ],
+      [
+        214,
+        49
+      ]
+    ],
+    [
+      "struct frame_id",
+      {},
+      "",
+      [
+        215,
+        23
+      ],
+      [
+        215,
+        38
+      ]
+    ],
+    [
+      "struct trad_frame_cache",
+      {},
+      "",
+      [
+        217,
+        2
+      ],
+      [
+        217,
+        25
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        223,
+        7
+      ],
+      [
+        223,
+        19
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        224,
+        38
+      ],
+      [
+        224,
+        55
+      ]
+    ],
+    [
+      "struct trad_frame_cache",
+      {},
+      "",
+      [
+        227,
+        2
+      ],
+      [
+        227,
+        25
+      ]
+    ],
+    [
+      "struct frame_unwind",
+      {},
+      "",
+      [
+        233,
+        13
+      ],
+      [
+        233,
+        32
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        244,
+        18
+      ],
+      [
+        244,
+        37
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        244,
+        44
+      ],
+      [
+        244,
+        58
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"arch-utils.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"frame.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"frame-unwind.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbtypes.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"osabi.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"regset.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"trad-frame.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"ppc-tdep.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"ppc-obsd-tdep.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"solib-svr4.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        123,
+        2
+      ],
+      [
+        123,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        164,
+        2
+      ],
+      [
+        164,
+        17
+      ]
+    ]
+  ]
+}

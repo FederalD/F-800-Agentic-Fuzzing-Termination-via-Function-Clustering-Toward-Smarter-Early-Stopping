@@ -1,0 +1,386 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "jas_image_t *ras_decode(jas_stream_t *in, char *optstr)\n{\n\tras_hdr_t hdr;\n\tras_cmap_t cmap;\n\tjas_image_t *image;\n\tjas_image_cmptparm_t cmptparms[3];\n\tjas_image_cmptparm_t *cmptparm;\n\tint clrspc;\n\tint numcmpts;\n\tint i;\n\n\tif (optstr) {\n\t\tjas_eprintf(\"warning: ignoring RAS decoder options\\n\");\n\t}\n\n\t/* Read the header. */\n\tif (ras_gethdr(in, &hdr)) {\n\t\treturn 0;\n\t}\n\n\t/* Does the header information look reasonably sane? */\n\tif (hdr.magic != RAS_MAGIC || hdr.width <= 0 || hdr.height <= 0 ||\n\t  hdr.depth <= 0 || hdr.depth > 32) {\n\t\treturn 0;\n\t}\n\n\t/* In the case of the old format, do not rely on the length field\n\tbeing properly specified.  Calculate the quantity from scratch. */\n\tif (hdr.type == RAS_TYPE_OLD) {\n\t\thdr.length = RAS_ROWSIZE(&hdr) * hdr.height;\n\t}\n\n\t/* Calculate some quantities needed for creation of the image\n\tobject. */\n\tif (RAS_ISRGB(&hdr)) {\n\t\tclrspc = JAS_CLRSPC_SRGB;\n\t\tnumcmpts = 3;\n\t} else {\n\t\tclrspc = JAS_CLRSPC_SGRAY;\n\t\tnumcmpts = 1;\n\t}\n\tfor (i = 0, cmptparm = cmptparms; i < numcmpts; ++i, ++cmptparm) {\n\t\tcmptparm->tlx = 0;\n\t\tcmptparm->tly = 0;\n\t\tcmptparm->hstep = 1;\n\t\tcmptparm->vstep = 1;\n\t\tcmptparm->width = hdr.width;\n\t\tcmptparm->height = hdr.height;\n\t\tcmptparm->prec = RAS_ISRGB(&hdr) ? 8 : hdr.depth;\n\t\tcmptparm->sgnd = false;\n\t}\n\t/* Create the image object. */\n\tif (!(image = jas_image_create(numcmpts, cmptparms, JAS_CLRSPC_UNKNOWN))) {\n\t\treturn 0;\n\t}\n\n\t/* Read the color map (if there is one). */\n\tif (ras_getcmap(in, &hdr, &cmap)) {\n\t\tjas_image_destroy(image);\n\t\treturn 0;\n\t}\n\n\t/* Read the pixel data. */\n\tif (ras_getdata(in, &hdr, &cmap, image)) {\n\t\tjas_image_destroy(image);\n\t\treturn 0;\n\t}\n\n\tjas_image_setclrspc(image, clrspc);\n\tif (clrspc == JAS_CLRSPC_SRGB) {\n\t\tjas_image_setcmpttype(image, 0,\n\t\t  JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_RGB_R));\n\t\tjas_image_setcmpttype(image, 1,\n\t\t  JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_RGB_G));\n\t\tjas_image_setcmpttype(image, 2,\n\t\t  JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_RGB_B));\n\t} else {\n\t\tjas_image_setcmpttype(image, 0,\n\t\t  JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_GRAY_Y));\n\t}\n\n\treturn image;\n}",
+      "fn_code_pos": [
+        [
+          99,
+          0
+        ],
+        [
+          181,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_decode",
+        "parameters": {
+          "in": "jas_stream_t",
+          "optstr": "char"
+        },
+        "return_type": "jas_image_t"
+      }
+    },
+    {
+      "fn_code": "int ras_validate(jas_stream_t *in)\n{\n\tuchar buf[RAS_MAGICLEN];\n\tint i;\n\tint n;\n\tuint_fast32_t magic;\n\n\tassert(JAS_STREAM_MAXPUTBACK >= RAS_MAGICLEN);\n\n\t/* Read the validation data (i.e., the data used for detecting\n\t  the format). */\n\tif ((n = jas_stream_read(in, buf, RAS_MAGICLEN)) < 0) {\n\t\treturn -1;\n\t}\n\n\t/* Put the validation data back onto the stream, so that the\n\t  stream position will not be changed. */\n\tfor (i = n - 1; i >= 0; --i) {\n\t\tif (jas_stream_ungetc(in, buf[i]) == EOF) {\n\t\t\treturn -1;\n\t\t}\n\t}\n\n\t/* Did we read enough data? */\n\tif (n < RAS_MAGICLEN) {\n\t\treturn -1;\n\t}\n\n\tmagic = (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];\n\n\t/* Is the signature correct for the Sun Rasterfile format? */\n\tif (magic != RAS_MAGIC) {\n\t\treturn -1;\n\t}\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          183,
+          0
+        ],
+        [
+          218,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_validate",
+        "parameters": {
+          "in": "jas_stream_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int ras_getdata(jas_stream_t *in, ras_hdr_t *hdr, ras_cmap_t *cmap,\n  jas_image_t *image)\n{\n\tint ret;\n\n\tswitch (hdr->type) {\n\tcase RAS_TYPE_OLD:\n\tcase RAS_TYPE_STD:\n\t\tret = ras_getdatastd(in, hdr, cmap, image);\n\t\tbreak;\n\tcase RAS_TYPE_RLE:\n\t\tjas_eprintf(\"error: RLE encoding method not supported\\n\");\n\t\tret = -1;\n\t\tbreak;\n\tdefault:\n\t\tjas_eprintf(\"error: encoding method not supported\\n\");\n\t\tret = -1;\n\t\tbreak;\n\t}\n\treturn ret;\n}",
+      "fn_code_pos": [
+        [
+          220,
+          0
+        ],
+        [
+          240,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_getdata",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "ras_hdr_t",
+          "cmap": "ras_cmap_t",
+          "image": "jas_image_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int ras_getdatastd(jas_stream_t *in, ras_hdr_t *hdr, ras_cmap_t *cmap,\n  jas_image_t *image)\n{\n\tint pad;\n\tint nz;\n\tint z;\n\tint c;\n\tint y;\n\tint x;\n\tint v;\n\tint i;\n\tjas_matrix_t *data[3];\n\n/* Note: This function does not properly handle images with a colormap. */\n\t/* Avoid compiler warnings about unused parameters. */\n\tcmap = 0;\n\n\tfor (i = 0; i < jas_image_numcmpts(image); ++i) {\n\t\tdata[i] = jas_matrix_create(1, jas_image_width(image));\n\t\tassert(data[i]);\n\t}\n\n\tpad = RAS_ROWSIZE(hdr) - (hdr->width * hdr->depth + 7) / 8;\n\n\tfor (y = 0; y < hdr->height; y++) {\n\t\tnz = 0;\n\t\tz = 0;\n\t\tfor (x = 0; x < hdr->width; x++) {\n\t\t\twhile (nz < hdr->depth) {\n\t\t\t\tif ((c = jas_stream_getc(in)) == EOF) {\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\t\t\t\tz = (z << 8) | c;\n\t\t\t\tnz += 8;\n\t\t\t}\n\n\t\t\tv = (z >> (nz - hdr->depth)) & RAS_ONES(hdr->depth);\n\t\t\tz &= RAS_ONES(nz - hdr->depth);\n\t\t\tnz -= hdr->depth;\n\n\t\t\tif (jas_image_numcmpts(image) == 3) {\n\t\t\t\tjas_matrix_setv(data[0], x, (RAS_GETRED(v)));\n\t\t\t\tjas_matrix_setv(data[1], x, (RAS_GETGREEN(v)));\n\t\t\t\tjas_matrix_setv(data[2], x, (RAS_GETBLUE(v)));\n\t\t\t} else {\n\t\t\t\tjas_matrix_setv(data[0], x, (v));\n\t\t\t}\n\t\t}\n\t\tif (pad) {\n\t\t\tif ((c = jas_stream_getc(in)) == EOF) {\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t}\n\t\tfor (i = 0; i < jas_image_numcmpts(image); ++i) {\n\t\t\tif (jas_image_writecmpt(image, i, 0, y, hdr->width, 1,\n\t\t\t  data[i])) {\n\t\t\t\treturn -1;\n\t\t\t}\n\t\t}\n\t}\n\n\tfor (i = 0; i < jas_image_numcmpts(image); ++i) {\n\t\tjas_matrix_destroy(data[i]);\n\t}\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          242,
+          0
+        ],
+        [
+          308,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_getdatastd",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "ras_hdr_t",
+          "cmap": "ras_cmap_t",
+          "image": "jas_image_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int ras_getcmap(jas_stream_t *in, ras_hdr_t *hdr, ras_cmap_t *cmap)\n{\n\tint i;\n\tint j;\n\tint x;\n\tint c;\n\tint numcolors;\n\tint actualnumcolors;\n\n\tswitch (hdr->maptype) {\n\tcase RAS_MT_NONE:\n\t\tbreak;\n\tcase RAS_MT_EQUALRGB:\n\t\t{\n\t\tjas_eprintf(\"warning: palettized images not fully supported\\n\");\n\t\tnumcolors = 1 << hdr->depth;\n\t\tassert(numcolors <= RAS_CMAP_MAXSIZ);\n\t\tactualnumcolors = hdr->maplength / 3;\n\t\tfor (i = 0; i < numcolors; i++) {\n\t\t\tcmap->data[i] = 0;\n\t\t}\n\t\tif ((hdr->maplength % 3) || hdr->maplength < 0 ||\n\t\t  hdr->maplength > 3 * numcolors) {\n\t\t\treturn -1;\n\t\t}\n\t\tfor (i = 0; i < 3; i++) {\n\t\t\tfor (j = 0; j < actualnumcolors; j++) {\n\t\t\t\tif ((c = jas_stream_getc(in)) == EOF) {\n\t\t\t\t\treturn -1;\n\t\t\t\t}\n\t\t\t\tx = 0;\n\t\t\t\tswitch (i) {\n\t\t\t\tcase 0:\n\t\t\t\t\tx = RAS_RED(c);\n\t\t\t\t\tbreak;\n\t\t\t\tcase 1:\n\t\t\t\t\tx = RAS_GREEN(c);\n\t\t\t\t\tbreak;\n\t\t\t\tcase 2:\n\t\t\t\t\tx = RAS_BLUE(c);\n\t\t\t\t\tbreak;\n\t\t\t\t}\n\t\t\t\tcmap->data[j] |= x;\n\t\t\t}\n\t\t}\n\t\t}\n\t\tbreak;\n\tdefault:\n\t\treturn -1;\n\t\tbreak;\n\t}\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          310,
+          0
+        ],
+        [
+          363,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_getcmap",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "ras_hdr_t",
+          "cmap": "ras_cmap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int ras_gethdr(jas_stream_t *in, ras_hdr_t *hdr)\n{\n\tif (ras_getint(in, &hdr->magic) || ras_getint(in, &hdr->width) ||\n\t  ras_getint(in, &hdr->height) || ras_getint(in, &hdr->depth) ||\n\t  ras_getint(in, &hdr->length) || ras_getint(in, &hdr->type) ||\n\t  ras_getint(in, &hdr->maptype) || ras_getint(in, &hdr->maplength)) {\n\t\treturn -1;\n\t}\n\n\tif (hdr->magic != RAS_MAGIC) {\n\t\treturn -1;\n\t}\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          365,
+          0
+        ],
+        [
+          379,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_gethdr",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "ras_hdr_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int ras_getint(jas_stream_t *in, int_fast32_t *val)\n{\n\tint x;\n\tint c;\n\tint i;\n\n\tx = 0;\n\tfor (i = 0; i < 4; i++) {\n\t\tif ((c = jas_stream_getc(in)) == EOF) {\n\t\t\treturn -1;\n\t\t}\n\t\tx = (x << 8) | (c & 0xff);\n\t}\n\n\t*val = x;\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          381,
+          0
+        ],
+        [
+          397,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_getint",
+        "parameters": {
+          "in": "jas_stream_t",
+          "val": "int_fast32_t"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "ras_gethdr(jas_stream_t *in, ras_hdr_t *hdr)",
+      "fn_dec_pos": [
+        [
+          86,
+          11
+        ],
+        [
+          86,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_gethdr",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "ras_hdr_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "ras_getint(jas_stream_t *in, int_fast32_t *val)",
+      "fn_dec_pos": [
+        [
+          87,
+          11
+        ],
+        [
+          87,
+          58
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_getint",
+        "parameters": {
+          "in": "jas_stream_t",
+          "val": "int_fast32_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "ras_getdata(jas_stream_t *in, ras_hdr_t *hdr, ras_cmap_t *cmap,\n  jas_image_t *image)",
+      "fn_dec_pos": [
+        [
+          89,
+          11
+        ],
+        [
+          90,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_getdata",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "ras_hdr_t",
+          "cmap": "ras_cmap_t",
+          "image": "jas_image_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "ras_getdatastd(jas_stream_t *in, ras_hdr_t *hdr, ras_cmap_t *cmap,\n  jas_image_t *image)",
+      "fn_dec_pos": [
+        [
+          91,
+          11
+        ],
+        [
+          92,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_getdatastd",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "ras_hdr_t",
+          "cmap": "ras_cmap_t",
+          "image": "jas_image_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "ras_getcmap(jas_stream_t *in, ras_hdr_t *hdr, ras_cmap_t *cmap)",
+      "fn_dec_pos": [
+        [
+          93,
+          11
+        ],
+        [
+          93,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_getcmap",
+        "parameters": {
+          "in": "jas_stream_t",
+          "hdr": "ras_hdr_t",
+          "cmap": "ras_cmap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "ras_decode(jas_stream_t *in, char *optstr)",
+      "fn_dec_pos": [
+        [
+          99,
+          13
+        ],
+        [
+          99,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ras_decode",
+        "parameters": {
+          "in": "jas_stream_t",
+          "optstr": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include <assert.h>\n",
+      [
+        73,
+        0
+      ],
+      [
+        74,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        74,
+        0
+      ],
+      [
+        75,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_stream.h\"\n",
+      [
+        76,
+        0
+      ],
+      [
+        77,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_image.h\"\n",
+      [
+        77,
+        0
+      ],
+      [
+        78,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_debug.h\"\n",
+      [
+        78,
+        0
+      ],
+      [
+        79,
+        0
+      ]
+    ],
+    [
+      "#include \"ras_cod.h\"\n",
+      [
+        80,
+        0
+      ],
+      [
+        81,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

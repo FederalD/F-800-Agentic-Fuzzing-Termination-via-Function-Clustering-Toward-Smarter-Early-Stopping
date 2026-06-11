@@ -1,0 +1,945 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static const char *\nfbsd_core_pid_to_str (struct gdbarch *gdbarch, ptid_t ptid)\n{\n  static char buf[80];\n\n  if (ptid_get_lwp (ptid) != 0)\n    {\n      xsnprintf (buf, sizeof buf, \"LWP %ld\", ptid_get_lwp (ptid));\n      return buf;\n    }\n\n  return normal_pid_to_str (ptid);\n}",
+      "fn_code_pos": [
+        [
+          34,
+          0
+        ],
+        [
+          46,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_core_pid_to_str",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "ptid": "ptid_t"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static const char *\nfbsd_core_thread_name (struct gdbarch *gdbarch, struct thread_info *thr)\n{\n  static char buf[80];\n  struct bfd_section *section;\n  bfd_size_type size;\n  char sectionstr[32];\n\n  if (ptid_get_lwp (thr->ptid) != 0)\n    {\n      /* FreeBSD includes a NT_FREEBSD_THRMISC note for each thread\n\t whose contents are defined by a \"struct thrmisc\" declared in\n\t <sys/procfs.h> on FreeBSD.  The per-thread name is stored as\n\t a null-terminated string as the first member of the\n\t structure.  Rather than define the full structure here, just\n\t extract the null-terminated name from the start of the\n\t note.  */\n      xsnprintf (sectionstr, sizeof sectionstr, \".thrmisc/%ld\",\n\t\tptid_get_lwp (thr->ptid));\n      section = bfd_get_section_by_name (core_bfd, sectionstr);\n      if (section != NULL && bfd_section_size (core_bfd, section) > 0)\n\t{\n\t  /* Truncate the name if it is longer than \"buf\".  */\n\t  size = bfd_section_size (core_bfd, section);\n\t  if (size > sizeof buf - 1)\n\t    size = sizeof buf - 1;\n\t  if (bfd_get_section_contents (core_bfd, section, buf, (file_ptr) 0,\n\t\t\t\t\tsize)\n\t      && buf[0] != '\\0')\n\t    {\n\t      buf[size] = '\\0';\n\n\t      /* Note that each thread will report the process command\n\t\t as its thread name instead of an empty name if a name\n\t\t has not been set explicitly.  Return a NULL name in\n\t\t that case.  */\n\t      if (strcmp (buf, elf_tdata (core_bfd)->core->program) != 0)\n\t\treturn buf;\n\t    }\n\t}\n    }\n\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          51,
+          0
+        ],
+        [
+          94,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_core_thread_name",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "thr": "struct thread_info"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static int\nfind_signalled_thread (struct thread_info *info, void *data)\n{\n  if (info->suspend.stop_signal != GDB_SIGNAL_0\n      && ptid_get_pid (info->ptid) == ptid_get_pid (inferior_ptid))\n    return 1;\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          96,
+          0
+        ],
+        [
+          104,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_signalled_thread",
+        "parameters": {
+          "info": "struct thread_info",
+          "data": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_collect_regset_section_cb (const char *sect_name, int size,\n\t\t\t\tconst struct regset *regset,\n\t\t\t\tconst char *human_name, void *cb_data)\n{\n  char *buf;\n  struct fbsd_collect_regset_section_cb_data *data\n    = (struct fbsd_collect_regset_section_cb_data *) cb_data;\n\n  if (data->abort_iteration)\n    return;\n\n  gdb_assert (regset->collect_regset);\n\n  buf = (char *) xmalloc (size);\n  regset->collect_regset (regset, data->regcache, -1, buf, size);\n\n  /* PRSTATUS still needs to be treated specially.  */\n  if (strcmp (sect_name, \".reg\") == 0)\n    data->note_data = (char *) elfcore_write_prstatus\n      (data->obfd, data->note_data, data->note_size, data->lwp,\n       gdb_signal_to_host (data->stop_signal), buf);\n  else\n    data->note_data = (char *) elfcore_write_register_note\n      (data->obfd, data->note_data, data->note_size,\n       sect_name, buf, size);\n  xfree (buf);\n\n  if (data->note_data == NULL)\n    data->abort_iteration = 1;\n}",
+      "fn_code_pos": [
+        [
+          121,
+          0
+        ],
+        [
+          151,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_collect_regset_section_cb",
+        "parameters": {
+          "sect_name": "char",
+          "size": "int",
+          "regset": "struct regset",
+          "human_name": "char",
+          "cb_data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\nfbsd_collect_thread_registers (const struct regcache *regcache,\n\t\t\t       ptid_t ptid, bfd *obfd,\n\t\t\t       char *note_data, int *note_size,\n\t\t\t       enum gdb_signal stop_signal)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct fbsd_collect_regset_section_cb_data data;\n\n  data.regcache = regcache;\n  data.obfd = obfd;\n  data.note_data = note_data;\n  data.note_size = note_size;\n  data.stop_signal = stop_signal;\n  data.abort_iteration = 0;\n  data.lwp = ptid_get_lwp (ptid);\n\n  gdbarch_iterate_over_regset_sections (gdbarch,\n\t\t\t\t\tfbsd_collect_regset_section_cb,\n\t\t\t\t\t&data, regcache);\n  return data.note_data;\n}",
+      "fn_code_pos": [
+        [
+          156,
+          0
+        ],
+        [
+          177,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_collect_thread_registers",
+        "parameters": {
+          "regcache": "struct regcache",
+          "ptid": "ptid_t",
+          "obfd": "bfd",
+          "note_data": "char",
+          "note_size": "int",
+          "stop_signal": "enum gdb_signal"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_corefile_thread (struct thread_info *info,\n\t\t      struct fbsd_corefile_thread_data *args)\n{\n  struct regcache *regcache;\n\n  regcache = get_thread_arch_regcache (info->ptid, args->gdbarch);\n\n  target_fetch_registers (regcache, -1);\n\n  args->note_data = fbsd_collect_thread_registers\n    (regcache, info->ptid, args->obfd, args->note_data,\n     args->note_size, args->stop_signal);\n}",
+      "fn_code_pos": [
+        [
+          191,
+          0
+        ],
+        [
+          204,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_corefile_thread",
+        "parameters": {
+          "info": "struct thread_info",
+          "args": "struct fbsd_corefile_thread_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\nfbsd_make_corefile_notes (struct gdbarch *gdbarch, bfd *obfd, int *note_size)\n{\n  struct fbsd_corefile_thread_data thread_args;\n  char *note_data = NULL;\n  Elf_Internal_Ehdr *i_ehdrp;\n  struct thread_info *curr_thr, *signalled_thr, *thr;\n\n  /* Put a \"FreeBSD\" label in the ELF header.  */\n  i_ehdrp = elf_elfheader (obfd);\n  i_ehdrp->e_ident[EI_OSABI] = ELFOSABI_FREEBSD;\n\n  gdb_assert (gdbarch_iterate_over_regset_sections_p (gdbarch));\n\n  if (get_exec_file (0))\n    {\n      const char *fname = lbasename (get_exec_file (0));\n      char *psargs = xstrdup (fname);\n\n      if (get_inferior_args ())\n\tpsargs = reconcat (psargs, psargs, \" \", get_inferior_args (),\n\t\t\t   (char *) NULL);\n\n      note_data = elfcore_write_prpsinfo (obfd, note_data, note_size,\n\t\t\t\t\t  fname, psargs);\n    }\n\n  /* Thread register information.  */\n  TRY\n    {\n      update_thread_list ();\n    }",
+      "fn_code_pos": [
+        [
+          209,
+          0
+        ],
+        [
+          240,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_make_corefile_notes",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "obfd": "bfd",
+          "note_size": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "CATCH (e, RETURN_MASK_ERROR)\n    {\n      exception_print (gdb_stderr, e);\n    }",
+      "fn_code_pos": [
+        [
+          241,
+          2
+        ],
+        [
+          244,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "ALL_NON_EXITED_THREADS (thr)\n    {\n      if (thr == signalled_thr)\n\tcontinue;\n      if (ptid_get_pid (thr->ptid) != ptid_get_pid (inferior_ptid))\n\tcontinue;\n\n      fbsd_corefile_thread (thr, &thread_args);\n    }",
+      "fn_code_pos": [
+        [
+          268,
+          2
+        ],
+        [
+          276,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ALL_NON_EXITED_THREADS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nfbsd_print_auxv_entry (struct gdbarch *gdbarch, struct ui_file *file,\n\t\t       CORE_ADDR type, CORE_ADDR val)\n{\n  const char *name;\n  const char *description;\n  enum auxv_format format;\n\n  switch (type)\n    {\n#define _TAGNAME(tag) #tag\n#define TAGNAME(tag) _TAGNAME(AT_##tag)\n#define TAG(tag, text, kind) \\\n      case AT_FREEBSD_##tag: name = TAGNAME(tag); description = text; format = kind; break\n      TAG (EXECPATH, _(\"Executable path\"), AUXV_FORMAT_STR);\n      TAG (CANARY, _(\"Canary for SSP\"), AUXV_FORMAT_HEX);\n      TAG (CANARYLEN, (\"Length of the SSP canary\"), AUXV_FORMAT_DEC);\n      TAG (OSRELDATE, _(\"OSRELDATE\"), AUXV_FORMAT_DEC);\n      TAG (NCPUS, _(\"Number of CPUs\"), AUXV_FORMAT_DEC);\n      TAG (PAGESIZES, _(\"Pagesizes\"), AUXV_FORMAT_HEX);\n      TAG (PAGESIZESLEN, _(\"Number of pagesizes\"), AUXV_FORMAT_DEC);\n      TAG (TIMEKEEP, _(\"Pointer to timehands\"), AUXV_FORMAT_HEX);\n      TAG (STACKPROT, _(\"Initial stack protection\"), AUXV_FORMAT_HEX);\n    default:\n      default_print_auxv_entry (gdbarch, file, type, val);\n      return;\n    }\n\n  fprint_auxv_entry (file, name, description, format, type, val);\n}",
+      "fn_code_pos": [
+        [
+          285,
+          0
+        ],
+        [
+          314,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_print_auxv_entry",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "file": "struct ui_file",
+          "type": "CORE_ADDR",
+          "val": "CORE_ADDR"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nfbsd_get_syscall_number (struct gdbarch *gdbarch,\n\t\t\t ptid_t ptid)\n{\n\n  /* FreeBSD doesn't use gdbarch_get_syscall_number since FreeBSD\n     native targets fetch the system call number from the\n     'pl_syscall_code' member of struct ptrace_lwpinfo in fbsd_wait.\n     However, system call catching requires this function to be\n     set.  */\n\n  internal_error (__FILE__, __LINE__, _(\"fbsd_get_sycall_number called\"));\n}",
+      "fn_code_pos": [
+        [
+          318,
+          0
+        ],
+        [
+          330,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_get_syscall_number",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "ptid": "ptid_t"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "void\nfbsd_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)\n{\n  set_gdbarch_core_pid_to_str (gdbarch, fbsd_core_pid_to_str);\n  set_gdbarch_core_thread_name (gdbarch, fbsd_core_thread_name);\n  set_gdbarch_make_corefile_notes (gdbarch, fbsd_make_corefile_notes);\n  set_gdbarch_print_auxv_entry (gdbarch, fbsd_print_auxv_entry);\n\n  /* `catch syscall' */\n  set_xml_syscall_file_name (gdbarch, \"syscalls/freebsd.xml\");\n  set_gdbarch_get_syscall_number (gdbarch, fbsd_get_syscall_number);\n}",
+      "fn_code_pos": [
+        [
+          334,
+          0
+        ],
+        [
+          345,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_init_abi",
+        "parameters": {
+          "info": "struct gdbarch_info",
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "fbsd_core_pid_to_str (struct gdbarch *gdbarch, ptid_t ptid)",
+      "fn_dec_pos": [
+        [
+          35,
+          0
+        ],
+        [
+          35,
+          59
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_core_pid_to_str",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "ptid": "ptid_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "fbsd_core_thread_name (struct gdbarch *gdbarch, struct thread_info *thr)",
+      "fn_dec_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          52,
+          72
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_core_thread_name",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "thr": "struct thread_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "fbsd_collect_thread_registers (const struct regcache *regcache,\n\t\t\t       ptid_t ptid, bfd *obfd,\n\t\t\t       char *note_data, int *note_size,\n\t\t\t       enum gdb_signal stop_signal)",
+      "fn_dec_pos": [
+        [
+          157,
+          0
+        ],
+        [
+          160,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_collect_thread_registers",
+        "parameters": {
+          "regcache": "struct regcache",
+          "ptid": "ptid_t",
+          "obfd": "bfd",
+          "note_data": "char",
+          "note_size": "int",
+          "stop_signal": "enum gdb_signal"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "fbsd_make_corefile_notes (struct gdbarch *gdbarch, bfd *obfd, int *note_size)",
+      "fn_dec_pos": [
+        [
+          210,
+          0
+        ],
+        [
+          210,
+          77
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fbsd_make_corefile_notes",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "obfd": "bfd",
+          "note_size": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct fbsd_collect_regset_section_cb_data\n{\n  const struct regcache *regcache;\n  bfd *obfd;\n  char *note_data;\n  int *note_size;\n  unsigned long lwp;\n  enum gdb_signal stop_signal;\n  int abort_iteration;\n}",
+      {
+        "struct regcache": "const",
+        "*obfd": "bfd",
+        "*note_data": "char",
+        "*note_size": "int",
+        "lwp": "unsigned long",
+        "stop_signal": "enum gdb_signal",
+        "abort_iteration": "int"
+      },
+      "fbsd_collect_regset_section_cb_data",
+      [
+        110,
+        0
+      ],
+      [
+        119,
+        1
+      ]
+    ],
+    [
+      "struct fbsd_corefile_thread_data\n{\n  struct gdbarch *gdbarch;\n  bfd *obfd;\n  char *note_data;\n  int *note_size;\n  enum gdb_signal stop_signal;\n}",
+      {
+        "*gdbarch": "struct gdbarch",
+        "*obfd": "bfd",
+        "*note_data": "char",
+        "*note_size": "int",
+        "stop_signal": "enum gdb_signal"
+      },
+      "fbsd_corefile_thread_data",
+      [
+        179,
+        0
+      ],
+      [
+        186,
+        1
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        35,
+        22
+      ],
+      [
+        35,
+        36
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        52,
+        23
+      ],
+      [
+        52,
+        37
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        52,
+        48
+      ],
+      [
+        52,
+        66
+      ]
+    ],
+    [
+      "struct bfd_section",
+      {},
+      "",
+      [
+        55,
+        2
+      ],
+      [
+        55,
+        20
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        97,
+        23
+      ],
+      [
+        97,
+        41
+      ]
+    ],
+    [
+      "struct fbsd_collect_regset_section_cb_data\n{\n  const struct regcache *regcache;\n  bfd *obfd;\n  char *note_data;\n  int *note_size;\n  unsigned long lwp;\n  enum gdb_signal stop_signal;\n  int abort_iteration;\n}",
+      {
+        "struct regcache": "const",
+        "*obfd": "bfd",
+        "*note_data": "char",
+        "*note_size": "int",
+        "lwp": "unsigned long",
+        "stop_signal": "enum gdb_signal",
+        "abort_iteration": "int"
+      },
+      "fbsd_collect_regset_section_cb_data",
+      [
+        110,
+        0
+      ],
+      [
+        119,
+        1
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        112,
+        8
+      ],
+      [
+        112,
+        23
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        123,
+        10
+      ],
+      [
+        123,
+        23
+      ]
+    ],
+    [
+      "struct fbsd_collect_regset_section_cb_data",
+      {},
+      "",
+      [
+        127,
+        2
+      ],
+      [
+        127,
+        44
+      ]
+    ],
+    [
+      "struct fbsd_collect_regset_section_cb_data",
+      {},
+      "",
+      [
+        128,
+        7
+      ],
+      [
+        128,
+        49
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        157,
+        37
+      ],
+      [
+        157,
+        52
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        162,
+        2
+      ],
+      [
+        162,
+        16
+      ]
+    ],
+    [
+      "struct fbsd_collect_regset_section_cb_data",
+      {},
+      "",
+      [
+        163,
+        2
+      ],
+      [
+        163,
+        44
+      ]
+    ],
+    [
+      "struct fbsd_corefile_thread_data\n{\n  struct gdbarch *gdbarch;\n  bfd *obfd;\n  char *note_data;\n  int *note_size;\n  enum gdb_signal stop_signal;\n}",
+      {
+        "*gdbarch": "struct gdbarch",
+        "*obfd": "bfd",
+        "*note_data": "char",
+        "*note_size": "int",
+        "stop_signal": "enum gdb_signal"
+      },
+      "fbsd_corefile_thread_data",
+      [
+        179,
+        0
+      ],
+      [
+        186,
+        1
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        181,
+        2
+      ],
+      [
+        181,
+        16
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        192,
+        22
+      ],
+      [
+        192,
+        40
+      ]
+    ],
+    [
+      "struct fbsd_corefile_thread_data",
+      {},
+      "",
+      [
+        193,
+        8
+      ],
+      [
+        193,
+        40
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        195,
+        2
+      ],
+      [
+        195,
+        17
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        210,
+        26
+      ],
+      [
+        210,
+        40
+      ]
+    ],
+    [
+      "struct fbsd_corefile_thread_data",
+      {},
+      "",
+      [
+        212,
+        2
+      ],
+      [
+        212,
+        34
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        215,
+        2
+      ],
+      [
+        215,
+        20
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        286,
+        23
+      ],
+      [
+        286,
+        37
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        286,
+        48
+      ],
+      [
+        286,
+        62
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        319,
+        25
+      ],
+      [
+        319,
+        39
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        335,
+        15
+      ],
+      [
+        335,
+        34
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        335,
+        41
+      ],
+      [
+        335,
+        55
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"auxv.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"regset.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbthread.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"xml-syscall.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"elf-bfd.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"fbsd-tdep.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum gdb_signal",
+      {},
+      "",
+      [
+        117,
+        2
+      ],
+      [
+        117,
+        17
+      ]
+    ],
+    [
+      "enum gdb_signal",
+      {},
+      "",
+      [
+        160,
+        10
+      ],
+      [
+        160,
+        25
+      ]
+    ],
+    [
+      "enum gdb_signal",
+      {},
+      "",
+      [
+        185,
+        2
+      ],
+      [
+        185,
+        17
+      ]
+    ],
+    [
+      "enum auxv_format",
+      {},
+      "",
+      [
+        291,
+        2
+      ],
+      [
+        291,
+        18
+      ]
+    ]
+  ]
+}

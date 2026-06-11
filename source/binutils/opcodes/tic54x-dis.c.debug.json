@@ -1,0 +1,515 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int\nprint_insn_tic54x (bfd_vma memaddr, disassemble_info *info)\n{\n  bfd_byte opbuf[2];\n  unsigned short opcode;\n  int status, size;\n  const insn_template* tm;\n\n  status = (*info->read_memory_func) (memaddr, opbuf, 2, info);\n  if (status != 0)\n  {\n    (*info->memory_error_func) (status, memaddr, info);\n    return -1;\n  }\n\n  opcode = bfd_getl16 (opbuf);\n  tm = tic54x_get_insn (info, memaddr, opcode, &size);\n\n  info->bytes_per_line = 2;\n  info->bytes_per_chunk = 2;\n  info->octets_per_byte = 2;\n  info->display_endian = BFD_ENDIAN_LITTLE;\n\n  if (tm->flags & FL_PAR)\n  {\n    if (!print_parallel_instruction (info, memaddr, opcode, tm, size))\n      return -1;\n  }\n  else\n  {\n    if (!print_instruction (info, memaddr, opcode,\n                            (char *) tm->name,\n                            tm->operand_types,\n                            size, (tm->flags & FL_EXT)))\n      return -1;\n  }\n\n  return size * 2;\n}",
+      "fn_code_pos": [
+        [
+          47,
+          0
+        ],
+        [
+          85,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_insn_tic54x",
+        "parameters": {
+          "memaddr": "bfd_vma",
+          "info": "disassemble_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nhas_lkaddr (unsigned short memdata, const insn_template *tm)\n{\n  return (IS_LKADDR (memdata)\n\t  && (OPTYPE (tm->operand_types[0]) == OP_Smem\n\t      || OPTYPE (tm->operand_types[1]) == OP_Smem\n\t      || OPTYPE (tm->operand_types[2]) == OP_Smem\n\t      || OPTYPE (tm->operand_types[1]) == OP_Sind\n              || OPTYPE (tm->operand_types[0]) == OP_Lmem\n              || OPTYPE (tm->operand_types[1]) == OP_Lmem));\n}",
+      "fn_code_pos": [
+        [
+          87,
+          0
+        ],
+        [
+          97,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "has_lkaddr",
+        "parameters": {
+          "memdata": "unsigned short",
+          "tm": "insn_template"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "const insn_template*\ntic54x_get_insn (disassemble_info *info, bfd_vma addr,\n                 unsigned short memdata, int *size)\n{\n  const insn_template *tm = NULL;\n\n  for (tm = tic54x_optab; tm->name; tm++)\n  {\n    if (tm->opcode == (memdata & tm->mask))\n    {\n      /* a few opcodes span two words */\n      if (tm->flags & FL_EXT)\n        {\n          /* if lk addressing is used, the second half of the opcode gets\n             pushed one word later */\n          bfd_byte opbuf[2];\n          bfd_vma addr2 = addr + 1 + has_lkaddr (memdata, tm);\n          int status = (*info->read_memory_func) (addr2, opbuf, 2, info);\n          // FIXME handle errors\n          if (status == 0)\n            {\n              unsigned short data2 = bfd_getl16 (opbuf);\n              if (tm->opcode2 == (data2 & tm->mask2))\n                {\n                  if (size) *size = get_insn_size (memdata, tm);\n                  return tm;\n                }\n            }\n        }\n      else\n        {\n          if (size) *size = get_insn_size (memdata, tm);\n          return tm;\n        }\n    }\n  }\n  for (tm = (insn_template *) tic54x_paroptab; tm->name; tm++)\n  {\n    if (tm->opcode == (memdata & tm->mask))\n    {\n      if (size) *size = get_insn_size (memdata, tm);\n      return tm;\n    }\n  }\n\n  if (size) *size = 1;\n  return &tic54x_unknown_opcode;\n}",
+      "fn_code_pos": [
+        [
+          101,
+          0
+        ],
+        [
+          148,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic54x_get_insn",
+        "parameters": {
+          "info": "disassemble_info",
+          "addr": "bfd_vma",
+          "memdata": "unsigned short",
+          "size": "int"
+        },
+        "return_type": "insn_template"
+      }
+    },
+    {
+      "fn_code": "static int\nget_insn_size (unsigned short memdata, const insn_template *insn)\n{\n  int size;\n\n  if (insn->flags & FL_PAR)\n    {\n      /* only non-parallel instructions support lk addressing */\n      size = insn->words;\n    }\n  else\n    {\n      size = insn->words + has_lkaddr (memdata, insn);\n    }\n\n  return size;\n}",
+      "fn_code_pos": [
+        [
+          150,
+          0
+        ],
+        [
+          166,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_insn_size",
+        "parameters": {
+          "memdata": "unsigned short",
+          "insn": "insn_template"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nprint_instruction (disassemble_info *info,\n\t\t   bfd_vma memaddr,\n\t\t   unsigned short opcode,\n\t\t   const char *tm_name,\n\t\t   const enum optype tm_operands[],\n\t\t   int size,\n\t\t   int ext)\n{\n  static int n;\n  /* string storage for multiple operands */\n  char operand[4][64] = { {0},{0},{0},{0}, };\n  bfd_byte buf[2];\n  unsigned long opcode2 = 0;\n  unsigned long lkaddr = 0;\n  enum optype src = OP_None;\n  enum optype dst = OP_None;\n  int i, shift;\n  char *comma = \"\";\n\n  info->fprintf_func (info->stream, \"%-7s\", tm_name);\n\n  if (size > 1)\n    {\n      int status = (*info->read_memory_func) (memaddr + 1, buf, 2, info);\n      if (status != 0)\n        return 0;\n      lkaddr = opcode2 = bfd_getl16 (buf);\n      if (size > 2)\n        {\n          status = (*info->read_memory_func) (memaddr + 2, buf, 2, info);\n          if (status != 0)\n            return 0;\n          opcode2 = bfd_getl16 (buf);\n        }\n    }\n\n  for (i = 0; i < MAX_OPERANDS && OPTYPE (tm_operands[i]) != OP_None; i++)\n    {\n      char *next_comma = \",\";\n      int optional = (tm_operands[i] & OPT) != 0;\n\n      switch (OPTYPE (tm_operands[i]))\n        {\n        case OP_Xmem:\n          sprint_dual_address (info, operand[i], XMEM (opcode));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_Ymem:\n          sprint_dual_address (info, operand[i], YMEM (opcode));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_Smem:\n        case OP_Sind:\n        case OP_Lmem:\n          info->fprintf_func (info->stream, \"%s\", comma);\n          if (INDIRECT (opcode))\n            {\n              if (MOD (opcode) >= 12)\n                {\n                  bfd_vma addr = lkaddr;\n                  int arf = ARF (opcode);\n                  int mod = MOD (opcode);\n                  if (mod == 15)\n                      info->fprintf_func (info->stream, \"*(\");\n                  else\n                      info->fprintf_func (info->stream, \"*%sar%d(\",\n                                          (mod == 13 || mod == 14 ? \"+\" : \"\"),\n                                          arf);\n                  (*(info->print_address_func)) ((bfd_vma) addr, info);\n                  info->fprintf_func (info->stream, \")%s\",\n                                      mod == 14 ? \"%\" : \"\");\n                }\n              else\n                {\n                  sprint_indirect_address (info, operand[i], opcode);\n                  info->fprintf_func (info->stream, \"%s\", operand[i]);\n                }\n            }\n          else\n          {\n            /* FIXME -- use labels (print_address_func) */\n            /* in order to do this, we need to guess what DP is */\n            sprint_direct_address (info, operand[i], opcode);\n            info->fprintf_func (info->stream, \"%s\", operand[i]);\n          }\n          break;\n        case OP_dmad:\n          info->fprintf_func (info->stream, \"%s\", comma);\n          (*(info->print_address_func)) ((bfd_vma) opcode2, info);\n          break;\n        case OP_xpmad:\n          /* upper 7 bits of address are in the opcode */\n          opcode2 += ((unsigned long) opcode & 0x7F) << 16;\n          /* fall through */\n        case OP_pmad:\n          info->fprintf_func (info->stream, \"%s\", comma);\n          (*(info->print_address_func)) ((bfd_vma) opcode2, info);\n          break;\n        case OP_MMRX:\n          sprint_mmr (info, operand[i], MMRX (opcode));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_MMRY:\n          sprint_mmr (info, operand[i], MMRY (opcode));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_MMR:\n          sprint_mmr (info, operand[i], MMR (opcode));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_PA:\n          sprintf (operand[i], \"pa%d\", (unsigned) opcode2);\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_SRC:\n          src = SRC (ext ? opcode2 : opcode) ? OP_B : OP_A;\n          sprintf (operand[i], (src == OP_B) ? \"b\" : \"a\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_SRC1:\n          src = SRC1 (ext ? opcode2 : opcode) ? OP_B : OP_A;\n          sprintf (operand[i], (src == OP_B) ? \"b\" : \"a\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_RND:\n          dst = DST (opcode) ? OP_B : OP_A;\n          sprintf (operand[i], (dst == OP_B) ? \"a\" : \"b\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_DST:\n          dst = DST (ext ? opcode2 : opcode) ? OP_B : OP_A;\n          if (!optional || dst != src)\n            {\n              sprintf (operand[i], (dst == OP_B) ? \"b\" : \"a\");\n              info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n            }\n          else\n            next_comma = comma;\n          break;\n        case OP_B:\n          sprintf (operand[i], \"b\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_A:\n          sprintf (operand[i], \"a\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_ARX:\n          sprintf (operand[i], \"ar%d\", (int) ARX (opcode));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_SHIFT:\n          shift = SHIFT (ext ? opcode2 : opcode);\n          if (!optional || shift != 0)\n            {\n              sprintf (operand[i], \"%d\", shift);\n              info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n            }\n          else\n            next_comma = comma;\n          break;\n        case OP_SHFT:\n          shift = SHFT (opcode);\n          if (!optional || shift != 0)\n            {\n              sprintf (operand[i], \"%d\", (unsigned) shift);\n              info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n            }\n          else\n            next_comma = comma;\n          break;\n        case OP_lk:\n          sprintf (operand[i], \"#%d\", (int) (short) opcode2);\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_T:\n          sprintf (operand[i], \"t\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_TS:\n          sprintf (operand[i], \"ts\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_k8:\n          sprintf (operand[i], \"%d\", (int) ((signed char) (opcode & 0xFF)));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_16:\n          sprintf (operand[i], \"16\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_ASM:\n          sprintf (operand[i], \"asm\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_BITC:\n          sprintf (operand[i], \"%d\", (int) (opcode & 0xF));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_CC:\n          /* put all CC operands in the same operand */\n          sprint_condition (info, operand[i], opcode);\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          i = MAX_OPERANDS;\n          break;\n        case OP_CC2:\n          sprint_cc2 (info, operand[i], opcode);\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_CC3:\n        {\n          const char *code[] = { \"eq\", \"lt\", \"gt\", \"neq\" };\n\n\t  /* Do not use sprintf with only two parameters as a\n\t     compiler warning could be generated in such conditions.  */\n\t  sprintf (operand[i], \"%s\", code[CC3 (opcode)]);\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        }\n        case OP_123:\n          {\n            int code = (opcode >> 8) & 0x3;\n            sprintf (operand[i], \"%d\", (code == 0) ? 1 : (code == 2) ? 2 : 3);\n            info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n            break;\n          }\n        case OP_k5:\n          sprintf (operand[i], \"#%d\",\n                   (int) (((signed char) opcode & 0x1F) << 3) >> 3);\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_k8u:\n          sprintf (operand[i], \"#%d\", (unsigned) (opcode & 0xFF));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_k3:\n          sprintf (operand[i], \"#%d\", (int) (opcode & 0x7));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_lku:\n          sprintf (operand[i], \"#%d\", (unsigned) opcode2);\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_N:\n          n = (opcode >> 9) & 0x1;\n          sprintf (operand[i], \"st%d\", n);\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_SBIT:\n        {\n          const char *status0[] = {\n            \"0\", \"1\", \"2\", \"3\", \"4\", \"5\", \"6\", \"7\", \"8\",\n            \"ovb\", \"ova\", \"c\", \"tc\", \"13\", \"14\", \"15\"\n          };\n          const char *status1[] = {\n            \"0\", \"1\", \"2\", \"3\", \"4\",\n            \"cmpt\", \"frct\", \"c16\", \"sxm\", \"ovm\", \"10\",\n            \"intm\", \"hm\", \"xf\", \"cpl\", \"braf\"\n          };\n          sprintf (operand[i], \"%s\",\n                   n ? status1[SBIT (opcode)] : status0[SBIT (opcode)]);\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        }\n        case OP_12:\n          sprintf (operand[i], \"%d\", (int) ((opcode >> 9) & 1) + 1);\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_TRN:\n          sprintf (operand[i], \"trn\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_DP:\n          sprintf (operand[i], \"dp\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_k9:\n          /* FIXME-- this is DP, print the original address? */\n          sprintf (operand[i], \"#%d\", (int) (opcode & 0x1FF));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_ARP:\n          sprintf (operand[i], \"arp\");\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        case OP_031:\n          sprintf (operand[i], \"%d\", (int) (opcode & 0x1F));\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        default:\n          sprintf (operand[i], \"??? (0x%x)\", tm_operands[i]);\n          info->fprintf_func (info->stream, \"%s%s\", comma, operand[i]);\n          break;\n        }\n      comma = next_comma;\n    }\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          168,
+          0
+        ],
+        [
+          466,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_instruction",
+        "parameters": {
+          "info": "disassemble_info",
+          "memaddr": "bfd_vma",
+          "opcode": "unsigned short",
+          "tm_name": "char",
+          "tm_operands": "enum optype",
+          "size": "int",
+          "ext": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nprint_parallel_instruction (disassemble_info *info,\n\t\t\t    bfd_vma memaddr,\n\t\t\t    unsigned short opcode,\n\t\t\t    const insn_template *ptm,\n\t\t\t    int size)\n{\n  print_instruction (info, memaddr, opcode,\n                     ptm->name, ptm->operand_types, size, 0);\n  info->fprintf_func (info->stream, \" || \");\n  return print_instruction (info, memaddr, opcode,\n                            ptm->parname, ptm->paroperand_types, size, 0);\n}",
+      "fn_code_pos": [
+        [
+          468,
+          0
+        ],
+        [
+          480,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_parallel_instruction",
+        "parameters": {
+          "info": "disassemble_info",
+          "memaddr": "bfd_vma",
+          "opcode": "unsigned short",
+          "ptm": "insn_template",
+          "size": "int"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "has_lkaddr (unsigned short, const insn_template *)",
+      "fn_dec_pos": [
+        [
+          29,
+          11
+        ],
+        [
+          29,
+          61
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "has_lkaddr",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "get_insn_size (unsigned short, const insn_template *)",
+      "fn_dec_pos": [
+        [
+          30,
+          11
+        ],
+        [
+          30,
+          64
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_insn_size",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "print_instruction (disassemble_info *, bfd_vma,\n                              unsigned short, const char *,\n                              const enum optype [], int, int)",
+      "fn_dec_pos": [
+        [
+          31,
+          11
+        ],
+        [
+          33,
+          61
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_instruction",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "print_parallel_instruction (disassemble_info *, bfd_vma,\n                                       unsigned short,\n                                       const insn_template *, int)",
+      "fn_dec_pos": [
+        [
+          34,
+          11
+        ],
+        [
+          36,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_parallel_instruction",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "sprint_dual_address (disassemble_info *,char [],\n                                unsigned short)",
+      "fn_dec_pos": [
+        [
+          37,
+          11
+        ],
+        [
+          38,
+          47
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sprint_dual_address",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "sprint_indirect_address (disassemble_info *,char [],\n                                    unsigned short)",
+      "fn_dec_pos": [
+        [
+          39,
+          11
+        ],
+        [
+          40,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sprint_indirect_address",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "sprint_direct_address (disassemble_info *,char [],\n                                  unsigned short)",
+      "fn_dec_pos": [
+        [
+          41,
+          11
+        ],
+        [
+          42,
+          49
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sprint_direct_address",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "sprint_mmr (disassemble_info *,char [],int)",
+      "fn_dec_pos": [
+        [
+          43,
+          11
+        ],
+        [
+          43,
+          54
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sprint_mmr",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "sprint_condition (disassemble_info *,char *,unsigned short)",
+      "fn_dec_pos": [
+        [
+          44,
+          11
+        ],
+        [
+          44,
+          70
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sprint_condition",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "sprint_cc2 (disassemble_info *,char *,unsigned short)",
+      "fn_dec_pos": [
+        [
+          45,
+          11
+        ],
+        [
+          45,
+          64
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sprint_cc2",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "tic54x_get_insn (disassemble_info *info, bfd_vma addr,\n                 unsigned short memdata, int *size)",
+      "fn_dec_pos": [
+        [
+          102,
+          0
+        ],
+        [
+          103,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic54x_get_insn",
+        "parameters": {
+          "info": "disassemble_info",
+          "addr": "bfd_vma",
+          "memdata": "unsigned short",
+          "size": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <math.h>\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"disassemble.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"opcode/tic54x.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"coff/tic54x.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum optype",
+      {},
+      "",
+      [
+        33,
+        36
+      ],
+      [
+        33,
+        47
+      ]
+    ],
+    [
+      "enum optype",
+      {},
+      "",
+      [
+        173,
+        11
+      ],
+      [
+        173,
+        22
+      ]
+    ],
+    [
+      "enum optype",
+      {},
+      "",
+      [
+        183,
+        2
+      ],
+      [
+        183,
+        13
+      ]
+    ],
+    [
+      "enum optype",
+      {},
+      "",
+      [
+        184,
+        2
+      ],
+      [
+        184,
+        13
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,800 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nread_pe_section_index (const char *section_name)\n{\n  if (strcmp (section_name, \".text\") == 0)\n    {\n      return PE_SECTION_INDEX_TEXT;\n    }\n\n  else if (strcmp (section_name, \".data\") == 0)\n    {\n      return PE_SECTION_INDEX_DATA;\n    }\n\n  else if (strcmp (section_name, \".bss\") == 0)\n    {\n      return PE_SECTION_INDEX_BSS;\n    }\n\n  else\n    {\n      return PE_SECTION_INDEX_INVALID;\n    }\n}",
+      "fn_code_pos": [
+        [
+          72,
+          0
+        ],
+        [
+          94,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_pe_section_index",
+        "parameters": {
+          "section_name": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_pe_section_index (const char *section_name,\n\t\t      struct read_pe_section_data *sections,\n\t\t      int nb_sections)\n{\n  int i;\n\n  for (i = 0; i < nb_sections; i++)\n    if (strcmp (sections[i].section_name, section_name) == 0)\n      return i;\n  return PE_SECTION_INDEX_INVALID;\n}",
+      "fn_code_pos": [
+        [
+          100,
+          0
+        ],
+        [
+          111,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_pe_section_index",
+        "parameters": {
+          "section_name": "char",
+          "sections": "struct read_pe_section_data",
+          "nb_sections": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nget_section_vmas (bfd *abfd, asection *sectp, void *context)\n{\n  struct pe_sections_info *data = (struct pe_sections_info *) context;\n  struct read_pe_section_data *sections = data->sections;\n  int sectix = get_pe_section_index (sectp->name, sections,\n\t\t\t\t     data->nb_sections);\n\n  if (sectix != PE_SECTION_INDEX_INVALID)\n    {\n      /* Data within the section start at rva_start in the pe and at\n         bfd_get_section_vma() within memory.  Store the offset.  */\n\n      sections[sectix].vma_offset\n\t= bfd_get_section_vma (abfd, sectp) - sections[sectix].rva_start;\n    }\n}",
+      "fn_code_pos": [
+        [
+          124,
+          0
+        ],
+        [
+          140,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_section_vmas",
+        "parameters": {
+          "abfd": "bfd",
+          "sectp": "asection",
+          "context": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nadd_pe_exported_sym (minimal_symbol_reader &reader,\n\t\t     const char *sym_name,\n\t\t     unsigned long func_rva,\n\t\t     int ordinal,\n\t\t     const struct read_pe_section_data *section_data,\n\t\t     const char *dll_name, struct objfile *objfile)\n{\n  char *qualified_name, *bare_name;\n  /* Add the stored offset to get the loaded address of the symbol.  */\n  CORE_ADDR vma = func_rva + section_data->vma_offset;\n\n  /* Generate a (hopefully unique) qualified name using the first part\n     of the dll name, e.g. KERNEL32!AddAtomA.  This matches the style\n     used by windbg from the \"Microsoft Debugging Tools for Windows\".  */\n\n  if (sym_name == NULL || *sym_name == '\\0')\n    bare_name = xstrprintf (\"#%d\", ordinal);\n  else\n    bare_name = xstrdup (sym_name);\n\n  qualified_name = xstrprintf (\"%s!%s\", dll_name, bare_name);\n\n  if ((section_data->ms_type == mst_unknown) && debug_coff_pe_read)\n    fprintf_unfiltered (gdb_stdlog , _(\"Unknown section type for \\\"%s\\\"\"\n\t\t\t\" for entry \\\"%s\\\" in dll \\\"%s\\\"\\n\"),\n\t\t\tsection_data->section_name, sym_name, dll_name);\n\n  reader.record_with_info (qualified_name, vma, section_data->ms_type,\n\t\t\t   section_data->index);\n\n  /* Enter the plain name as well, which might not be unique.  */\n  reader.record_with_info (bare_name, vma, section_data->ms_type,\n\t\t\t   section_data->index);\n  if (debug_coff_pe_read > 1)\n    fprintf_unfiltered (gdb_stdlog, _(\"Adding exported symbol \\\"%s\\\"\"\n\t\t\t\" in dll \\\"%s\\\"\\n\"), sym_name, dll_name);\n  xfree (qualified_name);\n  xfree (bare_name);\n}",
+      "fn_code_pos": [
+        [
+          151,
+          0
+        ],
+        [
+          190,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "add_pe_exported_sym",
+        "parameters": {
+          "reader": "minimal_symbol_reader",
+          "sym_name": "char",
+          "func_rva": "unsigned long",
+          "ordinal": "int",
+          "section_data": "struct read_pe_section_data",
+          "dll_name": "char",
+          "objfile": "struct objfile"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nadd_pe_forwarded_sym (minimal_symbol_reader &reader,\n\t\t      const char *sym_name, const char *forward_dll_name,\n\t\t      const char *forward_func_name, int ordinal,\n\t\t      const char *dll_name, struct objfile *objfile)\n{\n  CORE_ADDR vma, baseaddr;\n  struct bound_minimal_symbol msymbol;\n  enum minimal_symbol_type msymtype;\n  char *qualified_name, *bare_name;\n  int forward_dll_name_len = strlen (forward_dll_name);\n  int forward_func_name_len = strlen (forward_func_name);\n  int forward_len = forward_dll_name_len + forward_func_name_len + 2;\n  char *forward_qualified_name = (char *) alloca (forward_len);\n  short section;\n\n  xsnprintf (forward_qualified_name, forward_len, \"%s!%s\", forward_dll_name,\n\t     forward_func_name);\n\n\n  msymbol = lookup_minimal_symbol_and_objfile (forward_qualified_name);\n\n  if (!msymbol.minsym)\n    {\n      int i;\n\n      for (i = 0; i < forward_dll_name_len; i++)\n\tforward_qualified_name[i] = tolower (forward_qualified_name[i]);\n      msymbol = lookup_minimal_symbol_and_objfile (forward_qualified_name);\n    }\n\n  if (!msymbol.minsym)\n    {\n      if (debug_coff_pe_read)\n\tfprintf_unfiltered (gdb_stdlog, _(\"Unable to find function \\\"%s\\\" in\"\n\t\t\t    \" dll \\\"%s\\\", forward of \\\"%s\\\" in dll \\\"%s\\\"\\n\"),\n\t\t\t    forward_func_name, forward_dll_name, sym_name,\n\t\t\t    dll_name);\n      return 0;\n    }\n\n  if (debug_coff_pe_read > 1)\n    fprintf_unfiltered (gdb_stdlog, _(\"Adding forwarded exported symbol\"\n\t\t\t\" \\\"%s\\\" in dll \\\"%s\\\", pointing to \\\"%s\\\"\\n\"),\n\t\t\tsym_name, dll_name, forward_qualified_name);\n\n  vma = BMSYMBOL_VALUE_ADDRESS (msymbol);\n  msymtype = MSYMBOL_TYPE (msymbol.minsym);\n  section = MSYMBOL_SECTION (msymbol.minsym);\n\n  /* Generate a (hopefully unique) qualified name using the first part\n     of the dll name, e.g. KERNEL32!AddAtomA.  This matches the style\n     used by windbg from the \"Microsoft Debugging Tools for Windows\".  */\n\n  if (sym_name == NULL || *sym_name == '\\0')\n    bare_name = xstrprintf (\"#%d\", ordinal);\n  else\n    bare_name = xstrdup (sym_name);\n\n  qualified_name = xstrprintf (\"%s!%s\", dll_name, bare_name);\n\n  /* Note that this code makes a minimal symbol whose value may point\n     outside of any section in this objfile.  These symbols can't\n     really be relocated properly, but nevertheless we make a stab at\n     it, choosing an approach consistent with the history of this\n     code.  */\n  baseaddr = ANOFFSET (objfile->section_offsets, SECT_OFF_TEXT (objfile));\n\n  reader.record_with_info (qualified_name, vma - baseaddr, msymtype, section);\n\n  /* Enter the plain name as well, which might not be unique.  */\n  reader.record_with_info (bare_name, vma - baseaddr, msymtype, section);\n  xfree (qualified_name);\n  xfree (bare_name);\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          201,
+          0
+        ],
+        [
+          277,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "add_pe_forwarded_sym",
+        "parameters": {
+          "reader": "minimal_symbol_reader",
+          "sym_name": "char",
+          "forward_dll_name": "char",
+          "forward_func_name": "char",
+          "ordinal": "int",
+          "dll_name": "char",
+          "objfile": "struct objfile"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nread_pe_truncate_name (char *dll_name)\n{\n  char *last_point = strrchr (dll_name, '.');\n\n  if (last_point != NULL)\n    *last_point = '\\0';\n}",
+      "fn_code_pos": [
+        [
+          281,
+          0
+        ],
+        [
+          288,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_pe_truncate_name",
+        "parameters": {
+          "dll_name": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned int\npe_get16 (bfd *abfd, int where)\n{\n  unsigned char b[2];\n\n  bfd_seek (abfd, (file_ptr) where, SEEK_SET);\n  bfd_bread (b, (bfd_size_type) 2, abfd);\n  return b[0] + (b[1] << 8);\n}",
+      "fn_code_pos": [
+        [
+          291,
+          0
+        ],
+        [
+          299,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pe_get16",
+        "parameters": {
+          "abfd": "bfd",
+          "where": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned int\npe_get32 (bfd *abfd, int where)\n{\n  unsigned char b[4];\n\n  bfd_seek (abfd, (file_ptr) where, SEEK_SET);\n  bfd_bread (b, (bfd_size_type) 4, abfd);\n  return b[0] + (b[1] << 8) + (b[2] << 16) + (b[3] << 24);\n}",
+      "fn_code_pos": [
+        [
+          301,
+          0
+        ],
+        [
+          309,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pe_get32",
+        "parameters": {
+          "abfd": "bfd",
+          "where": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned int\npe_as16 (void *ptr)\n{\n  unsigned char *b = (unsigned char *) ptr;\n\n  return b[0] + (b[1] << 8);\n}",
+      "fn_code_pos": [
+        [
+          311,
+          0
+        ],
+        [
+          317,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pe_as16",
+        "parameters": {
+          "ptr": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned int\npe_as32 (void *ptr)\n{\n  unsigned char *b = (unsigned char *) ptr;\n\n  return b[0] + (b[1] << 8) + (b[2] << 16) + (b[3] << 24);\n}",
+      "fn_code_pos": [
+        [
+          319,
+          0
+        ],
+        [
+          325,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pe_as32",
+        "parameters": {
+          "ptr": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\nread_pe_exported_syms (minimal_symbol_reader &reader,\n\t\t       struct objfile *objfile)\n{\n  bfd *dll = objfile->obfd;\n  unsigned long nbnormal, nbforward;\n  unsigned long pe_header_offset, opthdr_ofs, num_entries, i;\n  unsigned long export_opthdrrva, export_opthdrsize;\n  unsigned long export_rva, export_size, nsections, secptr, expptr;\n  unsigned long exp_funcbase;\n  unsigned char *expdata, *erva;\n  unsigned long name_rvas, ordinals, nexp, ordbase;\n  char *dll_name = (char *) dll->filename;\n  int otherix = PE_SECTION_TABLE_SIZE;\n  int is_pe64 = 0;\n  int is_pe32 = 0;\n\n  /* Array elements are for text, data and bss in that order\n     Initialization with RVA_START > RVA_END guarantees that\n     unused sections won't be matched.  */\n  struct read_pe_section_data *section_data;\n  struct pe_sections_info pe_sections_info;\n\n  struct cleanup *back_to = make_cleanup (null_cleanup, 0);\n\n  char const *target = bfd_get_target (objfile->obfd);\n\n  section_data = XCNEWVEC (struct read_pe_section_data, PE_SECTION_TABLE_SIZE);\n\n  make_cleanup (free_current_contents, &section_data);\n\n  for (i=0; i < PE_SECTION_TABLE_SIZE; i++)\n    {\n      section_data[i].vma_offset = 0;\n      section_data[i].rva_start = 1;\n      section_data[i].rva_end = 0;\n    };\n  section_data[PE_SECTION_INDEX_TEXT].ms_type = mst_text;\n  section_data[PE_SECTION_INDEX_TEXT].section_name = \".text\";\n  section_data[PE_SECTION_INDEX_DATA].ms_type = mst_data;\n  section_data[PE_SECTION_INDEX_DATA].section_name = \".data\";\n  section_data[PE_SECTION_INDEX_BSS].ms_type = mst_bss;\n  section_data[PE_SECTION_INDEX_BSS].section_name = \".bss\";\n\n  is_pe64 = (strcmp (target, \"pe-x86-64\") == 0\n\t     || strcmp (target, \"pei-x86-64\") == 0);\n  is_pe32 = (strcmp (target, \"pe-i386\") == 0\n\t     || strcmp (target, \"pei-i386\") == 0\n\t     || strcmp (target, \"pe-arm-wince-little\") == 0\n\t     || strcmp (target, \"pei-arm-wince-little\") == 0);\n  if (!is_pe32 && !is_pe64)\n    {\n      /* This is not a recognized PE format file.  Abort now, because\n\t the code is untested on anything else.  *FIXME* test on\n\t further architectures and loosen or remove this test.  */\n      do_cleanups (back_to);\n      return;\n    }\n\n  /* Get pe_header, optional header and numbers of export entries.  */\n  pe_header_offset = pe_get32 (dll, 0x3c);\n  opthdr_ofs = pe_header_offset + 4 + 20;\n  if (is_pe64)\n    num_entries = pe_get32 (dll, opthdr_ofs + 108);\n  else\n    num_entries = pe_get32 (dll, opthdr_ofs + 92);\n\n  if (num_entries < 1)\t\t/* No exports.  */\n    {\n      do_cleanups (back_to);\n      return;\n    }\n  if (is_pe64)\n    {\n      export_opthdrrva = pe_get32 (dll, opthdr_ofs + 112);\n      export_opthdrsize = pe_get32 (dll, opthdr_ofs + 116);\n    }\n  else\n    {\n      export_opthdrrva = pe_get32 (dll, opthdr_ofs + 96);\n      export_opthdrsize = pe_get32 (dll, opthdr_ofs + 100);\n    }\n  nsections = pe_get16 (dll, pe_header_offset + 4 + 2);\n  secptr = (pe_header_offset + 4 + 20 +\n\t    pe_get16 (dll, pe_header_offset + 4 + 16));\n  expptr = 0;\n  export_size = 0;\n\n  /* Get the rva and size of the export section.  */\n  for (i = 0; i < nsections; i++)\n    {\n      char sname[8];\n      unsigned long secptr1 = secptr + 40 * i;\n      unsigned long vaddr = pe_get32 (dll, secptr1 + 12);\n      unsigned long vsize = pe_get32 (dll, secptr1 + 16);\n      unsigned long fptr = pe_get32 (dll, secptr1 + 20);\n\n      bfd_seek (dll, (file_ptr) secptr1, SEEK_SET);\n      bfd_bread (sname, (bfd_size_type) sizeof (sname), dll);\n\n      if ((strcmp (sname, \".edata\") == 0)\n\t  || (vaddr <= export_opthdrrva && export_opthdrrva < vaddr + vsize))\n\t{\n\t  if (strcmp (sname, \".edata\") != 0)\n\t    {\n\t      if (debug_coff_pe_read)\n\t\tfprintf_unfiltered (gdb_stdlog, _(\"Export RVA for dll \"\n\t\t\t\t    \"\\\"%s\\\" is in section \\\"%s\\\"\\n\"),\n\t\t\t\t    dll_name, sname);\n\t    }\n\t  else if (export_opthdrrva != vaddr && debug_coff_pe_read)\n\t    fprintf_unfiltered (gdb_stdlog, _(\"Wrong value of export RVA\"\n\t\t\t\t\" for dll \\\"%s\\\": 0x%lx instead of 0x%lx\\n\"),\n\t\t\t\tdll_name, export_opthdrrva, vaddr);\n\t  expptr = fptr + (export_opthdrrva - vaddr);\n\t  break;\n\t}\n    }\n\n  export_rva = export_opthdrrva;\n  export_size = export_opthdrsize;\n\n  if (export_size == 0)\n    {\n      /* Empty export table.  */\n      do_cleanups (back_to);\n      return;\n    }\n\n  /* Scan sections and store the base and size of the relevant\n     sections.  */\n  for (i = 0; i < nsections; i++)\n    {\n      unsigned long secptr1 = secptr + 40 * i;\n      unsigned long vsize = pe_get32 (dll, secptr1 + 8);\n      unsigned long vaddr = pe_get32 (dll, secptr1 + 12);\n      unsigned long characteristics = pe_get32 (dll, secptr1 + 36);\n      char sec_name[SCNNMLEN + 1];\n      int sectix;\n      unsigned int bfd_section_index;\n      asection *section;\n\n      bfd_seek (dll, (file_ptr) secptr1 + 0, SEEK_SET);\n      bfd_bread (sec_name, (bfd_size_type) SCNNMLEN, dll);\n      sec_name[SCNNMLEN] = '\\0';\n\n      sectix = read_pe_section_index (sec_name);\n      section = bfd_get_section_by_name (dll, sec_name);\n      if (section)\n\tbfd_section_index = section->index;\n      else\n\tbfd_section_index = -1;\n\n      if (sectix != PE_SECTION_INDEX_INVALID)\n\t{\n\t  section_data[sectix].rva_start = vaddr;\n\t  section_data[sectix].rva_end = vaddr + vsize;\n\t  section_data[sectix].index = bfd_section_index;\n\t}\n      else\n\t{\n\t  char *name;\n\n\t  section_data = XRESIZEVEC (struct read_pe_section_data, section_data,\n\t\t\t\t     otherix + 1);\n\t  name = xstrdup (sec_name);\n\t  section_data[otherix].section_name = name;\n\t  make_cleanup (xfree, name);\n\t  section_data[otherix].rva_start = vaddr;\n\t  section_data[otherix].rva_end = vaddr + vsize;\n\t  section_data[otherix].vma_offset = 0;\n\t  section_data[otherix].index = bfd_section_index;\n\t  if (characteristics & IMAGE_SCN_CNT_CODE)\n\t    section_data[otherix].ms_type = mst_text;\n\t  else if (characteristics & IMAGE_SCN_CNT_INITIALIZED_DATA)\n\t    section_data[otherix].ms_type = mst_data;\n\t  else if (characteristics & IMAGE_SCN_CNT_UNINITIALIZED_DATA)\n\t    section_data[otherix].ms_type = mst_bss;\n\t  else\n\t    section_data[otherix].ms_type = mst_unknown;\n\t  otherix++;\n\t}\n    }\n\n  expdata = (unsigned char *) xmalloc (export_size);\n  make_cleanup (xfree, expdata);\n\n  bfd_seek (dll, (file_ptr) expptr, SEEK_SET);\n  bfd_bread (expdata, (bfd_size_type) export_size, dll);\n  erva = expdata - export_rva;\n\n  nexp = pe_as32 (expdata + 24);\n  name_rvas = pe_as32 (expdata + 32);\n  ordinals = pe_as32 (expdata + 36);\n  ordbase = pe_as32 (expdata + 16);\n  exp_funcbase = pe_as32 (expdata + 28);\n\n  /* Use internal dll name instead of full pathname.  */\n  dll_name = (char *) (pe_as32 (expdata + 12) + erva);\n\n  pe_sections_info.nb_sections = otherix;\n  pe_sections_info.sections = section_data;\n\n  bfd_map_over_sections (dll, get_section_vmas, &pe_sections_info);\n\n  /* Truncate name at first dot. Should maybe also convert to all\n     lower case for convenience on Windows.  */\n  read_pe_truncate_name (dll_name);\n\n  if (debug_coff_pe_read)\n    fprintf_unfiltered (gdb_stdlog, _(\"DLL \\\"%s\\\" has %ld export entries,\"\n\t\t\t\" base=%ld\\n\"), dll_name, nexp, ordbase);\n  nbforward = 0;\n  nbnormal = 0;\n  /* Iterate through the list of symbols.  */\n  for (i = 0; i < nexp; i++)\n    {\n      /* Pointer to the names vector.  */\n      unsigned long name_rva = pe_as32 (erva + name_rvas + i * 4);\n      /* Retrieve ordinal value.  */\n\n      unsigned long ordinal = pe_as16 (erva + ordinals + i * 2);\n\n\n      /* Pointer to the function address vector.  */\n      /* This is relatived to ordinal value. */\n      unsigned long func_rva = pe_as32 (erva + exp_funcbase +\n                                        ordinal * 4);\n\n      /* Find this symbol's section in our own array.  */\n      int sectix = 0;\n      int section_found = 0;\n\n      /* First handle forward cases.  */\n      if (func_rva >= export_rva && func_rva < export_rva + export_size)\n\t{\n\t  char *forward_name = (char *) (erva + func_rva);\n\t  char *funcname = (char *) (erva + name_rva);\n\t  char *forward_dll_name = forward_name;\n\t  char *forward_func_name = forward_name;\n\t  char *sep = strrchr (forward_name, '.');\n\n\t  if (sep)\n\t    {\n\t      int len = (int) (sep - forward_name);\n\n\t      forward_dll_name = (char *) alloca (len + 1);\n\t      strncpy (forward_dll_name, forward_name, len);\n\t      forward_dll_name[len] = '\\0';\n\t      forward_func_name = ++sep;\n\t    }\n\t  if (add_pe_forwarded_sym (reader, funcname, forward_dll_name,\n\t\t\t\t    forward_func_name, ordinal,\n\t\t\t\t    dll_name, objfile) != 0)\n\t    ++nbforward;\n\t  continue;\n\t}\n\n      for (sectix = 0; sectix < otherix; ++sectix)\n\t{\n\t  if ((func_rva >= section_data[sectix].rva_start)\n\t      && (func_rva < section_data[sectix].rva_end))\n\t    {\n\t      char *sym_name = (char *) (erva + name_rva);\n\n\t      section_found = 1;\n\t      add_pe_exported_sym (reader, sym_name, func_rva, ordinal,\n\t\t\t\t   section_data + sectix, dll_name, objfile);\n\t      ++nbnormal;\n\t      break;\n\t    }\n\t}\n      if (!section_found)\n\t{\n\t  char *funcname = (char *) (erva + name_rva);\n\n\t  if (name_rva == 0)\n\t    {\n\t      add_pe_exported_sym (reader, NULL, func_rva, ordinal,\n\t\t\t\t   section_data, dll_name, objfile);\n\t      ++nbnormal;\n\t    }\n\t  else if (debug_coff_pe_read)\n\t    fprintf_unfiltered (gdb_stdlog, _(\"Export name \\\"%s\\\" ord. %lu,\"\n\t\t\t\t\" RVA 0x%lx in dll \\\"%s\\\" not handled\\n\"),\n\t\t\t\tfuncname, ordinal, func_rva, dll_name);\n\t}\n    }\n\n  if (debug_coff_pe_read)\n    fprintf_unfiltered (gdb_stdlog, _(\"Finished reading \\\"%s\\\", exports %ld,\"\n\t\t\t\" forwards %ld, total %ld/%ld.\\n\"), dll_name, nbnormal,\n\t\t\tnbforward, nbnormal + nbforward, nexp);\n  /* Discard expdata and section_data.  */\n  do_cleanups (back_to);\n}",
+      "fn_code_pos": [
+        [
+          331,
+          0
+        ],
+        [
+          626,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_pe_exported_syms",
+        "parameters": {
+          "reader": "minimal_symbol_reader",
+          "objfile": "struct objfile"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "CORE_ADDR\npe_text_section_offset (struct bfd *abfd)\n\n{\n  unsigned long pe_header_offset, i;\n  unsigned long nsections, secptr;\n  int is_pe64 = 0;\n  int is_pe32 = 0;\n  char const *target;\n\n  if (!abfd)\n    return DEFAULT_COFF_PE_TEXT_SECTION_OFFSET;\n\n  target = bfd_get_target (abfd);\n\n  is_pe64 = (strcmp (target, \"pe-x86-64\") == 0\n\t     || strcmp (target, \"pei-x86-64\") == 0);\n  is_pe32 = (strcmp (target, \"pe-i386\") == 0\n\t     || strcmp (target, \"pei-i386\") == 0\n\t     || strcmp (target, \"pe-arm-wince-little\") == 0\n\t     || strcmp (target, \"pei-arm-wince-little\") == 0);\n\n  if (!is_pe32 && !is_pe64)\n    {\n      /* This is not a recognized PE format file.  Abort now, because\n\t the code is untested on anything else.  *FIXME* test on\n\t further architectures and loosen or remove this test.  */\n      return DEFAULT_COFF_PE_TEXT_SECTION_OFFSET;\n    }\n\n  /* Get pe_header, optional header and numbers of sections.  */\n  pe_header_offset = pe_get32 (abfd, 0x3c);\n  nsections = pe_get16 (abfd, pe_header_offset + 4 + 2);\n  secptr = (pe_header_offset + 4 + 20 +\n\t    pe_get16 (abfd, pe_header_offset + 4 + 16));\n\n  /* Get the rva and size of the export section.  */\n  for (i = 0; i < nsections; i++)\n    {\n      char sname[SCNNMLEN + 1];\n      unsigned long secptr1 = secptr + 40 * i;\n      unsigned long vaddr = pe_get32 (abfd, secptr1 + 12);\n\n      bfd_seek (abfd, (file_ptr) secptr1, SEEK_SET);\n      bfd_bread (sname, (bfd_size_type) SCNNMLEN, abfd);\n      sname[SCNNMLEN] = '\\0';\n      if (strcmp (sname, \".text\") == 0)\n\treturn vaddr;\n    }\n\n  return DEFAULT_COFF_PE_TEXT_SECTION_OFFSET;\n}",
+      "fn_code_pos": [
+        [
+          638,
+          0
+        ],
+        [
+          689,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pe_text_section_offset",
+        "parameters": {
+          "abfd": "struct bfd"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static void\nshow_debug_coff_pe_read (struct ui_file *file, int from_tty,\n\t\t\t struct cmd_list_element *c, const char *value)\n{\n  fprintf_filtered (file, _(\"Coff PE read debugging is %s.\\n\"), value);\n}",
+      "fn_code_pos": [
+        [
+          693,
+          0
+        ],
+        [
+          698,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "show_debug_coff_pe_read",
+        "parameters": {
+          "file": "struct ui_file",
+          "from_tty": "int",
+          "c": "struct cmd_list_element",
+          "value": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_coff_pe_read (void)\n{\n  add_setshow_zuinteger_cmd (\"coff-pe-read\", class_maintenance,\n\t\t\t     &debug_coff_pe_read,\n\t\t\t     _(\"Set coff PE read debugging.\"),\n\t\t\t     _(\"Show coff PE read debugging.\"),\n\t\t\t     _(\"When set, debugging messages for coff reading \"\n\t\t\t       \"of exported symbols are displayed.\"),\n\t\t\t     NULL, show_debug_coff_pe_read,\n\t\t\t     &setdebuglist, &showdebuglist);\n}",
+      "fn_code_pos": [
+        [
+          706,
+          0
+        ],
+        [
+          717,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_coff_pe_read",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "_initialize_coff_pe_read (void)",
+      "fn_dec_pos": [
+        [
+          702,
+          5
+        ],
+        [
+          702,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_coff_pe_read",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct read_pe_section_data\n{\n  CORE_ADDR vma_offset;\t\t/* Offset to loaded address of section.  */\n  unsigned long rva_start;\t/* Start offset within the pe.  */\n  unsigned long rva_end;\t/* End offset within the pe.  */\n  enum minimal_symbol_type ms_type;\t/* Type to assign symbols in\n\t\t\t\t\t   section.  */\n  unsigned int index;\t\t/* BFD section number.  */\n  const char *section_name;\t/* Recorded section name.  */\n}",
+      {
+        "vma_offset": "CORE_ADDR",
+        "rva_start": "unsigned long",
+        "rva_end": "unsigned long",
+        "ms_type": "enum minimal_symbol_type",
+        "index": "unsigned int",
+        "char": "const"
+      },
+      "read_pe_section_data",
+      [
+        48,
+        0
+      ],
+      [
+        57,
+        1
+      ]
+    ],
+    [
+      "struct pe_sections_info\n{\n  int nb_sections;\n  struct read_pe_section_data *sections;\n}",
+      {
+        "nb_sections": "int",
+        "*sections": "struct read_pe_section_data"
+      },
+      "pe_sections_info",
+      [
+        116,
+        0
+      ],
+      [
+        120,
+        1
+      ]
+    ],
+    [
+      "struct read_pe_section_data\n{\n  CORE_ADDR vma_offset;\t\t/* Offset to loaded address of section.  */\n  unsigned long rva_start;\t/* Start offset within the pe.  */\n  unsigned long rva_end;\t/* End offset within the pe.  */\n  enum minimal_symbol_type ms_type;\t/* Type to assign symbols in\n\t\t\t\t\t   section.  */\n  unsigned int index;\t\t/* BFD section number.  */\n  const char *section_name;\t/* Recorded section name.  */\n}",
+      {
+        "vma_offset": "CORE_ADDR",
+        "rva_start": "unsigned long",
+        "rva_end": "unsigned long",
+        "ms_type": "enum minimal_symbol_type",
+        "index": "unsigned int",
+        "char": "const"
+      },
+      "read_pe_section_data",
+      [
+        48,
+        0
+      ],
+      [
+        57,
+        1
+      ]
+    ],
+    [
+      "struct read_pe_section_data",
+      {},
+      "",
+      [
+        102,
+        8
+      ],
+      [
+        102,
+        35
+      ]
+    ],
+    [
+      "struct pe_sections_info\n{\n  int nb_sections;\n  struct read_pe_section_data *sections;\n}",
+      {
+        "nb_sections": "int",
+        "*sections": "struct read_pe_section_data"
+      },
+      "pe_sections_info",
+      [
+        116,
+        0
+      ],
+      [
+        120,
+        1
+      ]
+    ],
+    [
+      "struct read_pe_section_data",
+      {},
+      "",
+      [
+        119,
+        2
+      ],
+      [
+        119,
+        29
+      ]
+    ],
+    [
+      "struct pe_sections_info",
+      {},
+      "",
+      [
+        127,
+        2
+      ],
+      [
+        127,
+        25
+      ]
+    ],
+    [
+      "struct pe_sections_info",
+      {},
+      "",
+      [
+        127,
+        35
+      ],
+      [
+        127,
+        58
+      ]
+    ],
+    [
+      "struct read_pe_section_data",
+      {},
+      "",
+      [
+        128,
+        2
+      ],
+      [
+        128,
+        29
+      ]
+    ],
+    [
+      "struct read_pe_section_data",
+      {},
+      "",
+      [
+        156,
+        13
+      ],
+      [
+        156,
+        40
+      ]
+    ],
+    [
+      "struct objfile",
+      {},
+      "",
+      [
+        157,
+        29
+      ],
+      [
+        157,
+        43
+      ]
+    ],
+    [
+      "struct objfile",
+      {},
+      "",
+      [
+        205,
+        30
+      ],
+      [
+        205,
+        44
+      ]
+    ],
+    [
+      "struct bound_minimal_symbol",
+      {},
+      "",
+      [
+        208,
+        2
+      ],
+      [
+        208,
+        29
+      ]
+    ],
+    [
+      "struct objfile",
+      {},
+      "",
+      [
+        333,
+        9
+      ],
+      [
+        333,
+        23
+      ]
+    ],
+    [
+      "struct read_pe_section_data",
+      {},
+      "",
+      [
+        351,
+        2
+      ],
+      [
+        351,
+        29
+      ]
+    ],
+    [
+      "struct pe_sections_info",
+      {},
+      "",
+      [
+        352,
+        2
+      ],
+      [
+        352,
+        25
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        354,
+        2
+      ],
+      [
+        354,
+        16
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        639,
+        24
+      ],
+      [
+        639,
+        34
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        694,
+        25
+      ],
+      [
+        694,
+        39
+      ]
+    ],
+    [
+      "struct cmd_list_element",
+      {},
+      "",
+      [
+        695,
+        4
+      ],
+      [
+        695,
+        27
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"coff-pe-read.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbtypes.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"command.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcmd.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"symfile.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"objfiles.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"common/common-utils.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"coff/internal.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum minimal_symbol_type",
+      {},
+      "",
+      [
+        53,
+        2
+      ],
+      [
+        53,
+        26
+      ]
+    ],
+    [
+      "enum minimal_symbol_type",
+      {},
+      "",
+      [
+        209,
+        2
+      ],
+      [
+        209,
+        26
+      ]
+    ]
+  ]
+}

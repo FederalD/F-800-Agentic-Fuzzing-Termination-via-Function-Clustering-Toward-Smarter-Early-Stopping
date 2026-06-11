@@ -1,0 +1,215 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static RETSIGTYPE\ncntrl_c (int sig)\n{\n  if (! sim_stop (sd))\n    {\n      fprintf (stderr, \"Quit!\\n\");\n      exit (1);\n    }\n}",
+      "fn_code_pos": [
+        [
+          53,
+          0
+        ],
+        [
+          61,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cntrl_c",
+        "parameters": {
+          "sig": "int"
+        },
+        "return_type": "RETSIGTYPE"
+      }
+    },
+    {
+      "fn_code": "int\nmain (int argc, char **argv)\n{\n  const char *name;\n  char **prog_argv = NULL;\n  struct bfd *prog_bfd;\n  enum sim_stop reason;\n  int sigrc = 0;\n  int single_step = 0;\n  RETSIGTYPE (*prev_sigint) ();\n\n  myname = lbasename (argv[0]);\n\n  /* INTERNAL: When MYNAME is `step', single step the simulator\n     instead of allowing it to run free.  The sole purpose of this\n     HACK is to allow the sim_resume interface's step argument to be\n     tested without having to build/run gdb. */\n  if (strlen (myname) > 4 && strcmp (myname - 4, \"step\") == 0)\n    {\n      single_step = 1;\n    }\n\n  /* Create an instance of the simulator.  */\n  default_callback.init (&default_callback);\n  sd = sim_open (SIM_OPEN_STANDALONE, &default_callback, NULL, argv);\n  if (sd == 0)\n    exit (1);\n  if (STATE_MAGIC (sd) != SIM_MAGIC_NUMBER)\n    {\n      fprintf (stderr, \"Internal error - bad magic number in simulator struct\\n\");\n      abort ();\n    }\n\n  /* We can't set the endianness in the callback structure until\n     sim_config is called, which happens in sim_open.  */\n  default_callback.target_endian\n    = (CURRENT_TARGET_BYTE_ORDER == BFD_ENDIAN_BIG\n       ? BFD_ENDIAN_BIG : BFD_ENDIAN_LITTLE);\n\n  /* Was there a program to run?  */\n  prog_argv = STATE_PROG_ARGV (sd);\n  prog_bfd = STATE_PROG_BFD (sd);\n  if (prog_argv == NULL || *prog_argv == NULL)\n    usage ();\n\n  name = *prog_argv;\n\n  /* For simulators that don't open prog during sim_open() */\n  if (prog_bfd == NULL)\n    {\n      prog_bfd = bfd_openr (name, 0);\n      if (prog_bfd == NULL)\n\t{\n\t  fprintf (stderr, \"%s: can't open \\\"%s\\\": %s\\n\",\n\t\t   myname, name, bfd_errmsg (bfd_get_error ()));\n\t  exit (1);\n\t}\n      if (!bfd_check_format (prog_bfd, bfd_object))\n\t{\n\t  fprintf (stderr, \"%s: \\\"%s\\\" is not an object file: %s\\n\",\n\t\t   myname, name, bfd_errmsg (bfd_get_error ()));\n\t  exit (1);\n\t}\n    }\n\n  if (STATE_VERBOSE_P (sd))\n    printf (\"%s %s\\n\", myname, name);\n\n  /* Load the program into the simulator.  */\n  if (sim_load (sd, name, prog_bfd, 0) == SIM_RC_FAIL)\n    exit (1);\n\n  /* Prepare the program for execution.  */\n#ifdef HAVE_ENVIRON\n  sim_create_inferior (sd, prog_bfd, prog_argv, environ);\n#else\n  sim_create_inferior (sd, prog_bfd, prog_argv, NULL);\n#endif\n\n  /* To accommodate relative file paths, chdir to sysroot now.  We\n     mustn't do this until BFD has opened the program, else we wouldn't\n     find the executable if it has a relative file path.  */\n  if (simulator_sysroot[0] != '\\0' && chdir (simulator_sysroot) < 0)\n    {\n      fprintf (stderr, \"%s: can't change directory to \\\"%s\\\"\\n\",\n\t       myname, simulator_sysroot);\n      exit (1);\n    }\n\n  /* Run/Step the program.  */\n  if (single_step)\n    {\n      do\n\t{\n\t  prev_sigint = signal (SIGINT, cntrl_c);\n\t  sim_resume (sd, 1/*step*/, 0);\n\t  signal (SIGINT, prev_sigint);\n\t  sim_stop_reason (sd, &reason, &sigrc);\n\n\t  if ((reason == sim_stopped) &&\n\t      (sigrc == sim_signal_to_host (sd, SIM_SIGINT)))\n\t    break; /* exit on control-C */\n\t}\n      /* remain on breakpoint or signals in oe mode*/\n      while (((reason == sim_signalled) &&\n\t      (sigrc == sim_signal_to_host (sd, SIM_SIGTRAP))) ||\n\t     ((reason == sim_stopped) &&\n\t      (STATE_ENVIRONMENT (sd) == OPERATING_ENVIRONMENT)));\n    }\n  else\n    {\n      do\n\t{\n#if defined (HAVE_SIGACTION) && defined (SA_RESTART)\n\t  struct sigaction sa, osa;\n\t  sa.sa_handler = cntrl_c;\n\t  sigemptyset (&sa.sa_mask);\n\t  sa.sa_flags = 0;\n\t  sigaction (SIGINT, &sa, &osa);\n\t  prev_sigint = osa.sa_handler;\n#else\n\t  prev_sigint = signal (SIGINT, cntrl_c);\n#endif\n\t  sim_resume (sd, 0, sigrc);\n\t  signal (SIGINT, prev_sigint);\n\t  sim_stop_reason (sd, &reason, &sigrc);\n\n\t  if ((reason == sim_stopped) &&\n\t      (sigrc == sim_signal_to_host (sd, SIM_SIGINT)))\n\t    break; /* exit on control-C */\n\n\t  /* remain on signals in oe mode */\n\t} while ((reason == sim_stopped) &&\n\t\t (STATE_ENVIRONMENT (sd) == OPERATING_ENVIRONMENT));\n\n    }\n  /* Print any stats the simulator collected.  */\n  if (STATE_VERBOSE_P (sd))\n    sim_info (sd, 0);\n\n  /* Shutdown the simulator.  */\n  sim_close (sd, 0);\n\n  /* If reason is sim_exited, then sigrc holds the exit code which we want\n     to return.  If reason is sim_stopped or sim_signalled, then sigrc holds\n     the signal that the simulator received; we want to return that to\n     indicate failure.  */\n\n  /* Why did we stop? */\n  switch (reason)\n    {\n    case sim_signalled:\n    case sim_stopped:\n      if (sigrc != 0)\n\tfprintf (stderr, \"program stopped with signal %d (%s).\\n\", sigrc,\n\t\t strsignal (sigrc));\n      break;\n\n    case sim_exited:\n      break;\n\n    default:\n      fprintf (stderr, \"program in undefined state (%d:%d)\\n\", reason, sigrc);\n      break;\n\n    }\n\n  return sigrc;\n}",
+      "fn_code_pos": [
+        [
+          63,
+          0
+        ],
+        [
+          231,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nusage (void)\n{\n  fprintf (stderr, \"Usage: %s [options] program [program args]\\n\", myname);\n  fprintf (stderr, \"Run `%s --help' for full list of options.\\n\", myname);\n  exit (1);\n}",
+      "fn_code_pos": [
+        [
+          233,
+          0
+        ],
+        [
+          239,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "usage",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "usage (void)",
+      "fn_dec_pos": [
+        [
+          45,
+          12
+        ],
+        [
+          45,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "usage",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        68,
+        2
+      ],
+      [
+        68,
+        12
+      ]
+    ],
+    [
+      "struct sigaction",
+      {},
+      "",
+      [
+        177,
+        3
+      ],
+      [
+        177,
+        19
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        18,
+        0
+      ],
+      [
+        19,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <strings.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum sim_stop",
+      {},
+      "",
+      [
+        69,
+        2
+      ],
+      [
+        69,
+        15
+      ]
+    ]
+  ]
+}

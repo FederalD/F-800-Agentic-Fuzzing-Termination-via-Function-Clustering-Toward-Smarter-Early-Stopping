@@ -1,0 +1,2172 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static enum ext_lang_bt_status\nextract_sym (PyObject *obj, gdb::unique_xmalloc_ptr<char> *name,\n\t     struct symbol **sym, struct block **sym_block,\n\t     const struct language_defn **language)\n{\n  gdbpy_ref<> result (PyObject_CallMethod (obj, \"symbol\", NULL));\n\n  if (result == NULL)\n    return EXT_LANG_BT_ERROR;\n\n  /* For 'symbol' callback, the function can return a symbol or a\n     string.  */\n  if (gdbpy_is_string (result.get ()))\n    {\n      *name = python_string_to_host_string (result.get ());\n\n      if (*name == NULL)\n\treturn EXT_LANG_BT_ERROR;\n      /* If the API returns a string (and not a symbol), then there is\n\tno symbol derived language available and the frame filter has\n\teither overridden the symbol with a string, or supplied a\n\tentirely synthetic symbol/value pairing.  In that case, use\n\tpython_language.  */\n      *language = python_language;\n      *sym = NULL;\n      *sym_block = NULL;\n    }\n  else\n    {\n      /* This type checks 'result' during the conversion so we\n\t just call it unconditionally and check the return.  */\n      *sym = symbol_object_to_symbol (result.get ());\n      /* TODO: currently, we have no way to recover the block in which SYMBOL\n\t was found, so we have no block to return.  Trying to evaluate SYMBOL\n\t will yield an incorrect value when it's located in a FRAME and\n\t evaluated from another frame (as permitted in nested functions).  */\n      *sym_block = NULL;\n\n      if (*sym == NULL)\n\t{\n\t  PyErr_SetString (PyExc_RuntimeError,\n\t\t\t   _(\"Unexpected value.  Expecting a \"\n\t\t\t     \"gdb.Symbol or a Python string.\"));\n\t  return EXT_LANG_BT_ERROR;\n\t}\n\n      /* Duplicate the symbol name, so the caller has consistency\n\t in garbage collection.  */\n      name->reset (xstrdup (SYMBOL_PRINT_NAME (*sym)));\n\n      /* If a symbol is specified attempt to determine the language\n\t from the symbol.  If mode is not \"auto\", then the language\n\t has been explicitly set, use that.  */\n      if (language_mode == language_mode_auto)\n\t*language = language_def (SYMBOL_LANGUAGE (*sym));\n      else\n\t*language = current_language;\n    }\n\n  return EXT_LANG_BT_OK;\n}",
+      "fn_code_pos": [
+        [
+          55,
+          0
+        ],
+        [
+          115,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "extract_sym",
+        "parameters": {
+          "obj": "PyObject",
+          "name": "gdb::unique_xmalloc_ptr<char>",
+          "sym": "struct symbol",
+          "sym_block": "struct block",
+          "language": "struct language_defn"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static enum ext_lang_bt_status\nextract_value (PyObject *obj, struct value **value)\n{\n  if (PyObject_HasAttrString (obj, \"value\"))\n    {\n      gdbpy_ref<> vresult (PyObject_CallMethod (obj, \"value\", NULL));\n\n      if (vresult == NULL)\n\treturn EXT_LANG_BT_ERROR;\n\n      /* The Python code has returned 'None' for a value, so we set\n\t value to NULL.  This flags that GDB should read the\n\t value.  */\n      if (vresult == Py_None)\n\t{\n\t  *value = NULL;\n\t  return EXT_LANG_BT_OK;\n\t}\n      else\n\t{\n\t  *value = convert_value_from_python (vresult.get ());\n\n\t  if (*value == NULL)\n\t    return EXT_LANG_BT_ERROR;\n\n\t  return EXT_LANG_BT_OK;\n\t}\n    }\n  else\n    *value = NULL;\n\n  return EXT_LANG_BT_OK;\n}",
+      "fn_code_pos": [
+        [
+          126,
+          0
+        ],
+        [
+          158,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "extract_value",
+        "parameters": {
+          "obj": "PyObject",
+          "value": "struct value"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nmi_should_print (struct symbol *sym, enum mi_print_types type)\n{\n  int print_me = 0;\n\n  switch (SYMBOL_CLASS (sym))\n    {\n    default:\n    case LOC_UNDEF:\t/* catches errors        */\n    case LOC_CONST:\t/* constant              */\n    case LOC_TYPEDEF:\t/* local typedef         */\n    case LOC_LABEL:\t/* local label           */\n    case LOC_BLOCK:\t/* local function        */\n    case LOC_CONST_BYTES:\t/* loc. byte seq.        */\n    case LOC_UNRESOLVED:\t/* unresolved static     */\n    case LOC_OPTIMIZED_OUT:\t/* optimized out         */\n      print_me = 0;\n      break;\n\n    case LOC_ARG:\t/* argument              */\n    case LOC_REF_ARG:\t/* reference arg         */\n    case LOC_REGPARM_ADDR:\t/* indirect register arg */\n    case LOC_LOCAL:\t/* stack local           */\n    case LOC_STATIC:\t/* static                */\n    case LOC_REGISTER:\t/* register              */\n    case LOC_COMPUTED:\t/* computed location     */\n      if (type == MI_PRINT_LOCALS)\n\tprint_me = ! SYMBOL_IS_ARGUMENT (sym);\n      else\n\tprint_me = SYMBOL_IS_ARGUMENT (sym);\n    }\n  return print_me;\n}",
+      "fn_code_pos": [
+        [
+          164,
+          0
+        ],
+        [
+          196,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mi_should_print",
+        "parameters": {
+          "sym": "struct symbol",
+          "type": "enum mi_print_types"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static enum ext_lang_bt_status\npy_print_type (struct ui_out *out, struct value *val)\n{\n\n  TRY\n    {\n      check_typedef (value_type (val));\n\n      string_file stb;\n      type_print (value_type (val), \"\", &stb, -1);\n      out->field_stream (\"type\", stb);\n    }",
+      "fn_code_pos": [
+        [
+          205,
+          0
+        ],
+        [
+          216,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "py_print_type",
+        "parameters": {
+          "out": "struct ui_out",
+          "val": "struct value"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n    {\n      gdbpy_convert_exception (except);\n      return EXT_LANG_BT_ERROR;\n    }",
+      "fn_code_pos": [
+        [
+          217,
+          2
+        ],
+        [
+          221,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static enum ext_lang_bt_status\npy_print_value (struct ui_out *out, struct value *val,\n\t\tconst struct value_print_options *opts,\n\t\tint indent,\n\t\tenum ext_lang_frame_args args_type,\n\t\tconst struct language_defn *language)\n{\n  int should_print = 0;\n\n  /* MI does not print certain values, differentiated by type,\n     depending on what ARGS_TYPE indicates.  Test type against option.\n     For CLI print all values.  */\n  if (args_type == MI_PRINT_SIMPLE_VALUES\n      || args_type == MI_PRINT_ALL_VALUES)\n    {\n      struct type *type = NULL;\n\n      TRY\n\t{\n\t  type = check_typedef (value_type (val));\n\t}\n      CATCH (except, RETURN_MASK_ALL)\n\t{\n\t  gdbpy_convert_exception (except);\n\t  return EXT_LANG_BT_ERROR;\n\t}\n      END_CATCH\n\n      if (args_type == MI_PRINT_ALL_VALUES)\n\tshould_print = 1;\n      else if (args_type == MI_PRINT_SIMPLE_VALUES\n\t       && TYPE_CODE (type) != TYPE_CODE_ARRAY\n\t       && TYPE_CODE (type) != TYPE_CODE_STRUCT\n\t       && TYPE_CODE (type) != TYPE_CODE_UNION)\n\tshould_print = 1;\n    }",
+      "fn_code_pos": [
+        [
+          236,
+          0
+        ],
+        [
+          271,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "py_print_value",
+        "parameters": {
+          "out": "struct ui_out",
+          "val": "struct value",
+          "opts": "struct value_print_options",
+          "indent": "int",
+          "args_type": "enum ext_lang_frame_args",
+          "language": "struct language_defn"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n\t{\n\t  gdbpy_convert_exception (except);\n\t  return EXT_LANG_BT_ERROR;\n\t}",
+      "fn_code_pos": [
+        [
+          257,
+          6
+        ],
+        [
+          261,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n\t{\n\t  gdbpy_convert_exception (except);\n\t  return EXT_LANG_BT_ERROR;\n\t}",
+      "fn_code_pos": [
+        [
+          284,
+          6
+        ],
+        [
+          288,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static PyObject *\nget_py_iter_from_func (PyObject *filter, const char *func)\n{\n  if (PyObject_HasAttrString (filter, func))\n    {\n      gdbpy_ref<> result (PyObject_CallMethod (filter, func, NULL));\n\n      if (result != NULL)\n\t{\n\t  if (result == Py_None)\n\t    {\n\t      return result.release ();\n\t    }\n\t  else\n\t    {\n\t      return PyObject_GetIter (result.get ());\n\t    }\n\t}\n    }\n  else\n    Py_RETURN_NONE;\n\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          302,
+          0
+        ],
+        [
+          325,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_py_iter_from_func",
+        "parameters": {
+          "filter": "PyObject",
+          "func": "char"
+        },
+        "return_type": "PyObject"
+      }
+    },
+    {
+      "fn_code": "static enum ext_lang_bt_status\npy_print_single_arg (struct ui_out *out,\n\t\t     const char *sym_name,\n\t\t     struct frame_arg *fa,\n\t\t     struct value *fv,\n\t\t     const struct value_print_options *opts,\n\t\t     enum ext_lang_frame_args args_type,\n\t\t     int print_args_field,\n\t\t     const struct language_defn *language)\n{\n  struct value *val;\n  enum ext_lang_bt_status retval = EXT_LANG_BT_OK;\n\n  if (fa != NULL)\n    {\n      if (fa->val == NULL && fa->error == NULL)\n\treturn EXT_LANG_BT_OK;\n      language = language_def (SYMBOL_LANGUAGE (fa->sym));\n      val = fa->val;\n    }\n  else\n    val = fv;\n\n  TRY\n    {\n      gdb::optional<ui_out_emit_tuple> maybe_tuple;\n\n      /*  MI has varying rules for tuples, but generally if there is only\n      one element in each item in the list, do not start a tuple.  The\n      exception is -stack-list-variables which emits an ARGS=\"1\" field\n      if the value is a frame argument.  This is denoted in this\n      function with PRINT_ARGS_FIELD which is flag from the caller to\n      emit the ARGS field.  */\n      if (out->is_mi_like_p ())\n\t{\n\t  if (print_args_field || args_type != NO_VALUES)\n\t    maybe_tuple.emplace (out, nullptr);\n\t}\n\n      annotate_arg_begin ();\n\n      /* If frame argument is populated, check for entry-values and the\n\t entry value options.  */\n      if (fa != NULL)\n\t{\n\t  string_file stb;\n\n\t  fprintf_symbol_filtered (&stb, SYMBOL_PRINT_NAME (fa->sym),\n\t\t\t\t   SYMBOL_LANGUAGE (fa->sym),\n\t\t\t\t   DMGL_PARAMS | DMGL_ANSI);\n\t  if (fa->entry_kind == print_entry_values_compact)\n\t    {\n\t      stb.puts (\"=\");\n\n\t      fprintf_symbol_filtered (&stb, SYMBOL_PRINT_NAME (fa->sym),\n\t\t\t\t       SYMBOL_LANGUAGE (fa->sym),\n\t\t\t\t       DMGL_PARAMS | DMGL_ANSI);\n\t    }\n\t  if (fa->entry_kind == print_entry_values_only\n\t      || fa->entry_kind == print_entry_values_compact)\n\t    stb.puts (\"@entry\");\n\t  out->field_stream (\"name\", stb);\n\t}\n      else\n\t/* Otherwise, just output the name.  */\n\tout->field_string (\"name\", sym_name);\n\n      annotate_arg_name_end ();\n\n      if (! out->is_mi_like_p ())\n\tout->text (\"=\");\n\n      if (print_args_field)\n\tout->field_int (\"arg\", 1);\n\n      /* For MI print the type, but only for simple values.  This seems\n\t weird, but this is how MI choose to format the various output\n\t types.  */\n      if (args_type == MI_PRINT_SIMPLE_VALUES && val != NULL)\n\t{\n\t  if (py_print_type (out, val) == EXT_LANG_BT_ERROR)\n\t    retval = EXT_LANG_BT_ERROR;\n\t}\n\n      if (retval != EXT_LANG_BT_ERROR)\n\t{\n\t  if (val != NULL)\n\t    annotate_arg_value (value_type (val));\n\n\t  /* If the output is to the CLI, and the user option \"set print\n\t     frame-arguments\" is set to none, just output \"...\".  */\n\t  if (! out->is_mi_like_p () && args_type == NO_VALUES)\n\t    out->field_string (\"value\", \"...\");\n\t  else\n\t    {\n\t      /* Otherwise, print the value for both MI and the CLI, except\n\t\t for the case of MI_PRINT_NO_VALUES.  */\n\t      if (args_type != NO_VALUES)\n\t\t{\n\t\t  if (val == NULL)\n\t\t    {\n\t\t      gdb_assert (fa != NULL && fa->error != NULL);\n\t\t      out->field_fmt (\"value\",\n\t\t\t\t\t_(\"<error reading variable: %s>\"),\n\t\t\t\t\tfa->error);\n\t\t    }\n\t\t  else if (py_print_value (out, val, opts, 0, args_type, language)\n\t\t\t   == EXT_LANG_BT_ERROR)\n\t\t    retval = EXT_LANG_BT_ERROR;\n\t\t}\n\t    }\n\t}\n    }",
+      "fn_code_pos": [
+        [
+          343,
+          0
+        ],
+        [
+          455,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "py_print_single_arg",
+        "parameters": {
+          "out": "struct ui_out",
+          "sym_name": "char",
+          "fa": "struct frame_arg",
+          "fv": "struct value",
+          "opts": "struct value_print_options",
+          "args_type": "enum ext_lang_frame_args",
+          "print_args_field": "int",
+          "language": "struct language_defn"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n    {\n      gdbpy_convert_exception (except);\n    }",
+      "fn_code_pos": [
+        [
+          456,
+          2
+        ],
+        [
+          459,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static enum ext_lang_bt_status\nenumerate_args (PyObject *iter,\n\t\tstruct ui_out *out,\n\t\tenum ext_lang_frame_args args_type,\n\t\tint print_args_field,\n\t\tstruct frame_info *frame)\n{\n  struct value_print_options opts;\n\n  get_user_print_options (&opts);\n\n  if (args_type == CLI_SCALAR_VALUES)\n    {\n      /* True in \"summary\" mode, false otherwise.  */\n      opts.summary = 1;\n    }\n\n  opts.deref_ref = 1;\n\n  TRY\n    {\n      annotate_frame_args ();\n    }",
+      "fn_code_pos": [
+        [
+          476,
+          0
+        ],
+        [
+          498,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "enumerate_args",
+        "parameters": {
+          "iter": "PyObject",
+          "out": "struct ui_out",
+          "args_type": "enum ext_lang_frame_args",
+          "print_args_field": "int",
+          "frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n    {\n      gdbpy_convert_exception (except);\n      return EXT_LANG_BT_ERROR;\n    }",
+      "fn_code_pos": [
+        [
+          499,
+          2
+        ],
+        [
+          503,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n\t    {\n\t      gdbpy_convert_exception (except);\n\t      return EXT_LANG_BT_ERROR;\n\t    }",
+      "fn_code_pos": [
+        [
+          555,
+          3
+        ],
+        [
+          559,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n\t\t    {\n\t\t      xfree (arg.error);\n\t\t      xfree (entryarg.error);\n\t\t      gdbpy_convert_exception (except);\n\t\t      return EXT_LANG_BT_ERROR;\n\t\t    }",
+      "fn_code_pos": [
+        [
+          589,
+          4
+        ],
+        [
+          595,
+          7
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n\t    {\n\t      gdbpy_convert_exception (except);\n\t      return EXT_LANG_BT_ERROR;\n\t    }",
+      "fn_code_pos": [
+        [
+          634,
+          3
+        ],
+        [
+          638,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n\t{\n\t  gdbpy_convert_exception (except);\n\t  return EXT_LANG_BT_ERROR;\n\t}",
+      "fn_code_pos": [
+        [
+          648,
+          6
+        ],
+        [
+          652,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static enum ext_lang_bt_status\nenumerate_locals (PyObject *iter,\n\t\t  struct ui_out *out,\n\t\t  int indent,\n\t\t  enum ext_lang_frame_args args_type,\n\t\t  int print_args_field,\n\t\t  struct frame_info *frame)\n{\n  struct value_print_options opts;\n\n  get_user_print_options (&opts);\n  opts.deref_ref = 1;\n\n  while (true)\n    {\n      const struct language_defn *language;\n      gdb::unique_xmalloc_ptr<char> sym_name;\n      struct value *val;\n      enum ext_lang_bt_status success = EXT_LANG_BT_ERROR;\n      struct symbol *sym;\n      struct block *sym_block;\n      int local_indent = 8 + (8 * indent);\n      gdb::optional<ui_out_emit_tuple> tuple;\n\n      gdbpy_ref<> item (PyIter_Next (iter));\n      if (item == NULL)\n\tbreak;\n\n      success = extract_sym (item.get (), &sym_name, &sym, &sym_block,\n\t\t\t     &language);\n      if (success == EXT_LANG_BT_ERROR)\n\treturn EXT_LANG_BT_ERROR;\n\n      success = extract_value (item.get (), &val);\n      if (success == EXT_LANG_BT_ERROR)\n\treturn EXT_LANG_BT_ERROR;\n\n      if (sym != NULL && out->is_mi_like_p ()\n\t  && ! mi_should_print (sym, MI_PRINT_LOCALS))\n\tcontinue;\n\n      /* If the object did not provide a value, read it.  */\n      if (val == NULL)\n\t{\n\t  TRY\n\t    {\n\t      val = read_var_value (sym, sym_block, frame);\n\t    }\n\t  CATCH (except, RETURN_MASK_ERROR)\n\t    {\n\t      gdbpy_convert_exception (except);\n\t      return EXT_LANG_BT_ERROR;\n\t    }\n\t  END_CATCH\n\t}\n\n      /* With PRINT_NO_VALUES, MI does not emit a tuple normally as\n\t each output contains only one field.  The exception is\n\t -stack-list-variables, which always provides a tuple.  */\n      if (out->is_mi_like_p ())\n\t{\n\t  if (print_args_field || args_type != NO_VALUES)\n\t    tuple.emplace (out, nullptr);\n\t}\n      TRY\n\t{\n\t  if (! out->is_mi_like_p ())\n\t    {\n\t      /* If the output is not MI we indent locals.  */\n\t      out->spaces (local_indent);\n\t    }\n\n\t  out->field_string (\"name\", sym_name.get ());\n\n\t  if (! out->is_mi_like_p ())\n\t    out->text (\" = \");\n\t}",
+      "fn_code_pos": [
+        [
+          671,
+          0
+        ],
+        [
+          747,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "enumerate_locals",
+        "parameters": {
+          "iter": "PyObject",
+          "out": "struct ui_out",
+          "indent": "int",
+          "args_type": "enum ext_lang_frame_args",
+          "print_args_field": "int",
+          "frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n\t    {\n\t      gdbpy_convert_exception (except);\n\t      return EXT_LANG_BT_ERROR;\n\t    }",
+      "fn_code_pos": [
+        [
+          719,
+          3
+        ],
+        [
+          723,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n\t{\n\t  gdbpy_convert_exception (except);\n\t  return EXT_LANG_BT_ERROR;\n\t}",
+      "fn_code_pos": [
+        [
+          748,
+          6
+        ],
+        [
+          752,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n\t{\n\t  gdbpy_convert_exception (except);\n\t  return EXT_LANG_BT_ERROR;\n\t}",
+      "fn_code_pos": [
+        [
+          785,
+          6
+        ],
+        [
+          789,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static enum ext_lang_bt_status\npy_mi_print_variables (PyObject *filter, struct ui_out *out,\n\t\t       struct value_print_options *opts,\n\t\t       enum ext_lang_frame_args args_type,\n\t\t       struct frame_info *frame)\n{\n  gdbpy_ref<> args_iter (get_py_iter_from_func (filter, \"frame_args\"));\n  if (args_iter == NULL)\n    return EXT_LANG_BT_ERROR;\n\n  gdbpy_ref<> locals_iter (get_py_iter_from_func (filter, \"frame_locals\"));\n  if (locals_iter == NULL)\n    return EXT_LANG_BT_ERROR;\n\n  ui_out_emit_list list_emitter (out, \"variables\");\n\n  if (args_iter != Py_None\n      && (enumerate_args (args_iter.get (), out, args_type, 1, frame)\n\t  == EXT_LANG_BT_ERROR))\n    return EXT_LANG_BT_ERROR;\n\n  if (locals_iter != Py_None\n      && (enumerate_locals (locals_iter.get (), out, 1, args_type, 1, frame)\n\t  == EXT_LANG_BT_ERROR))\n    return EXT_LANG_BT_ERROR;\n\n  return EXT_LANG_BT_OK;\n}",
+      "fn_code_pos": [
+        [
+          802,
+          0
+        ],
+        [
+          829,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "py_mi_print_variables",
+        "parameters": {
+          "filter": "PyObject",
+          "out": "struct ui_out",
+          "opts": "struct value_print_options",
+          "args_type": "enum ext_lang_frame_args",
+          "frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static enum ext_lang_bt_status\npy_print_locals (PyObject *filter,\n\t\t struct ui_out *out,\n\t\t enum ext_lang_frame_args args_type,\n\t\t int indent,\n\t\t struct frame_info *frame)\n{\n  gdbpy_ref<> locals_iter (get_py_iter_from_func (filter, \"frame_locals\"));\n  if (locals_iter == NULL)\n    return EXT_LANG_BT_ERROR;\n\n  ui_out_emit_list list_emitter (out, \"locals\");\n\n  if (locals_iter != Py_None\n      && (enumerate_locals (locals_iter.get (), out, indent, args_type,\n\t\t\t    0, frame) == EXT_LANG_BT_ERROR))\n    return EXT_LANG_BT_ERROR;\n\n  return EXT_LANG_BT_OK;\n}",
+      "fn_code_pos": [
+        [
+          835,
+          0
+        ],
+        [
+          854,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "py_print_locals",
+        "parameters": {
+          "filter": "PyObject",
+          "out": "struct ui_out",
+          "args_type": "enum ext_lang_frame_args",
+          "indent": "int",
+          "frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static enum ext_lang_bt_status\npy_print_args (PyObject *filter,\n\t       struct ui_out *out,\n\t       enum ext_lang_frame_args args_type,\n\t       struct frame_info *frame)\n{\n  gdbpy_ref<> args_iter (get_py_iter_from_func (filter, \"frame_args\"));\n  if (args_iter == NULL)\n    return EXT_LANG_BT_ERROR;\n\n  ui_out_emit_list list_emitter (out, \"args\");\n\n  TRY\n    {\n      annotate_frame_args ();\n      if (! out->is_mi_like_p ())\n\tout->text (\" (\");\n    }",
+      "fn_code_pos": [
+        [
+          861,
+          0
+        ],
+        [
+          878,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "py_print_args",
+        "parameters": {
+          "filter": "PyObject",
+          "out": "struct ui_out",
+          "args_type": "enum ext_lang_frame_args",
+          "frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n    {\n      gdbpy_convert_exception (except);\n      return EXT_LANG_BT_ERROR;\n    }",
+      "fn_code_pos": [
+        [
+          879,
+          2
+        ],
+        [
+          883,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n    {\n      gdbpy_convert_exception (except);\n      return EXT_LANG_BT_ERROR;\n    }",
+      "fn_code_pos": [
+        [
+          896,
+          2
+        ],
+        [
+          900,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static enum ext_lang_bt_status\npy_print_frame (PyObject *filter, int flags,\n\t\tenum ext_lang_frame_args args_type,\n\t\tstruct ui_out *out, int indent, htab_t levels_printed)\n{\n  int has_addr = 0;\n  CORE_ADDR address = 0;\n  struct gdbarch *gdbarch = NULL;\n  struct frame_info *frame = NULL;\n  struct value_print_options opts;\n  int print_level, print_frame_info, print_args, print_locals;\n  gdb::unique_xmalloc_ptr<char> function_to_free;\n\n  /* Extract print settings from FLAGS.  */\n  print_level = (flags & PRINT_LEVEL) ? 1 : 0;\n  print_frame_info = (flags & PRINT_FRAME_INFO) ? 1 : 0;\n  print_args = (flags & PRINT_ARGS) ? 1 : 0;\n  print_locals = (flags & PRINT_LOCALS) ? 1 : 0;\n\n  get_user_print_options (&opts);\n\n  /* Get the underlying frame.  This is needed to determine GDB\n  architecture, and also, in the cases of frame variables/arguments to\n  read them if they returned filter object requires us to do so.  */\n  gdbpy_ref<> py_inf_frame (PyObject_CallMethod (filter, \"inferior_frame\",\n\t\t\t\t\t\t NULL));\n  if (py_inf_frame == NULL)\n    return EXT_LANG_BT_ERROR;\n\n  frame = frame_object_to_frame_info (py_inf_frame.get ());\n  if (frame == NULL)\n    return EXT_LANG_BT_ERROR;\n\n  TRY\n    {\n      gdbarch = get_frame_arch (frame);\n    }",
+      "fn_code_pos": [
+        [
+          921,
+          0
+        ],
+        [
+          957,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "py_print_frame",
+        "parameters": {
+          "filter": "PyObject",
+          "flags": "int",
+          "args_type": "enum ext_lang_frame_args",
+          "out": "struct ui_out",
+          "indent": "int",
+          "levels_printed": "htab_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n    {\n      gdbpy_convert_exception (except);\n      return EXT_LANG_BT_ERROR;\n    }",
+      "fn_code_pos": [
+        [
+          958,
+          2
+        ],
+        [
+          962,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n\t    {\n\t      gdbpy_convert_exception (except);\n\t      return EXT_LANG_BT_ERROR;\n\t    }",
+      "fn_code_pos": [
+        [
+          991,
+          3
+        ],
+        [
+          995,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n\t{\n\t  gdbpy_convert_exception (except);\n\t  return EXT_LANG_BT_ERROR;\n\t}",
+      "fn_code_pos": [
+        [
+          1047,
+          6
+        ],
+        [
+          1051,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n\t    {\n\t      gdbpy_convert_exception (except);\n\t      return EXT_LANG_BT_ERROR;\n\t    }",
+      "fn_code_pos": [
+        [
+          1068,
+          3
+        ],
+        [
+          1072,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n\t    {\n\t      gdbpy_convert_exception (except);\n\t      return EXT_LANG_BT_ERROR;\n\t    }",
+      "fn_code_pos": [
+        [
+          1122,
+          3
+        ],
+        [
+          1126,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n\t{\n\t  gdbpy_convert_exception (except);\n\t  return EXT_LANG_BT_ERROR;\n\t}",
+      "fn_code_pos": [
+        [
+          1147,
+          6
+        ],
+        [
+          1151,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n\t\t{\n\t\t  gdbpy_convert_exception (except);\n\t\t  return EXT_LANG_BT_ERROR;\n\t\t}",
+      "fn_code_pos": [
+        [
+          1177,
+          7
+        ],
+        [
+          1181,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n\t\t{\n\t\t  gdbpy_convert_exception (except);\n\t\t  return EXT_LANG_BT_ERROR;\n\t\t}",
+      "fn_code_pos": [
+        [
+          1206,
+          7
+        ],
+        [
+          1210,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ERROR)\n\t{\n\t  gdbpy_convert_exception (except);\n\t  return EXT_LANG_BT_ERROR;\n\t}",
+      "fn_code_pos": [
+        [
+          1225,
+          6
+        ],
+        [
+          1229,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static PyObject *\nbootstrap_python_frame_filters (struct frame_info *frame,\n\t\t\t\tint frame_low, int frame_high)\n{\n  gdbpy_ref<> frame_obj (frame_info_to_frame_object (frame));\n  if (frame_obj == NULL)\n    return NULL;\n\n  gdbpy_ref<> module (PyImport_ImportModule (\"gdb.frames\"));\n  if (module == NULL)\n    return NULL;\n\n  gdbpy_ref<> sort_func (PyObject_GetAttrString (module.get (),\n\t\t\t\t\t\t \"execute_frame_filters\"));\n  if (sort_func == NULL)\n    return NULL;\n\n  gdbpy_ref<> py_frame_low (PyInt_FromLong (frame_low));\n  if (py_frame_low == NULL)\n    return NULL;\n\n  gdbpy_ref<> py_frame_high (PyInt_FromLong (frame_high));\n  if (py_frame_high == NULL)\n    return NULL;\n\n  gdbpy_ref<> iterable (PyObject_CallFunctionObjArgs (sort_func.get (),\n\t\t\t\t\t\t      frame_obj.get (),\n\t\t\t\t\t\t      py_frame_low.get (),\n\t\t\t\t\t\t      py_frame_high.get (),\n\t\t\t\t\t\t      NULL));\n  if (iterable == NULL)\n    return NULL;\n\n  if (iterable != Py_None)\n    return PyObject_GetIter (iterable.get ());\n  else\n    return iterable.release ();\n}",
+      "fn_code_pos": [
+        [
+          1278,
+          0
+        ],
+        [
+          1315,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bootstrap_python_frame_filters",
+        "parameters": {
+          "frame": "struct frame_info",
+          "frame_low": "int",
+          "frame_high": "int"
+        },
+        "return_type": "PyObject"
+      }
+    },
+    {
+      "fn_code": "enum ext_lang_bt_status\ngdbpy_apply_frame_filter (const struct extension_language_defn *extlang,\n\t\t\t  struct frame_info *frame, int flags,\n\t\t\t  enum ext_lang_frame_args args_type,\n\t\t\t  struct ui_out *out, int frame_low, int frame_high)\n{\n  struct gdbarch *gdbarch = NULL;\n  enum ext_lang_bt_status success = EXT_LANG_BT_ERROR;\n\n  if (!gdb_python_initialized)\n    return EXT_LANG_BT_NO_FILTERS;\n\n  TRY\n    {\n      gdbarch = get_frame_arch (frame);\n    }",
+      "fn_code_pos": [
+        [
+          1332,
+          0
+        ],
+        [
+          1347,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbpy_apply_frame_filter",
+        "parameters": {
+          "extlang": "struct extension_language_defn",
+          "frame": "struct frame_info",
+          "flags": "int",
+          "args_type": "enum ext_lang_frame_args",
+          "out": "struct ui_out",
+          "frame_low": "int",
+          "frame_high": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n    {\n      /* Let gdb try to print the stack trace.  */\n      return EXT_LANG_BT_NO_FILTERS;\n    }",
+      "fn_code_pos": [
+        [
+          1348,
+          2
+        ],
+        [
+          1352,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "get_py_iter_from_func (PyObject *filter, const char *func)",
+      "fn_dec_pos": [
+        [
+          303,
+          0
+        ],
+        [
+          303,
+          58
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_py_iter_from_func",
+        "parameters": {
+          "filter": "PyObject",
+          "func": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "item_ref (item)",
+      "fn_dec_pos": [
+        [
+          1257,
+          17
+        ],
+        [
+          1257,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "item_ref",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "bootstrap_python_frame_filters (struct frame_info *frame,\n\t\t\t\tint frame_low, int frame_high)",
+      "fn_dec_pos": [
+        [
+          1279,
+          0
+        ],
+        [
+          1280,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bootstrap_python_frame_filters",
+        "parameters": {
+          "frame": "struct frame_info",
+          "frame_low": "int",
+          "frame_high": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "gdbpy_enter enter_py (gdbarch, current_language)",
+      "fn_dec_pos": [
+        [
+          1355,
+          2
+        ],
+        [
+          1355,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbpy_enter",
+        "parameters": {},
+        "return_type": "END_CATCH"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        57,
+        6
+      ],
+      [
+        57,
+        19
+      ]
+    ],
+    [
+      "struct block",
+      {},
+      "",
+      [
+        57,
+        27
+      ],
+      [
+        57,
+        39
+      ]
+    ],
+    [
+      "struct language_defn",
+      {},
+      "",
+      [
+        58,
+        12
+      ],
+      [
+        58,
+        32
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        127,
+        30
+      ],
+      [
+        127,
+        42
+      ]
+    ],
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        165,
+        17
+      ],
+      [
+        165,
+        30
+      ]
+    ],
+    [
+      "struct ui_out",
+      {},
+      "",
+      [
+        206,
+        15
+      ],
+      [
+        206,
+        28
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        206,
+        35
+      ],
+      [
+        206,
+        47
+      ]
+    ],
+    [
+      "struct ui_out",
+      {},
+      "",
+      [
+        237,
+        16
+      ],
+      [
+        237,
+        29
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        237,
+        36
+      ],
+      [
+        237,
+        48
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        238,
+        8
+      ],
+      [
+        238,
+        34
+      ]
+    ],
+    [
+      "struct language_defn",
+      {},
+      "",
+      [
+        241,
+        8
+      ],
+      [
+        241,
+        28
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        251,
+        6
+      ],
+      [
+        251,
+        17
+      ]
+    ],
+    [
+      "struct ui_out",
+      {},
+      "",
+      [
+        344,
+        21
+      ],
+      [
+        344,
+        34
+      ]
+    ],
+    [
+      "struct frame_arg",
+      {},
+      "",
+      [
+        346,
+        7
+      ],
+      [
+        346,
+        23
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        347,
+        7
+      ],
+      [
+        347,
+        19
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        348,
+        13
+      ],
+      [
+        348,
+        39
+      ]
+    ],
+    [
+      "struct language_defn",
+      {},
+      "",
+      [
+        351,
+        13
+      ],
+      [
+        351,
+        33
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        353,
+        2
+      ],
+      [
+        353,
+        14
+      ]
+    ],
+    [
+      "struct ui_out",
+      {},
+      "",
+      [
+        478,
+        2
+      ],
+      [
+        478,
+        15
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        481,
+        2
+      ],
+      [
+        481,
+        19
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        483,
+        2
+      ],
+      [
+        483,
+        28
+      ]
+    ],
+    [
+      "struct language_defn",
+      {},
+      "",
+      [
+        516,
+        12
+      ],
+      [
+        516,
+        32
+      ]
+    ],
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        518,
+        6
+      ],
+      [
+        518,
+        19
+      ]
+    ],
+    [
+      "struct block",
+      {},
+      "",
+      [
+        519,
+        6
+      ],
+      [
+        519,
+        18
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        520,
+        6
+      ],
+      [
+        520,
+        18
+      ]
+    ],
+    [
+      "struct frame_arg",
+      {},
+      "",
+      [
+        540,
+        3
+      ],
+      [
+        540,
+        19
+      ]
+    ],
+    [
+      "struct ui_out",
+      {},
+      "",
+      [
+        673,
+        4
+      ],
+      [
+        673,
+        17
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        677,
+        4
+      ],
+      [
+        677,
+        21
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        679,
+        2
+      ],
+      [
+        679,
+        28
+      ]
+    ],
+    [
+      "struct language_defn",
+      {},
+      "",
+      [
+        686,
+        12
+      ],
+      [
+        686,
+        32
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        688,
+        6
+      ],
+      [
+        688,
+        18
+      ]
+    ],
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        690,
+        6
+      ],
+      [
+        690,
+        19
+      ]
+    ],
+    [
+      "struct block",
+      {},
+      "",
+      [
+        691,
+        6
+      ],
+      [
+        691,
+        18
+      ]
+    ],
+    [
+      "struct ui_out",
+      {},
+      "",
+      [
+        803,
+        41
+      ],
+      [
+        803,
+        54
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        804,
+        9
+      ],
+      [
+        804,
+        35
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        806,
+        9
+      ],
+      [
+        806,
+        26
+      ]
+    ],
+    [
+      "struct ui_out",
+      {},
+      "",
+      [
+        837,
+        3
+      ],
+      [
+        837,
+        16
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        840,
+        3
+      ],
+      [
+        840,
+        20
+      ]
+    ],
+    [
+      "struct ui_out",
+      {},
+      "",
+      [
+        863,
+        8
+      ],
+      [
+        863,
+        21
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        865,
+        8
+      ],
+      [
+        865,
+        25
+      ]
+    ],
+    [
+      "struct ui_out",
+      {},
+      "",
+      [
+        924,
+        2
+      ],
+      [
+        924,
+        15
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        928,
+        2
+      ],
+      [
+        928,
+        16
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        929,
+        2
+      ],
+      [
+        929,
+        19
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        930,
+        2
+      ],
+      [
+        930,
+        28
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1022,
+        6
+      ],
+      [
+        1022,
+        23
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1025,
+        14
+      ],
+      [
+        1025,
+        31
+      ]
+    ],
+    [
+      "struct bound_minimal_symbol",
+      {},
+      "",
+      [
+        1097,
+        7
+      ],
+      [
+        1097,
+        34
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1279,
+        32
+      ],
+      [
+        1279,
+        49
+      ]
+    ],
+    [
+      "struct extension_language_defn",
+      {},
+      "",
+      [
+        1333,
+        32
+      ],
+      [
+        1333,
+        62
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1334,
+        5
+      ],
+      [
+        1334,
+        22
+      ]
+    ],
+    [
+      "struct ui_out",
+      {},
+      "",
+      [
+        1336,
+        5
+      ],
+      [
+        1336,
+        18
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1338,
+        2
+      ],
+      [
+        1338,
+        16
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"objfiles.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"language.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"arch-utils.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"python.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"ui-out.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"valprint.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"annotate.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"hashtab.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"demangle.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"mi/mi-cmds.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"python-internal.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"py-ref.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"common/gdb_optional.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum mi_print_types\n{\n  MI_PRINT_ARGS,\n  MI_PRINT_LOCALS\n}",
+      {
+        "MI_PRINT_ARGS": "",
+        "MI_PRINT_LOCALS": ""
+      },
+      "mi_print_types",
+      [
+        35,
+        0
+      ],
+      [
+        39,
+        1
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        55,
+        7
+      ],
+      [
+        55,
+        30
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        126,
+        7
+      ],
+      [
+        126,
+        30
+      ]
+    ],
+    [
+      "enum mi_print_types",
+      {},
+      "",
+      [
+        165,
+        37
+      ],
+      [
+        165,
+        56
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        205,
+        7
+      ],
+      [
+        205,
+        30
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        236,
+        7
+      ],
+      [
+        236,
+        30
+      ]
+    ],
+    [
+      "enum ext_lang_frame_args",
+      {},
+      "",
+      [
+        240,
+        2
+      ],
+      [
+        240,
+        26
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        343,
+        7
+      ],
+      [
+        343,
+        30
+      ]
+    ],
+    [
+      "enum ext_lang_frame_args",
+      {},
+      "",
+      [
+        349,
+        7
+      ],
+      [
+        349,
+        31
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        354,
+        2
+      ],
+      [
+        354,
+        25
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        476,
+        7
+      ],
+      [
+        476,
+        30
+      ]
+    ],
+    [
+      "enum ext_lang_frame_args",
+      {},
+      "",
+      [
+        479,
+        2
+      ],
+      [
+        479,
+        26
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        521,
+        6
+      ],
+      [
+        521,
+        29
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        671,
+        7
+      ],
+      [
+        671,
+        30
+      ]
+    ],
+    [
+      "enum ext_lang_frame_args",
+      {},
+      "",
+      [
+        675,
+        4
+      ],
+      [
+        675,
+        28
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        689,
+        6
+      ],
+      [
+        689,
+        29
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        802,
+        7
+      ],
+      [
+        802,
+        30
+      ]
+    ],
+    [
+      "enum ext_lang_frame_args",
+      {},
+      "",
+      [
+        805,
+        9
+      ],
+      [
+        805,
+        33
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        835,
+        7
+      ],
+      [
+        835,
+        30
+      ]
+    ],
+    [
+      "enum ext_lang_frame_args",
+      {},
+      "",
+      [
+        838,
+        3
+      ],
+      [
+        838,
+        27
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        861,
+        7
+      ],
+      [
+        861,
+        30
+      ]
+    ],
+    [
+      "enum ext_lang_frame_args",
+      {},
+      "",
+      [
+        864,
+        8
+      ],
+      [
+        864,
+        32
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        921,
+        7
+      ],
+      [
+        921,
+        30
+      ]
+    ],
+    [
+      "enum ext_lang_frame_args",
+      {},
+      "",
+      [
+        923,
+        2
+      ],
+      [
+        923,
+        26
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        1259,
+        5
+      ],
+      [
+        1259,
+        28
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        1332,
+        0
+      ],
+      [
+        1332,
+        23
+      ]
+    ],
+    [
+      "enum ext_lang_frame_args",
+      {},
+      "",
+      [
+        1335,
+        5
+      ],
+      [
+        1335,
+        29
+      ]
+    ],
+    [
+      "enum ext_lang_bt_status",
+      {},
+      "",
+      [
+        1339,
+        2
+      ],
+      [
+        1339,
+        25
+      ]
+    ]
+  ]
+}

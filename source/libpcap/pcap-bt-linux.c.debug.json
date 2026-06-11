@@ -1,0 +1,693 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int\nbt_findalldevs(pcap_if_list_t *devlistp, char *err_str)\n{\n\tstruct hci_dev_list_req *dev_list;\n\tstruct hci_dev_req *dev_req;\n\tint i, sock;\n\tint ret = 0;\n\n\tsock  = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);\n\tif (sock < 0)\n\t{\n\t\t/* if bluetooth is not supported this this is not fatal*/\n\t\tif (errno == EAFNOSUPPORT)\n\t\t\treturn 0;\n\t\tpcap_fmt_errmsg_for_errno(err_str, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't open raw Bluetooth socket\");\n\t\treturn -1;\n\t}\n\n\tdev_list = malloc(HCI_MAX_DEV * sizeof(*dev_req) + sizeof(*dev_list));\n\tif (!dev_list)\n\t{\n\t\tpcap_snprintf(err_str, PCAP_ERRBUF_SIZE, \"Can't allocate %zu bytes for Bluetooth device list\",\n\t\t\tHCI_MAX_DEV * sizeof(*dev_req) + sizeof(*dev_list));\n\t\tret = -1;\n\t\tgoto done;\n\t}\n\n\tdev_list->dev_num = HCI_MAX_DEV;\n\n\tif (ioctl(sock, HCIGETDEVLIST, (void *) dev_list) < 0)\n\t{\n\t\tpcap_fmt_errmsg_for_errno(err_str, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't get Bluetooth device list via ioctl\");\n\t\tret = -1;\n\t\tgoto free;\n\t}\n\n\tdev_req = dev_list->dev_req;\n\tfor (i = 0; i < dev_list->dev_num; i++, dev_req++) {\n\t\tchar dev_name[20], dev_descr[30];\n\n\t\tpcap_snprintf(dev_name, 20, BT_IFACE\"%d\", dev_req->dev_id);\n\t\tpcap_snprintf(dev_descr, 30, \"Bluetooth adapter number %d\", i);\n\n\t\t/*\n\t\t * Bluetooth is a wireless technology.\n\t\t * XXX - if there's the notion of associating with a\n\t\t * network, and we can determine whether the interface\n\t\t * is associated with a network, check that and set\n\t\t * the status to PCAP_IF_CONNECTION_STATUS_CONNECTED\n\t\t * or PCAP_IF_CONNECTION_STATUS_DISCONNECTED.\n\t\t */\n\t\tif (add_dev(devlistp, dev_name, PCAP_IF_WIRELESS, dev_descr, err_str)  == NULL)\n\t\t{\n\t\t\tret = -1;\n\t\t\tbreak;\n\t\t}\n\t}\n\nfree:\n\tfree(dev_list);\n\ndone:\n\tclose(sock);\n\treturn ret;\n}",
+      "fn_code_pos": [
+        [
+          71,
+          0
+        ],
+        [
+          137,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_findalldevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "err_str": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\nbt_create(const char *device, char *ebuf, int *is_ours)\n{\n\tconst char *cp;\n\tchar *cpend;\n\tlong devnum;\n\tpcap_t *p;\n\n\t/* Does this look like a Bluetooth device? */\n\tcp = strrchr(device, '/');\n\tif (cp == NULL)\n\t\tcp = device;\n\t/* Does it begin with BT_IFACE? */\n\tif (strncmp(cp, BT_IFACE, sizeof BT_IFACE - 1) != 0) {\n\t\t/* Nope, doesn't begin with BT_IFACE */\n\t\t*is_ours = 0;\n\t\treturn NULL;\n\t}\n\t/* Yes - is BT_IFACE followed by a number? */\n\tcp += sizeof BT_IFACE - 1;\n\tdevnum = strtol(cp, &cpend, 10);\n\tif (cpend == cp || *cpend != '\\0') {\n\t\t/* Not followed by a number. */\n\t\t*is_ours = 0;\n\t\treturn NULL;\n\t}\n\tif (devnum < 0) {\n\t\t/* Followed by a non-valid number. */\n\t\t*is_ours = 0;\n\t\treturn NULL;\n\t}\n\n\t/* OK, it's probably ours. */\n\t*is_ours = 1;\n\n\tp = pcap_create_common(ebuf, sizeof (struct pcap_bt));\n\tif (p == NULL)\n\t\treturn (NULL);\n\n\tp->activate_op = bt_activate;\n\treturn (p);\n}",
+      "fn_code_pos": [
+        [
+          139,
+          0
+        ],
+        [
+          180,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "static int\nbt_activate(pcap_t* handle)\n{\n\tstruct pcap_bt *handlep = handle->priv;\n\tstruct sockaddr_hci addr;\n\tint opt;\n\tint\t\tdev_id;\n\tstruct hci_filter\tflt;\n\tint err = PCAP_ERROR;\n\n\t/* get bt interface id */\n\tif (sscanf(handle->opt.device, BT_IFACE\"%d\", &dev_id) != 1)\n\t{\n\t\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t\"Can't get Bluetooth device index from %s\",\n\t\t\t handle->opt.device);\n\t\treturn PCAP_ERROR;\n\t}\n\n\t/*\n\t * Turn a negative snapshot value (invalid), a snapshot value of\n\t * 0 (unspecified), or a value bigger than the normal maximum\n\t * value, into the maximum allowed value.\n\t *\n\t * If some application really *needs* a bigger snapshot\n\t * length, we should just increase MAXIMUM_SNAPLEN.\n\t */\n\tif (handle->snapshot <= 0 || handle->snapshot > MAXIMUM_SNAPLEN)\n\t\thandle->snapshot = MAXIMUM_SNAPLEN;\n\n\t/* Initialize some components of the pcap structure. */\n\thandle->bufsize = BT_CTRL_SIZE+sizeof(pcap_bluetooth_h4_header)+handle->snapshot;\n\thandle->linktype = DLT_BLUETOOTH_HCI_H4_WITH_PHDR;\n\n\thandle->read_op = bt_read_linux;\n\thandle->inject_op = bt_inject_linux;\n\thandle->setfilter_op = install_bpf_program; /* no kernel filtering */\n\thandle->setdirection_op = bt_setdirection_linux;\n\thandle->set_datalink_op = NULL;\t/* can't change data link type */\n\thandle->getnonblock_op = pcap_getnonblock_fd;\n\thandle->setnonblock_op = pcap_setnonblock_fd;\n\thandle->stats_op = bt_stats_linux;\n\thandlep->dev_id = dev_id;\n\n\t/* Create HCI socket */\n\thandle->fd = socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_HCI);\n\tif (handle->fd < 0) {\n\t\tpcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't create raw socket\");\n\t\treturn PCAP_ERROR;\n\t}\n\n\thandle->buffer = malloc(handle->bufsize);\n\tif (!handle->buffer) {\n\t\tpcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't allocate dump buffer\");\n\t\tgoto close_fail;\n\t}\n\n\topt = 1;\n\tif (setsockopt(handle->fd, SOL_HCI, HCI_DATA_DIR, &opt, sizeof(opt)) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't enable data direction info\");\n\t\tgoto close_fail;\n\t}\n\n\topt = 1;\n\tif (setsockopt(handle->fd, SOL_HCI, HCI_TIME_STAMP, &opt, sizeof(opt)) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't enable time stamp\");\n\t\tgoto close_fail;\n\t}\n\n\t/* Setup filter, do not call hci function to avoid dependence on\n\t * external libs\t*/\n\tmemset(&flt, 0, sizeof(flt));\n\tmemset((void *) &flt.type_mask, 0xff, sizeof(flt.type_mask));\n\tmemset((void *) &flt.event_mask, 0xff, sizeof(flt.event_mask));\n\tif (setsockopt(handle->fd, SOL_HCI, HCI_FILTER, &flt, sizeof(flt)) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't set filter\");\n\t\tgoto close_fail;\n\t}\n\n\n\t/* Bind socket to the HCI device */\n\taddr.hci_family = AF_BLUETOOTH;\n\taddr.hci_dev = handlep->dev_id;\n#ifdef HAVE_STRUCT_SOCKADDR_HCI_HCI_CHANNEL\n\taddr.hci_channel = HCI_CHANNEL_RAW;\n#endif\n\tif (bind(handle->fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't attach to device %d\", handlep->dev_id);\n\t\tgoto close_fail;\n\t}\n\n\tif (handle->opt.rfmon) {\n\t\t/*\n\t\t * Monitor mode doesn't apply to Bluetooth devices.\n\t\t */\n\t\terr = PCAP_ERROR_RFMON_NOTSUP;\n\t\tgoto close_fail;\n\t}\n\n\tif (handle->opt.buffer_size != 0) {\n\t\t/*\n\t\t * Set the socket buffer size to the specified value.\n\t\t */\n\t\tif (setsockopt(handle->fd, SOL_SOCKET, SO_RCVBUF,\n\t\t    &handle->opt.buffer_size,\n\t\t    sizeof(handle->opt.buffer_size)) == -1) {\n\t\t\tpcap_fmt_errmsg_for_errno(handle->errbuf,\n\t\t\t    errno, PCAP_ERRBUF_SIZE, \"SO_RCVBUF\");\n\t\t\tgoto close_fail;\n\t\t}\n\t}\n\n\thandle->selectable_fd = handle->fd;\n\treturn 0;\n\nclose_fail:\n\tpcap_cleanup_live_common(handle);\n\treturn err;\n}",
+      "fn_code_pos": [
+        [
+          182,
+          0
+        ],
+        [
+          306,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_activate",
+        "parameters": {
+          "handle": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbt_read_linux(pcap_t *handle, int max_packets _U_, pcap_handler callback, u_char *user)\n{\n\tstruct cmsghdr *cmsg;\n\tstruct msghdr msg;\n\tstruct iovec  iv;\n\tssize_t ret;\n\tstruct pcap_pkthdr pkth;\n\tpcap_bluetooth_h4_header* bthdr;\n\tu_char *pktd;\n\tint in = 0;\n\n\tpktd = (u_char *)handle->buffer + BT_CTRL_SIZE;\n\tbthdr = (pcap_bluetooth_h4_header*)(void *)pktd;\n\tiv.iov_base = pktd + sizeof(pcap_bluetooth_h4_header);\n\tiv.iov_len  = handle->snapshot;\n\n\tmemset(&msg, 0, sizeof(msg));\n\tmsg.msg_iov = &iv;\n\tmsg.msg_iovlen = 1;\n\tmsg.msg_control = handle->buffer;\n\tmsg.msg_controllen = BT_CTRL_SIZE;\n\n\t/* ignore interrupt system call error */\n\tdo {\n\t\tret = recvmsg(handle->fd, &msg, 0);\n\t\tif (handle->break_loop)\n\t\t{\n\t\t\thandle->break_loop = 0;\n\t\t\treturn -2;\n\t\t}\n\t} while ((ret == -1) && (errno == EINTR));\n\n\tif (ret < 0) {\n\t\tpcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't receive packet\");\n\t\treturn -1;\n\t}\n\n\tpkth.caplen = ret;\n\n\t/* get direction and timestamp*/\n\tcmsg = CMSG_FIRSTHDR(&msg);\n\twhile (cmsg) {\n\t\tswitch (cmsg->cmsg_type) {\n\t\t\tcase HCI_CMSG_DIR:\n\t\t\t\tmemcpy(&in, CMSG_DATA(cmsg), sizeof in);\n\t\t\t\tbreak;\n                      \tcase HCI_CMSG_TSTAMP:\n                      \t\tmemcpy(&pkth.ts, CMSG_DATA(cmsg),\n                      \t\t    sizeof pkth.ts);\n\t\t\t\tbreak;\n\t\t}\n\t\tcmsg = CMSG_NXTHDR(&msg, cmsg);\n\t}\n\tif ((in && (handle->direction == PCAP_D_OUT)) ||\n\t\t\t\t((!in) && (handle->direction == PCAP_D_IN)))\n\t\treturn 0;\n\n\tbthdr->direction = htonl(in != 0);\n\tpkth.caplen+=sizeof(pcap_bluetooth_h4_header);\n\tpkth.len = pkth.caplen;\n\tif (handle->fcode.bf_insns == NULL ||\n\t    bpf_filter(handle->fcode.bf_insns, pktd, pkth.len, pkth.caplen)) {\n\t\tcallback(user, &pkth, pktd);\n\t\treturn 1;\n\t}\n\treturn 0;\t/* didn't pass filter */\n}",
+      "fn_code_pos": [
+        [
+          308,
+          0
+        ],
+        [
+          376,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_read_linux",
+        "parameters": {
+          "handle": "pcap_t",
+          "max_packets": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbt_inject_linux(pcap_t *handle, const void *buf _U_, size_t size _U_)\n{\n\tpcap_snprintf(handle->errbuf, PCAP_ERRBUF_SIZE, \"inject not supported on \"\n    \t\t\"bluetooth devices\");\n\treturn (-1);\n}",
+      "fn_code_pos": [
+        [
+          378,
+          0
+        ],
+        [
+          384,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_inject_linux",
+        "parameters": {
+          "handle": "pcap_t",
+          "buf": "void",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbt_stats_linux(pcap_t *handle, struct pcap_stat *stats)\n{\n\tstruct pcap_bt *handlep = handle->priv;\n\tint ret;\n\tstruct hci_dev_info dev_info;\n\tstruct hci_dev_stats * s = &dev_info.stat;\n\tdev_info.dev_id = handlep->dev_id;\n\n\t/* ignore eintr */\n\tdo {\n\t\tret = ioctl(handle->fd, HCIGETDEVINFO, (void *)&dev_info);\n\t} while ((ret == -1) && (errno == EINTR));\n\n\tif (ret < 0) {\n\t\tpcap_fmt_errmsg_for_errno(handle->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"Can't get stats via ioctl\");\n\t\treturn (-1);\n\n\t}\n\n\t/* we receive both rx and tx frames, so comulate all stats */\n\tstats->ps_recv = s->evt_rx + s->acl_rx + s->sco_rx + s->cmd_tx +\n\t\ts->acl_tx +s->sco_tx;\n\tstats->ps_drop = s->err_rx + s->err_tx;\n\tstats->ps_ifdrop = 0;\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          387,
+          0
+        ],
+        [
+          414,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_stats_linux",
+        "parameters": {
+          "handle": "pcap_t",
+          "stats": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbt_setdirection_linux(pcap_t *p, pcap_direction_t d)\n{\n\tp->direction = d;\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          416,
+          0
+        ],
+        [
+          421,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_setdirection_linux",
+        "parameters": {
+          "p": "pcap_t",
+          "d": "pcap_direction_t"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "bt_activate(pcap_t *)",
+      "fn_dec_pos": [
+        [
+          58,
+          11
+        ],
+        [
+          58,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_activate",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "bt_read_linux(pcap_t *, int , pcap_handler , u_char *)",
+      "fn_dec_pos": [
+        [
+          59,
+          11
+        ],
+        [
+          59,
+          65
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_read_linux",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "bt_inject_linux(pcap_t *, const void *, size_t)",
+      "fn_dec_pos": [
+        [
+          60,
+          11
+        ],
+        [
+          60,
+          58
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_inject_linux",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "bt_setdirection_linux(pcap_t *, pcap_direction_t)",
+      "fn_dec_pos": [
+        [
+          61,
+          11
+        ],
+        [
+          61,
+          60
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_setdirection_linux",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "bt_stats_linux(pcap_t *, struct pcap_stat *)",
+      "fn_dec_pos": [
+        [
+          62,
+          11
+        ],
+        [
+          62,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_stats_linux",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "bt_create(const char *device, char *ebuf, int *is_ours)",
+      "fn_dec_pos": [
+        [
+          140,
+          0
+        ],
+        [
+          140,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bt_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_bt {\n\tint dev_id;\t\t/* device ID of device we're bound to */\n}",
+      {
+        "dev_id": "int"
+      },
+      "pcap_bt",
+      [
+        67,
+        0
+      ],
+      [
+        69,
+        1
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        62,
+        36
+      ],
+      [
+        62,
+        52
+      ]
+    ],
+    [
+      "struct pcap_bt {\n\tint dev_id;\t\t/* device ID of device we're bound to */\n}",
+      {
+        "dev_id": "int"
+      },
+      "pcap_bt",
+      [
+        67,
+        0
+      ],
+      [
+        69,
+        1
+      ]
+    ],
+    [
+      "struct hci_dev_list_req",
+      {},
+      "",
+      [
+        74,
+        1
+      ],
+      [
+        74,
+        24
+      ]
+    ],
+    [
+      "struct hci_dev_req",
+      {},
+      "",
+      [
+        75,
+        1
+      ],
+      [
+        75,
+        19
+      ]
+    ],
+    [
+      "struct pcap_bt",
+      {},
+      "",
+      [
+        174,
+        38
+      ],
+      [
+        174,
+        52
+      ]
+    ],
+    [
+      "struct pcap_bt",
+      {},
+      "",
+      [
+        185,
+        1
+      ],
+      [
+        185,
+        15
+      ]
+    ],
+    [
+      "struct sockaddr_hci",
+      {},
+      "",
+      [
+        186,
+        1
+      ],
+      [
+        186,
+        20
+      ]
+    ],
+    [
+      "struct hci_filter",
+      {},
+      "",
+      [
+        189,
+        1
+      ],
+      [
+        189,
+        18
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        273,
+        23
+      ],
+      [
+        273,
+        38
+      ]
+    ],
+    [
+      "struct cmsghdr",
+      {},
+      "",
+      [
+        311,
+        1
+      ],
+      [
+        311,
+        15
+      ]
+    ],
+    [
+      "struct msghdr",
+      {},
+      "",
+      [
+        312,
+        1
+      ],
+      [
+        312,
+        14
+      ]
+    ],
+    [
+      "struct iovec",
+      {},
+      "",
+      [
+        313,
+        1
+      ],
+      [
+        313,
+        13
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        315,
+        1
+      ],
+      [
+        315,
+        19
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        388,
+        31
+      ],
+      [
+        388,
+        47
+      ]
+    ],
+    [
+      "struct pcap_bt",
+      {},
+      "",
+      [
+        390,
+        1
+      ],
+      [
+        390,
+        15
+      ]
+    ],
+    [
+      "struct hci_dev_info",
+      {},
+      "",
+      [
+        392,
+        1
+      ],
+      [
+        392,
+        20
+      ]
+    ],
+    [
+      "struct hci_dev_stats",
+      {},
+      "",
+      [
+        393,
+        1
+      ],
+      [
+        393,
+        21
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-bt-linux.h\"\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap/bluetooth.h\"\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        46,
+        0
+      ],
+      [
+        47,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ioctl.h>\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include <arpa/inet.h>\n",
+      [
+        49,
+        0
+      ],
+      [
+        50,
+        0
+      ]
+    ],
+    [
+      "#include <bluetooth/bluetooth.h>\n",
+      [
+        51,
+        0
+      ],
+      [
+        52,
+        0
+      ]
+    ],
+    [
+      "#include <bluetooth/hci.h>\n",
+      [
+        52,
+        0
+      ],
+      [
+        53,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

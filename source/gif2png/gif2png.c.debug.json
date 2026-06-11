@@ -1,0 +1,462 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int interlace_line(int height, int line)\n/* return the actual line # used to store an interlaced line */\n{\n    int res;\n\n    /*@-shiftimplementation@*/\n    if ((line & 7) == 0) {\n\treturn line >> 3;\n    }\n    res = (height+7) >> 3;\n    if ((line & 7) == 4) {\n\treturn res+((line-4) >> 3);\n    }\n    res += (height+3) >> 3;\n    if ((line & 3) == 2) {\n\treturn res + ((line-2) >> 2);\n    }\n    return res + ((height+1) >> 2) + ((line-1) >> 1);\n    /*@=shiftimplementation@*/\n}",
+      "fn_code_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          63,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "interlace_line",
+        "parameters": {
+          "height": "int",
+          "line": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int inv_interlace_line(int height, int line)\n/* inverse function of above, used for recovery of interlaced images */\n{\n    /*@-shiftimplementation@*/\n    if ((line << 3)<height) {\n\treturn line << 3;\n    }\n    line -= (height+7) >> 3;\n    if ((line << 3) + 4 < height) {\n\treturn (line << 3) + 4;\n    }\n    line -= (height+3) >> 3;\n    if ((line << 2) + 2 < height) {\n\treturn (line << 2) + 2;\n    }\n    line -= (height + 1) >> 2;\n    return (line << 1) + 1;\n    /*@=shiftimplementation@*/\n}",
+      "fn_code_pos": [
+        [
+          65,
+          0
+        ],
+        [
+          83,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inv_interlace_line",
+        "parameters": {
+          "height": "int",
+          "line": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static bool is_gray(png_color c)\n{\n    /* check if r==g==b, moved to function to work around NeXTstep 3.3 cc bug.\n     * life could be so easy if at least the basic tools worked as expected.\n     */\n    return c.red == c.green && c.green == c.blue;\n}",
+      "fn_code_pos": [
+        [
+          108,
+          0
+        ],
+        [
+          114,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "is_gray",
+        "parameters": {
+          "c": "png_color"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "static int writefile(struct GIFelement *s, struct GIFelement *e, \n\t\t     FILE *fp, bool lastimg)\n{\n    int i;\n    struct GIFimagestruct *img = e->imagestruct;\n    unsigned long *count = img->color_count;\n    GifColor *colors = img->colors;\n    int colors_used = 0;\n    byte remap[MAXCMSIZE];\n    png_struct *png_ptr;\n    png_info *info_ptr;\n    int p;\n    png_color pal_rgb[MAXCMSIZE];\n    png_byte pal_trans[MAXCMSIZE];\n    png_color_16 color16trans, color16back;\n    byte buffer[24]; /* used for gIFt and gIFg */\n    int j;\n    png_uint_16 histogr[MAXCMSIZE];\n    int passcount;\n    int errtype, errorcount = 0;\n    png_text software;\n    png_text comment;\n\n    /* these volatile declarations prevent gcc warnings (\"variable might be\n     *  clobbered by `longjmp' or `vfork'\") */\n    volatile bool gray = true;\n    volatile int last_color = 0;\n    volatile bool remapping = false;\n    volatile int bitdepth;\n\n    /*@-nullpass@*/\n    png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);\n    if (png_ptr == NULL) {\n\t(void)fprintf(stderr, \"gif2png: fatal error, out of memory\\n\");\n\t(void)fprintf(stderr, \"gif2png: exiting ungracefully\\n\");\n\texit(1);\n    }\n    info_ptr = png_create_info_struct(png_ptr);\n    if (info_ptr == NULL) {\n\t(void)fprintf(stderr, \"gif2png: fatal error, out of memory\\n\");\n\t(void)fprintf(stderr, \"gif2png: exiting ungracefully\\n\");\n\texit(1);\n    }\n    /*@=nullpass@*/\n\n    /* pacify splint by defining all this storage */\n    memset(remap, '\\0', sizeof(remap));\n    memset(pal_rgb, '\\0', sizeof(pal_rgb));\n    memset(pal_trans, '\\0', sizeof(pal_trans));\n\n    /* ignore the transparency value if no pixel in the image uses it */\n    if (img->trans != -1 && count[img->trans] == 0)\n\timg->trans = -1;\n\n    if (optimize) {\n\t/* zero out unused color table entries and use zlib level 9 */\n\tfor (i = 0; i < MAXCMSIZE; i++)\n\t    if(count[i] == 0)\n\t\tcolors[i].red = colors[i].green = colors[i].blue = 0;\n\t/*\n\t * The way that last_color is computed ensures that trailing zeroed-out\n\t * entries will be dropped.\n\t * FIXME: someday, actually compact unused colors out of the table\n\t * and remap pixels appropriately.\n\t */\n    } else if (!recover) {\n\t/* report unused colors so user can choose to reconvert */\n\tint unused = 0;\n\n\tfor (i = 0; i < MAXCMSIZE; i++)\n\t    if (count[i] == 0)\n\t\tunused++;\n\n\tif (unused > 0)\n\t{\n\t    (void)fprintf(stderr, \n\t\t\t  \"gif2png: %d unused colors; convert with -O to remove\\n\",\n\t\t\t  unused);\n\t    errorcount++;\n\t}\n    }\n\n    for (i = 0; i < MAXCMSIZE; i++)\n\tif (count[i] != 0) {\n\t    gray &= is_gray(colors[i]);\n\t    colors_used++;\n\t    if (last_color < i) \n\t\tlast_color = i;\n\t}\n\n    if (gray) {\n\tif (verbose > 1)\n\t    (void)fprintf(stderr, \"gif2png: input image is grayscale\\n\");\n\n\tif (img->trans != -1) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tif (i!=img->trans && colors[i].red == colors[img->trans].red) {\n\t\t    gray = false;\n\t\t    if (verbose > 1)\n\t\t\t(void)fprintf(stderr,\n\t\t\t\t      \"gif2png: transparent color is repeated in visible colors, using palette\\n\");\n\t\t    break;\n\t\t}\n\t    }\n\t}\n    }\n\n    bitdepth = 8;\n    if (last_color<16) bitdepth = 4;\n    if (last_color<4) bitdepth = 2;\n    if (last_color<2) bitdepth = 1;\n\n    if (gray) {\n\tbool low_prec;\n\tint gray_bitdepth;\n\tremapping = true;\n\tfor (i = 0; i < MAXCMSIZE; i++)\n\t    remap[i] = colors[i].red;\n\n\tgray_bitdepth = 8;\n\n\t/* try to adjust to 4-bit precision grayscale */\n\n\tlow_prec = true;\n\tfor (i = 0; i < MAXCMSIZE; i++) {\n\t    if ((remap[i]&0xf)*0x11 != remap[i]) {\n\t\tlow_prec = false;\n\t\tbreak;\n\t    }\n\t}\n\tif (low_prec) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tremap[i] &= 0xf;\n\t    }\n\t    gray_bitdepth = 4;\n\t}\n\n\t/* try to adjust to 2-bit precision grayscale */\n\n\tif (low_prec) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tif ((remap[i]&3)*5 != remap[i]) {\n\t\t    low_prec = false;\n\t\t    break;\n\t\t}\n\t    }\n\t}\n\n\tif (low_prec) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tremap[i] &= 3;\n\t    }\n\t    gray_bitdepth = 2;\n\t}\n\n\t/* try to adjust to 1-bit precision grayscale */\n\n\tif (low_prec) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tif ((remap[i]&1)*3 != remap[i]) {\n\t\t    low_prec = false;\n\t\t    break;\n\t\t}\n\t    }\n\t}\n\tif (low_prec) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tremap[i] &= 1;\n\t    }\n\t    gray_bitdepth=1;\n\t}\n\n\tif (bitdepth<gray_bitdepth) {\n\t    gray = false;\t\t/* write palette file */\n\t    remapping = false;\n\t} else {\n\t    bitdepth = gray_bitdepth;\n\t}\n    }\n\n    if (verbose > 1)\n\t(void)fprintf(stderr, \"gif2png: %d colors used, highest color %d, %s, bitdepth %d\\n\",\n\t\t      colors_used, last_color, gray ? \"gray\":\"palette\", bitdepth);\n\n    if (verbose > 2)\n\tfor (i = 0; i <= last_color; i++) {\n\t    (void)fprintf(stderr, \"(%3d, %3d, %3d)\\n\", \n\t\t\t  colors[i].red, colors[i].blue, colors[i].green);  \n\t}\n\n    if (setjmp(png_jmpbuf(png_ptr)) != 0) {\n\t(void)fprintf(stderr, \"gif2png:  libpng returns fatal error condition\\n\");\n\t(void)free(png_ptr);\n\t(void)free(info_ptr);\n\treturn 1;\n    }\n\n    /* Create and initialize the png_struct with the desired error handler\n     * functions.  If you want to use the default stderr and longjump method,\n     * you can supply NULL for the last three parameters.  We also check that\n     * the library version is compatible with the one used at compile time,\n     * in case we are using dynamically linked libraries.  REQUIRED.\n     */\n    /*@-nullpass@*/\n    png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING,\n\t\t\t\t      (void *)NULL, NULL, NULL);\n\n    /*@=nullpass@*/\n    if (png_ptr == NULL)\n\treturn(2);\n\n    /* Allocate/initialize the image information data.  REQUIRED */\n    info_ptr = png_create_info_struct(png_ptr);\n    if (info_ptr == NULL)\n    {\n\t/*@i1@*/png_destroy_write_struct(&png_ptr,  (png_infopp)NULL);\n\treturn(2);\n    }\n\n    /* if errtype is not 1, this was generated by fatal() */ \n    if ((errtype = setjmp(png_jmpbuf(png_ptr))) != 0) {\n\tpng_destroy_write_struct(&png_ptr, &info_ptr);\n\treturn errtype;\n    }\n\n    /* use standard C streams */\n    png_init_io(png_ptr, fp);\n\n    if(optimize)\n       png_set_compression_level(png_ptr, Z_BEST_COMPRESSION);\n\n    if (gamma_srgb)\n    {\n          png_set_gAMA(png_ptr, info_ptr, 1./2.2);\n#if (PNG_LIBPNG_VER > 96)\n\t  png_set_sRGB(png_ptr, info_ptr, PNG_sRGB_INTENT_PERCEPTUAL);\n#endif\n    }\n\n    /* set basic image properties: width/height, type, bit depth, interlace */\n    if (interlaced == PNG_INTERLACE_LAST)\n\tinterlaced = current->imagestruct->interlace!=0 ? PNG_INTERLACE_ADAM7 : PNG_INTERLACE_NONE;\n\n    png_set_IHDR(png_ptr, info_ptr, \n\t\t current->imagestruct->width, current->imagestruct->height,\n\t\t bitdepth, \n\t\t gray ? PNG_COLOR_TYPE_GRAY : PNG_COLOR_TYPE_PALETTE,\n\t\t interlaced, \n\t\t PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);\n\n    /* if the GIF specified an aspect ratio, turn it into a pHYs chunk */\n    if (GifScreen.AspectRatio != 0 && GifScreen.AspectRatio != 49)\n\tpng_set_pHYs(png_ptr, info_ptr, \n\t\t     GifScreen.AspectRatio+15, 64, PNG_RESOLUTION_UNKNOWN);\n\n    /* if the GIF specified an image offset, turn it into a oFFs chunk */\n    if (img->offset_x>0 && img->offset_y>0)\n\tpng_set_oFFs(png_ptr, info_ptr, \n\t\t     img->offset_x, img->offset_y, PNG_OFFSET_PIXEL);\n\n    if (GifScreen.Background > 0) { /* no background for palette entry 0 */\n\t/* if the background color doesn't appear in local palette, we just\n\t   leave it out, if the pic is part of an animation, at least some will\n\t   use the global palette */\n\n\tif (gray) {\n\t    if (is_gray(GifScreen.ColorMap[GifScreen.Background])) {\n\t\tcolor16back.gray = remap[GifScreen.Background];\n\t\t/*@-compdef@*/\n\t\tpng_set_bKGD(png_ptr, info_ptr, &color16back);\n\t\t/*@=compdef@*/\n\t    }\n\t} else {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tif (GifScreen.ColorMap[GifScreen.Background].red == colors[i].red &&\n\t\t    GifScreen.ColorMap[GifScreen.Background].green == colors[i].green &&\n\t\t    GifScreen.ColorMap[GifScreen.Background].blue == colors[i].blue) {\n\t\t    if (last_color < i) \n\t\t\tlast_color = i;\n\t\t    color16back.index = (png_byte)i;\n\t\t    /*@-compdef@*/\n\t\t    png_set_bKGD(png_ptr, info_ptr, &color16back);\n\t\t    /*@=compdef@*/\n\t\t    break;\n\t\t}\n\t    }\n\t}\n    }\n\n    /* transparency handling */\n    if (img->trans != -1) {\n\tif (gray) {\n\t    if (verbose > 2)\n\t\t(void)fprintf(stderr, \n\t\t\t      \"gif2png: handling grayscale transparency\\n\");\n\t    color16trans.gray = remap[img->trans];\n\t    /*@-nullpass -compdef@*/\n\t    png_set_tRNS(png_ptr, info_ptr, NULL, 0, &color16trans);\n\t    /*@=nullpass =compdef@*/\n\t} else {\n\t    if (verbose > 2)\n\t\t(void)fprintf(stderr, \n\t\t\t      \"gif2png: handling palette transparency\\n\");\n\t    /* GRR NOTE: may be inconsistent with background-color logic (above) */\n\t    remapping = true;\n\t    for (i = 0; i < MAXCMSIZE; i++)\n\t\tremap[i] = (byte)i;\n\t    remap[0] = (byte)img->trans;\n\t    remap[img->trans] = 0;\n\t    pal_trans[0] = 0;\n\t    /*@-nullpass@*/\n\t    png_set_tRNS(png_ptr, info_ptr, pal_trans, 1, NULL);\n\t    /*@=nullpass@*/\n\t}\n    }\n\n    /* generate the PNG palette */\n    if (!gray) {\n\tpng_color *pltep;\n\tif (remapping) {\n\t    if (verbose > 2)\n\t\t(void)fprintf(stderr, \"Remapping palette...\\n\");\n\t    for (i = 0; i <= last_color; i++) {\n\t\tpal_rgb[i].red   = current->imagestruct->colors[remap[i]].red;\n\t\tpal_rgb[i].green = current->imagestruct->colors[remap[i]].green;\n\t\tpal_rgb[i].blue  = current->imagestruct->colors[remap[i]].blue;\n\t    }\n\t    pltep = pal_rgb;\n\t} else {\n\t    if (verbose > 2)\n\t\t(void)fprintf(stderr, \"Palette copied from GIF colors...\\n\");\n\t    pltep = current->imagestruct->colors;\n\t}\n\tpng_set_PLTE(png_ptr, info_ptr, pltep, last_color+1);\n\n\tif (verbose > 2) {\n\t    (void)fprintf(stderr,\n\t\t\t  \"PNG palette generated with %d colors:\\n\",\n\t\t\t  last_color+1);\n\t    for (i = 0; i <= last_color; i++) {\n\t\t(void)fprintf(stderr, \"(%3d, %3d, %3d)\\n\", \n\t\t\t      pltep[i].red, pltep[i].blue, pltep[i].green);  \n\t    }\n\t}\n    }\n\n    /* generate histogram chunk for paletted images only */\n    if (histogram && !gray) {\n\tunsigned long hist_maxvalue = 0;\n\tfor (i = 0; i < MAXCMSIZE; i++)\n\t    if (count[i]>hist_maxvalue)\n\t\thist_maxvalue = count[i];\n\tif (hist_maxvalue <= 65535) {\n\t    /* no scaling necessary */\n\t    for (i = 0; i < MAXCMSIZE; i++)\n\t\thistogr[i] = (png_uint_16)count[i];\n\t} else {\n\t    for (i = 0; i < MAXCMSIZE; i++)\n\t\tif (count[i] != 0) {\n\t\t    histogr[i] = (png_uint_16)\n#ifdef __GO32__\n\t\t\t/* avoid using fpu instructions on djgpp, so we don't need emu387 */\n\t\t\t(((long long)count[i]*65535)/hist_maxvalue);\n#else\n\t\t    ((double)count[i]*65535.0/hist_maxvalue);\n#endif\n\t\t    if (histogr[i] == 0)\n\t\t\thistogr[i] = 1;\n\t\t} else {\n\t\t    histogr[i] = 0;\n\t\t}\n\t}\n\tpng_set_hIST(png_ptr, info_ptr, histogr);\n    }\n\n    /* transcribe software chunk if necessary */\n    /*@-observertrans -statictrans@ -unqualifiedtrans -branchstate*/\n    if (software_chunk) {\n\tsoftware.compression = PNG_TEXT_COMPRESSION_NONE;\n\tsoftware.key = \"Software\";\n\tsoftware.text = (char*)version;\n\tsoftware.text_length = strlen(software.text);\n\n\tpng_set_text(png_ptr, info_ptr, &software, 1);\n    }\n    /*@=observertrans =statictrans =unqualifiedtrans =branchstate@*/\n\n    png_write_info(png_ptr, info_ptr);\n\n    if (bitdepth<8)\n\tpng_set_packing(png_ptr);\n\n    /* loop over elements until we reach the image or the last element if\n       this is the last image in a GIF */\n\n    while(lastimg ? s != NULL : s != e->next) {\n\tbyte *data;\n\tswitch((byte)s->GIFtype) {\n        /*@-branchstate@*/\n\tcase GIFimage:\n\t    passcount = png_set_interlace_handling(png_ptr);\n\t    for (p = 0; p<passcount;p++)\n\t\tfor (i = 0; i < (int)current->imagestruct->height; i++) {\n\t\t    if (progress) {\n\t\t\tif (passcount>1)\n\t\t\t    (void)fprintf(stderr, \"%d/%d \", p+1, passcount);\n\t\t\t(void)fprintf(stderr, \"%2d%%\\r\",\n\t\t\t\t      (int)(((long)i*100)/current->imagestruct->height));\n\t\t\t(void)fflush(stderr);\n\t\t    }\n\t\t    data = current->data + \n\t\t\t\t       (long) (img->interlace!=0 ?\n\t\t\t\t\t       interlace_line((int)current->imagestruct->height,i) : i) * current->imagestruct->width;\n\t\t    /* we have to remap once */\n\t\t    if (remapping && p == 0)\n\t\t    {\n\t\t\tfor (j = 0; j < (int)img->width; j++) {\n\t\t\t    data[j] = remap[data[j]];\n\t\t\t}\n\t\t    }\n\t\t    png_write_row(png_ptr, data);\n\t\t}\n\t    break;\n\n\tcase GIFcomment:\n\t    j = (int)s->size;\n\t    /* some GIF encoders produce trailing garbage and NULs */\n\t    if (j > 0 && ((s->data[j-1] == '\\0') || (s->data[j-1] & 0x80)!=0))\n\t\t--j;\n\t    /*@-observertrans -statictrans @*/\n\t    comment.key = \"Comment\";\n\t    if (j<500) {\n\t\tcomment.compression = PNG_TEXT_COMPRESSION_NONE;\n\t    } else {\n\t\tcomment.compression = PNG_TEXT_COMPRESSION_zTXt;\n\t    }\n\t    comment.text = (png_charp)s->data;\n \t    comment.text_length = strlen(comment.text);\n \t    png_set_text(png_ptr, info_ptr, &comment, 1);\n\t    /*@=observertrans =statictrans@*/\n\t    break;\n\n\tcase GIFapplication:\n\t    png_write_chunk_start(png_ptr, \n\t\t\t\t  (unsigned char *)\"gIFx\", \n\t\t\t\t  (png_uint_32)s->size);\n\t    png_write_chunk_data(png_ptr, \n\t\t\t\t s->data, \n\t\t\t\t (png_size_t)s->size);\n\t    png_write_chunk_end(png_ptr);\n\t    break;\n\n/* Plain Text Extensions are not supported because they represent a separate\n   subimage, and PNG is explicitly a single-image format.  PNG's gIFt chunk\n   has been officially deprecated.\n*/\n#if 0\n\tcase GIFplaintext:\n\t    /* gIFt is 12 bytes longer than GCE, due to 32-bit ints and\n\t       rgb colors */\n\t    png_write_chunk_start(png_ptr, \"gIFt\", s->size+12);\n\t    memset(buffer, 0, 24);\n\t    buffer[2] = s->data[1];\n\t    buffer[3] = s->data[0];\n\t    buffer[6] = s->data[3];\n\t    buffer[7] = s->data[2];\n\t    buffer[10] = s->data[5];\n\t    buffer[11] = s->data[4];\n\t    buffer[14] = s->data[7];\n\t    buffer[15] = s->data[6];\n\t    buffer[16] = s->data[8];\n\t    buffer[17] = s->data[9];\n\t    buffer[18] = GifScreen.ColorMap[s->data[10]].red;\n\t    buffer[19] = GifScreen.ColorMap[s->data[10]].green;\n\t    buffer[20] = GifScreen.ColorMap[s->data[10]].blue;\n\t    buffer[21] = GifScreen.ColorMap[s->data[11]].red;\n\t    buffer[22] = GifScreen.ColorMap[s->data[11]].green;\n\t    buffer[23] = GifScreen.ColorMap[s->data[11]].blue;\n\t    png_write_chunk_s->data(png_ptr, buffer, 24);\n\t    png_write_chunk_s->data(png_ptr, s->data+12, s->size-12);\n\t    png_write_chunk_end(png_ptr);\n\t    break;\n#endif\n\n\tcase GIFgraphicctl:\n\t    buffer[0] = (s->data[0] >> 2) & 7;\n\t    buffer[1] = (s->data[0] >> 1) & 1;\n\t    buffer[2] = s->data[2];\n\t    buffer[3] = s->data[1];\n\n\t    png_write_chunk(png_ptr, (unsigned char *)\"gIFg\", buffer, 4);\n\t    break;\n\n\tdefault:\n\t    (void)fprintf(stderr, \n\t\t\t  \"gif2png internal error: encountered unused element type %c\\n\", \n\t\t\t  s->GIFtype);\n\t    break;\n\t}\n        /*@=branchstate@*/\n\ts = s->next;\n    }\n    png_write_end(png_ptr, info_ptr);\n\n    /* clean up after the write, and free any memory allocated */\n    png_destroy_write_struct(&png_ptr, &info_ptr);\n\n    return errorcount;\n}",
+      "fn_code_pos": [
+        [
+          117,
+          0
+        ],
+        [
+          625,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "writefile",
+        "parameters": {
+          "s": "struct GIFelement",
+          "e": "struct GIFelement",
+          "fp": "FILE",
+          "lastimg": "bool"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nMatteGIF(GifColor matte)\n/* convert transparent pixels to a matte of given color */\n{\n    int icount = 0;\n\n    /* apply matte color to image-local transparency values */\n    for (current = &first; current ; current = current->next) {\n\tif (current->imagestruct) {\n\t    if (current->imagestruct->trans == -1)\n\t\t(void)fprintf(stderr, \n\t\t\t\"gif2png: no transparency color in image %d, matte argument ignored\\n\",\n\t\t\ticount);\n\t    else {\n\t\tif (verbose > 0) {\n\t\t    (void)fprintf(stderr, \n\t\t\t\"gif2png: transparent value in image %d is %d\\n\",  \n\t\t\ticount, current->imagestruct->trans);\n\t\t}\n\n\t\tcurrent->imagestruct->colors[current->imagestruct->trans] = matte;\n\t\tcurrent->imagestruct->trans = -1;\n\t    }\n\t}\n    }\n    return icount;\n}",
+      "fn_code_pos": [
+        [
+          629,
+          0
+        ],
+        [
+          655,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "MatteGIF",
+        "parameters": {
+          "matte": "GifColor"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int processfilter(void)\n{\n    int num_pics;\n    struct GIFelement *start;\n\n    current = &first;\n    num_pics = ReadGIF (stdin);\n    (void)fclose(stdin);\n\n    if (num_pics != 1) {\n\t(void)fprintf(stderr, \n\t\t      \"gif2png: %d images in -f (filter) mode\\n\", num_pics);\n\treturn 1;\n    }\n\n    /* eliminate use of transparency, if that is called for */\n    if (matte)\n\t(void)MatteGIF(matte_color);\n\n    start = NULL;\n    for (current = first.next; current ; current = current->next) {\n\tif (start == NULL) start = current;\n\tif (current->GIFtype == GIFimage) {\n\t    (void)writefile(start, current, stdout, true);\n\t    start = NULL;\n\t    ++numpngs;\n\t}\n    }\n    free_mem();\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          659,
+          0
+        ],
+        [
+          689,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "processfilter",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int processfile(char *fname, FILE *fp)\n{\n    char outname[1025]; /* MAXPATHLEN comes under too many names */\n    int num_pics;\n    struct GIFelement *start;\n    int i; \n    bool suppress_delete = false;\n    char *file_ext;\n    struct utimbuf time_buf;\n\n    if (fp == NULL) return 1;\n\n    current = &first;\n\n    num_pics = ReadGIF (fp);\n\n    if (preserve_mtime)\n    {\n        struct stat stat_buf;\n\n\t/*@-compdef@*/\n\t/*@-unrecog@*//* needed because splint's POSIX library is buggy */\n        if (fstat(fileno(fp), &stat_buf) < 0)\n        {\n            perror(\"Could not get input file times\");\n            return 1;\n        }\n\t/*@=compdef@*/\n\n\t/*@-usedef@*/\n        time_buf.actime  = stat_buf.st_atime;\n        time_buf.modtime = stat_buf.st_mtime;\n\t/*@=usedef@*/\n    }\n\n    (void)fclose(fp);\n\n    if (num_pics >= 0 && verbose > 1)\n\t(void)fprintf(stderr, \"gif2png: number of images %d\\n\", num_pics);\n\n    if (num_pics <= 0)\n\treturn 1;\n\n    if (webconvert)\n\tif (num_pics != 1)\n\t{\n\t    (void)fprintf(stderr, \"gif2png: %s is multi-image\\n\", fname);\n\t    return 0;\n\t}\n\telse\n\t{\n\t    (void)printf(\"%s\\n\", fname);\n\t    return 0;\n\t}\n\n    /* eliminate use of transparency, if that is called for */\n    if (matte)\n\t(void)MatteGIF(matte_color);\n\n    /* create output filename */\n\n    (void)strcpy(outname, fname);\n\n    file_ext = outname+strlen(outname);\n    if (file_ext >= outname + 4)\n\tfile_ext -= 4;\n\n    if (strcmp(file_ext, \".gif\") != 0 && strcmp(file_ext, \".GIF\") != 0 &&\n\tstrcmp(file_ext, \"_gif\") != 0 && strcmp(file_ext, \"_GIF\") != 0) {\n\t/* try to derive basename */\n\tfile_ext = outname+strlen(outname);\n\twhile(file_ext >= outname) {\n\t    if (*file_ext == '.' || *file_ext == '/' || *file_ext == '\\\\') break;\n\t    file_ext--;\n\t}\n\tif (file_ext<outname || *file_ext != '.') {\n\t    /* as a last resort, just add .png to the filename */\n\t    file_ext = outname+strlen(outname);\n\t}\n    }\n\n    (void)strcpy(file_ext, \".png\"); /* images are named .png, .p01, .p02, ... */\n\n    start = NULL;\n\n    i = 0;\n\n    for (current = first.next; current ; current = current->next) {\n\tif (start == NULL) start = current;\n\tif (current->GIFtype == GIFimage) {\n\t    i++;\n\t    if ((fp = fopen(outname, \"wb\")) == NULL) {\n\t\tperror(outname);\n\t\treturn 1;\n\t    } else {\n\t\tsuppress_delete |= writefile(start, current, fp, i == num_pics);\n\t\t(void)fclose(fp);\n\n                if (preserve_mtime)\n                {\n\t\t    /*@-compdef@*/\n                    if (utime(outname, &time_buf) < 0)\n                    {\n                        perror(\"Could not set output file times\");\n                        return 1;\n                    }\n\t\t    /*@=compdef@*/\n                }\n\n\t\t++numpngs;\n\t\tstart = NULL;\n\t\t/*@-bufferoverflowhigh*/\n\t\t(void)sprintf(file_ext, \".p%02d\", i);\n\t\t/*@=bufferoverflowhigh*/\n\t    }\n\t}\n    }\n\n    free_mem();\n\n    if (delete && !suppress_delete) {\n\t(void)unlink(fname);\n    }\n\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          693,
+          0
+        ],
+        [
+          818,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "processfile",
+        "parameters": {
+          "fname": "char",
+          "fp": "FILE"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static bool input_is_terminal(void)\n{\n    return isatty(fileno(stdin))!=0;\n}",
+      "fn_code_pos": [
+        [
+          821,
+          0
+        ],
+        [
+          824,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "input_is_terminal",
+        "parameters": {},
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "static void bailout(int sig)\n{\n    (void)fprintf(stderr, \"gif2png: GIF is fatally malformed, bailing out.\\n\");\n    exit(2);\n}",
+      "fn_code_pos": [
+        [
+          826,
+          0
+        ],
+        [
+          830,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bailout",
+        "parameters": {
+          "sig": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int main(int argc, char *argv[])\n{\n    FILE *fp;\n    int i; \n    unsigned int background;\n    int errors = 0;\n    char name[1025];\n    int ac;\n    char *color;\n\n    signal(SIGSEGV, bailout);\n\n    software_chunk = true;\n\n    for (ac = 1; ac < argc && argv[ac][0] == '-'; ac++)\n    {\n\tfor (i = 1; i < (int)strlen(argv[ac]); i++)\n\t    switch(argv[ac][i]) {\n\t    case 'b':\n\t\tif (ac >= argc - 1)\n\t\t{\n\t\t    (void)fputs(\"gif2png: missing background-matte argument\\n\",\n\t\t\t\tstderr);\n\t\t    exit(1);\n\t\t}\n\t\tcolor = argv[++ac];\n\t\tif (*color == '#')\n\t\t    color++;\n\t        (void)sscanf(color, \"%2ux\", &background);\n\t\tmatte_color.red = (background >> 16) & 0xff;\n\t\tmatte_color.green = (background >> 8) & 0xff; \n\t\tmatte_color.blue = background & 0xff;\n\t\tmatte = true;\n\t\tgoto skiparg;\n\n\t    case 'd':\n\t\tdelete = true;\n\t\tbreak;\n\n\t    case 'f':\n\t    case '1': /* backward compatibility */\n\t\tfiltermode = true;\n\t\tbreak;\n\n\t    case 'g':\n\t\tgamma_srgb = true;\n\t\tbreak;\n\n\t    case 'h':\n\t\thistogram = true;\n\t\tbreak;\n\n\t    case 'i':\n\t\tinterlaced = PNG_INTERLACE_ADAM7;\n\t\tbreak;\n\n\t    case 'm':\n\t\tpreserve_mtime = true;\n\t\tbreak;\n\n\t    case 'n':\n\t\tinterlaced = PNG_INTERLACE_NONE;\n\t\tbreak;\n\n\t    case 'p':\n\t\tprogress = true;\n\t\tbreak;\n\n\t    case 'r':\n\t\trecover = true;\n\t\tbreak;\n\n\t    case 's':\n\t\tsoftware_chunk = false;\n\t\tbreak;\n\n\t    case 'v':\n\t\t++verbose;\n\t\tbreak;\n\n\t    case 'w':\n\t\twebconvert = true;\n\t\tbreak;\n\n\t    case 'O':\n\t\toptimize = true;\n\t\tbreak;\n\n\t    default:\n\t\t(void)fprintf(stderr, \n\t\t\t      \"gif2png: unknown option `-%c'\\n\", argv[ac][i]);\n\t    usage:\n\t\t(void)fprintf(stderr,\n\t\"\\n\"\n\t\"usage: gif2png [ -bdfghimnprstvwO ] [file[.gif]] ...\\n\"\n\t\"\\n\"\n\t\"   -b  replace background pixels with given RRGGBB color (hex digits)\\n\"\n\t\"   -d  delete source GIF files after successful conversion\\n\"\n\t\"   -f  allow use as filter, die on multi-image GIF\\n\"\n\t\"   -g  write gamma=(1.0/2.2) and sRGB chunks\\n\"\n\t\"   -h  generate PNG histogram chunks into color output files\\n\"\n\t\"   -i  force conversion to interlaced PNG files\\n\"\n\t\"   -m  preserve input file modification time\\n\"\n\t\"   -n  force conversion to noninterlaced PNG files\\n\"\n\t\"   -p  display progress of PNG writing in %%\\n\"\n\t\"   -r  try to recover corrupted GIF files\\n\"\n\t\"   -s  do not write Software text chunk\\n\"\n\t\"   -v  verbose; display conversion statistics and debugging messages\\n\"\n\t\"   -w  web probe, list images without animation\\n\"\n\t\"   -O  optimize; remove unused color-table entries; use zlib level 9\\n\"\n\t\"   -1  one-only; same as -f; provided for backward compatibility\\n\"\n\t\"\\n\"\n\t\"   If no source files are listed, stdin is converted to noname.png.\\n\"\n\t\"\\n\"\n\t\"   This is %s, %s\\n\", version, compile_info);\n\t\treturn 1;\n\t    }\n    skiparg:;\n    }\n\n    if (verbose > 1)\n\t(void)fprintf(stderr, \"gif2png: %s, %s\\n\", version, compile_info);\n\n    /* loop over arguments or use stdin */\n    if (argc == ac) {\n\tif (input_is_terminal()) {\n\t    goto usage;\n\t}\n\tif (verbose > 1)\n\t    (void)fprintf(stderr, \"stdin:\\n\");\n\tif (filtermode) {\n\t    if (processfilter() != 0) ++errors;\n\t} else {\n\t    (void)processfile(\"noname.gif\", stdin);\n\t    ++numgifs;\n\t}\n    } else {\n\tfor (i = ac;i<argc; i++) {\n\t    /* make sure that there is enough space for a '.p<NUM>' suffix;\n\t       this check catches also the '.gif' case below. */\n\t    if (strlen(argv[i]) >= sizeof name - sizeof \".p\" - 3 * sizeof(int)) {\n\t\t(void)fprintf(stderr, \"%s: name too long\\n\", argv[i]);\n\t\terrors = 1;\n\t\tcontinue;\n\t    }\n\n\t    (void)strcpy(name, argv[i]);\n\t    if ((fp = fopen(name, \"rb\")) == NULL) {\n\t\t/* retry with .gif appended */\n\t\t(void)strcat(name, \".gif\");\n\t\tfp = fopen(name,\"rb\");\n\t    }\n\t    if (fp == NULL) {\n\t\tperror(argv[i]);\n\t\terrors = 1;\n\t    } else {\n\t\tif (verbose > 1)\n\t\t    (void)fprintf(stderr, \"%s:\\n\", name);\n\t\terrors |= processfile(name, fp);\n\t\t/* fp is closed in processfile */\n\t\t++numgifs;\n\t    }\n\t}\n    }\n\n    if (verbose > 0)\n\t(void)fprintf(stderr, \"Done (%s).  Converted %ld GIF%s into %ld PNG%s.\\n\",\n\t\t      errors!=0? \"with one or more errors\" : \"no errors detected\", \n\t\t      numgifs, (numgifs == 1) ? \"\" : \"s\", numpngs, (numpngs == 1)? \"\" : \"s\");\n\n    return (errors > 0) ? 1 : 0;\n}",
+      "fn_code_pos": [
+        [
+          832,
+          0
+        ],
+        [
+          1003,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct GIFelement",
+      {},
+      "",
+      [
+        24,
+        8
+      ],
+      [
+        24,
+        25
+      ]
+    ],
+    [
+      "struct GIFelement",
+      {},
+      "",
+      [
+        25,
+        0
+      ],
+      [
+        25,
+        17
+      ]
+    ],
+    [
+      "struct GIFelement",
+      {},
+      "",
+      [
+        117,
+        21
+      ],
+      [
+        117,
+        38
+      ]
+    ],
+    [
+      "struct GIFelement",
+      {},
+      "",
+      [
+        117,
+        43
+      ],
+      [
+        117,
+        60
+      ]
+    ],
+    [
+      "struct GIFimagestruct",
+      {},
+      "",
+      [
+        121,
+        4
+      ],
+      [
+        121,
+        25
+      ]
+    ],
+    [
+      "struct GIFelement",
+      {},
+      "",
+      [
+        662,
+        4
+      ],
+      [
+        662,
+        21
+      ]
+    ],
+    [
+      "struct GIFelement",
+      {},
+      "",
+      [
+        697,
+        4
+      ],
+      [
+        697,
+        21
+      ]
+    ],
+    [
+      "struct utimbuf",
+      {},
+      "",
+      [
+        701,
+        4
+      ],
+      [
+        701,
+        18
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        711,
+        8
+      ],
+      [
+        711,
+        19
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <stdio.h>\n",
+      [
+        7,
+        0
+      ],
+      [
+        8,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        8,
+        0
+      ],
+      [
+        9,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        9,
+        0
+      ],
+      [
+        10,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\t/* for isatty() */\n",
+      [
+        10,
+        0
+      ],
+      [
+        11,
+        0
+      ]
+    ],
+    [
+      "#include <zlib.h>\n",
+      [
+        11,
+        0
+      ],
+      [
+        12,
+        0
+      ]
+    ],
+    [
+      "#include <sys/stat.h>\n",
+      [
+        12,
+        0
+      ],
+      [
+        13,
+        0
+      ]
+    ],
+    [
+      "#include <utime.h>\n",
+      [
+        13,
+        0
+      ],
+      [
+        14,
+        0
+      ]
+    ],
+    [
+      "#include <stdbool.h>\n",
+      [
+        14,
+        0
+      ],
+      [
+        15,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        15,
+        0
+      ],
+      [
+        16,
+        0
+      ]
+    ],
+    [
+      "#include \"gif2png.h\"\n",
+      [
+        17,
+        0
+      ],
+      [
+        18,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

@@ -1,0 +1,988 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nx86_linux_new_fork (struct lwp_info *parent, pid_t child_pid)\n{\n  pid_t parent_pid;\n  struct x86_debug_reg_state *parent_state;\n  struct x86_debug_reg_state *child_state;\n\n  /* NULL means no watchpoint has ever been set in the parent.  In\n     that case, there's nothing to do.  */\n  if (parent->arch_private == NULL)\n    return;\n\n  /* Linux kernel before 2.6.33 commit\n     72f674d203cd230426437cdcf7dd6f681dad8b0d\n     will inherit hardware debug registers from parent\n     on fork/vfork/clone.  Newer Linux kernels create such tasks with\n     zeroed debug registers.\n\n     GDB core assumes the child inherits the watchpoints/hw\n     breakpoints of the parent, and will remove them all from the\n     forked off process.  Copy the debug registers mirrors into the\n     new process so that all breakpoints and watchpoints can be\n     removed together.  The debug registers mirror will become zeroed\n     in the end before detaching the forked off process, thus making\n     this compatible with older Linux kernels too.  */\n\n  parent_pid = ptid_get_pid (parent->ptid);\n  parent_state = x86_debug_reg_state (parent_pid);\n  child_state = x86_debug_reg_state (child_pid);\n  *child_state = *parent_state;\n}",
+      "fn_code_pos": [
+        [
+          47,
+          0
+        ],
+        [
+          77,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_new_fork",
+        "parameters": {
+          "parent": "struct lwp_info",
+          "child_pid": "pid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nx86_linux_child_post_startup_inferior (struct target_ops *self, ptid_t ptid)\n{\n  x86_cleanup_dregs ();\n  super_post_startup_inferior (self, ptid);\n}",
+      "fn_code_pos": [
+        [
+          83,
+          0
+        ],
+        [
+          88,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_child_post_startup_inferior",
+        "parameters": {
+          "self": "struct target_ops",
+          "ptid": "ptid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static const struct target_desc *\nx86_linux_read_description (struct target_ops *ops)\n{\n  int tid;\n  int is_64bit = 0;\n#ifdef __x86_64__\n  int is_x32;\n#endif\n  static uint64_t xcr0;\n  uint64_t xcr0_features_bits;\n\n  /* GNU/Linux LWP ID's are process ID's.  */\n  tid = ptid_get_lwp (inferior_ptid);\n  if (tid == 0)\n    tid = ptid_get_pid (inferior_ptid); /* Not a threaded program.  */\n\n#ifdef __x86_64__\n  {\n    unsigned long cs;\n    unsigned long ds;\n\n    /* Get CS register.  */\n    errno = 0;\n    cs = ptrace (PTRACE_PEEKUSER, tid,\n\t\t offsetof (struct user_regs_struct, cs), 0);\n    if (errno != 0)\n      perror_with_name (_(\"Couldn't get CS register\"));\n\n    is_64bit = cs == AMD64_LINUX_USER64_CS;\n\n    /* Get DS register.  */\n    errno = 0;\n    ds = ptrace (PTRACE_PEEKUSER, tid,\n\t\t offsetof (struct user_regs_struct, ds), 0);\n    if (errno != 0)\n      perror_with_name (_(\"Couldn't get DS register\"));\n\n    is_x32 = ds == AMD64_LINUX_X32_DS;\n\n    if (sizeof (void *) == 4 && is_64bit && !is_x32)\n      error (_(\"Can't debug 64-bit process with 32-bit GDB\"));\n  }\n#elif HAVE_PTRACE_GETFPXREGS\n  if (have_ptrace_getfpxregs == -1)\n    {\n      elf_fpxregset_t fpxregs;\n\n      if (ptrace (PTRACE_GETFPXREGS, tid, 0, (int) &fpxregs) < 0)\n\t{\n\t  have_ptrace_getfpxregs = 0;\n\t  have_ptrace_getregset = TRIBOOL_FALSE;\n\t  return tdesc_i386_mmx_linux;\n\t}\n    }\n#endif\n\n  if (have_ptrace_getregset == TRIBOOL_UNKNOWN)\n    {\n      uint64_t xstateregs[(X86_XSTATE_SSE_SIZE / sizeof (uint64_t))];\n      struct iovec iov;\n\n      iov.iov_base = xstateregs;\n      iov.iov_len = sizeof (xstateregs);\n\n      /* Check if PTRACE_GETREGSET works.  */\n      if (ptrace (PTRACE_GETREGSET, tid,\n\t\t  (unsigned int) NT_X86_XSTATE, &iov) < 0)\n\thave_ptrace_getregset = TRIBOOL_FALSE;\n      else\n\t{\n\t  have_ptrace_getregset = TRIBOOL_TRUE;\n\n\t  /* Get XCR0 from XSAVE extended state.  */\n\t  xcr0 = xstateregs[(I386_LINUX_XSAVE_XCR0_OFFSET\n\t\t\t     / sizeof (uint64_t))];\n\t}\n    }\n\n  /* Check the native XCR0 only if PTRACE_GETREGSET is available.  If\n     PTRACE_GETREGSET is not available then set xcr0_features_bits to\n     zero so that the \"no-features\" descriptions are returned by the\n     switches below.  */\n  if (have_ptrace_getregset == TRIBOOL_TRUE)\n    xcr0_features_bits = xcr0 & X86_XSTATE_ALL_MASK;\n  else\n    xcr0_features_bits = 0;\n\n  if (is_64bit)\n    {\n#ifdef __x86_64__\n      switch (xcr0_features_bits)\n\t{\n\tcase X86_XSTATE_AVX_MPX_AVX512_PKU_MASK:\n\t  if (is_x32)\n\t    /* No MPX, PKU on x32, fall back to AVX-AVX512.  */\n\t    return tdesc_x32_avx_avx512_linux;\n\t  else\n\t    return tdesc_amd64_avx_mpx_avx512_pku_linux;\n\tcase X86_XSTATE_AVX_AVX512_MASK:\n\t  if (is_x32)\n\t    return tdesc_x32_avx_avx512_linux;\n\t  else\n\t    return tdesc_amd64_avx_avx512_linux;\n\tcase X86_XSTATE_MPX_MASK:\n\t  if (is_x32)\n\t    return tdesc_x32_avx_linux; /* No MPX on x32 using AVX.  */\n\t  else\n\t    return tdesc_amd64_mpx_linux;\n\tcase X86_XSTATE_AVX_MPX_MASK:\n\t  if (is_x32)\n\t    return tdesc_x32_avx_linux; /* No MPX on x32 using AVX.  */\n\t  else\n\t    return tdesc_amd64_avx_mpx_linux;\n\tcase X86_XSTATE_AVX_MASK:\n\t  if (is_x32)\n\t    return tdesc_x32_avx_linux;\n\t  else\n\t    return tdesc_amd64_avx_linux;\n\tdefault:\n\t  if (is_x32)\n\t    return tdesc_x32_linux;\n\t  else\n\t    return tdesc_amd64_linux;\n\t}\n#endif\n    }\n  else\n    {\n      switch (xcr0_features_bits)\n\t{\n\tcase X86_XSTATE_AVX_MPX_AVX512_PKU_MASK:\n\t  return tdesc_i386_avx_mpx_avx512_pku_linux;\n\tcase X86_XSTATE_AVX_AVX512_MASK:\n\t  return tdesc_i386_avx_avx512_linux;\n\tcase X86_XSTATE_MPX_MASK:\n\t  return tdesc_i386_mpx_linux;\n\tcase X86_XSTATE_AVX_MPX_MASK:\n\t  return tdesc_i386_avx_mpx_linux;\n\tcase X86_XSTATE_AVX_MASK:\n\t  return tdesc_i386_avx_linux;\n\tdefault:\n\t  return tdesc_i386_linux;\n\t}\n    }\n\n  gdb_assert_not_reached (\"failed to return tdesc\");\n}",
+      "fn_code_pos": [
+        [
+          104,
+          0
+        ],
+        [
+          250,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_read_description",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static struct btrace_target_info *\nx86_linux_enable_btrace (struct target_ops *self, ptid_t ptid,\n\t\t\t const struct btrace_config *conf)\n{\n  struct btrace_target_info *tinfo;\n\n  errno = 0;\n  tinfo = linux_enable_btrace (ptid, conf);\n\n  if (tinfo == NULL)\n    error (_(\"Could not enable branch tracing for %s: %s.\"),\n\t   target_pid_to_str (ptid), safe_strerror (errno));\n\n  return tinfo;\n}",
+      "fn_code_pos": [
+        [
+          255,
+          0
+        ],
+        [
+          269,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_enable_btrace",
+        "parameters": {
+          "self": "struct target_ops",
+          "ptid": "ptid_t",
+          "conf": "struct btrace_config"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nx86_linux_disable_btrace (struct target_ops *self,\n\t\t\t  struct btrace_target_info *tinfo)\n{\n  enum btrace_error errcode = linux_disable_btrace (tinfo);\n\n  if (errcode != BTRACE_ERR_NONE)\n    error (_(\"Could not disable branch tracing.\"));\n}",
+      "fn_code_pos": [
+        [
+          273,
+          0
+        ],
+        [
+          281,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_disable_btrace",
+        "parameters": {
+          "self": "struct target_ops",
+          "tinfo": "struct btrace_target_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nx86_linux_teardown_btrace (struct target_ops *self,\n\t\t\t   struct btrace_target_info *tinfo)\n{\n  /* Ignore errors.  */\n  linux_disable_btrace (tinfo);\n}",
+      "fn_code_pos": [
+        [
+          285,
+          0
+        ],
+        [
+          291,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_teardown_btrace",
+        "parameters": {
+          "self": "struct target_ops",
+          "tinfo": "struct btrace_target_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static enum btrace_error\nx86_linux_read_btrace (struct target_ops *self,\n\t\t       struct btrace_data *data,\n\t\t       struct btrace_target_info *btinfo,\n\t\t       enum btrace_read_type type)\n{\n  return linux_read_btrace (data, btinfo, type);\n}",
+      "fn_code_pos": [
+        [
+          293,
+          0
+        ],
+        [
+          300,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_read_btrace",
+        "parameters": {
+          "self": "struct target_ops",
+          "data": "struct btrace_data",
+          "btinfo": "struct btrace_target_info",
+          "type": "enum btrace_read_type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static const struct btrace_config *\nx86_linux_btrace_conf (struct target_ops *self,\n\t\t       const struct btrace_target_info *btinfo)\n{\n  return linux_btrace_conf (btinfo);\n}",
+      "fn_code_pos": [
+        [
+          304,
+          0
+        ],
+        [
+          309,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_btrace_conf",
+        "parameters": {
+          "self": "struct target_ops",
+          "btinfo": "struct btrace_target_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "ps_err_e\nx86_linux_get_thread_area (pid_t pid, void *addr, unsigned int *base_addr)\n{\n  /* NOTE: cagney/2003-08-26: The definition of this buffer is found\n     in the kernel header <asm-i386/ldt.h>.  It, after padding, is 4 x\n     4 byte integers in size: `entry_number', `base_addr', `limit',\n     and a bunch of status bits.\n\n     The values returned by this ptrace call should be part of the\n     regcache buffer, and ps_get_thread_area should channel its\n     request through the regcache.  That way remote targets could\n     provide the value using the remote protocol and not this direct\n     call.\n\n     Is this function needed?  I'm guessing that the `base' is the\n     address of a descriptor that libthread_db uses to find the\n     thread local address base that GDB needs.  Perhaps that\n     descriptor is defined by the ABI.  Anyway, given that\n     libthread_db calls this function without prompting (gdb\n     requesting tls base) I guess it needs info in there anyway.  */\n  unsigned int desc[4];\n\n  /* This code assumes that \"int\" is 32 bits and that\n     GET_THREAD_AREA returns no more than 4 int values.  */\n  gdb_assert (sizeof (int) == 4);\n\n#ifndef PTRACE_GET_THREAD_AREA\n#define PTRACE_GET_THREAD_AREA 25\n#endif\n\n  if (ptrace (PTRACE_GET_THREAD_AREA, pid, addr, &desc) < 0)\n    return PS_ERR;\n\n  *base_addr = desc[1];\n  return PS_OK;\n}",
+      "fn_code_pos": [
+        [
+          317,
+          0
+        ],
+        [
+          352,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_get_thread_area",
+        "parameters": {
+          "pid": "pid_t",
+          "addr": "void",
+          "base_addr": "unsigned int"
+        },
+        "return_type": "ps_err_e"
+      }
+    },
+    {
+      "fn_code": "struct target_ops *\nx86_linux_create_target (void)\n{\n  /* Fill in the generic GNU/Linux methods.  */\n  struct target_ops *t = linux_target ();\n\n  /* Initialize the debug register function vectors.  */\n  x86_use_watchpoints (t);\n  x86_dr_low.set_control = x86_linux_dr_set_control;\n  x86_dr_low.set_addr = x86_linux_dr_set_addr;\n  x86_dr_low.get_addr = x86_linux_dr_get_addr;\n  x86_dr_low.get_status = x86_linux_dr_get_status;\n  x86_dr_low.get_control = x86_linux_dr_get_control;\n  x86_set_debug_register_length (sizeof (void *));\n\n  /* Override the GNU/Linux inferior startup hook.  */\n  super_post_startup_inferior = t->to_post_startup_inferior;\n  t->to_post_startup_inferior = x86_linux_child_post_startup_inferior;\n\n  /* Add the description reader.  */\n  t->to_read_description = x86_linux_read_description;\n\n  /* Add btrace methods.  */\n  t->to_supports_btrace = linux_supports_btrace;\n  t->to_enable_btrace = x86_linux_enable_btrace;\n  t->to_disable_btrace = x86_linux_disable_btrace;\n  t->to_teardown_btrace = x86_linux_teardown_btrace;\n  t->to_read_btrace = x86_linux_read_btrace;\n  t->to_btrace_conf = x86_linux_btrace_conf;\n\n  return t;\n}",
+      "fn_code_pos": [
+        [
+          357,
+          0
+        ],
+        [
+          388,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_create_target",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\nx86_linux_add_target (struct target_ops *t)\n{\n  linux_nat_add_target (t);\n  linux_nat_set_new_thread (t, x86_linux_new_thread);\n  linux_nat_set_new_fork (t, x86_linux_new_fork);\n  linux_nat_set_forget_process (t, x86_forget_process);\n  linux_nat_set_prepare_to_resume (t, x86_linux_prepare_to_resume);\n}",
+      "fn_code_pos": [
+        [
+          392,
+          0
+        ],
+        [
+          400,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_add_target",
+        "parameters": {
+          "t": "struct target_ops"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "(*super_post_startup_inferior) (struct target_ops *self,\n\t\t\t\t\t    ptid_t ptid)",
+      "fn_dec_pos": [
+        [
+          80,
+          12
+        ],
+        [
+          81,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "self": "struct target_ops",
+          "ptid": "ptid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "x86_linux_read_description (struct target_ops *ops)",
+      "fn_dec_pos": [
+        [
+          105,
+          0
+        ],
+        [
+          105,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_read_description",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "x86_linux_enable_btrace (struct target_ops *self, ptid_t ptid,\n\t\t\t const struct btrace_config *conf)",
+      "fn_dec_pos": [
+        [
+          256,
+          0
+        ],
+        [
+          257,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_enable_btrace",
+        "parameters": {
+          "self": "struct target_ops",
+          "ptid": "ptid_t",
+          "conf": "struct btrace_config"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "x86_linux_btrace_conf (struct target_ops *self,\n\t\t       const struct btrace_target_info *btinfo)",
+      "fn_dec_pos": [
+        [
+          305,
+          0
+        ],
+        [
+          306,
+          49
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_btrace_conf",
+        "parameters": {
+          "self": "struct target_ops",
+          "btinfo": "struct btrace_target_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "x86_linux_create_target (void)",
+      "fn_dec_pos": [
+        [
+          358,
+          0
+        ],
+        [
+          358,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_linux_create_target",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        48,
+        20
+      ],
+      [
+        48,
+        35
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        51,
+        2
+      ],
+      [
+        51,
+        28
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        52,
+        2
+      ],
+      [
+        52,
+        28
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        80,
+        44
+      ],
+      [
+        80,
+        61
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        84,
+        39
+      ],
+      [
+        84,
+        56
+      ]
+    ],
+    [
+      "struct target_desc",
+      {},
+      "",
+      [
+        104,
+        13
+      ],
+      [
+        104,
+        31
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        105,
+        28
+      ],
+      [
+        105,
+        45
+      ]
+    ],
+    [
+      "struct user_regs_struct",
+      {},
+      "",
+      [
+        128,
+        13
+      ],
+      [
+        128,
+        36
+      ]
+    ],
+    [
+      "struct user_regs_struct",
+      {},
+      "",
+      [
+        137,
+        13
+      ],
+      [
+        137,
+        36
+      ]
+    ],
+    [
+      "struct iovec",
+      {},
+      "",
+      [
+        163,
+        6
+      ],
+      [
+        163,
+        18
+      ]
+    ],
+    [
+      "struct btrace_target_info",
+      {},
+      "",
+      [
+        255,
+        7
+      ],
+      [
+        255,
+        32
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        256,
+        25
+      ],
+      [
+        256,
+        42
+      ]
+    ],
+    [
+      "struct btrace_config",
+      {},
+      "",
+      [
+        257,
+        10
+      ],
+      [
+        257,
+        30
+      ]
+    ],
+    [
+      "struct btrace_target_info",
+      {},
+      "",
+      [
+        259,
+        2
+      ],
+      [
+        259,
+        27
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        274,
+        26
+      ],
+      [
+        274,
+        43
+      ]
+    ],
+    [
+      "struct btrace_target_info",
+      {},
+      "",
+      [
+        275,
+        5
+      ],
+      [
+        275,
+        30
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        286,
+        27
+      ],
+      [
+        286,
+        44
+      ]
+    ],
+    [
+      "struct btrace_target_info",
+      {},
+      "",
+      [
+        287,
+        6
+      ],
+      [
+        287,
+        31
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        294,
+        23
+      ],
+      [
+        294,
+        40
+      ]
+    ],
+    [
+      "struct btrace_data",
+      {},
+      "",
+      [
+        295,
+        9
+      ],
+      [
+        295,
+        27
+      ]
+    ],
+    [
+      "struct btrace_target_info",
+      {},
+      "",
+      [
+        296,
+        9
+      ],
+      [
+        296,
+        34
+      ]
+    ],
+    [
+      "struct btrace_config",
+      {},
+      "",
+      [
+        304,
+        13
+      ],
+      [
+        304,
+        33
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        305,
+        23
+      ],
+      [
+        305,
+        40
+      ]
+    ],
+    [
+      "struct btrace_target_info",
+      {},
+      "",
+      [
+        306,
+        15
+      ],
+      [
+        306,
+        40
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        357,
+        0
+      ],
+      [
+        357,
+        17
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        361,
+        2
+      ],
+      [
+        361,
+        19
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        393,
+        22
+      ],
+      [
+        393,
+        39
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"elf/common.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_proc_service.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"nat/gdb_ptrace.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <sys/user.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <sys/procfs.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <sys/uio.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"x86-nat.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"linux-nat.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"i386-linux-nat.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"x86-linux-nat.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"i386-linux-tdep.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"amd64-linux-tdep.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"x86-xstate.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include \"nat/linux-btrace.h\"\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"nat/linux-nat.h\"\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include \"nat/x86-linux.h\"\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include \"nat/x86-linux-dregs.h\"\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include \"nat/linux-ptrace.h\"\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum btrace_error",
+      {},
+      "",
+      [
+        277,
+        2
+      ],
+      [
+        277,
+        19
+      ]
+    ],
+    [
+      "enum btrace_error",
+      {},
+      "",
+      [
+        293,
+        7
+      ],
+      [
+        293,
+        24
+      ]
+    ],
+    [
+      "enum btrace_read_type",
+      {},
+      "",
+      [
+        297,
+        9
+      ],
+      [
+        297,
+        30
+      ]
+    ]
+  ]
+}

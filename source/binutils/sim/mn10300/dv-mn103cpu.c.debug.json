@@ -1,0 +1,638 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nattach_mn103cpu_regs (struct hw *me,\n\t\t      struct mn103cpu *controller)\n{\n  unsigned_word attach_address;\n  int attach_space;\n  unsigned attach_size;\n  reg_property_spec reg;\n  if (hw_find_property (me, \"reg\") == NULL)\n    hw_abort (me, \"Missing \\\"reg\\\" property\");\n  if (!hw_find_reg_array_property (me, \"reg\", 0, &reg))\n    hw_abort (me, \"\\\"reg\\\" property must contain three addr/size entries\");\n  hw_unit_address_to_attach_address (hw_parent (me),\n\t\t\t\t     &reg.address,\n\t\t\t\t     &attach_space,\n\t\t\t\t     &attach_address,\n\t\t\t\t     me);\n  controller->block.base = attach_address;\n  hw_unit_size_to_attach_size (hw_parent (me),\n\t\t\t       &reg.size,\n\t\t\t       &attach_size, me);\n  controller->block.bound = attach_address + (attach_size - 1);\n  if ((controller->block.base & 3) != 0)\n    hw_abort (me, \"cpu register block must be 4 byte aligned\");\n  hw_attach_address (hw_parent (me),\n\t\t     0,\n\t\t     attach_space, attach_address, attach_size,\n\t\t     me);\n}",
+      "fn_code_pos": [
+        [
+          156,
+          0
+        ],
+        [
+          184,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_mn103cpu_regs",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103cpu"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nmn103cpu_finish (struct hw *me)\n{\n  struct mn103cpu *controller;\n\n  controller = HW_ZALLOC (me, struct mn103cpu);\n  set_hw_data (me, controller);\n  set_hw_io_read_buffer (me, mn103cpu_io_read_buffer);\n  set_hw_io_write_buffer (me, mn103cpu_io_write_buffer);\n  set_hw_ports (me, mn103cpu_ports);\n  set_hw_port_event (me, mn103cpu_port_event);\n\n  /* Attach ourself to our parent bus */\n  attach_mn103cpu_regs (me, controller);\n\n  /* Initialize the read-only registers */\n  controller->pending_level = 7; /* FIXME */\n  /* ... */\n}",
+      "fn_code_pos": [
+        [
+          187,
+          0
+        ],
+        [
+          205,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103cpu_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndeliver_mn103cpu_interrupt (struct hw *me,\n\t\t\t    void *data)\n{\n  struct mn103cpu *controller = hw_data (me);\n  SIM_DESC simulator = hw_system (me);\n  sim_cpu *cpu = STATE_CPU (simulator, 0);\n\n  if (controller->pending_reset)\n    {\n      controller->pending_reset = 0;\n      /* need to clear all registers et.al! */\n      HW_TRACE ((me, \"Reset!\"));\n      hw_abort (me, \"Reset!\");\n    }\n  else if (controller->pending_nmi)\n    {\n      controller->pending_nmi = 0;\n      store_word (SP - 4, CPU_PC_GET (cpu));\n      store_half (SP - 8, PSW);\n      PSW &= ~PSW_IE;\n      SP = SP - 8;\n      CPU_PC_SET (cpu, 0x40000008);\n      HW_TRACE ((me, \"nmi pc=0x%08lx psw=0x%04x sp=0x%08lx\",\n\t\t (long) CPU_PC_GET (cpu), (unsigned) PSW, (long) SP));\n    }\n  else if ((controller->pending_level < EXTRACT_PSW_LM)\n\t   && (PSW & PSW_IE))\n    {\n      /* Don't clear pending level.  Request continues to be pending\n         until the interrupt controller clears/changes it */\n      store_word (SP - 4, CPU_PC_GET (cpu));\n      store_half (SP - 8, PSW);\n      PSW &= ~PSW_IE;\n      PSW &= ~PSW_LM;\n      PSW |= INSERT_PSW_LM (controller->pending_level);\n      SP = SP - 8;\n      CPU_PC_SET (cpu, 0x40000000 + controller->interrupt_vector[controller->pending_level]);\n      HW_TRACE ((me, \"port-out ack %d\", controller->pending_level));\n      hw_port_event (me, ACK_PORT, controller->pending_level);\n      HW_TRACE ((me, \"int level=%d pc=0x%08lx psw=0x%04x sp=0x%08lx\",\n\t\t controller->pending_level,\n\t\t (long) CPU_PC_GET (cpu), (unsigned) PSW, (long) SP));\n    }\n\n  if (controller->pending_level < 7) /* FIXME */\n    {\n      /* As long as there is the potential need to deliver an\n\t interrupt we keep rescheduling this routine. */\n      if (controller->pending_handler != NULL)\n\tcontroller->pending_handler =\n\t  hw_event_queue_schedule (me, 1, deliver_mn103cpu_interrupt, NULL);\n    }\n  else\n    {\n      /* Don't bother re-scheduling the interrupt handler as there is\n         nothing to deliver */\n      controller->pending_handler = NULL;\n    }\n\n}",
+      "fn_code_pos": [
+        [
+          211,
+          0
+        ],
+        [
+          271,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "deliver_mn103cpu_interrupt",
+        "parameters": {
+          "me": "struct hw",
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nmn103cpu_port_event (struct hw *me,\n\t\t     int my_port,\n\t\t     struct hw *source,\n\t\t     int source_port,\n\t\t     int level)\n{\n  struct mn103cpu *controller = hw_data (me);\n\n  /* Schedule our event handler *now* */\n  if (controller->pending_handler == NULL)\n    controller->pending_handler =\n      hw_event_queue_schedule (me, 0, deliver_mn103cpu_interrupt, NULL);\n\n  switch (my_port)\n    {\n      \n    case RESET_PORT:\n      controller->pending_reset = 1;\n      HW_TRACE ((me, \"port-in reset\"));\n      break;\n      \n    case NMI_PORT:\n      controller->pending_nmi = 1;\n      HW_TRACE ((me, \"port-in nmi\"));\n      break;\n      \n    case LEVEL_PORT:\n      controller->pending_level = level;\n      HW_TRACE ((me, \"port-in level=%d\", level));\n      break;\n      \n    default:\n      hw_abort (me, \"bad switch\");\n      break;\n\n    }\n}",
+      "fn_code_pos": [
+        [
+          274,
+          0
+        ],
+        [
+          311,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103cpu_port_event",
+        "parameters": {
+          "me": "struct hw",
+          "my_port": "int",
+          "source": "struct hw",
+          "source_port": "int",
+          "level": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static enum mn103cpu_regs\ndecode_mn103cpu_addr (struct hw *me,\n\t\t      struct mn103cpu *controller,\n\t\t      unsigned_word base)\n{\n  switch (base - controller->block.base)\n    {\n    case 0x000: return IVR0_REG;\n    case 0x004: return IVR1_REG;\n    case 0x008: return IVR2_REG;\n    case 0x00c: return IVR3_REG;\n    case 0x010: return IVR4_REG;\n    case 0x014: return IVR5_REG;\n    case 0x018: return IVR6_REG;\n    case 0x020: return IMCR_REG;\n    case 0x040: return CPUM_REG;\n    default: return INVALID_REG;\n    }\n}",
+      "fn_code_pos": [
+        [
+          329,
+          0
+        ],
+        [
+          347,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decode_mn103cpu_addr",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103cpu",
+          "base": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nmn103cpu_io_read_buffer (struct hw *me,\n\t\t\t void *dest,\n\t\t\t int space,\n\t\t\t unsigned_word base,\n\t\t\t unsigned nr_bytes)\n{\n  struct mn103cpu *controller = hw_data (me);\n  unsigned16 val = 0;\n  enum mn103cpu_regs reg = decode_mn103cpu_addr (me, controller, base);\n\n  switch (reg)\n    {\n    case IVR0_REG:\n    case IVR1_REG:\n    case IVR2_REG:\n    case IVR3_REG:\n    case IVR4_REG:\n    case IVR5_REG:\n    case IVR6_REG:\n      val = controller->interrupt_vector[reg - IVR0_REG];\n      break;\n    case IMCR_REG:\n      val = controller->internal_memory_control;\n      break;\n    case CPUM_REG:\n      val = controller->cpu_mode;\n      break;\n    default:\n      /* just ignore the read */\n      break;\n    }\n\n  if (nr_bytes == 2)\n    *(unsigned16*) dest = H2LE_2 (val);\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          349,
+          0
+        ],
+        [
+          386,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103cpu_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nmn103cpu_io_write_buffer (struct hw *me,\n\t\t\t  const void *source,\n\t\t\t  int space,\n\t\t\t  unsigned_word base,\n\t\t\t  unsigned nr_bytes)\n{\n  struct mn103cpu *controller = hw_data (me);\n  unsigned16 val;\n  enum mn103cpu_regs reg;\n\n  if (nr_bytes != 2)\n    hw_abort (me, \"must be two byte write\");\n\n  reg = decode_mn103cpu_addr (me, controller, base);\n  val = LE2H_2 (* (unsigned16 *) source);\n\n  switch (reg)\n    {\n    case IVR0_REG:\n    case IVR1_REG:\n    case IVR2_REG:\n    case IVR3_REG:\n    case IVR4_REG:\n    case IVR5_REG:\n    case IVR6_REG:\n      controller->interrupt_vector[reg - IVR0_REG] = val;\n      HW_TRACE ((me, \"ivr%d = 0x%04lx\", reg - IVR0_REG, (long) val));\n      break;\n    default:\n      /* just ignore the write */\n      break;\n    }\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          388,
+          0
+        ],
+        [
+          423,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103cpu_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct mn103cpu_block {\n  unsigned_word base;\n  unsigned_word bound;\n}",
+      {
+        "base": "unsigned_word",
+        "bound": "unsigned_word"
+      },
+      "mn103cpu_block",
+      [
+        100,
+        0
+      ],
+      [
+        103,
+        1
+      ]
+    ],
+    [
+      "struct mn103cpu {\n  struct mn103cpu_block block;\n  struct hw_event *pending_handler;\n  int pending_level;\n  int pending_nmi;\n  int pending_reset;\n  /* the visible registers */\n  unsigned16 interrupt_vector[NR_VECTORS];\n  unsigned16 internal_memory_control;\n  unsigned16 cpu_mode;\n}",
+      {
+        "block": "struct mn103cpu_block",
+        "*pending_handler": "struct hw_event",
+        "pending_level": "int",
+        "pending_nmi": "int",
+        "pending_reset": "int",
+        "interrupt_vector[NR_VECTORS]": "unsigned16",
+        "internal_memory_control": "unsigned16",
+        "cpu_mode": "unsigned16"
+      },
+      "mn103cpu",
+      [
+        106,
+        0
+      ],
+      [
+        116,
+        1
+      ]
+    ],
+    [
+      "struct mn103cpu_block {\n  unsigned_word base;\n  unsigned_word bound;\n}",
+      {
+        "base": "unsigned_word",
+        "bound": "unsigned_word"
+      },
+      "mn103cpu_block",
+      [
+        100,
+        0
+      ],
+      [
+        103,
+        1
+      ]
+    ],
+    [
+      "struct mn103cpu {\n  struct mn103cpu_block block;\n  struct hw_event *pending_handler;\n  int pending_level;\n  int pending_nmi;\n  int pending_reset;\n  /* the visible registers */\n  unsigned16 interrupt_vector[NR_VECTORS];\n  unsigned16 internal_memory_control;\n  unsigned16 cpu_mode;\n}",
+      {
+        "block": "struct mn103cpu_block",
+        "*pending_handler": "struct hw_event",
+        "pending_level": "int",
+        "pending_nmi": "int",
+        "pending_reset": "int",
+        "interrupt_vector[NR_VECTORS]": "unsigned16",
+        "internal_memory_control": "unsigned16",
+        "cpu_mode": "unsigned16"
+      },
+      "mn103cpu",
+      [
+        106,
+        0
+      ],
+      [
+        116,
+        1
+      ]
+    ],
+    [
+      "struct mn103cpu_block",
+      {},
+      "",
+      [
+        107,
+        2
+      ],
+      [
+        107,
+        23
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        108,
+        2
+      ],
+      [
+        108,
+        17
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        135,
+        13
+      ],
+      [
+        135,
+        38
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        157,
+        22
+      ],
+      [
+        157,
+        31
+      ]
+    ],
+    [
+      "struct mn103cpu",
+      {},
+      "",
+      [
+        158,
+        8
+      ],
+      [
+        158,
+        23
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        188,
+        17
+      ],
+      [
+        188,
+        26
+      ]
+    ],
+    [
+      "struct mn103cpu",
+      {},
+      "",
+      [
+        190,
+        2
+      ],
+      [
+        190,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        212,
+        28
+      ],
+      [
+        212,
+        37
+      ]
+    ],
+    [
+      "struct mn103cpu",
+      {},
+      "",
+      [
+        215,
+        2
+      ],
+      [
+        215,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        275,
+        21
+      ],
+      [
+        275,
+        30
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        277,
+        7
+      ],
+      [
+        277,
+        16
+      ]
+    ],
+    [
+      "struct mn103cpu",
+      {},
+      "",
+      [
+        281,
+        2
+      ],
+      [
+        281,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        330,
+        22
+      ],
+      [
+        330,
+        31
+      ]
+    ],
+    [
+      "struct mn103cpu",
+      {},
+      "",
+      [
+        331,
+        8
+      ],
+      [
+        331,
+        23
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        350,
+        25
+      ],
+      [
+        350,
+        34
+      ]
+    ],
+    [
+      "struct mn103cpu",
+      {},
+      "",
+      [
+        356,
+        2
+      ],
+      [
+        356,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        389,
+        26
+      ],
+      [
+        389,
+        35
+      ]
+    ],
+    [
+      "struct mn103cpu",
+      {},
+      "",
+      [
+        395,
+        2
+      ],
+      [
+        395,
+        17
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        426,
+        6
+      ],
+      [
+        426,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum { NR_VECTORS = 7, }",
+      {
+        "NR_VECTORS": ""
+      },
+      "",
+      [
+        95,
+        0
+      ],
+      [
+        95,
+        24
+      ]
+    ],
+    [
+      "enum {\n  RESET_PORT,\n  NMI_PORT,\n  LEVEL_PORT,\n}",
+      {
+        "RESET_PORT": "",
+        "NMI_PORT": "",
+        "LEVEL_PORT": ""
+      },
+      "",
+      [
+        122,
+        0
+      ],
+      [
+        126,
+        1
+      ]
+    ],
+    [
+      "enum {\n  ACK_PORT,\n}",
+      {
+        "ACK_PORT": ""
+      },
+      "",
+      [
+        131,
+        0
+      ],
+      [
+        133,
+        1
+      ]
+    ],
+    [
+      "enum mn103cpu_regs {\n  INVALID_REG,\n  IVR0_REG,\n  IVR1_REG,\n  IVR2_REG,\n  IVR3_REG,\n  IVR4_REG,\n  IVR5_REG,\n  IVR6_REG,\n  IMCR_REG,\n  CPUM_REG,\n}",
+      {
+        "INVALID_REG": "",
+        "IVR0_REG": "",
+        "IVR1_REG": "",
+        "IVR2_REG": "",
+        "IVR3_REG": "",
+        "IVR4_REG": "",
+        "IVR5_REG": "",
+        "IVR6_REG": "",
+        "IMCR_REG": "",
+        "CPUM_REG": ""
+      },
+      "mn103cpu_regs",
+      [
+        316,
+        0
+      ],
+      [
+        327,
+        1
+      ]
+    ],
+    [
+      "enum mn103cpu_regs",
+      {},
+      "",
+      [
+        329,
+        7
+      ],
+      [
+        329,
+        25
+      ]
+    ],
+    [
+      "enum mn103cpu_regs",
+      {},
+      "",
+      [
+        358,
+        2
+      ],
+      [
+        358,
+        20
+      ]
+    ],
+    [
+      "enum mn103cpu_regs",
+      {},
+      "",
+      [
+        397,
+        2
+      ],
+      [
+        397,
+        20
+      ]
+    ]
+  ]
+}

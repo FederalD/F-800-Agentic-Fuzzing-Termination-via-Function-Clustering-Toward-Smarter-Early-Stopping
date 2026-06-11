@@ -1,0 +1,1292 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "rc_res_directory *\nread_coff_rsrc (const char *filename, const char *target)\n{\n  rc_res_directory *ret;\n  bfd *abfd;\n  windres_bfd wrbfd;\n  char **matching;\n  asection *sec;\n  bfd_size_type size;\n  bfd_byte *data;\n  struct coff_file_info flaginfo;\n\n  if (filename == NULL)\n    fatal (_(\"filename required for COFF input\"));\n\n  abfd = bfd_openr (filename, target);\n  if (abfd == NULL)\n    bfd_fatal (filename);\n\n  if (! bfd_check_format_matches (abfd, bfd_object, &matching))\n    {\n      bfd_nonfatal (bfd_get_filename (abfd));\n      if (bfd_get_error () == bfd_error_file_ambiguously_recognized)\n\tlist_matching_formats (matching);\n      xexit (1);\n    }\n\n  sec = bfd_get_section_by_name (abfd, \".rsrc\");\n  if (sec == NULL)\n    {\n      fatal (_(\"%s: no resource section\"), filename);\n    }\n\n  set_windres_bfd (&wrbfd, abfd, sec, WR_KIND_BFD);\n  size = bfd_section_size (abfd, sec);\n  /* PR 17512: file: 1b25ba5d\n     The call to get_file_size here may be expensive\n     but there is no other way to determine if the section size\n     is reasonable.  */\n  if (size > (bfd_size_type) get_file_size (filename))\n    fatal (_(\"%s: .rsrc section is bigger than the file!\"), filename);\n\n  data = (bfd_byte *) res_alloc (size);\n  get_windres_bfd_content (&wrbfd, data, 0, size);\n\n  flaginfo.filename = filename;\n  flaginfo.data = data;\n  flaginfo.data_end = data + size;\n  flaginfo.secaddr = (bfd_get_section_vma (abfd, sec)\n\t\t   - pe_data (abfd)->pe_opthdr.ImageBase);\n\n  /* Now just read in the top level resource directory.  Note that we\n     don't free data, since we create resource entries that point into\n     it.  If we ever want to free up the resource information we read,\n     this will have to be cleaned up.  */\n\n  ret = read_coff_res_dir (&wrbfd, data, &flaginfo, (const rc_res_id *) NULL, 0);\n\n  bfd_close (abfd);\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          109,
+          0
+        ],
+        [
+          170,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_coff_rsrc",
+        "parameters": {
+          "filename": "char",
+          "target": "char"
+        },
+        "return_type": "rc_res_directory"
+      }
+    },
+    {
+      "fn_code": "static void\noverrun (const struct coff_file_info *flaginfo, const char *msg)\n{\n  fatal (_(\"%s: %s: address out of bounds\"), flaginfo->filename, msg);\n}",
+      "fn_code_pos": [
+        [
+          174,
+          0
+        ],
+        [
+          178,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "overrun",
+        "parameters": {
+          "flaginfo": "struct coff_file_info",
+          "msg": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static rc_res_directory *\nread_coff_res_dir (windres_bfd *wrbfd, const bfd_byte *data,\n\t\t   const struct coff_file_info *flaginfo,\n\t\t   const rc_res_id *type, int level)\n{\n  const struct extern_res_directory *erd;\n  rc_res_directory *rd;\n  int name_count, id_count, i;\n  rc_res_entry **pp;\n  const struct extern_res_entry *ere;\n\n  /* PR 17512: file: 09d80f53.\n     Whilst in theory resources can nest to any level, in practice\n     Microsoft only defines 3 levels.  Corrupt files however might\n     claim to use more.  */\n  if (level > 4)\n    overrun (flaginfo, _(\"Resources nest too deep\"));\n\n  if ((size_t) (flaginfo->data_end - data) < sizeof (struct extern_res_directory))\n    overrun (flaginfo, _(\"directory\"));\n\n  erd = (const struct extern_res_directory *) data;\n\n  rd = (rc_res_directory *) res_alloc (sizeof (rc_res_directory));\n  rd->characteristics = windres_get_32 (wrbfd, erd->characteristics, 4);\n  rd->time = windres_get_32 (wrbfd, erd->time, 4);\n  rd->major = windres_get_16 (wrbfd, erd->major, 2);\n  rd->minor = windres_get_16 (wrbfd, erd->minor, 2);\n  rd->entries = NULL;\n\n  name_count = windres_get_16 (wrbfd, erd->name_count, 2);\n  id_count = windres_get_16 (wrbfd, erd->id_count, 2);\n\n  pp = &rd->entries;\n\n  /* The resource directory entries immediately follow the directory\n     table.  */\n  ere = (const struct extern_res_entry *) (erd + 1);\n\n  for (i = 0; i < name_count; i++, ere++)\n    {\n      rc_uint_type name, rva;\n      rc_res_entry *re;\n      const bfd_byte *ers;\n      int length, j;\n\n      if ((const bfd_byte *) ere >= flaginfo->data_end)\n\toverrun (flaginfo, _(\"named directory entry\"));\n\n      name = windres_get_32 (wrbfd, ere->name, 4);\n      rva = windres_get_32 (wrbfd, ere->rva, 4);\n\n      /* For some reason the high bit in NAME is set.  */\n      name &=~ 0x80000000;\n\n      if (name > (rc_uint_type) (flaginfo->data_end - flaginfo->data))\n\toverrun (flaginfo, _(\"directory entry name\"));\n\n      ers = flaginfo->data + name;\n\n      re = (rc_res_entry *) res_alloc (sizeof *re);\n      re->next = NULL;\n      re->id.named = 1;\n      length = windres_get_16 (wrbfd, ers, 2);\n      re->id.u.n.length = length;\n      re->id.u.n.name = (unichar *) res_alloc (length * sizeof (unichar));\n      for (j = 0; j < length; j++)\n\t{\n\t  /* PR 17512: file: 05dc4a16.  */\n\t  if (length < 0 || ers >= flaginfo->data_end || ers + j * 2 + 4 >= flaginfo->data_end)\n\t    overrun (flaginfo, _(\"resource name\"));\n\t  re->id.u.n.name[j] = windres_get_16 (wrbfd, ers + j * 2 + 2, 2);\n\t}\n\n      if (level == 0)\n\ttype = &re->id;\n\n      if ((rva & 0x80000000) != 0)\n\t{\n\t  rva &=~ 0x80000000;\n\t  if (rva >= (rc_uint_type) (flaginfo->data_end - flaginfo->data))\n\t    overrun (flaginfo, _(\"named subdirectory\"));\n\t  re->subdir = 1;\n\t  re->u.dir = read_coff_res_dir (wrbfd, flaginfo->data + rva, flaginfo, type,\n\t\t\t\t\t level + 1);\n\t}\n      else\n\t{\n\t  if (rva >= (rc_uint_type) (flaginfo->data_end - flaginfo->data))\n\t    overrun (flaginfo, _(\"named resource\"));\n\t  re->subdir = 0;\n\t  re->u.res = read_coff_data_entry (wrbfd, flaginfo->data + rva, flaginfo, type);\n\t}\n\n      *pp = re;\n      pp = &re->next;\n    }\n\n  for (i = 0; i < id_count; i++, ere++)\n    {\n      unsigned long name, rva;\n      rc_res_entry *re;\n\n      if ((const bfd_byte *) ere >= flaginfo->data_end)\n\toverrun (flaginfo, _(\"ID directory entry\"));\n\n      name = windres_get_32 (wrbfd, ere->name, 4);\n      rva = windres_get_32 (wrbfd, ere->rva, 4);\n\n      re = (rc_res_entry *) res_alloc (sizeof *re);\n      re->next = NULL;\n      re->id.named = 0;\n      re->id.u.id = name;\n\n      if (level == 0)\n\ttype = &re->id;\n\n      if ((rva & 0x80000000) != 0)\n\t{\n\t  rva &=~ 0x80000000;\n\t  if (rva >= (rc_uint_type) (flaginfo->data_end - flaginfo->data))\n\t    overrun (flaginfo, _(\"ID subdirectory\"));\n\t  re->subdir = 1;\n\t  re->u.dir = read_coff_res_dir (wrbfd, flaginfo->data + rva, flaginfo, type,\n\t\t\t\t\t level + 1);\n\t}\n      else\n\t{\n\t  if (rva >= (rc_uint_type) (flaginfo->data_end - flaginfo->data))\n\t    overrun (flaginfo, _(\"ID resource\"));\n\t  re->subdir = 0;\n\t  re->u.res = read_coff_data_entry (wrbfd, flaginfo->data + rva, flaginfo, type);\n\t}\n\n      *pp = re;\n      pp = &re->next;\n    }\n\n  return rd;\n}",
+      "fn_code_pos": [
+        [
+          182,
+          0
+        ],
+        [
+          321,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_coff_res_dir",
+        "parameters": {
+          "wrbfd": "windres_bfd",
+          "data": "bfd_byte",
+          "flaginfo": "struct coff_file_info",
+          "type": "rc_res_id",
+          "level": "int"
+        },
+        "return_type": "rc_res_directory"
+      }
+    },
+    {
+      "fn_code": "static rc_res_resource *\nread_coff_data_entry (windres_bfd *wrbfd, const bfd_byte *data,\n\t\t      const struct coff_file_info *flaginfo,\n\t\t      const rc_res_id *type)\n{\n  const struct extern_res_data *erd;\n  rc_res_resource *r;\n  rc_uint_type size, rva;\n  const bfd_byte *resdata;\n\n  if (type == NULL)\n    fatal (_(\"resource type unknown\"));\n\n  if ((size_t) (flaginfo->data_end - data) < sizeof (struct extern_res_data))\n    overrun (flaginfo, _(\"data entry\"));\n\n  erd = (const struct extern_res_data *) data;\n\n  size = windres_get_32 (wrbfd, erd->size, 4);\n  rva = windres_get_32 (wrbfd, erd->rva, 4);\n  if (rva < flaginfo->secaddr\n      || rva - flaginfo->secaddr >= (rc_uint_type) (flaginfo->data_end - flaginfo->data))\n    overrun (flaginfo, _(\"resource data\"));\n\n  resdata = flaginfo->data + (rva - flaginfo->secaddr);\n\n  if (size > (rc_uint_type) (flaginfo->data_end - resdata))\n    overrun (flaginfo, _(\"resource data size\"));\n\n  r = bin_to_res (wrbfd, *type, resdata, size);\n\n  memset (&r->res_info, 0, sizeof (rc_res_res_info));\n  r->coff_info.codepage = windres_get_32 (wrbfd, erd->codepage, 4);\n  r->coff_info.reserved = windres_get_32 (wrbfd, erd->reserved, 4);\n\n  return r;\n}",
+      "fn_code_pos": [
+        [
+          325,
+          0
+        ],
+        [
+          361,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_coff_data_entry",
+        "parameters": {
+          "wrbfd": "windres_bfd",
+          "data": "bfd_byte",
+          "flaginfo": "struct coff_file_info",
+          "type": "rc_res_id"
+        },
+        "return_type": "rc_res_resource"
+      }
+    },
+    {
+      "fn_code": "void\nwrite_coff_file (const char *filename, const char *target,\n\t\t const rc_res_directory *resources)\n{\n  bfd *abfd;\n  asection *sec;\n  struct coff_write_info cwi;\n  windres_bfd wrbfd;\n  bindata *d;\n  coff_res_data *rd;\n  unsigned long length, offset;\n\n  if (filename == NULL)\n    fatal (_(\"filename required for COFF output\"));\n\n  abfd = bfd_openw (filename, target);\n  if (abfd == NULL)\n    bfd_fatal (filename);\n\n  if (! bfd_set_format (abfd, bfd_object))\n    bfd_fatal (\"bfd_set_format\");\n\n#if defined DLLTOOL_SH\n  if (! bfd_set_arch_mach (abfd, bfd_arch_sh, 0))\n    bfd_fatal (\"bfd_set_arch_mach(sh)\");\n#elif defined DLLTOOL_MIPS\n  if (! bfd_set_arch_mach (abfd, bfd_arch_mips, 0))\n    bfd_fatal (\"bfd_set_arch_mach(mips)\");\n#elif defined DLLTOOL_ARM\n  if (! bfd_set_arch_mach (abfd, bfd_arch_arm, 0))\n    bfd_fatal (\"bfd_set_arch_mach(arm)\");\n#else\n  /* FIXME: This is obviously i386 specific.  */\n  if (! bfd_set_arch_mach (abfd, bfd_arch_i386, 0))\n    bfd_fatal (\"bfd_set_arch_mach(i386)\");\n#endif\n\n  if (! bfd_set_file_flags (abfd, HAS_SYMS | HAS_RELOC))\n    bfd_fatal (\"bfd_set_file_flags\");\n\n  sec = bfd_make_section_with_flags (abfd, \".rsrc\",\n\t\t\t\t     (SEC_HAS_CONTENTS | SEC_ALLOC\n\t\t\t\t      | SEC_LOAD | SEC_DATA));\n  if (sec == NULL)\n    bfd_fatal (\"bfd_make_section\");\n\n  if (! bfd_set_symtab (abfd, sec->symbol_ptr_ptr, 1))\n    bfd_fatal (\"bfd_set_symtab\");\n\n  /* Requiring this is probably a bug in BFD.  */\n  sec->output_section = sec;\n\n  /* The order of data in the .rsrc section is\n       resource directory tables and entries\n       resource directory strings\n       resource data entries\n       actual resource data\n\n     We build these different types of data in different lists.  */\n\n  set_windres_bfd (&wrbfd, abfd, sec, WR_KIND_BFD);\n\n  cwi.wrbfd = &wrbfd;\n  cwi.sympp = sec->symbol_ptr_ptr;\n  cwi.dirsize = 0;\n  cwi.dirstrsize = 0;\n  cwi.dataentsize = 0;\n  cwi.dirs.d = NULL;\n  cwi.dirs.last = NULL;\n  cwi.dirs.length = 0;\n  cwi.dirstrs.d = NULL;\n  cwi.dirstrs.last = NULL;\n  cwi.dirstrs.length = 0;\n  cwi.dataents.d = NULL;\n  cwi.dataents.last = NULL;\n  cwi.dataents.length = 0;\n  cwi.resources.d = NULL;\n  cwi.resources.last = NULL;\n  cwi.resources.length = 0;\n  cwi.relocs = NULL;\n  cwi.reloc_count = 0;\n\n  /* Work out the sizes of the resource directory entries, so that we\n     know the various offsets we will need.  */\n  coff_bin_sizes (resources, &cwi);\n\n  /* Force the directory strings to be 64 bit aligned.  Every other\n     structure is 64 bit aligned anyhow.  */\n  cwi.dirstrsize = (cwi.dirstrsize + 7) & ~7;\n\n  /* Actually convert the resources to binary.  */\n  coff_to_bin (resources, &cwi);\n\n  /* Add another few bytes to the directory strings if needed for\n     alignment.  */\n  if ((cwi.dirstrs.length & 7) != 0)\n    {\n      rc_uint_type pad = 8 - (cwi.dirstrs.length & 7);\n      bfd_byte *ex;\n\n      ex = coff_alloc (& cwi.dirstrs, pad);\n      memset (ex, 0, pad);\n    }\n\n  /* Make sure that the data we built came out to the same size as we\n     calculated initially.  */\n  assert (cwi.dirs.length == cwi.dirsize);\n  assert (cwi.dirstrs.length == cwi.dirstrsize);\n  assert (cwi.dataents.length == cwi.dataentsize);\n\n  length = (cwi.dirsize\n\t    + cwi.dirstrsize\n\t    + cwi.dataentsize\n\t    + cwi.resources.length);\n\n  if (! bfd_set_section_size (abfd, sec, length))\n    bfd_fatal (\"bfd_set_section_size\");\n\n  bfd_set_reloc (abfd, sec, cwi.relocs, cwi.reloc_count);\n\n  offset = 0;\n  for (d = cwi.dirs.d; d != NULL; d = d->next)\n    {\n      if (! bfd_set_section_contents (abfd, sec, d->data, offset, d->length))\n\tbfd_fatal (\"bfd_set_section_contents\");\n      offset += d->length;\n    }\n  for (d = cwi.dirstrs.d; d != NULL; d = d->next)\n    {\n      set_windres_bfd_content (&wrbfd, d->data, offset, d->length);\n      offset += d->length;\n    }\n  for (d = cwi.dataents.d; d != NULL; d = d->next)\n    {\n      set_windres_bfd_content (&wrbfd, d->data, offset, d->length);\n      offset += d->length;\n    }\n  for (rd = cwi.resources.d; rd != NULL; rd = rd->next)\n    {\n      res_to_bin (cwi.wrbfd, (rc_uint_type) offset, rd->res);\n      offset += rd->length;\n    }\n\n  assert (offset == length);\n\n  if (! bfd_close (abfd))\n    bfd_fatal (\"bfd_close\");\n\n  /* We allocated the relocs array using malloc.  */\n  free (cwi.relocs);\n}",
+      "fn_code_pos": [
+        [
+          434,
+          0
+        ],
+        [
+          584,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_coff_file",
+        "parameters": {
+          "filename": "char",
+          "target": "char",
+          "resources": "rc_res_directory"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncoff_bin_sizes (const rc_res_directory *resdir,\n\t\tstruct coff_write_info *cwi)\n{\n  const rc_res_entry *re;\n\n  cwi->dirsize += sizeof (struct extern_res_directory);\n\n  for (re = resdir->entries; re != NULL; re = re->next)\n    {\n      cwi->dirsize += sizeof (struct extern_res_entry);\n\n      if (re->id.named)\n\tcwi->dirstrsize += re->id.u.n.length * 2 + 2;\n\n      if (re->subdir)\n\tcoff_bin_sizes (re->u.dir, cwi);\n      else\n\tcwi->dataentsize += sizeof (struct extern_res_data);\n    }\n}",
+      "fn_code_pos": [
+        [
+          589,
+          0
+        ],
+        [
+          609,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "coff_bin_sizes",
+        "parameters": {
+          "resdir": "rc_res_directory",
+          "cwi": "struct coff_write_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static bfd_byte *\ncoff_alloc (struct bindata_build *bb, rc_uint_type size)\n{\n  bindata *d;\n\n  d = (bindata *) reswr_alloc (sizeof (bindata));\n\n  d->next = NULL;\n  d->data = (bfd_byte *) reswr_alloc (size);\n  d->length = size;\n\n  if (bb->d == NULL)\n    bb->d = d;\n  else\n    bb->last->next = d;\n  bb->last = d;\n  bb->length += size;\n\n  return d->data;\n}",
+      "fn_code_pos": [
+        [
+          613,
+          0
+        ],
+        [
+          632,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "coff_alloc",
+        "parameters": {
+          "bb": "struct bindata_build",
+          "size": "rc_uint_type"
+        },
+        "return_type": "bfd_byte"
+      }
+    },
+    {
+      "fn_code": "static void\ncoff_to_bin (const rc_res_directory *resdir, struct coff_write_info *cwi)\n{\n  struct extern_res_directory *erd;\n  int ci, cn;\n  const rc_res_entry *e;\n  struct extern_res_entry *ere;\n\n  /* Write out the directory table.  */\n\n  erd = ((struct extern_res_directory *)\n\t coff_alloc (&cwi->dirs, sizeof (*erd)));\n\n  windres_put_32 (cwi->wrbfd, erd->characteristics, resdir->characteristics);\n  windres_put_32 (cwi->wrbfd, erd->time, resdir->time);\n  windres_put_16 (cwi->wrbfd, erd->major, resdir->major);\n  windres_put_16 (cwi->wrbfd, erd->minor, resdir->minor);\n\n  ci = 0;\n  cn = 0;\n  for (e = resdir->entries; e != NULL; e = e->next)\n    {\n      if (e->id.named)\n\t++cn;\n      else\n\t++ci;\n    }\n\n  windres_put_16 (cwi->wrbfd, erd->name_count, cn);\n  windres_put_16 (cwi->wrbfd, erd->id_count, ci);\n\n  /* Write out the data entries.  Note that we allocate space for all\n     the entries before writing them out.  That permits a recursive\n     call to work correctly when writing out subdirectories.  */\n\n  ere = ((struct extern_res_entry *)\n\t coff_alloc (&cwi->dirs, (ci + cn) * sizeof (*ere)));\n  for (e = resdir->entries; e != NULL; e = e->next, ere++)\n    {\n      if (! e->id.named)\n\twindres_put_32 (cwi->wrbfd, ere->name, e->id.u.id);\n      else\n\t{\n\t  bfd_byte *str;\n\t  rc_uint_type i;\n\n\t  /* For some reason existing files seem to have the high bit\n             set on the address of the name, although that is not\n             documented.  */\n\t  windres_put_32 (cwi->wrbfd, ere->name,\n\t\t     0x80000000 | (cwi->dirsize + cwi->dirstrs.length));\n\n\t  str = coff_alloc (&cwi->dirstrs, e->id.u.n.length * 2 + 2);\n\t  windres_put_16 (cwi->wrbfd, str, e->id.u.n.length);\n\t  for (i = 0; i < e->id.u.n.length; i++)\n\t    windres_put_16 (cwi->wrbfd, str + (i + 1) * sizeof (unichar), e->id.u.n.name[i]);\n\t}\n\n      if (e->subdir)\n\t{\n\t  windres_put_32 (cwi->wrbfd, ere->rva, 0x80000000 | cwi->dirs.length);\n\t  coff_to_bin (e->u.dir, cwi);\n\t}\n      else\n\t{\n\t  windres_put_32 (cwi->wrbfd, ere->rva,\n\t\t     cwi->dirsize + cwi->dirstrsize + cwi->dataents.length);\n\n\t  coff_res_to_bin (e->u.res, cwi);\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          636,
+          0
+        ],
+        [
+          707,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "coff_to_bin",
+        "parameters": {
+          "resdir": "rc_res_directory",
+          "cwi": "struct coff_write_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncoff_res_to_bin (const rc_res_resource *res, struct coff_write_info *cwi)\n{\n  arelent *r;\n  struct extern_res_data *erd;\n  coff_res_data *d;\n\n  /* For some reason, although every other address is a section\n     offset, the address of the resource data itself is an RVA.  That\n     means that we need to generate a relocation for it.  We allocate\n     the relocs array using malloc so that we can use realloc.  FIXME:\n     This relocation handling is correct for the i386, but probably\n     not for any other target.  */\n\n  r = (arelent *) reswr_alloc (sizeof (arelent));\n  r->sym_ptr_ptr = cwi->sympp;\n  r->address = cwi->dirsize + cwi->dirstrsize + cwi->dataents.length;\n  r->addend = 0;\n  r->howto = bfd_reloc_type_lookup (WR_BFD (cwi->wrbfd), BFD_RELOC_RVA);\n  if (r->howto == NULL)\n    bfd_fatal (_(\"can't get BFD_RELOC_RVA relocation type\"));\n\n  cwi->relocs = xrealloc (cwi->relocs,\n\t\t\t  (cwi->reloc_count + 2) * sizeof (arelent *));\n  cwi->relocs[cwi->reloc_count] = r;\n  cwi->relocs[cwi->reloc_count + 1] = NULL;\n  ++cwi->reloc_count;\n\n  erd = (struct extern_res_data *) coff_alloc (&cwi->dataents, sizeof (*erd));\n\n  windres_put_32 (cwi->wrbfd, erd->rva,\n\t     (cwi->dirsize\n\t      + cwi->dirstrsize\n\t      + cwi->dataentsize\n\t      + cwi->resources.length));\n  windres_put_32 (cwi->wrbfd, erd->codepage, res->coff_info.codepage);\n  windres_put_32 (cwi->wrbfd, erd->reserved, res->coff_info.reserved);\n\n  d = (coff_res_data *) reswr_alloc (sizeof (coff_res_data));\n  d->length = res_to_bin (NULL, (rc_uint_type) 0, res);\n  d->res = res;\n  d->next = NULL;\n\n  if (cwi->resources.d == NULL)\n    cwi->resources.d = d;\n  else\n    cwi->resources.last->next = d;\n\n  cwi->resources.last = d;\n  cwi->resources.length += (d->length + 7) & ~7;\n\n  windres_put_32 (cwi->wrbfd, erd->size, d->length);\n\n  /* Force the next resource to have 64 bit alignment.  */\n  d->length = (d->length + 7) & ~7;\n}",
+      "fn_code_pos": [
+        [
+          711,
+          0
+        ],
+        [
+          766,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "coff_res_to_bin",
+        "parameters": {
+          "res": "rc_res_resource",
+          "cwi": "struct coff_write_info"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "overrun (const struct coff_file_info *, const char *)",
+      "fn_dec_pos": [
+        [
+          99,
+          12
+        ],
+        [
+          99,
+          65
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "overrun",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "read_coff_res_dir (windres_bfd *, const bfd_byte *,\n\t\t\t\t\t    const struct coff_file_info *,\n\t\t\t\t\t    const rc_res_id *, int)",
+      "fn_dec_pos": [
+        [
+          100,
+          25
+        ],
+        [
+          102,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_coff_res_dir",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "read_coff_data_entry (windres_bfd *, const bfd_byte *,\n\t\t\t\t\t      const struct coff_file_info *,\n\t\t\t\t\t      const rc_res_id *)",
+      "fn_dec_pos": [
+        [
+          103,
+          24
+        ],
+        [
+          105,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_coff_data_entry",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "read_coff_rsrc (const char *filename, const char *target)",
+      "fn_dec_pos": [
+        [
+          110,
+          0
+        ],
+        [
+          110,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_coff_rsrc",
+        "parameters": {
+          "filename": "char",
+          "target": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "read_coff_res_dir (windres_bfd *wrbfd, const bfd_byte *data,\n\t\t   const struct coff_file_info *flaginfo,\n\t\t   const rc_res_id *type, int level)",
+      "fn_dec_pos": [
+        [
+          183,
+          0
+        ],
+        [
+          185,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_coff_res_dir",
+        "parameters": {
+          "wrbfd": "windres_bfd",
+          "data": "bfd_byte",
+          "flaginfo": "struct coff_file_info",
+          "type": "rc_res_id",
+          "level": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "read_coff_data_entry (windres_bfd *wrbfd, const bfd_byte *data,\n\t\t      const struct coff_file_info *flaginfo,\n\t\t      const rc_res_id *type)",
+      "fn_dec_pos": [
+        [
+          326,
+          0
+        ],
+        [
+          328,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_coff_data_entry",
+        "parameters": {
+          "wrbfd": "windres_bfd",
+          "data": "bfd_byte",
+          "flaginfo": "struct coff_file_info",
+          "type": "rc_res_id"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "coff_bin_sizes (const rc_res_directory *, struct coff_write_info *)",
+      "fn_dec_pos": [
+        [
+          419,
+          12
+        ],
+        [
+          419,
+          79
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "coff_bin_sizes",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "coff_alloc (struct bindata_build *, rc_uint_type)",
+      "fn_dec_pos": [
+        [
+          420,
+          17
+        ],
+        [
+          420,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "coff_alloc",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "coff_to_bin\n  (const rc_res_directory *, struct coff_write_info *)",
+      "fn_dec_pos": [
+        [
+          421,
+          12
+        ],
+        [
+          422,
+          54
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "coff_to_bin",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "coff_res_to_bin\n  (const rc_res_resource *, struct coff_write_info *)",
+      "fn_dec_pos": [
+        [
+          423,
+          12
+        ],
+        [
+          424,
+          53
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "coff_res_to_bin",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "coff_alloc (struct bindata_build *bb, rc_uint_type size)",
+      "fn_dec_pos": [
+        [
+          614,
+          0
+        ],
+        [
+          614,
+          56
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "coff_alloc",
+        "parameters": {
+          "bb": "struct bindata_build",
+          "size": "rc_uint_type"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct coff_file_info\n{\n  /* File name.  */\n  const char *filename;\n  /* Data read from the file.  */\n  const bfd_byte *data;\n  /* End of data read from file.  */\n  const bfd_byte *data_end;\n  /* Address of the resource section minus the image base of the file.  */\n  rc_uint_type secaddr;\n}",
+      {
+        "char": "const",
+        "bfd_byte": "const",
+        "secaddr": "rc_uint_type"
+      },
+      "coff_file_info",
+      [
+        42,
+        0
+      ],
+      [
+        52,
+        1
+      ]
+    ],
+    [
+      "struct __attribute__ ((__packed__)) extern_res_directory\n{\n  /* Characteristics.  */\n  bfd_byte characteristics[4];\n  /* Time stamp.  */\n  bfd_byte time[4];\n  /* Major version number.  */\n  bfd_byte major[2];\n  /* Minor version number.  */\n  bfd_byte minor[2];\n  /* Number of named directory entries.  */\n  bfd_byte name_count[2];\n  /* Number of directory entries with IDs.  */\n  bfd_byte id_count[2];\n}",
+      {
+        "characteristics[4]": "bfd_byte",
+        "time[4]": "bfd_byte",
+        "major[2]": "bfd_byte",
+        "minor[2]": "bfd_byte",
+        "name_count[2]": "bfd_byte",
+        "id_count[2]": "bfd_byte"
+      },
+      "",
+      [
+        56,
+        0
+      ],
+      [
+        70,
+        1
+      ]
+    ],
+    [
+      "struct extern_res_entry\n{\n  /* Name or ID.  */\n  bfd_byte name[4];\n  /* Address of resource entry or subdirectory.  */\n  bfd_byte rva[4];\n}",
+      {
+        "name[4]": "bfd_byte",
+        "rva[4]": "bfd_byte"
+      },
+      "extern_res_entry",
+      [
+        74,
+        0
+      ],
+      [
+        80,
+        1
+      ]
+    ],
+    [
+      "struct extern_res_data\n{\n  /* Address of resource data.  This is apparently a file relative\n     address, rather than a section offset.  */\n  bfd_byte rva[4];\n  /* Size of resource data.  */\n  bfd_byte size[4];\n  /* Code page.  */\n  bfd_byte codepage[4];\n  /* Reserved.  */\n  bfd_byte reserved[4];\n}",
+      {
+        "rva[4]": "bfd_byte",
+        "size[4]": "bfd_byte",
+        "codepage[4]": "bfd_byte",
+        "reserved[4]": "bfd_byte"
+      },
+      "extern_res_data",
+      [
+        84,
+        0
+      ],
+      [
+        95,
+        1
+      ]
+    ],
+    [
+      "struct bindata_build\n{\n  /* The data.  */\n  bindata *d;\n  /* The last structure we have added to the list.  */\n  bindata *last;\n  /* The size of the list as a whole.  */\n  unsigned long length;\n}",
+      {
+        "*d": "bindata",
+        "*last": "bindata",
+        "length": "unsigned long"
+      },
+      "bindata_build",
+      [
+        365,
+        0
+      ],
+      [
+        373,
+        1
+      ]
+    ],
+    [
+      "struct coff_res_data_build\n{\n  /* The data.  */\n  coff_res_data *d;\n  /* The last structure we have added to the list.  */\n  coff_res_data *last;\n  /* The size of the list as a whole.  */\n  unsigned long length;\n}",
+      {
+        "*d": "coff_res_data",
+        "*last": "coff_res_data",
+        "length": "unsigned long"
+      },
+      "coff_res_data_build",
+      [
+        375,
+        0
+      ],
+      [
+        383,
+        1
+      ]
+    ],
+    [
+      "struct coff_write_info\n{\n  /* These fields are based on the BFD.  */\n  /* The BFD itself.  */\n  windres_bfd *wrbfd;\n  /* Pointer to section symbol used to build RVA relocs.  */\n  asymbol **sympp;\n\n  /* These fields are computed initially, and then not changed.  */\n  /* Length of directory tables and entries.  */\n  unsigned long dirsize;\n  /* Length of directory entry strings.  */\n  unsigned long dirstrsize;\n  /* Length of resource data entries.  */\n  unsigned long dataentsize;\n\n  /* These fields are updated as we add data.  */\n  /* Directory tables and entries.  */\n  struct bindata_build dirs;\n  /* Directory entry strings.  */\n  struct bindata_build dirstrs;\n  /* Resource data entries.  */\n  struct bindata_build dataents;\n  /* Actual resource data.  */\n  struct coff_res_data_build resources;\n  /* Relocations.  */\n  arelent **relocs;\n  /* Number of relocations.  */\n  unsigned int reloc_count;\n}",
+      {
+        "*wrbfd": "windres_bfd",
+        "**sympp": "asymbol",
+        "dirsize": "unsigned long",
+        "dirstrsize": "unsigned long",
+        "dataentsize": "unsigned long",
+        "dirs": "struct bindata_build",
+        "dirstrs": "struct bindata_build",
+        "dataents": "struct bindata_build",
+        "resources": "struct coff_res_data_build",
+        "**relocs": "arelent",
+        "reloc_count": "unsigned int"
+      },
+      "coff_write_info",
+      [
+        388,
+        0
+      ],
+      [
+        417,
+        1
+      ]
+    ],
+    [
+      "struct coff_file_info\n{\n  /* File name.  */\n  const char *filename;\n  /* Data read from the file.  */\n  const bfd_byte *data;\n  /* End of data read from file.  */\n  const bfd_byte *data_end;\n  /* Address of the resource section minus the image base of the file.  */\n  rc_uint_type secaddr;\n}",
+      {
+        "char": "const",
+        "bfd_byte": "const",
+        "secaddr": "rc_uint_type"
+      },
+      "coff_file_info",
+      [
+        42,
+        0
+      ],
+      [
+        52,
+        1
+      ]
+    ],
+    [
+      "struct __attribute__ ((__packed__)) extern_res_directory\n{\n  /* Characteristics.  */\n  bfd_byte characteristics[4];\n  /* Time stamp.  */\n  bfd_byte time[4];\n  /* Major version number.  */\n  bfd_byte major[2];\n  /* Minor version number.  */\n  bfd_byte minor[2];\n  /* Number of named directory entries.  */\n  bfd_byte name_count[2];\n  /* Number of directory entries with IDs.  */\n  bfd_byte id_count[2];\n}",
+      {
+        "characteristics[4]": "bfd_byte",
+        "time[4]": "bfd_byte",
+        "major[2]": "bfd_byte",
+        "minor[2]": "bfd_byte",
+        "name_count[2]": "bfd_byte",
+        "id_count[2]": "bfd_byte"
+      },
+      "",
+      [
+        56,
+        0
+      ],
+      [
+        70,
+        1
+      ]
+    ],
+    [
+      "struct extern_res_entry\n{\n  /* Name or ID.  */\n  bfd_byte name[4];\n  /* Address of resource entry or subdirectory.  */\n  bfd_byte rva[4];\n}",
+      {
+        "name[4]": "bfd_byte",
+        "rva[4]": "bfd_byte"
+      },
+      "extern_res_entry",
+      [
+        74,
+        0
+      ],
+      [
+        80,
+        1
+      ]
+    ],
+    [
+      "struct extern_res_data\n{\n  /* Address of resource data.  This is apparently a file relative\n     address, rather than a section offset.  */\n  bfd_byte rva[4];\n  /* Size of resource data.  */\n  bfd_byte size[4];\n  /* Code page.  */\n  bfd_byte codepage[4];\n  /* Reserved.  */\n  bfd_byte reserved[4];\n}",
+      {
+        "rva[4]": "bfd_byte",
+        "size[4]": "bfd_byte",
+        "codepage[4]": "bfd_byte",
+        "reserved[4]": "bfd_byte"
+      },
+      "extern_res_data",
+      [
+        84,
+        0
+      ],
+      [
+        95,
+        1
+      ]
+    ],
+    [
+      "struct coff_file_info",
+      {},
+      "",
+      [
+        99,
+        27
+      ],
+      [
+        99,
+        48
+      ]
+    ],
+    [
+      "struct coff_file_info",
+      {},
+      "",
+      [
+        101,
+        15
+      ],
+      [
+        101,
+        36
+      ]
+    ],
+    [
+      "struct coff_file_info",
+      {},
+      "",
+      [
+        104,
+        17
+      ],
+      [
+        104,
+        38
+      ]
+    ],
+    [
+      "struct coff_file_info",
+      {},
+      "",
+      [
+        119,
+        2
+      ],
+      [
+        119,
+        23
+      ]
+    ],
+    [
+      "struct coff_file_info",
+      {},
+      "",
+      [
+        175,
+        15
+      ],
+      [
+        175,
+        36
+      ]
+    ],
+    [
+      "struct coff_file_info",
+      {},
+      "",
+      [
+        184,
+        11
+      ],
+      [
+        184,
+        32
+      ]
+    ],
+    [
+      "struct extern_res_directory",
+      {},
+      "",
+      [
+        187,
+        8
+      ],
+      [
+        187,
+        35
+      ]
+    ],
+    [
+      "struct extern_res_entry",
+      {},
+      "",
+      [
+        191,
+        8
+      ],
+      [
+        191,
+        31
+      ]
+    ],
+    [
+      "struct extern_res_directory",
+      {},
+      "",
+      [
+        200,
+        53
+      ],
+      [
+        200,
+        80
+      ]
+    ],
+    [
+      "struct extern_res_directory",
+      {},
+      "",
+      [
+        203,
+        15
+      ],
+      [
+        203,
+        42
+      ]
+    ],
+    [
+      "struct extern_res_entry",
+      {},
+      "",
+      [
+        219,
+        15
+      ],
+      [
+        219,
+        38
+      ]
+    ],
+    [
+      "struct coff_file_info",
+      {},
+      "",
+      [
+        327,
+        14
+      ],
+      [
+        327,
+        35
+      ]
+    ],
+    [
+      "struct extern_res_data",
+      {},
+      "",
+      [
+        330,
+        8
+      ],
+      [
+        330,
+        30
+      ]
+    ],
+    [
+      "struct extern_res_data",
+      {},
+      "",
+      [
+        338,
+        53
+      ],
+      [
+        338,
+        75
+      ]
+    ],
+    [
+      "struct extern_res_data",
+      {},
+      "",
+      [
+        341,
+        15
+      ],
+      [
+        341,
+        37
+      ]
+    ],
+    [
+      "struct bindata_build\n{\n  /* The data.  */\n  bindata *d;\n  /* The last structure we have added to the list.  */\n  bindata *last;\n  /* The size of the list as a whole.  */\n  unsigned long length;\n}",
+      {
+        "*d": "bindata",
+        "*last": "bindata",
+        "length": "unsigned long"
+      },
+      "bindata_build",
+      [
+        365,
+        0
+      ],
+      [
+        373,
+        1
+      ]
+    ],
+    [
+      "struct coff_res_data_build\n{\n  /* The data.  */\n  coff_res_data *d;\n  /* The last structure we have added to the list.  */\n  coff_res_data *last;\n  /* The size of the list as a whole.  */\n  unsigned long length;\n}",
+      {
+        "*d": "coff_res_data",
+        "*last": "coff_res_data",
+        "length": "unsigned long"
+      },
+      "coff_res_data_build",
+      [
+        375,
+        0
+      ],
+      [
+        383,
+        1
+      ]
+    ],
+    [
+      "struct coff_write_info\n{\n  /* These fields are based on the BFD.  */\n  /* The BFD itself.  */\n  windres_bfd *wrbfd;\n  /* Pointer to section symbol used to build RVA relocs.  */\n  asymbol **sympp;\n\n  /* These fields are computed initially, and then not changed.  */\n  /* Length of directory tables and entries.  */\n  unsigned long dirsize;\n  /* Length of directory entry strings.  */\n  unsigned long dirstrsize;\n  /* Length of resource data entries.  */\n  unsigned long dataentsize;\n\n  /* These fields are updated as we add data.  */\n  /* Directory tables and entries.  */\n  struct bindata_build dirs;\n  /* Directory entry strings.  */\n  struct bindata_build dirstrs;\n  /* Resource data entries.  */\n  struct bindata_build dataents;\n  /* Actual resource data.  */\n  struct coff_res_data_build resources;\n  /* Relocations.  */\n  arelent **relocs;\n  /* Number of relocations.  */\n  unsigned int reloc_count;\n}",
+      {
+        "*wrbfd": "windres_bfd",
+        "**sympp": "asymbol",
+        "dirsize": "unsigned long",
+        "dirstrsize": "unsigned long",
+        "dataentsize": "unsigned long",
+        "dirs": "struct bindata_build",
+        "dirstrs": "struct bindata_build",
+        "dataents": "struct bindata_build",
+        "resources": "struct coff_res_data_build",
+        "**relocs": "arelent",
+        "reloc_count": "unsigned int"
+      },
+      "coff_write_info",
+      [
+        388,
+        0
+      ],
+      [
+        417,
+        1
+      ]
+    ],
+    [
+      "struct bindata_build",
+      {},
+      "",
+      [
+        406,
+        2
+      ],
+      [
+        406,
+        22
+      ]
+    ],
+    [
+      "struct bindata_build",
+      {},
+      "",
+      [
+        408,
+        2
+      ],
+      [
+        408,
+        22
+      ]
+    ],
+    [
+      "struct bindata_build",
+      {},
+      "",
+      [
+        410,
+        2
+      ],
+      [
+        410,
+        22
+      ]
+    ],
+    [
+      "struct coff_res_data_build",
+      {},
+      "",
+      [
+        412,
+        2
+      ],
+      [
+        412,
+        28
+      ]
+    ],
+    [
+      "struct coff_write_info",
+      {},
+      "",
+      [
+        419,
+        54
+      ],
+      [
+        419,
+        76
+      ]
+    ],
+    [
+      "struct bindata_build",
+      {},
+      "",
+      [
+        420,
+        29
+      ],
+      [
+        420,
+        49
+      ]
+    ],
+    [
+      "struct coff_write_info",
+      {},
+      "",
+      [
+        422,
+        29
+      ],
+      [
+        422,
+        51
+      ]
+    ],
+    [
+      "struct coff_write_info",
+      {},
+      "",
+      [
+        424,
+        28
+      ],
+      [
+        424,
+        50
+      ]
+    ],
+    [
+      "struct coff_write_info",
+      {},
+      "",
+      [
+        440,
+        2
+      ],
+      [
+        440,
+        24
+      ]
+    ],
+    [
+      "struct coff_write_info",
+      {},
+      "",
+      [
+        591,
+        2
+      ],
+      [
+        591,
+        24
+      ]
+    ],
+    [
+      "struct extern_res_directory",
+      {},
+      "",
+      [
+        595,
+        26
+      ],
+      [
+        595,
+        53
+      ]
+    ],
+    [
+      "struct extern_res_entry",
+      {},
+      "",
+      [
+        599,
+        30
+      ],
+      [
+        599,
+        53
+      ]
+    ],
+    [
+      "struct extern_res_data",
+      {},
+      "",
+      [
+        607,
+        29
+      ],
+      [
+        607,
+        51
+      ]
+    ],
+    [
+      "struct bindata_build",
+      {},
+      "",
+      [
+        614,
+        12
+      ],
+      [
+        614,
+        32
+      ]
+    ],
+    [
+      "struct coff_write_info",
+      {},
+      "",
+      [
+        637,
+        45
+      ],
+      [
+        637,
+        67
+      ]
+    ],
+    [
+      "struct extern_res_directory",
+      {},
+      "",
+      [
+        639,
+        2
+      ],
+      [
+        639,
+        29
+      ]
+    ],
+    [
+      "struct extern_res_entry",
+      {},
+      "",
+      [
+        642,
+        2
+      ],
+      [
+        642,
+        25
+      ]
+    ],
+    [
+      "struct extern_res_directory",
+      {},
+      "",
+      [
+        646,
+        10
+      ],
+      [
+        646,
+        37
+      ]
+    ],
+    [
+      "struct extern_res_entry",
+      {},
+      "",
+      [
+        671,
+        10
+      ],
+      [
+        671,
+        33
+      ]
+    ],
+    [
+      "struct coff_write_info",
+      {},
+      "",
+      [
+        712,
+        45
+      ],
+      [
+        712,
+        67
+      ]
+    ],
+    [
+      "struct extern_res_data",
+      {},
+      "",
+      [
+        715,
+        2
+      ],
+      [
+        715,
+        24
+      ]
+    ],
+    [
+      "struct extern_res_data",
+      {},
+      "",
+      [
+        739,
+        9
+      ],
+      [
+        739,
+        31
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"bucomm.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"windres.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <assert.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"coff/internal.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"libcoff.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

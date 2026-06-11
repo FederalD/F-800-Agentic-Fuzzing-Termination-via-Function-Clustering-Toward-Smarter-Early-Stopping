@@ -1,0 +1,486 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "void\ndisassemble_init_s390 (struct disassemble_info *info)\n{\n  int i;\n  const char *p;\n\n  memset (opc_index, 0, sizeof (opc_index));\n\n  /* Reverse order, such that each opc_index ends up pointing to the\n     first matching entry instead of the last.  */\n  for (i = s390_num_opcodes; i--; )\n    opc_index[s390_opcodes[i].opcode[0]] = i;\n\n  current_arch_mask = 1 << S390_OPCODE_ZARCH;\n  option_use_insn_len_bits_p = 0;\n\n  for (p = info->disassembler_options; p != NULL; )\n    {\n      if (CONST_STRNEQ (p, \"esa\"))\n\tcurrent_arch_mask = 1 << S390_OPCODE_ESA;\n      else if (CONST_STRNEQ (p, \"zarch\"))\n\tcurrent_arch_mask = 1 << S390_OPCODE_ZARCH;\n      else if (CONST_STRNEQ (p, \"insnlength\"))\n\toption_use_insn_len_bits_p = 1;\n      else\n\tfprintf (stderr, \"Unknown S/390 disassembler option: %s\\n\", p);\n\n      p = strchr (p, ',');\n      if (p != NULL)\n\tp++;\n    }\n}",
+      "fn_code_pos": [
+        [
+          49,
+          0
+        ],
+        [
+          80,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "disassemble_init_s390",
+        "parameters": {
+          "info": "struct disassemble_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static inline int\ns390_insn_length (const bfd_byte *buffer)\n{\n  /* 00xxxxxx -> 2, 01xxxxxx/10xxxxxx -> 4, 11xxxxxx -> 6.  */\n  return ((buffer[0] >> 6) + 3) & ~1U;\n}",
+      "fn_code_pos": [
+        [
+          84,
+          0
+        ],
+        [
+          89,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "s390_insn_length",
+        "parameters": {
+          "buffer": "bfd_byte"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static inline int\ns390_insn_matches_opcode (const bfd_byte *buffer,\n\t\t\t  const struct s390_opcode *opcode)\n{\n  return (buffer[1] & opcode->mask[1]) == opcode->opcode[1]\n    && (buffer[2] & opcode->mask[2]) == opcode->opcode[2]\n    && (buffer[3] & opcode->mask[3]) == opcode->opcode[3]\n    && (buffer[4] & opcode->mask[4]) == opcode->opcode[4]\n    && (buffer[5] & opcode->mask[5]) == opcode->opcode[5];\n}",
+      "fn_code_pos": [
+        [
+          94,
+          0
+        ],
+        [
+          103,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "s390_insn_matches_opcode",
+        "parameters": {
+          "buffer": "bfd_byte",
+          "opcode": "struct s390_opcode"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static inline union operand_value\ns390_extract_operand (const bfd_byte *insn,\n\t\t      const struct s390_operand *operand)\n{\n  union operand_value ret;\n  unsigned int val;\n  int bits;\n  const bfd_byte *orig_insn = insn;\n\n  /* Extract fragments of the operand byte for byte.  */\n  insn += operand->shift / 8;\n  bits = (operand->shift & 7) + operand->bits;\n  val = 0;\n  do\n    {\n      val <<= 8;\n      val |= (unsigned int) *insn++;\n      bits -= 8;\n    }\n  while (bits > 0);\n  val >>= -bits;\n  val &= ((1U << (operand->bits - 1)) << 1) - 1;\n\n  /* Check for special long displacement case.  */\n  if (operand->bits == 20 && operand->shift == 20)\n    val = (val & 0xff) << 12 | (val & 0xfff00) >> 8;\n\n  /* Sign extend value if the operand is signed or pc relative.  Avoid\n     integer overflows.  */\n  if (operand->flags & (S390_OPERAND_SIGNED | S390_OPERAND_PCREL))\n    {\n      unsigned int m = 1U << (operand->bits - 1);\n\n      if (val >= m)\n\tret.i = (int) (val - m) - 1 - (int) (m - 1U);\n      else\n\tret.i = (int) val;\n    }\n  else if (operand->flags & S390_OPERAND_LENGTH)\n    /* Length x in an instruction has real length x + 1.  */\n    ret.u = val + 1;\n\n  else if (operand->flags & S390_OPERAND_VR)\n    {\n      /* Extract the extra bits for a vector register operand stored\n\t in the RXB field.  */\n      unsigned vr = operand->shift == 32 ? 3\n\t: (unsigned) operand->shift / 4 - 2;\n\n      ret.u = val | ((orig_insn[4] & (1 << (3 - vr))) << (vr + 1));\n    }\n  else\n    ret.u = val;\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          117,
+          0
+        ],
+        [
+          172,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "s390_extract_operand",
+        "parameters": {
+          "insn": "bfd_byte",
+          "operand": "struct s390_operand"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ns390_print_insn_with_opcode (bfd_vma memaddr,\n\t\t\t     struct disassemble_info *info,\n\t\t\t     const bfd_byte *buffer,\n\t\t\t     const struct s390_opcode *opcode)\n{\n  const unsigned char *opindex;\n  char separator;\n\n  /* Mnemonic.  */\n  info->fprintf_func (info->stream, \"%s\", opcode->name);\n\n  /* Operands.  */\n  separator = '\\t';\n  for (opindex = opcode->operands; *opindex != 0; opindex++)\n    {\n      const struct s390_operand *operand = s390_operands + *opindex;\n      union operand_value val = s390_extract_operand (buffer, operand);\n      unsigned long flags = operand->flags;\n\n      if ((flags & S390_OPERAND_INDEX) && val.u == 0)\n\tcontinue;\n      if ((flags & S390_OPERAND_BASE) &&\n\t  val.u == 0 && separator == '(')\n\t{\n\t  separator = ',';\n\t  continue;\n\t}\n\n      /* For instructions with a last optional operand don't print it\n\t if zero.  */\n      if ((opcode->flags & (S390_INSTR_FLAG_OPTPARM | S390_INSTR_FLAG_OPTPARM2))\n\t  && val.u == 0\n\t  && opindex[1] == 0)\n\tbreak;\n\n      if ((opcode->flags & S390_INSTR_FLAG_OPTPARM2)\n\t  && val.u == 0 && opindex[1] != 0 && opindex[2] == 0)\n\t{\n\t  union operand_value next_op_val =\n\t    s390_extract_operand (buffer, s390_operands + opindex[1]);\n\t  if (next_op_val.u == 0)\n\t    break;\n\t}\n\n      if (flags & S390_OPERAND_GPR)\n\tinfo->fprintf_func (info->stream, \"%c%%r%u\", separator, val.u);\n      else if (flags & S390_OPERAND_FPR)\n\tinfo->fprintf_func (info->stream, \"%c%%f%u\", separator, val.u);\n      else if (flags & S390_OPERAND_VR)\n\tinfo->fprintf_func (info->stream, \"%c%%v%i\", separator, val.u);\n      else if (flags & S390_OPERAND_AR)\n\tinfo->fprintf_func (info->stream, \"%c%%a%u\", separator, val.u);\n      else if (flags & S390_OPERAND_CR)\n\tinfo->fprintf_func (info->stream, \"%c%%c%u\", separator, val.u);\n      else if (flags & S390_OPERAND_PCREL)\n\t{\n\t  info->fprintf_func (info->stream, \"%c\", separator);\n\t  info->print_address_func (memaddr + val.i + val.i, info);\n\t}\n      else if (flags & S390_OPERAND_SIGNED)\n\tinfo->fprintf_func (info->stream, \"%c%i\", separator, val.i);\n      else\n\t{\n\t  if (flags & S390_OPERAND_OR1)\n\t    val.u &= ~1;\n\t  if (flags & S390_OPERAND_OR2)\n\t    val.u &= ~2;\n\t  if (flags & S390_OPERAND_OR8)\n\t    val.u &= ~8;\n\n\t  if ((opcode->flags & S390_INSTR_FLAG_OPTPARM)\n\t      && val.u == 0\n\t      && opindex[1] == 0)\n\t    break;\n\t  info->fprintf_func (info->stream, \"%c%u\", separator, val.u);\n\t}\n\n      if (flags & S390_OPERAND_DISP)\n\tseparator = '(';\n      else if (flags & S390_OPERAND_BASE)\n\t{\n\t  info->fprintf_func (info->stream, \")\");\n\t  separator = ',';\n\t}\n      else\n\tseparator = ',';\n    }\n}",
+      "fn_code_pos": [
+        [
+          177,
+          0
+        ],
+        [
+          265,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "s390_print_insn_with_opcode",
+        "parameters": {
+          "memaddr": "bfd_vma",
+          "info": "struct disassemble_info",
+          "buffer": "bfd_byte",
+          "opcode": "struct s390_opcode"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nopcode_mask_more_specific (const struct s390_opcode *a,\n\t\t\t   const struct s390_opcode *b)\n{\n  return (((int) a->mask[0] + a->mask[1] + a->mask[2]\n\t   + a->mask[3] + a->mask[4] + a->mask[5])\n\t  > ((int) b->mask[0] + b->mask[1] + b->mask[2]\n\t     + b->mask[3] + b->mask[4] + b->mask[5]));\n}",
+      "fn_code_pos": [
+        [
+          269,
+          0
+        ],
+        [
+          277,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "opcode_mask_more_specific",
+        "parameters": {
+          "a": "struct s390_opcode",
+          "b": "struct s390_opcode"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nprint_insn_s390 (bfd_vma memaddr, struct disassemble_info *info)\n{\n  bfd_byte buffer[6];\n  const struct s390_opcode *opcode = NULL;\n  unsigned int value;\n  int status, opsize, bufsize, bytes_to_dump, i;\n\n  /* The output looks better if we put 6 bytes on a line.  */\n  info->bytes_per_line = 6;\n\n  /* Every S390 instruction is max 6 bytes long.  */\n  memset (buffer, 0, 6);\n  status = info->read_memory_func (memaddr, buffer, 6, info);\n  if (status != 0)\n    {\n      for (bufsize = 0; bufsize < 6; bufsize++)\n\tif (info->read_memory_func (memaddr, buffer, bufsize + 1, info) != 0)\n\t  break;\n      if (bufsize <= 0)\n\t{\n\t  info->memory_error_func (status, memaddr, info);\n\t  return -1;\n\t}\n      opsize = s390_insn_length (buffer);\n      status = opsize > bufsize;\n    }\n  else\n    {\n      bufsize = 6;\n      opsize = s390_insn_length (buffer);\n    }\n\n  if (status == 0)\n    {\n      const struct s390_opcode *op;\n\n      /* Find the \"best match\" in the opcode table.  */\n      for (op = s390_opcodes + opc_index[buffer[0]];\n\t   op != s390_opcodes + s390_num_opcodes\n\t     && op->opcode[0] == buffer[0];\n\t   op++)\n\t{\n\t  if ((op->modes & current_arch_mask)\n\t      && s390_insn_matches_opcode (buffer, op)\n\t      && (opcode == NULL\n\t\t  || opcode_mask_more_specific (op, opcode)))\n\t    opcode = op;\n\t}\n\n      if (opcode != NULL)\n\t{\n\t  /* The instruction is valid.  Print it and return its size.  */\n\t  s390_print_insn_with_opcode (memaddr, info, buffer, opcode);\n\t  return opsize;\n\t}\n    }\n\n  /* For code sections it makes sense to skip unknown instructions\n     according to their length bits.  */\n  if (status == 0\n      && option_use_insn_len_bits_p\n      && info->section != NULL\n      && (info->section->flags & SEC_CODE))\n    bytes_to_dump = opsize;\n  else\n    /* By default unknown instructions are printed as .long's/.short'\n       depending on how many bytes are available.  */\n    bytes_to_dump = bufsize >= 4 ? 4 : bufsize;\n\n  if (bytes_to_dump == 0)\n    return 0;\n\n  /* Fall back to hex print.  */\n  switch (bytes_to_dump)\n    {\n    case 4:\n      value = (unsigned int) buffer[0];\n      value = (value << 8) + (unsigned int) buffer[1];\n      value = (value << 8) + (unsigned int) buffer[2];\n      value = (value << 8) + (unsigned int) buffer[3];\n      info->fprintf_func (info->stream, \".long\\t0x%08x\", value);\n      return 4;\n    case 2:\n      value = (unsigned int) buffer[0];\n      value = (value << 8) + (unsigned int) buffer[1];\n      info->fprintf_func (info->stream, \".short\\t0x%04x\", value);\n      return 2;\n    default:\n      info->fprintf_func (info->stream, \".byte\\t0x%02x\",\n\t\t\t  (unsigned int) buffer[0]);\n      for (i = 1; i < bytes_to_dump; i++)\n\tinfo->fprintf_func (info->stream, \",0x%02x\",\n\t\t\t  (unsigned int) buffer[i]);\n      return bytes_to_dump;\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          281,
+          0
+        ],
+        [
+          378,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_insn_s390",
+        "parameters": {
+          "memaddr": "bfd_vma",
+          "info": "struct disassemble_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "const disasm_options_t *\ndisassembler_options_s390 (void)\n{\n  static disasm_options_t *opts = NULL;\n\n  if (opts == NULL)\n    {\n      size_t i, num_options = ARRAY_SIZE (options);\n      opts = XNEW (disasm_options_t);\n      opts->name = XNEWVEC (const char *, num_options + 1);\n      opts->description = XNEWVEC (const char *, num_options + 1);\n      for (i = 0; i < num_options; i++)\n\t{\n\t  opts->name[i] = options[i].name;\n\t  opts->description[i] = _(options[i].description);\n\t}\n      /* The array we return must be NULL terminated.  */\n      opts->name[i] = NULL;\n      opts->description[i] = NULL;\n    }\n\n  return opts;\n}",
+      "fn_code_pos": [
+        [
+          380,
+          0
+        ],
+        [
+          402,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "disassembler_options_s390",
+        "parameters": {},
+        "return_type": "disasm_options_t"
+      }
+    },
+    {
+      "fn_code": "void\nprint_s390_disassembler_options (FILE *stream)\n{\n  unsigned int i, max_len = 0;\n  fprintf (stream, _(\"\\n\\\nThe following S/390 specific disassembler options are supported for use\\n\\\nwith the -M switch (multiple options should be separated by commas):\\n\"));\n\n  for (i = 0; i < ARRAY_SIZE (options); i++)\n    {\n      unsigned int len = strlen (options[i].name);\n      if (max_len < len)\n\tmax_len = len;\n    }\n\n  for (i = 0, max_len++; i < ARRAY_SIZE (options); i++)\n    fprintf (stream, \"  %s%*c %s\\n\",\n\t     options[i].name,\n\t     (int)(max_len - strlen (options[i].name)), ' ',\n\t     _(options[i].description));\n}",
+      "fn_code_pos": [
+        [
+          404,
+          0
+        ],
+        [
+          424,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_s390_disassembler_options",
+        "parameters": {
+          "stream": "FILE"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "disassembler_options_s390 (void)",
+      "fn_dec_pos": [
+        [
+          381,
+          0
+        ],
+        [
+          381,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "disassembler_options_s390",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct\n{\n  const char *name;\n  const char *description;\n} s390_options_t;",
+      {
+        "char": "const"
+      },
+      "s390_options_t",
+      [
+        33,
+        0
+      ],
+      [
+        37,
+        17
+      ]
+    ],
+    [
+      "typedef struct\n{\n  const char *name;\n  const char *description;\n} s390_options_t;",
+      {
+        "char": "const"
+      },
+      "s390_options_t",
+      [
+        33,
+        0
+      ],
+      [
+        37,
+        17
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        50,
+        23
+      ],
+      [
+        50,
+        46
+      ]
+    ],
+    [
+      "struct s390_opcode",
+      {},
+      "",
+      [
+        96,
+        11
+      ],
+      [
+        96,
+        29
+      ]
+    ],
+    [
+      "struct s390_operand",
+      {},
+      "",
+      [
+        119,
+        14
+      ],
+      [
+        119,
+        33
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        179,
+        8
+      ],
+      [
+        179,
+        31
+      ]
+    ],
+    [
+      "struct s390_opcode",
+      {},
+      "",
+      [
+        181,
+        14
+      ],
+      [
+        181,
+        32
+      ]
+    ],
+    [
+      "struct s390_operand",
+      {},
+      "",
+      [
+        193,
+        12
+      ],
+      [
+        193,
+        31
+      ]
+    ],
+    [
+      "struct s390_opcode",
+      {},
+      "",
+      [
+        270,
+        33
+      ],
+      [
+        270,
+        51
+      ]
+    ],
+    [
+      "struct s390_opcode",
+      {},
+      "",
+      [
+        271,
+        12
+      ],
+      [
+        271,
+        30
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        282,
+        34
+      ],
+      [
+        282,
+        57
+      ]
+    ],
+    [
+      "struct s390_opcode",
+      {},
+      "",
+      [
+        285,
+        8
+      ],
+      [
+        285,
+        26
+      ]
+    ],
+    [
+      "struct s390_opcode",
+      {},
+      "",
+      [
+        316,
+        12
+      ],
+      [
+        316,
+        30
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"ansidecl.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"disassemble.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"opintl.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"opcode/s390.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

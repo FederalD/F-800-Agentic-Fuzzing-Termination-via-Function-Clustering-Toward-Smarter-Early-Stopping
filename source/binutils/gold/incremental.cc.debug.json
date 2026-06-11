@@ -1,0 +1,3194 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "template<int size, bool big_endian>\nbool\nSized_incremental_binary<size, big_endian>::find_incremental_inputs_sections(\n    unsigned int* p_inputs_shndx,\n    unsigned int* p_symtab_shndx,\n    unsigned int* p_relocs_shndx,\n    unsigned int* p_got_plt_shndx,\n    unsigned int* p_strtab_shndx)\n{\n  unsigned int inputs_shndx =\n      this->elf_file_.find_section_by_type(elfcpp::SHT_GNU_INCREMENTAL_INPUTS);\n  if (inputs_shndx == elfcpp::SHN_UNDEF)  // Not found.\n    return false;\n\n  unsigned int symtab_shndx =\n      this->elf_file_.find_section_by_type(elfcpp::SHT_GNU_INCREMENTAL_SYMTAB);\n  if (symtab_shndx == elfcpp::SHN_UNDEF)  // Not found.\n    return false;\n  if (this->elf_file_.section_link(symtab_shndx) != inputs_shndx)\n    return false;\n\n  unsigned int relocs_shndx =\n      this->elf_file_.find_section_by_type(elfcpp::SHT_GNU_INCREMENTAL_RELOCS);\n  if (relocs_shndx == elfcpp::SHN_UNDEF)  // Not found.\n    return false;\n  if (this->elf_file_.section_link(relocs_shndx) != inputs_shndx)\n    return false;\n\n  unsigned int got_plt_shndx =\n      this->elf_file_.find_section_by_type(elfcpp::SHT_GNU_INCREMENTAL_GOT_PLT);\n  if (got_plt_shndx == elfcpp::SHN_UNDEF)  // Not found.\n    return false;\n  if (this->elf_file_.section_link(got_plt_shndx) != inputs_shndx)\n    return false;\n\n  unsigned int strtab_shndx = this->elf_file_.section_link(inputs_shndx);\n  if (strtab_shndx == elfcpp::SHN_UNDEF\n      || strtab_shndx > this->elf_file_.shnum()\n      || this->elf_file_.section_type(strtab_shndx) != elfcpp::SHT_STRTAB)\n    return false;\n\n  if (p_inputs_shndx != NULL)\n    *p_inputs_shndx = inputs_shndx;\n  if (p_symtab_shndx != NULL)\n    *p_symtab_shndx = symtab_shndx;\n  if (p_relocs_shndx != NULL)\n    *p_relocs_shndx = relocs_shndx;\n  if (p_got_plt_shndx != NULL)\n    *p_got_plt_shndx = got_plt_shndx;\n  if (p_strtab_shndx != NULL)\n    *p_strtab_shndx = strtab_shndx;\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          191,
+          0
+        ],
+        [
+          243,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incremental_binary<size, big_endian>::setup_readers()\n{\n  unsigned int inputs_shndx;\n  unsigned int symtab_shndx;\n  unsigned int relocs_shndx;\n  unsigned int got_plt_shndx;\n  unsigned int strtab_shndx;\n\n  if (!this->find_incremental_inputs_sections(&inputs_shndx, &symtab_shndx,\n\t\t\t\t\t      &relocs_shndx, &got_plt_shndx,\n\t\t\t\t\t      &strtab_shndx))\n    return;\n\n  Location inputs_location(this->elf_file_.section_contents(inputs_shndx));\n  Location symtab_location(this->elf_file_.section_contents(symtab_shndx));\n  Location relocs_location(this->elf_file_.section_contents(relocs_shndx));\n  Location got_plt_location(this->elf_file_.section_contents(got_plt_shndx));\n  Location strtab_location(this->elf_file_.section_contents(strtab_shndx));\n\n  View inputs_view = this->view(inputs_location);\n  View symtab_view = this->view(symtab_location);\n  View relocs_view = this->view(relocs_location);\n  View got_plt_view = this->view(got_plt_location);\n  View strtab_view = this->view(strtab_location);\n\n  elfcpp::Elf_strtab strtab(strtab_view.data(), strtab_location.data_size);\n\n  this->inputs_reader_ =\n      Incremental_inputs_reader<size, big_endian>(inputs_view.data(), strtab);\n  this->symtab_reader_ =\n      Incremental_symtab_reader<big_endian>(symtab_view.data(),\n\t\t\t\t\t    symtab_location.data_size);\n  this->relocs_reader_ =\n      Incremental_relocs_reader<size, big_endian>(relocs_view.data(),\n\t\t\t\t\t\t  relocs_location.data_size);\n  this->got_plt_reader_ =\n      Incremental_got_plt_reader<big_endian>(got_plt_view.data());\n\n  // Find the main symbol table.\n  unsigned int main_symtab_shndx =\n      this->elf_file_.find_section_by_type(elfcpp::SHT_SYMTAB);\n  gold_assert(main_symtab_shndx != elfcpp::SHN_UNDEF);\n  this->main_symtab_loc_ = this->elf_file_.section_contents(main_symtab_shndx);\n\n  // Find the main symbol string table.\n  unsigned int main_strtab_shndx =\n      this->elf_file_.section_link(main_symtab_shndx);\n  gold_assert(main_strtab_shndx != elfcpp::SHN_UNDEF\n\t      && main_strtab_shndx < this->elf_file_.shnum());\n  this->main_strtab_loc_ = this->elf_file_.section_contents(main_strtab_shndx);\n\n  // Walk the list of input files (a) to setup an Input_reader for each\n  // input file, and (b) to record maps of files added from archive\n  // libraries and scripts.\n  Incremental_inputs_reader<size, big_endian>& inputs = this->inputs_reader_;\n  unsigned int count = inputs.input_file_count();\n  this->input_objects_.resize(count);\n  this->input_entry_readers_.reserve(count);\n  this->library_map_.resize(count);\n  this->script_map_.resize(count);\n  for (unsigned int i = 0; i < count; i++)\n    {\n      Input_entry_reader input_file = inputs.input_file(i);\n      this->input_entry_readers_.push_back(Sized_input_reader(input_file));\n      switch (input_file.type())\n\t{\n\tcase INCREMENTAL_INPUT_OBJECT:\n\tcase INCREMENTAL_INPUT_ARCHIVE_MEMBER:\n\tcase INCREMENTAL_INPUT_SHARED_LIBRARY:\n\t  // No special treatment necessary.\n\t  break;\n\tcase INCREMENTAL_INPUT_ARCHIVE:\n\t  {\n\t    Incremental_library* lib =\n\t\tnew Incremental_library(input_file.filename(), i,\n\t\t\t\t\t&this->input_entry_readers_[i]);\n\t    this->library_map_[i] = lib;\n\t    unsigned int member_count = input_file.get_member_count();\n\t    for (unsigned int j = 0; j < member_count; j++)\n\t      {\n\t\tint member_offset = input_file.get_member_offset(j);\n\t\tint member_index = inputs.input_file_index(member_offset);\n\t\tthis->library_map_[member_index] = lib;\n\t      }\n\t  }\n\t  break;\n\tcase INCREMENTAL_INPUT_SCRIPT:\n\t  {\n\t    Script_info* script = new Script_info(input_file.filename(), i);\n\t    this->script_map_[i] = script;\n\t    unsigned int object_count = input_file.get_object_count();\n\t    for (unsigned int j = 0; j < object_count; j++)\n\t      {\n\t\tint object_offset = input_file.get_object_offset(j);\n\t\tint object_index = inputs.input_file_index(object_offset);\n\t\tthis->script_map_[object_index] = script;\n\t      }\n\t  }\n\t  break;\n\tdefault:\n\t  gold_unreachable();\n\t}\n    }\n\n  // Initialize the map of global symbols.\n  unsigned int nglobals = this->symtab_reader_.symbol_count();\n  this->symbol_map_.resize(nglobals);\n\n  this->has_incremental_info_ = true;\n}",
+      "fn_code_pos": [
+        [
+          247,
+          0
+        ],
+        [
+          358,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nbool\nSized_incremental_binary<size, big_endian>::do_check_inputs(\n    const Command_line& cmdline,\n    Incremental_inputs* incremental_inputs)\n{\n  Incremental_inputs_reader<size, big_endian>& inputs = this->inputs_reader_;\n\n  if (!this->has_incremental_info_)\n    {\n      explain_no_incremental(_(\"no incremental data from previous build\"));\n      return false;\n    }\n\n  if (inputs.version() != INCREMENTAL_LINK_VERSION)\n    {\n      explain_no_incremental(_(\"different version of incremental build data\"));\n      return false;\n    }\n\n  if (incremental_inputs->command_line() != inputs.command_line())\n    {\n      gold_debug(DEBUG_INCREMENTAL,\n\t\t \"old command line: %s\",\n\t\t inputs.command_line());\n      gold_debug(DEBUG_INCREMENTAL,\n\t\t \"new command line: %s\",\n\t\t incremental_inputs->command_line().c_str());\n      explain_no_incremental(_(\"command line changed\"));\n      return false;\n    }\n\n  // Walk the list of input files given on the command line, and build\n  // a direct map of argument serial numbers to the corresponding input\n  // arguments.\n  this->input_args_map_.resize(cmdline.number_of_input_files());\n  check_input_args(this->input_args_map_, cmdline.begin(), cmdline.end());\n\n  // Walk the list of input files to check for conditions that prevent\n  // an incremental update link.\n  unsigned int count = inputs.input_file_count();\n  for (unsigned int i = 0; i < count; i++)\n    {\n      Input_entry_reader input_file = inputs.input_file(i);\n      switch (input_file.type())\n\t{\n\tcase INCREMENTAL_INPUT_OBJECT:\n\tcase INCREMENTAL_INPUT_ARCHIVE_MEMBER:\n\tcase INCREMENTAL_INPUT_SHARED_LIBRARY:\n\tcase INCREMENTAL_INPUT_ARCHIVE:\n\t  // No special treatment necessary.\n\t  break;\n\tcase INCREMENTAL_INPUT_SCRIPT:\n\t  if (this->do_file_has_changed(i))\n\t    {\n\t      explain_no_incremental(_(\"%s: script file changed\"),\n\t\t\t\t     input_file.filename());\n\t      return false;\n\t    }\n\t  break;\n\tdefault:\n\t  gold_unreachable();\n\t}\n    }\n\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          399,
+          0
+        ],
+        [
+          465,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nbool\nSized_incremental_binary<size, big_endian>::do_file_has_changed(\n    unsigned int n) const\n{\n  Input_entry_reader input_file = this->inputs_reader_.input_file(n);\n  Incremental_disposition disp = INCREMENTAL_CHECK;\n\n  // For files named in scripts, find the file that was actually named\n  // on the command line, so that we can get the incremental disposition\n  // flag.\n  Script_info* script = this->get_script_info(n);\n  if (script != NULL)\n    n = script->input_file_index();\n\n  const Input_argument* input_argument = this->get_input_argument(n);\n  if (input_argument != NULL)\n    disp = input_argument->file().options().incremental_disposition();\n\n  // For files at the beginning of the command line (i.e., those added\n  // implicitly by gcc), check whether the --incremental-startup-unchanged\n  // option was used.\n  if (disp == INCREMENTAL_STARTUP)\n    disp = parameters->options().incremental_startup_disposition();\n\n  if (disp != INCREMENTAL_CHECK)\n    return disp == INCREMENTAL_CHANGED;\n\n  const char* filename = input_file.filename();\n  Timespec old_mtime = input_file.get_mtime();\n  Timespec new_mtime;\n  if (!get_mtime(filename, &new_mtime))\n    {\n      // If we can't open get the current modification time, assume it has\n      // changed.  If the file doesn't exist, we'll issue an error when we\n      // try to open it later.\n      return true;\n    }\n\n  if (new_mtime.seconds > old_mtime.seconds)\n    return true;\n  if (new_mtime.seconds == old_mtime.seconds\n      && new_mtime.nanoseconds > old_mtime.nanoseconds)\n    return true;\n  return false;\n}",
+      "fn_code_pos": [
+        [
+          469,
+          0
+        ],
+        [
+          514,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incremental_binary<size, big_endian>::do_init_layout(Layout* layout)\n{\n  typedef elfcpp::Shdr<size, big_endian> Shdr;\n  const int shdr_size = elfcpp::Elf_sizes<size>::shdr_size;\n\n  // Get views of the section headers and the section string table.\n  const off_t shoff = this->elf_file_.shoff();\n  const unsigned int shnum = this->elf_file_.shnum();\n  const unsigned int shstrndx = this->elf_file_.shstrndx();\n  Location shdrs_location(shoff, shnum * shdr_size);\n  Location shstrndx_location(this->elf_file_.section_contents(shstrndx));\n  View shdrs_view = this->view(shdrs_location);\n  View shstrndx_view = this->view(shstrndx_location);\n  elfcpp::Elf_strtab shstrtab(shstrndx_view.data(),\n\t\t\t      shstrndx_location.data_size);\n\n  layout->set_incremental_base(this);\n\n  // Initialize the layout.\n  this->section_map_.resize(shnum);\n  const unsigned char* pshdr = shdrs_view.data() + shdr_size;\n  for (unsigned int i = 1; i < shnum; i++)\n    {\n      Shdr shdr(pshdr);\n      const char* name;\n      if (!shstrtab.get_c_string(shdr.get_sh_name(), &name))\n\tname = NULL;\n      gold_debug(DEBUG_INCREMENTAL,\n\t\t \"Output section: %2d %08lx %08lx %08lx %3d %s\",\n\t\t i,\n\t\t static_cast<long>(shdr.get_sh_addr()),\n\t\t static_cast<long>(shdr.get_sh_offset()),\n\t\t static_cast<long>(shdr.get_sh_size()),\n\t\t shdr.get_sh_type(), name ? name : \"<null>\");\n      this->section_map_[i] = layout->init_fixed_output_section(name, shdr);\n      pshdr += shdr_size;\n    }\n}",
+      "fn_code_pos": [
+        [
+          519,
+          0
+        ],
+        [
+          558,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incremental_binary<size, big_endian>::do_reserve_layout(\n    unsigned int input_file_index)\n{\n  const int sym_size = elfcpp::Elf_sizes<size>::sym_size;\n\n  Input_entry_reader input_file =\n      this->inputs_reader_.input_file(input_file_index);\n\n  if (input_file.type() == INCREMENTAL_INPUT_SHARED_LIBRARY)\n    {\n      // Reserve the BSS space used for COPY relocations.\n      unsigned int nsyms = input_file.get_global_symbol_count();\n      Incremental_binary::View symtab_view(NULL);\n      unsigned int symtab_count;\n      elfcpp::Elf_strtab strtab(NULL, 0);\n      this->get_symtab_view(&symtab_view, &symtab_count, &strtab);\n      for (unsigned int i = 0; i < nsyms; ++i)\n\t{\n\t  bool is_def;\n\t  bool is_copy;\n\t  unsigned int output_symndx =\n\t      input_file.get_output_symbol_index(i, &is_def, &is_copy);\n\t  if (is_copy)\n\t    {\n\t      const unsigned char* sym_p = (symtab_view.data()\n\t\t\t\t\t    + output_symndx * sym_size);\n\t      elfcpp::Sym<size, big_endian> gsym(sym_p);\n\t      unsigned int shndx = gsym.get_st_shndx();\n\t      if (shndx < 1 || shndx >= this->section_map_.size())\n\t\tcontinue;\n\t      Output_section* os = this->section_map_[shndx];\n\t      off_t offset = gsym.get_st_value() - os->address();\n\t      os->reserve(offset, gsym.get_st_size());\n\t      gold_debug(DEBUG_INCREMENTAL,\n\t\t\t \"Reserve for COPY reloc: %s, off %d, size %d\",\n\t\t\t os->name(),\n\t\t\t static_cast<int>(offset),\n\t\t\t static_cast<int>(gsym.get_st_size()));\n\t    }\n\t}\n      return;\n    }\n\n  unsigned int shnum = input_file.get_input_section_count();\n  for (unsigned int i = 0; i < shnum; i++)\n    {\n      typename Input_entry_reader::Input_section_info sect =\n\t  input_file.get_input_section(i);\n      if (sect.output_shndx == 0 || sect.sh_offset == -1)\n\tcontinue;\n      Output_section* os = this->section_map_[sect.output_shndx];\n      gold_assert(os != NULL);\n      os->reserve(sect.sh_offset, sect.sh_size);\n    }\n}",
+      "fn_code_pos": [
+        [
+          562,
+          0
+        ],
+        [
+          618,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incremental_binary<size, big_endian>::do_process_got_plt(\n    Symbol_table* symtab,\n    Layout* layout)\n{\n  Incremental_got_plt_reader<big_endian> got_plt_reader(this->got_plt_reader());\n  Sized_target<size, big_endian>* target =\n      parameters->sized_target<size, big_endian>();\n\n  // Get the number of symbols in the main symbol table and in the\n  // incremental symbol table.  The difference between the two counts\n  // is the index of the first forced-local or global symbol in the\n  // main symbol table.\n  unsigned int symtab_count =\n      this->main_symtab_loc_.data_size / elfcpp::Elf_sizes<size>::sym_size;\n  unsigned int isym_count = this->symtab_reader_.symbol_count();\n  unsigned int first_global = symtab_count - isym_count;\n\n  // Tell the target how big the GOT and PLT sections are.\n  unsigned int got_count = got_plt_reader.get_got_entry_count();\n  unsigned int plt_count = got_plt_reader.get_plt_entry_count();\n  Output_data_got_base* got =\n      target->init_got_plt_for_update(symtab, layout, got_count, plt_count);\n\n  // Read the GOT entries from the base file and build the outgoing GOT.\n  for (unsigned int i = 0; i < got_count; ++i)\n    {\n      unsigned int got_type = got_plt_reader.get_got_type(i);\n      if ((got_type & 0x7f) == 0x7f)\n\t{\n\t  // This is the second entry of a pair.\n\t  got->reserve_slot(i);\n\t  continue;\n\t}\n      unsigned int symndx = got_plt_reader.get_got_symndx(i);\n      if (got_type & 0x80)\n\t{\n\t  // This is an entry for a local symbol.  Ignore this entry if\n\t  // the object file was replaced.\n\t  unsigned int input_index = got_plt_reader.get_got_input_index(i);\n\t  gold_debug(DEBUG_INCREMENTAL,\n\t\t     \"GOT entry %d, type %02x: (local symbol)\",\n\t\t     i, got_type & 0x7f);\n\t  Sized_relobj_incr<size, big_endian>* obj =\n\t      this->input_object(input_index);\n\t  if (obj != NULL)\n\t    target->reserve_local_got_entry(i, obj, symndx, got_type & 0x7f);\n\t}\n      else\n\t{\n\t  // This is an entry for a global symbol.  GOT_DESC is the symbol\n\t  // table index.\n\t  // FIXME: This should really be a fatal error (corrupt input).\n\t  gold_assert(symndx >= first_global && symndx < symtab_count);\n\t  Symbol* sym = this->global_symbol(symndx - first_global);\n\t  // Add the GOT entry only if the symbol is still referenced.\n\t  if (sym != NULL && sym->in_reg())\n\t    {\n\t      gold_debug(DEBUG_INCREMENTAL,\n\t\t\t \"GOT entry %d, type %02x: %s\",\n\t\t\t i, got_type, sym->name());\n\t      target->reserve_global_got_entry(i, sym, got_type);\n\t    }\n\t}\n    }\n\n  // Read the PLT entries from the base file and pass each to the target.\n  for (unsigned int i = 0; i < plt_count; ++i)\n    {\n      unsigned int plt_desc = got_plt_reader.get_plt_desc(i);\n      // FIXME: This should really be a fatal error (corrupt input).\n      gold_assert(plt_desc >= first_global && plt_desc < symtab_count);\n      Symbol* sym = this->global_symbol(plt_desc - first_global);\n      // Add the PLT entry only if the symbol is still referenced.\n      if (sym != NULL && sym->in_reg())\n\t{\n\t  gold_debug(DEBUG_INCREMENTAL,\n\t\t     \"PLT entry %d: %s\",\n\t\t     i, sym->name());\n\t  target->register_global_plt_entry(symtab, layout, i, sym);\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          622,
+          0
+        ],
+        [
+          705,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incremental_binary<size, big_endian>::do_emit_copy_relocs(\n    Symbol_table* symtab)\n{\n  Sized_target<size, big_endian>* target =\n      parameters->sized_target<size, big_endian>();\n\n  for (typename Copy_relocs::iterator p = this->copy_relocs_.begin();\n       p != this->copy_relocs_.end();\n       ++p)\n    {\n      if (!(*p).symbol->is_copied_from_dynobj())\n\ttarget->emit_copy_reloc(symtab, (*p).symbol, (*p).output_section,\n\t\t\t\t(*p).offset);\n    }\n}",
+      "fn_code_pos": [
+        [
+          709,
+          0
+        ],
+        [
+          725,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incremental_binary<size, big_endian>::do_apply_incremental_relocs(\n    const Symbol_table* symtab,\n    Layout* layout,\n    Output_file* of)\n{\n  typedef typename elfcpp::Elf_types<size>::Elf_Addr Address;\n  typedef typename elfcpp::Elf_types<size>::Elf_Swxword Addend;\n  Incremental_symtab_reader<big_endian> isymtab(this->symtab_reader());\n  Incremental_relocs_reader<size, big_endian> irelocs(this->relocs_reader());\n  unsigned int nglobals = isymtab.symbol_count();\n  const unsigned int incr_reloc_size = irelocs.reloc_size;\n\n  Relocate_info<size, big_endian> relinfo;\n  relinfo.symtab = symtab;\n  relinfo.layout = layout;\n  relinfo.object = NULL;\n  relinfo.reloc_shndx = 0;\n  relinfo.reloc_shdr = NULL;\n  relinfo.data_shndx = 0;\n  relinfo.data_shdr = NULL;\n\n  Sized_target<size, big_endian>* target =\n      parameters->sized_target<size, big_endian>();\n\n  for (unsigned int i = 0; i < nglobals; i++)\n    {\n      const Symbol* gsym = this->global_symbol(i);\n\n      // If the symbol is not referenced from any unchanged input files,\n      // we do not need to reapply any of its relocations.\n      if (gsym == NULL)\n\tcontinue;\n\n      // If the symbol is defined in an unchanged file, we do not need to\n      // reapply any of its relocations.\n      if (gsym->source() == Symbol::FROM_OBJECT\n\t  && gsym->object()->is_incremental())\n\tcontinue;\n\n      gold_debug(DEBUG_INCREMENTAL,\n\t\t \"Applying incremental relocations for global symbol %s [%d]\",\n\t\t gsym->name(), i);\n\n      // Follow the linked list of input symbol table entries for this symbol.\n      // We don't bother to figure out whether the symbol table entry belongs\n      // to a changed or unchanged file because it's easier just to apply all\n      // the relocations -- although we might scribble over an area that has\n      // been reallocated, we do this before copying any new data into the\n      // output file.\n      unsigned int offset = isymtab.get_list_head(i);\n      while (offset > 0)\n\t{\n\t  Incremental_global_symbol_reader<big_endian> sym_info =\n\t      this->inputs_reader().global_symbol_reader_at_offset(offset);\n\t  unsigned int r_base = sym_info.reloc_offset();\n\t  unsigned int r_count = sym_info.reloc_count();\n\n\t  // Apply each relocation for this symbol table entry.\n\t  for (unsigned int j = 0; j < r_count;\n\t       ++j, r_base += incr_reloc_size)\n\t    {\n\t      unsigned int r_type = irelocs.get_r_type(r_base);\n\t      unsigned int r_shndx = irelocs.get_r_shndx(r_base);\n\t      Address r_offset = irelocs.get_r_offset(r_base);\n\t      Addend r_addend = irelocs.get_r_addend(r_base);\n\t      Output_section* os = this->output_section(r_shndx);\n\t      Address address = os->address();\n\t      off_t section_offset = os->offset();\n\t      size_t view_size = os->data_size();\n\t      unsigned char* const view = of->get_output_view(section_offset,\n\t\t\t\t\t\t\t      view_size);\n\n\t      gold_debug(DEBUG_INCREMENTAL,\n\t\t\t \"  %08lx: %s + %d: type %d addend %ld\",\n\t\t\t (long)(section_offset + r_offset),\n\t\t\t os->name(),\n\t\t\t (int)r_offset,\n\t\t\t r_type,\n\t\t\t (long)r_addend);\n\n\t      target->apply_relocation(&relinfo, r_offset, r_type, r_addend,\n\t\t\t\t       gsym, view, address, view_size);\n\n\t      // FIXME: Do something more efficient if write_output_view\n\t      // ever becomes more than a no-op.\n\t      of->write_output_view(section_offset, view_size, view);\n\t    }\n\t  offset = sym_info.next_offset();\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          729,
+          0
+        ],
+        [
+          821,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incremental_binary<size, big_endian>::get_symtab_view(\n    View* symtab_view,\n    unsigned int* nsyms,\n    elfcpp::Elf_strtab* strtab)\n{\n  *symtab_view = this->view(this->main_symtab_loc_);\n  *nsyms = this->main_symtab_loc_.data_size / elfcpp::Elf_sizes<size>::sym_size;\n\n  View strtab_view(this->view(this->main_strtab_loc_));\n  *strtab = elfcpp::Elf_strtab(strtab_view.data(),\n\t\t\t       this->main_strtab_loc_.data_size);\n}",
+      "fn_code_pos": [
+        [
+          825,
+          0
+        ],
+        [
+          838,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nIncremental_binary*\nmake_sized_incremental_binary(Output_file* file,\n\t\t\t      const elfcpp::Ehdr<size, big_endian>& ehdr)\n{\n  Target* target = select_target(NULL, 0, // XXX\n\t\t\t\t ehdr.get_e_machine(), size, big_endian,\n\t\t\t\t ehdr.get_e_ident()[elfcpp::EI_OSABI],\n\t\t\t\t ehdr.get_e_ident()[elfcpp::EI_ABIVERSION]);\n  if (target == NULL)\n    {\n      explain_no_incremental(_(\"unsupported ELF machine number %d\"),\n\t       ehdr.get_e_machine());\n      return NULL;\n    }\n\n  if (!parameters->target_valid())\n    set_parameters_target(target);\n  else if (target != &parameters->target())\n    gold_error(_(\"%s: incompatible target\"), file->filename());\n\n  return new Sized_incremental_binary<size, big_endian>(file, ehdr, target);\n}",
+      "fn_code_pos": [
+        [
+          846,
+          0
+        ],
+        [
+          868,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nOutput_section_incremental_inputs<size, big_endian>::set_final_data_size()\n{\n  const Incremental_inputs* inputs = this->inputs_;\n\n  // Offset of each input entry.\n  unsigned int input_offset = this->header_size;\n\n  // Offset of each supplemental info block.\n  unsigned int file_index = 0;\n  unsigned int info_offset = this->header_size;\n  info_offset += this->input_entry_size * inputs->input_file_count();\n\n  // Count each input file and its supplemental information block.\n  for (Incremental_inputs::Input_list::const_iterator p =\n\t   inputs->input_files().begin();\n       p != inputs->input_files().end();\n       ++p)\n    {\n      // Set the index and offset of the input file entry.\n      (*p)->set_offset(file_index, input_offset);\n      ++file_index;\n      input_offset += this->input_entry_size;\n\n      // Set the offset of the supplemental info block.\n      switch ((*p)->type())\n\t{\n\tcase INCREMENTAL_INPUT_SCRIPT:\n\t  {\n\t    Incremental_script_entry *entry = (*p)->script_entry();\n\t    gold_assert(entry != NULL);\n\t    (*p)->set_info_offset(info_offset);\n\t    // Object count.\n\t    info_offset += 4;\n\t    // Each member.\n\t    info_offset += (entry->get_object_count() * 4);\n\t  }\n\t  break;\n\tcase INCREMENTAL_INPUT_OBJECT:\n\tcase INCREMENTAL_INPUT_ARCHIVE_MEMBER:\n\t  {\n\t    Incremental_object_entry* entry = (*p)->object_entry();\n\t    gold_assert(entry != NULL);\n\t    (*p)->set_info_offset(info_offset);\n\t    // Input section count, global symbol count, local symbol offset,\n\t    // local symbol count, first dynamic reloc, dynamic reloc count,\n\t    // comdat group count.\n\t    info_offset += this->object_info_size;\n\t    // Each input section.\n\t    info_offset += (entry->get_input_section_count()\n\t\t\t    * this->input_section_entry_size);\n\t    // Each global symbol.\n\t    const Object::Symbols* syms = entry->object()->get_global_symbols();\n\t    info_offset += syms->size() * this->global_sym_entry_size;\n\t    // Each comdat group.\n\t    info_offset += entry->get_comdat_group_count() * 4;\n\t  }\n\t  break;\n\tcase INCREMENTAL_INPUT_SHARED_LIBRARY:\n\t  {\n\t    Incremental_dynobj_entry* entry = (*p)->dynobj_entry();\n\t    gold_assert(entry != NULL);\n\t    (*p)->set_info_offset(info_offset);\n\t    // Global symbol count, soname index.\n\t    info_offset += 8;\n\t    // Each global symbol.\n\t    const Object::Symbols* syms = entry->object()->get_global_symbols();\n\t    gold_assert(syms != NULL);\n\t    unsigned int nsyms = syms->size();\n\t    unsigned int nsyms_out = 0;\n\t    for (unsigned int i = 0; i < nsyms; ++i)\n\t      {\n\t\tconst Symbol* sym = (*syms)[i];\n\t\tif (sym == NULL)\n\t\t  continue;\n\t\tif (sym->is_forwarder())\n\t\t  sym = this->symtab_->resolve_forwards(sym);\n\t\tif (sym->symtab_index() != -1U)\n\t\t  ++nsyms_out;\n\t      }\n\t    info_offset += nsyms_out * 4;\n\t  }\n\t  break;\n\tcase INCREMENTAL_INPUT_ARCHIVE:\n\t  {\n\t    Incremental_archive_entry* entry = (*p)->archive_entry();\n\t    gold_assert(entry != NULL);\n\t    (*p)->set_info_offset(info_offset);\n\t    // Member count + unused global symbol count.\n\t    info_offset += 8;\n\t    // Each member.\n\t    info_offset += (entry->get_member_count() * 4);\n\t    // Each global symbol.\n\t    info_offset += (entry->get_unused_global_symbol_count() * 4);\n\t  }\n\t  break;\n\tdefault:\n\t  gold_unreachable();\n\t}\n\n     // Pad so each supplemental info block begins at an 8-byte boundary.\n     if (info_offset & 4)\n       info_offset += 4;\n   }\n\n  this->set_data_size(info_offset);\n\n  // Set the size of the .gnu_incremental_symtab section.\n  inputs->symtab_section()->set_current_data_size(this->symtab_->output_count()\n\t\t\t\t\t\t  * sizeof(unsigned int));\n\n  // Set the size of the .gnu_incremental_relocs section.\n  inputs->relocs_section()->set_current_data_size(inputs->get_reloc_count()\n\t\t\t\t\t\t  * this->incr_reloc_size);\n\n  // Set the size of the .gnu_incremental_got_plt section.\n  Sized_target<size, big_endian>* target =\n    parameters->sized_target<size, big_endian>();\n  unsigned int got_count = target->got_entry_count();\n  unsigned int plt_count = target->plt_entry_count();\n  unsigned int got_plt_size = 8;  // GOT entry count, PLT entry count.\n  got_plt_size = (got_plt_size + got_count + 3) & ~3;  // GOT type array.\n  got_plt_size += got_count * 8 + plt_count * 4;  // GOT array, PLT array.\n  inputs->got_plt_section()->set_current_data_size(got_plt_size);\n}",
+      "fn_code_pos": [
+        [
+          1259,
+          0
+        ],
+        [
+          1384,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nOutput_section_incremental_inputs<size, big_endian>::do_write(Output_file* of)\n{\n  const Incremental_inputs* inputs = this->inputs_;\n  Stringpool* strtab = inputs->get_stringpool();\n\n  // Get a view into the .gnu_incremental_inputs section.\n  const off_t off = this->offset();\n  const off_t oview_size = this->data_size();\n  unsigned char* const oview = of->get_output_view(off, oview_size);\n  unsigned char* pov = oview;\n\n  // Get a view into the .gnu_incremental_symtab section.\n  const off_t symtab_off = inputs->symtab_section()->offset();\n  const off_t symtab_size = inputs->symtab_section()->data_size();\n  unsigned char* const symtab_view = of->get_output_view(symtab_off,\n\t\t\t\t\t\t\t symtab_size);\n\n  // Allocate an array of linked list heads for the .gnu_incremental_symtab\n  // section.  Each element corresponds to a global symbol in the output\n  // symbol table, and points to the head of the linked list that threads\n  // through the object file input entries.  The value of each element\n  // is the section-relative offset to a global symbol entry in a\n  // supplemental information block.\n  unsigned int global_sym_count = this->symtab_->output_count();\n  unsigned int* global_syms = new unsigned int[global_sym_count];\n  memset(global_syms, 0, global_sym_count * sizeof(unsigned int));\n\n  // Write the section header.\n  Stringpool::Key command_line_key = inputs->command_line_key();\n  pov = this->write_header(pov, inputs->input_file_count(),\n\t\t\t   strtab->get_offset_from_key(command_line_key));\n\n  // Write the list of input files.\n  pov = this->write_input_files(oview, pov, strtab);\n\n  // Write the supplemental information blocks for each input file.\n  pov = this->write_info_blocks(oview, pov, strtab, global_syms,\n\t\t\t\tglobal_sym_count);\n\n  gold_assert(pov - oview == oview_size);\n\n  // Write the .gnu_incremental_symtab section.\n  gold_assert(static_cast<off_t>(global_sym_count) * 4 == symtab_size);\n  this->write_symtab(symtab_view, global_syms, global_sym_count);\n\n  delete[] global_syms;\n\n  // Write the .gnu_incremental_got_plt section.\n  const off_t got_plt_off = inputs->got_plt_section()->offset();\n  const off_t got_plt_size = inputs->got_plt_section()->data_size();\n  unsigned char* const got_plt_view = of->get_output_view(got_plt_off,\n\t\t\t\t\t\t\t  got_plt_size);\n  this->write_got_plt(got_plt_view, got_plt_size);\n\n  of->write_output_view(off, oview_size, oview);\n  of->write_output_view(symtab_off, symtab_size, symtab_view);\n  of->write_output_view(got_plt_off, got_plt_size, got_plt_view);\n}",
+      "fn_code_pos": [
+        [
+          1389,
+          0
+        ],
+        [
+          1448,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned char*\nOutput_section_incremental_inputs<size, big_endian>::write_header(\n    unsigned char* pov,\n    unsigned int input_file_count,\n    section_offset_type command_line_offset)\n{\n  Swap32::writeval(pov, INCREMENTAL_LINK_VERSION);\n  Swap32::writeval(pov + 4, input_file_count);\n  Swap32::writeval(pov + 8, command_line_offset);\n  Swap32::writeval(pov + 12, 0);\n  gold_assert(this->header_size == 16);\n  return pov + this->header_size;\n}",
+      "fn_code_pos": [
+        [
+          1453,
+          0
+        ],
+        [
+          1466,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned char*\nOutput_section_incremental_inputs<size, big_endian>::write_input_files(\n    unsigned char* oview,\n    unsigned char* pov,\n    Stringpool* strtab)\n{\n  const Incremental_inputs* inputs = this->inputs_;\n\n  for (Incremental_inputs::Input_list::const_iterator p =\n\t   inputs->input_files().begin();\n       p != inputs->input_files().end();\n       ++p)\n    {\n      gold_assert(static_cast<unsigned int>(pov - oview) == (*p)->get_offset());\n      section_offset_type filename_offset =\n\t  strtab->get_offset_from_key((*p)->get_filename_key());\n      const Timespec& mtime = (*p)->get_mtime();\n      unsigned int flags = (*p)->type();\n      if ((*p)->is_in_system_directory())\n\tflags |= INCREMENTAL_INPUT_IN_SYSTEM_DIR;\n      if ((*p)->as_needed())\n\tflags |= INCREMENTAL_INPUT_AS_NEEDED;\n      Swap32::writeval(pov, filename_offset);\n      Swap32::writeval(pov + 4, (*p)->get_info_offset());\n      Swap64::writeval(pov + 8, mtime.seconds);\n      Swap32::writeval(pov + 16, mtime.nanoseconds);\n      Swap16::writeval(pov + 20, flags);\n      Swap16::writeval(pov + 22, (*p)->arg_serial());\n      gold_assert(this->input_entry_size == 24);\n      pov += this->input_entry_size;\n    }\n  return pov;\n}",
+      "fn_code_pos": [
+        [
+          1470,
+          0
+        ],
+        [
+          1503,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned char*\nOutput_section_incremental_inputs<size, big_endian>::write_info_blocks(\n    unsigned char* oview,\n    unsigned char* pov,\n    Stringpool* strtab,\n    unsigned int* global_syms,\n    unsigned int global_sym_count)\n{\n  const Incremental_inputs* inputs = this->inputs_;\n  unsigned int first_global_index = this->symtab_->first_global_index();\n\n  for (Incremental_inputs::Input_list::const_iterator p =\n\t   inputs->input_files().begin();\n       p != inputs->input_files().end();\n       ++p)\n    {\n      switch ((*p)->type())\n\t{\n\tcase INCREMENTAL_INPUT_SCRIPT:\n\t  {\n\t    gold_assert(static_cast<unsigned int>(pov - oview)\n\t\t\t== (*p)->get_info_offset());\n\t    Incremental_script_entry* entry = (*p)->script_entry();\n\t    gold_assert(entry != NULL);\n\n\t    // Write the object count.\n\t    unsigned int nobjects = entry->get_object_count();\n\t    Swap32::writeval(pov, nobjects);\n\t    pov += 4;\n\n\t    // For each object, write the offset to its input file entry.\n\t    for (unsigned int i = 0; i < nobjects; ++i)\n\t      {\n\t\tIncremental_input_entry* obj = entry->get_object(i);\n\t\tSwap32::writeval(pov, obj->get_offset());\n\t\tpov += 4;\n\t      }\n\t  }\n\t  break;\n\n\tcase INCREMENTAL_INPUT_OBJECT:\n\tcase INCREMENTAL_INPUT_ARCHIVE_MEMBER:\n\t  {\n\t    gold_assert(static_cast<unsigned int>(pov - oview)\n\t\t\t== (*p)->get_info_offset());\n\t    Incremental_object_entry* entry = (*p)->object_entry();\n\t    gold_assert(entry != NULL);\n\t    const Object* obj = entry->object();\n\t    const Relobj* relobj = static_cast<const Relobj*>(obj);\n\t    const Object::Symbols* syms = obj->get_global_symbols();\n\t    // Write the input section count and global symbol count.\n\t    unsigned int nsections = entry->get_input_section_count();\n\t    unsigned int nsyms = syms->size();\n\t    off_t locals_offset = relobj->local_symbol_offset();\n\t    unsigned int nlocals = relobj->output_local_symbol_count();\n\t    unsigned int first_dynrel = relobj->first_dyn_reloc();\n\t    unsigned int ndynrel = relobj->dyn_reloc_count();\n\t    unsigned int ncomdat = entry->get_comdat_group_count();\n\t    Swap32::writeval(pov, nsections);\n\t    Swap32::writeval(pov + 4, nsyms);\n\t    Swap32::writeval(pov + 8, static_cast<unsigned int>(locals_offset));\n\t    Swap32::writeval(pov + 12, nlocals);\n\t    Swap32::writeval(pov + 16, first_dynrel);\n\t    Swap32::writeval(pov + 20, ndynrel);\n\t    Swap32::writeval(pov + 24, ncomdat);\n\t    Swap32::writeval(pov + 28, 0);\n\t    gold_assert(this->object_info_size == 32);\n\t    pov += this->object_info_size;\n\n\t    // Build a temporary array to map input section indexes\n\t    // from the original object file index to the index in the\n\t    // incremental info table.\n\t    unsigned int* index_map = new unsigned int[obj->shnum()];\n\t    memset(index_map, 0, obj->shnum() * sizeof(unsigned int));\n\n\t    // For each input section, write the name, output section index,\n\t    // offset within output section, and input section size.\n\t    for (unsigned int i = 0; i < nsections; i++)\n\t      {\n\t\tunsigned int shndx = entry->get_input_section_index(i);\n\t\tindex_map[shndx] = i + 1;\n\t\tStringpool::Key key = entry->get_input_section_name_key(i);\n\t\toff_t name_offset = 0;\n\t\tif (key != 0)\n\t\t  name_offset = strtab->get_offset_from_key(key);\n\t\tint out_shndx = 0;\n\t\toff_t out_offset = 0;\n\t\toff_t sh_size = 0;\n\t\tOutput_section* os = obj->output_section(shndx);\n\t\tif (os != NULL)\n\t\t  {\n\t\t    out_shndx = os->out_shndx();\n\t\t    out_offset = obj->output_section_offset(shndx);\n\t\t    sh_size = entry->get_input_section_size(i);\n\t\t  }\n\t\tSwap32::writeval(pov, name_offset);\n\t\tSwap32::writeval(pov + 4, out_shndx);\n\t\tSwap::writeval(pov + 8, out_offset);\n\t\tSwap::writeval(pov + 8 + sizeof_addr, sh_size);\n\t\tgold_assert(this->input_section_entry_size\n\t\t\t    == 8 + 2 * sizeof_addr);\n\t\tpov += this->input_section_entry_size;\n\t      }\n\n\t    // For each global symbol, write its associated relocations,\n\t    // add it to the linked list of globals, then write the\n\t    // supplemental information:  global symbol table index,\n\t    // input section index, linked list chain pointer, relocation\n\t    // count, and offset to the relocations.\n\t    for (unsigned int i = 0; i < nsyms; i++)\n\t      {\n\t\tconst Symbol* sym = (*syms)[i];\n\t\tif (sym->is_forwarder())\n\t\t  sym = this->symtab_->resolve_forwards(sym);\n\t\tunsigned int shndx = 0;\n\t\tif (sym->source() != Symbol::FROM_OBJECT)\n\t\t  {\n\t\t    // The symbol was defined by the linker (e.g., common).\n\t\t    // We mark these symbols with a special SHNDX of -1,\n\t\t    // but exclude linker-predefined symbols and symbols\n\t\t    // copied from shared objects.\n\t\t    if (!sym->is_predefined()\n\t\t\t&& !sym->is_copied_from_dynobj())\n\t\t      shndx = -1U;\n\t\t  }\n\t\telse if (sym->object() == obj && sym->is_defined())\n\t\t  {\n\t\t    bool is_ordinary;\n\t\t    unsigned int orig_shndx = sym->shndx(&is_ordinary);\n\t\t    if (is_ordinary)\n\t\t      shndx = index_map[orig_shndx];\n\t\t    else\n\t\t      shndx = 1;\n\t\t  }\n\t\tunsigned int symtab_index = sym->symtab_index();\n\t\tunsigned int chain = 0;\n\t\tunsigned int first_reloc = 0;\n\t\tunsigned int nrelocs = obj->get_incremental_reloc_count(i);\n\t\tif (nrelocs > 0)\n\t\t  {\n\t\t    gold_assert(symtab_index != -1U\n\t\t\t\t&& (symtab_index - first_global_index\n\t\t\t\t    < global_sym_count));\n\t\t    first_reloc = obj->get_incremental_reloc_base(i);\n\t\t    chain = global_syms[symtab_index - first_global_index];\n\t\t    global_syms[symtab_index - first_global_index] =\n\t\t\tpov - oview;\n\t\t  }\n\t\tSwap32::writeval(pov, symtab_index);\n\t\tSwap32::writeval(pov + 4, shndx);\n\t\tSwap32::writeval(pov + 8, chain);\n\t\tSwap32::writeval(pov + 12, nrelocs);\n\t\tSwap32::writeval(pov + 16,\n\t\t\t\t first_reloc * (8 + 2 * sizeof_addr));\n\t\tgold_assert(this->global_sym_entry_size == 20);\n\t\tpov += this->global_sym_entry_size;\n\t      }\n\n\t    // For each kept COMDAT group, write the group signature.\n\t    for (unsigned int i = 0; i < ncomdat; i++)\n\t      {\n\t\tStringpool::Key key = entry->get_comdat_signature_key(i);\n\t\toff_t name_offset = 0;\n\t\tif (key != 0)\n\t\t  name_offset = strtab->get_offset_from_key(key);\n\t\tSwap32::writeval(pov, name_offset);\n\t\tpov += 4;\n\t      }\n\n\t    delete[] index_map;\n\t  }\n\t  break;\n\n\tcase INCREMENTAL_INPUT_SHARED_LIBRARY:\n\t  {\n\t    gold_assert(static_cast<unsigned int>(pov - oview)\n\t\t\t== (*p)->get_info_offset());\n\t    Incremental_dynobj_entry* entry = (*p)->dynobj_entry();\n\t    gold_assert(entry != NULL);\n\t    Object* obj = entry->object();\n\t    Dynobj* dynobj = obj->dynobj();\n\t    gold_assert(dynobj != NULL);\n\t    const Object::Symbols* syms = obj->get_global_symbols();\n\n\t    // Write the soname string table index.\n\t    section_offset_type soname_offset =\n\t\tstrtab->get_offset_from_key(entry->get_soname_key());\n\t    Swap32::writeval(pov, soname_offset);\n\t    pov += 4;\n\n\t    // Skip the global symbol count for now.\n\t    unsigned char* orig_pov = pov;\n\t    pov += 4;\n\n\t    // For each global symbol, write the global symbol table index.\n\t    unsigned int nsyms = syms->size();\n\t    unsigned int nsyms_out = 0;\n\t    for (unsigned int i = 0; i < nsyms; i++)\n\t      {\n\t\tconst Symbol* sym = (*syms)[i];\n\t\tif (sym == NULL)\n\t\t  continue;\n\t\tif (sym->is_forwarder())\n\t\t  sym = this->symtab_->resolve_forwards(sym);\n\t\tif (sym->symtab_index() == -1U)\n\t\t  continue;\n\t\tunsigned int flags = 0;\n\t\t// If the symbol has hidden or internal visibility, we\n\t\t// mark it as defined in the shared object so we don't\n\t\t// try to resolve it during an incremental update.\n\t\tif (sym->visibility() == elfcpp::STV_HIDDEN\n\t\t    || sym->visibility() == elfcpp::STV_INTERNAL)\n\t\t  flags = INCREMENTAL_SHLIB_SYM_DEF;\n\t\telse if (sym->source() == Symbol::FROM_OBJECT\n\t\t\t && sym->object() == obj\n\t\t\t && sym->is_defined())\n\t\t  flags = INCREMENTAL_SHLIB_SYM_DEF;\n\t\telse if (sym->is_copied_from_dynobj()\n\t\t\t && this->symtab_->get_copy_source(sym) == dynobj)\n\t\t  flags = INCREMENTAL_SHLIB_SYM_COPY;\n\t\tflags <<= INCREMENTAL_SHLIB_SYM_FLAGS_SHIFT;\n\t\tSwap32::writeval(pov, sym->symtab_index() | flags);\n\t\tpov += 4;\n\t\t++nsyms_out;\n\t      }\n\n\t    // Now write the global symbol count.\n\t    Swap32::writeval(orig_pov, nsyms_out);\n\t  }\n\t  break;\n\n\tcase INCREMENTAL_INPUT_ARCHIVE:\n\t  {\n\t    gold_assert(static_cast<unsigned int>(pov - oview)\n\t\t\t== (*p)->get_info_offset());\n\t    Incremental_archive_entry* entry = (*p)->archive_entry();\n\t    gold_assert(entry != NULL);\n\n\t    // Write the member count and unused global symbol count.\n\t    unsigned int nmembers = entry->get_member_count();\n\t    unsigned int nsyms = entry->get_unused_global_symbol_count();\n\t    Swap32::writeval(pov, nmembers);\n\t    Swap32::writeval(pov + 4, nsyms);\n\t    pov += 8;\n\n\t    // For each member, write the offset to its input file entry.\n\t    for (unsigned int i = 0; i < nmembers; ++i)\n\t      {\n\t\tIncremental_object_entry* member = entry->get_member(i);\n\t\tSwap32::writeval(pov, member->get_offset());\n\t\tpov += 4;\n\t      }\n\n\t    // For each global symbol, write the name offset.\n\t    for (unsigned int i = 0; i < nsyms; ++i)\n\t      {\n\t\tStringpool::Key key = entry->get_unused_global_symbol(i);\n\t\tSwap32::writeval(pov, strtab->get_offset_from_key(key));\n\t\tpov += 4;\n\t      }\n\t  }\n\t  break;\n\n\tdefault:\n\t  gold_unreachable();\n\t}\n\n     // Pad the info block to a multiple of 8 bytes.\n     if (static_cast<unsigned int>(pov - oview) & 4)\n      {\n\tSwap32::writeval(pov, 0);\n\tpov += 4;\n      }\n    }\n  return pov;\n}",
+      "fn_code_pos": [
+        [
+          1507,
+          0
+        ],
+        [
+          1783,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nOutput_section_incremental_inputs<size, big_endian>::write_symtab(\n    unsigned char* pov,\n    unsigned int* global_syms,\n    unsigned int global_sym_count)\n{\n  for (unsigned int i = 0; i < global_sym_count; ++i)\n    {\n      Swap32::writeval(pov, global_syms[i]);\n      pov += 4;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1787,
+          0
+        ],
+        [
+          1799,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nOutput_section_incremental_inputs<size, big_endian>::write_got_plt(\n    unsigned char* pov,\n    off_t view_size)\n{\n  Sized_target<size, big_endian>* target =\n    parameters->sized_target<size, big_endian>();\n\n  // Set up the view information for the functors.\n  struct Got_plt_view_info view_info;\n  view_info.got_count = target->got_entry_count();\n  view_info.plt_count = target->plt_entry_count();\n  view_info.first_plt_entry_offset = target->first_plt_entry_offset();\n  view_info.plt_entry_size = target->plt_entry_size();\n  view_info.got_entry_size = target->got_entry_size();\n  view_info.got_type_p = pov + 8;\n  view_info.got_desc_p = (view_info.got_type_p\n\t\t\t  + ((view_info.got_count + 3) & ~3));\n  view_info.plt_desc_p = view_info.got_desc_p + view_info.got_count * 8;\n\n  gold_assert(pov + view_size ==\n\t      view_info.plt_desc_p + view_info.plt_count * 4);\n\n  // Write the section header.\n  Swap32::writeval(pov, view_info.got_count);\n  Swap32::writeval(pov + 4, view_info.plt_count);\n\n  // Initialize the GOT type array to 0xff (reserved).\n  memset(view_info.got_type_p, 0xff, view_info.got_count);\n\n  // Write the incremental GOT descriptors for local symbols.\n  typedef Local_got_offset_visitor<size, big_endian> Got_visitor;\n  for (Incremental_inputs::Input_list::const_iterator p =\n\t   this->inputs_->input_files().begin();\n       p != this->inputs_->input_files().end();\n       ++p)\n    {\n      if ((*p)->type() != INCREMENTAL_INPUT_OBJECT\n\t  && (*p)->type() != INCREMENTAL_INPUT_ARCHIVE_MEMBER)\n\tcontinue;\n      Incremental_object_entry* entry = (*p)->object_entry();\n      gold_assert(entry != NULL);\n      const Object* obj = entry->object();\n      gold_assert(obj != NULL);\n      view_info.input_index = (*p)->get_file_index();\n      Got_visitor v(view_info);\n      obj->for_all_local_got_entries(&v);\n    }\n\n  // Write the incremental GOT and PLT descriptors for global symbols.\n  typedef Global_symbol_visitor_got_plt<size, big_endian> Symbol_visitor;\n  symtab_->for_all_symbols<size, Symbol_visitor>(Symbol_visitor(view_info));\n}",
+      "fn_code_pos": [
+        [
+          1935,
+          0
+        ],
+        [
+          1988,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nSized_relobj_incr<size, big_endian>::Sized_relobj_incr(\n    const std::string& name,\n    Sized_incremental_binary<size, big_endian>* ibase,\n    unsigned int input_file_index)\n  : Sized_relobj<size, big_endian>(name, NULL), ibase_(ibase),\n    input_file_index_(input_file_index),\n    input_reader_(ibase->inputs_reader().input_file(input_file_index)),\n    local_symbol_count_(0), output_local_dynsym_count_(0),\n    local_symbol_index_(0), local_symbol_offset_(0), local_dynsym_offset_(0),\n    symbols_(), defined_count_(0), incr_reloc_offset_(-1U),\n    incr_reloc_count_(0), incr_reloc_output_index_(0), incr_relocs_(NULL),\n    local_symbols_()\n{\n  if (this->input_reader_.is_in_system_directory())\n    this->set_is_in_system_directory();\n  const unsigned int shnum = this->input_reader_.get_input_section_count() + 1;\n  this->set_shnum(shnum);\n  ibase->set_input_object(input_file_index, this);\n}",
+      "fn_code_pos": [
+        [
+          1994,
+          0
+        ],
+        [
+          2013,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_read_symbols(Read_symbols_data*)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2017,
+          0
+        ],
+        [
+          2022,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_layout(\n    Symbol_table*,\n    Layout* layout,\n    Read_symbols_data*)\n{\n  const unsigned int shnum = this->shnum();\n  Incremental_inputs* incremental_inputs = layout->incremental_inputs();\n  gold_assert(incremental_inputs != NULL);\n  Output_sections& out_sections(this->output_sections());\n  out_sections.resize(shnum);\n  this->section_offsets().resize(shnum);\n\n  // Keep track of .debug_info and .debug_types sections.\n  std::vector<unsigned int> debug_info_sections;\n  std::vector<unsigned int> debug_types_sections;\n\n  for (unsigned int i = 1; i < shnum; i++)\n    {\n      typename Input_entry_reader::Input_section_info sect =\n\t  this->input_reader_.get_input_section(i - 1);\n      // Add the section to the incremental inputs layout.\n      incremental_inputs->report_input_section(this, i, sect.name,\n\t\t\t\t\t       sect.sh_size);\n      if (sect.output_shndx == 0 || sect.sh_offset == -1)\n\tcontinue;\n      Output_section* os = this->ibase_->output_section(sect.output_shndx);\n      gold_assert(os != NULL);\n      out_sections[i] = os;\n      this->section_offsets()[i] = static_cast<Address>(sect.sh_offset);\n\n      // When generating a .gdb_index section, we do additional\n      // processing of .debug_info and .debug_types sections after all\n      // the other sections.\n      if (parameters->options().gdb_index())\n\t{\n\t  const char* name = os->name();\n\t  if (strcmp(name, \".debug_info\") == 0)\n\t    debug_info_sections.push_back(i);\n\t  else if (strcmp(name, \".debug_types\") == 0)\n\t    debug_types_sections.push_back(i);\n\t}\n    }\n\n  // Process the COMDAT groups.\n  unsigned int ncomdat = this->input_reader_.get_comdat_group_count();\n  for (unsigned int i = 0; i < ncomdat; i++)\n    {\n      const char* signature = this->input_reader_.get_comdat_group_signature(i);\n      if (signature == NULL || signature[0] == '\\0')\n\tthis->error(_(\"COMDAT group has no signature\"));\n      bool keep = layout->find_or_add_kept_section(signature, this, i, true,\n\t\t\t\t\t\t   true, NULL);\n      if (keep)\n\tincremental_inputs->report_comdat_group(this, signature);\n      else\n\tthis->error(_(\"COMDAT group %s included twice in incremental link\"),\n\t\t    signature);\n    }\n\n  // When building a .gdb_index section, scan the .debug_info and\n  // .debug_types sections.\n  for (std::vector<unsigned int>::const_iterator p\n\t   = debug_info_sections.begin();\n       p != debug_info_sections.end();\n       ++p)\n    {\n      unsigned int i = *p;\n      layout->add_to_gdb_index(false, this, NULL, 0, i, 0, 0);\n    }\n  for (std::vector<unsigned int>::const_iterator p\n\t   = debug_types_sections.begin();\n       p != debug_types_sections.end();\n       ++p)\n    {\n      unsigned int i = *p;\n      layout->add_to_gdb_index(true, this, 0, 0, i, 0, 0);\n    }\n}",
+      "fn_code_pos": [
+        [
+          2026,
+          0
+        ],
+        [
+          2105,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_layout_deferred_sections(Layout*)\n{\n}",
+      "fn_code_pos": [
+        [
+          2109,
+          0
+        ],
+        [
+          2113,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_add_symbols(\n    Symbol_table* symtab,\n    Read_symbols_data*,\n    Layout*)\n{\n  const int sym_size = elfcpp::Elf_sizes<size>::sym_size;\n  unsigned char symbuf[sym_size];\n  elfcpp::Sym<size, big_endian> sym(symbuf);\n  elfcpp::Sym_write<size, big_endian> osym(symbuf);\n\n  typedef typename elfcpp::Elf_types<size>::Elf_WXword Elf_size_type;\n\n  unsigned int nsyms = this->input_reader_.get_global_symbol_count();\n  this->symbols_.resize(nsyms);\n\n  Incremental_binary::View symtab_view(NULL);\n  unsigned int symtab_count;\n  elfcpp::Elf_strtab strtab(NULL, 0);\n  this->ibase_->get_symtab_view(&symtab_view, &symtab_count, &strtab);\n\n  Incremental_symtab_reader<big_endian> isymtab(this->ibase_->symtab_reader());\n  unsigned int isym_count = isymtab.symbol_count();\n  unsigned int first_global = symtab_count - isym_count;\n\n  const unsigned char* sym_p;\n  for (unsigned int i = 0; i < nsyms; ++i)\n    {\n      Incremental_global_symbol_reader<big_endian> info =\n\t  this->input_reader_.get_global_symbol_reader(i);\n      unsigned int output_symndx = info.output_symndx();\n      sym_p = symtab_view.data() + output_symndx * sym_size;\n      elfcpp::Sym<size, big_endian> gsym(sym_p);\n      const char* name;\n      if (!strtab.get_c_string(gsym.get_st_name(), &name))\n\tname = \"\";\n\n      typename elfcpp::Elf_types<size>::Elf_Addr v = gsym.get_st_value();\n      unsigned int shndx = gsym.get_st_shndx();\n      elfcpp::STB st_bind = gsym.get_st_bind();\n      elfcpp::STT st_type = gsym.get_st_type();\n\n      // Local hidden symbols start out as globals, but get converted to\n      // to local during output.\n      if (st_bind == elfcpp::STB_LOCAL)\n\tst_bind = elfcpp::STB_GLOBAL;\n\n      unsigned int input_shndx = info.shndx();\n      if (input_shndx == 0 || input_shndx == -1U)\n\t{\n\t  shndx = elfcpp::SHN_UNDEF;\n\t  v = 0;\n\t}\n      else if (shndx != elfcpp::SHN_ABS)\n\t{\n\t  // Find the input section and calculate the section-relative value.\n\t  gold_assert(shndx != elfcpp::SHN_UNDEF);\n\t  Output_section* os = this->ibase_->output_section(shndx);\n\t  gold_assert(os != NULL && os->has_fixed_layout());\n\t  typename Input_entry_reader::Input_section_info sect =\n\t      this->input_reader_.get_input_section(input_shndx - 1);\n\t  gold_assert(sect.output_shndx == shndx);\n\t  if (st_type != elfcpp::STT_TLS)\n\t    v -= os->address();\n\t  v -= sect.sh_offset;\n\t  shndx = input_shndx;\n\t}\n\n      osym.put_st_name(0);\n      osym.put_st_value(v);\n      osym.put_st_size(gsym.get_st_size());\n      osym.put_st_info(st_bind, st_type);\n      osym.put_st_other(gsym.get_st_other());\n      osym.put_st_shndx(shndx);\n\n      Symbol* res = symtab->add_from_incrobj(this, name, NULL, &sym);\n\n      if (shndx != elfcpp::SHN_UNDEF)\n\t++this->defined_count_;\n\n      // If this is a linker-defined symbol that hasn't yet been defined,\n      // define it now.\n      if (input_shndx == -1U && !res->is_defined())\n\t{\n\t  shndx = gsym.get_st_shndx();\n\t  v = gsym.get_st_value();\n\t  Elf_size_type symsize = gsym.get_st_size();\n\t  if (shndx == elfcpp::SHN_ABS)\n\t    {\n\t      symtab->define_as_constant(name, NULL,\n\t\t\t\t\t Symbol_table::INCREMENTAL_BASE,\n\t\t\t\t\t v, symsize, st_type, st_bind,\n\t\t\t\t\t gsym.get_st_visibility(), 0,\n\t\t\t\t\t false, false);\n\t    }\n\t  else\n\t    {\n\t      Output_section* os = this->ibase_->output_section(shndx);\n\t      gold_assert(os != NULL && os->has_fixed_layout());\n\t      v -= os->address();\n\t      if (symsize > 0)\n\t\tos->reserve(v, symsize);\n\t      symtab->define_in_output_data(name, NULL,\n\t\t\t\t\t    Symbol_table::INCREMENTAL_BASE,\n\t\t\t\t\t    os, v, symsize, st_type, st_bind,\n\t\t\t\t\t    gsym.get_st_visibility(), 0,\n\t\t\t\t\t    false, false);\n\t    }\n\t}\n\n      this->symbols_[i] = res;\n      this->ibase_->add_global_symbol(output_symndx - first_global, res);\n    }\n}",
+      "fn_code_pos": [
+        [
+          2117,
+          0
+        ],
+        [
+          2231,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nArchive::Should_include\nSized_relobj_incr<size, big_endian>::do_should_include_member(\n    Symbol_table*,\n    Layout*,\n    Read_symbols_data*,\n    std::string*)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2235,
+          0
+        ],
+        [
+          2244,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_for_all_global_symbols(\n    Read_symbols_data*,\n    Library_base::Symbol_visitor_base*)\n{\n  // This routine is not used for incremental objects.\n}",
+      "fn_code_pos": [
+        [
+          2248,
+          0
+        ],
+        [
+          2255,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nuint64_t\nSized_relobj_incr<size, big_endian>::do_section_size(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2259,
+          0
+        ],
+        [
+          2264,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nstd::string\nSized_relobj_incr<size, big_endian>::do_section_name(unsigned int shndx) const\n{\n  const Output_sections& out_sections(this->output_sections());\n  const Output_section* os = out_sections[shndx];\n  if (os == NULL)\n    return NULL;\n  return os->name();\n}",
+      "fn_code_pos": [
+        [
+          2270,
+          0
+        ],
+        [
+          2279,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nconst unsigned char*\nSized_relobj_incr<size, big_endian>::do_section_contents(\n    unsigned int shndx,\n    section_size_type* plen,\n    bool)\n{\n  Output_sections& out_sections(this->output_sections());\n  Output_section* os = out_sections[shndx];\n  gold_assert(os != NULL);\n  off_t section_offset = os->offset();\n  typename Input_entry_reader::Input_section_info sect =\n      this->input_reader_.get_input_section(shndx - 1);\n  section_offset += sect.sh_offset;\n  *plen = sect.sh_size;\n  return this->ibase_->view(section_offset, sect.sh_size).data();\n}",
+      "fn_code_pos": [
+        [
+          2283,
+          0
+        ],
+        [
+          2299,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nuint64_t\nSized_relobj_incr<size, big_endian>::do_section_flags(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2303,
+          0
+        ],
+        [
+          2308,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nuint64_t\nSized_relobj_incr<size, big_endian>::do_section_entsize(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2312,
+          0
+        ],
+        [
+          2317,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nuint64_t\nSized_relobj_incr<size, big_endian>::do_section_address(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2321,
+          0
+        ],
+        [
+          2326,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned int\nSized_relobj_incr<size, big_endian>::do_section_type(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2330,
+          0
+        ],
+        [
+          2335,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned int\nSized_relobj_incr<size, big_endian>::do_section_link(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2339,
+          0
+        ],
+        [
+          2344,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned int\nSized_relobj_incr<size, big_endian>::do_section_info(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2348,
+          0
+        ],
+        [
+          2353,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nuint64_t\nSized_relobj_incr<size, big_endian>::do_section_addralign(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2357,
+          0
+        ],
+        [
+          2362,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nXindex*\nSized_relobj_incr<size, big_endian>::do_initialize_xindex()\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2366,
+          0
+        ],
+        [
+          2371,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_get_global_symbol_counts(\n    const Symbol_table*,\n    size_t* defined,\n    size_t* used) const\n{\n  *defined = this->defined_count_;\n  size_t count = 0;\n  for (typename Symbols::const_iterator p = this->symbols_.begin();\n       p != this->symbols_.end();\n       ++p)\n    if (*p != NULL\n\t&& (*p)->source() == Symbol::FROM_OBJECT\n\t&& (*p)->object() == this\n\t&& (*p)->is_defined())\n      ++count;\n  *used = count;\n}",
+      "fn_code_pos": [
+        [
+          2375,
+          0
+        ],
+        [
+          2393,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_read_relocs(Read_relocs_data*)\n{\n}",
+      "fn_code_pos": [
+        [
+          2397,
+          0
+        ],
+        [
+          2401,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_gc_process_relocs(Symbol_table*,\n\t\t\t\t\t\t\t  Layout*,\n\t\t\t\t\t\t\t  Read_relocs_data*)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2406,
+          0
+        ],
+        [
+          2413,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_scan_relocs(Symbol_table*,\n\t\t\t\t\t\t    Layout* layout,\n\t\t\t\t\t\t    Read_relocs_data*)\n{\n  // Count the incremental relocations for this object.\n  unsigned int nsyms = this->input_reader_.get_global_symbol_count();\n  this->allocate_incremental_reloc_counts();\n  for (unsigned int i = 0; i < nsyms; i++)\n    {\n      Incremental_global_symbol_reader<big_endian> sym =\n\t  this->input_reader_.get_global_symbol_reader(i);\n      unsigned int reloc_count = sym.reloc_count();\n      if (reloc_count > 0 && this->incr_reloc_offset_ == -1U)\n\tthis->incr_reloc_offset_ = sym.reloc_offset();\n      this->incr_reloc_count_ += reloc_count;\n      for (unsigned int j = 0; j < reloc_count; j++)\n\tthis->count_incremental_reloc(i);\n    }\n  this->incr_reloc_output_index_ =\n      layout->incremental_inputs()->get_reloc_count();\n  this->finalize_incremental_relocs(layout, false);\n\n  // The incoming incremental relocations may not end up in the same\n  // location after the incremental update, because the incremental info\n  // is regenerated in each link.  Because the new location may overlap\n  // with other data in the updated output file, we need to copy the\n  // relocations into a buffer so that we can still read them safely\n  // after we start writing updates to the output file.\n  if (this->incr_reloc_count_ > 0)\n    {\n      const Incremental_relocs_reader<size, big_endian>& relocs_reader =\n\t  this->ibase_->relocs_reader();\n      const unsigned int incr_reloc_size = relocs_reader.reloc_size;\n      unsigned int len = this->incr_reloc_count_ * incr_reloc_size;\n      this->incr_relocs_ = new unsigned char[len];\n      memcpy(this->incr_relocs_,\n\t     relocs_reader.data(this->incr_reloc_offset_),\n\t     len);\n    }\n}",
+      "fn_code_pos": [
+        [
+          2417,
+          0
+        ],
+        [
+          2458,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_count_local_symbols(\n    Stringpool_template<char>* pool,\n    Stringpool_template<char>*)\n{\n  const int sym_size = elfcpp::Elf_sizes<size>::sym_size;\n\n  // Set the count of local symbols based on the incremental info.\n  unsigned int nlocals = this->input_reader_.get_local_symbol_count();\n  this->local_symbol_count_ = nlocals;\n  this->local_symbols_.reserve(nlocals);\n\n  // Get views of the base file's symbol table and string table.\n  Incremental_binary::View symtab_view(NULL);\n  unsigned int symtab_count;\n  elfcpp::Elf_strtab strtab(NULL, 0);\n  this->ibase_->get_symtab_view(&symtab_view, &symtab_count, &strtab);\n\n  // Read the local symbols from the base file's symbol table.\n  off_t off = this->input_reader_.get_local_symbol_offset();\n  const unsigned char* symp = symtab_view.data() + off;\n  for (unsigned int i = 0; i < nlocals; ++i, symp += sym_size)\n    {\n      elfcpp::Sym<size, big_endian> sym(symp);\n      const char* name;\n      if (!strtab.get_c_string(sym.get_st_name(), &name))\n\tname = \"\";\n      gold_debug(DEBUG_INCREMENTAL, \"Local symbol %d: %s\", i, name);\n      name = pool->add(name, true, NULL);\n      this->local_symbols_.push_back(Local_symbol(name,\n\t\t\t\t\t\t  sym.get_st_value(),\n\t\t\t\t\t\t  sym.get_st_size(),\n\t\t\t\t\t\t  sym.get_st_shndx(),\n\t\t\t\t\t\t  sym.get_st_type(),\n\t\t\t\t\t\t  false));\n    }\n}",
+      "fn_code_pos": [
+        [
+          2462,
+          0
+        ],
+        [
+          2499,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned int\nSized_relobj_incr<size, big_endian>::do_finalize_local_symbols(\n    unsigned int index,\n    off_t off,\n    Symbol_table*)\n{\n  this->local_symbol_index_ = index;\n  this->local_symbol_offset_ = off;\n  return index + this->local_symbol_count_;\n}",
+      "fn_code_pos": [
+        [
+          2503,
+          0
+        ],
+        [
+          2513,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned int\nSized_relobj_incr<size, big_endian>::do_set_local_dynsym_indexes(\n    unsigned int index)\n{\n  // FIXME: set local dynsym indexes.\n  return index;\n}",
+      "fn_code_pos": [
+        [
+          2517,
+          0
+        ],
+        [
+          2524,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned int\nSized_relobj_incr<size, big_endian>::do_set_local_dynsym_offset(off_t)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          2528,
+          0
+        ],
+        [
+          2533,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_relocate(const Symbol_table*,\n\t\t\t\t\t\t const Layout* layout,\n\t\t\t\t\t\t Output_file* of)\n{\n  if (this->incr_reloc_count_ == 0)\n    return;\n\n  const unsigned int incr_reloc_size =\n      Incremental_relocs_reader<size, big_endian>::reloc_size;\n\n  // Get a view for the .gnu_incremental_relocs section.\n  Incremental_inputs* inputs = layout->incremental_inputs();\n  gold_assert(inputs != NULL);\n  const off_t relocs_off = inputs->relocs_section()->offset();\n  const off_t relocs_size = inputs->relocs_section()->data_size();\n  unsigned char* const view = of->get_output_view(relocs_off, relocs_size);\n\n  // Copy the relocations from the buffer.\n  off_t off = this->incr_reloc_output_index_ * incr_reloc_size;\n  unsigned int len = this->incr_reloc_count_ * incr_reloc_size;\n  memcpy(view + off, this->incr_relocs_, len);\n\n  // The output section table may have changed, so we need to map\n  // the old section index to the new section index for each relocation.\n  for (unsigned int i = 0; i < this->incr_reloc_count_; ++i)\n    {\n      unsigned char* pov = view + off + i * incr_reloc_size;\n      unsigned int shndx = elfcpp::Swap<32, big_endian>::readval(pov + 4);\n      Output_section* os = this->ibase_->output_section(shndx);\n      gold_assert(os != NULL);\n      shndx = os->out_shndx();\n      elfcpp::Swap<32, big_endian>::writeval(pov + 4, shndx);\n    }\n\n  of->write_output_view(off, len, view);\n\n  // Get views into the output file for the portions of the symbol table\n  // and the dynamic symbol table that we will be writing.\n  off_t symtab_off = layout->symtab_section()->offset();\n  off_t output_size = this->local_symbol_count_ * This::sym_size;\n  unsigned char* oview = NULL;\n  if (output_size > 0)\n    oview = of->get_output_view(symtab_off + this->local_symbol_offset_,\n\t\t\t\toutput_size);\n\n  off_t dyn_output_size = this->output_local_dynsym_count_ * sym_size;\n  unsigned char* dyn_oview = NULL;\n  if (dyn_output_size > 0)\n    dyn_oview = of->get_output_view(this->local_dynsym_offset_,\n\t\t\t\t    dyn_output_size);\n\n  // Write the local symbols.\n  unsigned char* ov = oview;\n  unsigned char* dyn_ov = dyn_oview;\n  const Stringpool* sympool = layout->sympool();\n  const Stringpool* dynpool = layout->dynpool();\n  Output_symtab_xindex* symtab_xindex = layout->symtab_xindex();\n  Output_symtab_xindex* dynsym_xindex = layout->dynsym_xindex();\n  for (unsigned int i = 0; i < this->local_symbol_count_; ++i)\n    {\n      Local_symbol& lsym(this->local_symbols_[i]);\n\n      bool is_ordinary;\n      unsigned int st_shndx = this->adjust_sym_shndx(i, lsym.st_shndx,\n\t\t\t\t\t\t     &is_ordinary);\n      if (is_ordinary)\n\t{\n\t  Output_section* os = this->ibase_->output_section(st_shndx);\n\t  st_shndx = os->out_shndx();\n\t  if (st_shndx >= elfcpp::SHN_LORESERVE)\n\t    {\n\t      symtab_xindex->add(this->local_symbol_index_ + i, st_shndx);\n\t      if (lsym.needs_dynsym_entry)\n\t\tdynsym_xindex->add(lsym.output_dynsym_index, st_shndx);\n\t      st_shndx = elfcpp::SHN_XINDEX;\n\t    }\n\t}\n\n      // Write the symbol to the output symbol table.\n      {\n\telfcpp::Sym_write<size, big_endian> osym(ov);\n\tosym.put_st_name(sympool->get_offset(lsym.name));\n\tosym.put_st_value(lsym.st_value);\n\tosym.put_st_size(lsym.st_size);\n\tosym.put_st_info(elfcpp::STB_LOCAL,\n\t\t\t static_cast<elfcpp::STT>(lsym.st_type));\n\tosym.put_st_other(0);\n\tosym.put_st_shndx(st_shndx);\n\tov += sym_size;\n      }\n\n      // Write the symbol to the output dynamic symbol table.\n      if (lsym.needs_dynsym_entry)\n\t{\n\t  gold_assert(dyn_ov < dyn_oview + dyn_output_size);\n\t  elfcpp::Sym_write<size, big_endian> osym(dyn_ov);\n\t  osym.put_st_name(dynpool->get_offset(lsym.name));\n\t  osym.put_st_value(lsym.st_value);\n\t  osym.put_st_size(lsym.st_size);\n\t  osym.put_st_info(elfcpp::STB_LOCAL,\n\t\t\t   static_cast<elfcpp::STT>(lsym.st_type));\n\t  osym.put_st_other(0);\n\t  osym.put_st_shndx(st_shndx);\n\t  dyn_ov += sym_size;\n\t}\n    }\n\n  if (output_size > 0)\n    {\n      gold_assert(ov - oview == output_size);\n      of->write_output_view(symtab_off + this->local_symbol_offset_,\n\t\t\t    output_size, oview);\n    }\n\n  if (dyn_output_size > 0)\n    {\n      gold_assert(dyn_ov - dyn_oview == dyn_output_size);\n      of->write_output_view(this->local_dynsym_offset_, dyn_output_size,\n\t\t\t    dyn_oview);\n    }\n}",
+      "fn_code_pos": [
+        [
+          2541,
+          0
+        ],
+        [
+          2663,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_incr<size, big_endian>::do_set_section_offset(unsigned int,\n\t\t\t\t\t\t\t   uint64_t)\n{\n}",
+      "fn_code_pos": [
+        [
+          2667,
+          0
+        ],
+        [
+          2672,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nSized_incr_dynobj<size, big_endian>::Sized_incr_dynobj(\n    const std::string& name,\n    Sized_incremental_binary<size, big_endian>* ibase,\n    unsigned int input_file_index)\n  : Dynobj(name, NULL), ibase_(ibase),\n    input_file_index_(input_file_index),\n    input_reader_(ibase->inputs_reader().input_file(input_file_index)),\n    symbols_(), defined_count_(0)\n{\n  if (this->input_reader_.is_in_system_directory())\n    this->set_is_in_system_directory();\n  if (this->input_reader_.as_needed())\n    this->set_as_needed();\n  this->set_soname_string(this->input_reader_.get_soname());\n  this->set_shnum(0);\n}",
+      "fn_code_pos": [
+        [
+          2678,
+          0
+        ],
+        [
+          2694,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incr_dynobj<size, big_endian>::do_read_symbols(Read_symbols_data*)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2698,
+          0
+        ],
+        [
+          2703,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incr_dynobj<size, big_endian>::do_layout(\n    Symbol_table*,\n    Layout*,\n    Read_symbols_data*)\n{\n}",
+      "fn_code_pos": [
+        [
+          2707,
+          0
+        ],
+        [
+          2714,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incr_dynobj<size, big_endian>::do_add_symbols(\n    Symbol_table* symtab,\n    Read_symbols_data*,\n    Layout*)\n{\n  const int sym_size = elfcpp::Elf_sizes<size>::sym_size;\n  unsigned char symbuf[sym_size];\n  elfcpp::Sym<size, big_endian> sym(symbuf);\n  elfcpp::Sym_write<size, big_endian> osym(symbuf);\n\n  unsigned int nsyms = this->input_reader_.get_global_symbol_count();\n  this->symbols_.resize(nsyms);\n\n  Incremental_binary::View symtab_view(NULL);\n  unsigned int symtab_count;\n  elfcpp::Elf_strtab strtab(NULL, 0);\n  this->ibase_->get_symtab_view(&symtab_view, &symtab_count, &strtab);\n\n  Incremental_symtab_reader<big_endian> isymtab(this->ibase_->symtab_reader());\n  unsigned int isym_count = isymtab.symbol_count();\n  unsigned int first_global = symtab_count - isym_count;\n\n  // We keep a set of symbols that we have generated COPY relocations\n  // for, indexed by the symbol value. We do not need more than one\n  // COPY relocation per address.\n  typedef typename std::set<Address> Copied_symbols;\n  Copied_symbols copied_symbols;\n\n  const unsigned char* sym_p;\n  for (unsigned int i = 0; i < nsyms; ++i)\n    {\n      bool is_def;\n      bool is_copy;\n      unsigned int output_symndx =\n\t  this->input_reader_.get_output_symbol_index(i, &is_def, &is_copy);\n      sym_p = symtab_view.data() + output_symndx * sym_size;\n      elfcpp::Sym<size, big_endian> gsym(sym_p);\n      const char* name;\n      if (!strtab.get_c_string(gsym.get_st_name(), &name))\n\tname = \"\";\n\n      Address v;\n      unsigned int shndx;\n      elfcpp::STB st_bind = gsym.get_st_bind();\n      elfcpp::STT st_type = gsym.get_st_type();\n\n      // Local hidden symbols start out as globals, but get converted to\n      // to local during output.\n      if (st_bind == elfcpp::STB_LOCAL)\n\tst_bind = elfcpp::STB_GLOBAL;\n\n      if (!is_def)\n\t{\n\t  shndx = elfcpp::SHN_UNDEF;\n\t  v = 0;\n\t}\n      else\n\t{\n\t  // For a symbol defined in a shared object, the section index\n\t  // is meaningless, as long as it's not SHN_UNDEF.\n\t  shndx = 1;\n\t  v = gsym.get_st_value();\n\t  ++this->defined_count_;\n\t}\n\n      osym.put_st_name(0);\n      osym.put_st_value(v);\n      osym.put_st_size(gsym.get_st_size());\n      osym.put_st_info(st_bind, st_type);\n      osym.put_st_other(gsym.get_st_other());\n      osym.put_st_shndx(shndx);\n\n      Sized_symbol<size>* res =\n\t  symtab->add_from_incrobj<size, big_endian>(this, name, NULL, &sym);\n      this->symbols_[i] = res;\n      this->ibase_->add_global_symbol(output_symndx - first_global,\n\t\t\t\t      this->symbols_[i]);\n\n      if (is_copy)\n\t{\n\t  std::pair<typename Copied_symbols::iterator, bool> ins =\n\t      copied_symbols.insert(v);\n\t  if (ins.second)\n\t    {\n\t      unsigned int shndx = gsym.get_st_shndx();\n\t      Output_section* os = this->ibase_->output_section(shndx);\n\t      off_t offset = v - os->address();\n\t      this->ibase_->add_copy_reloc(this->symbols_[i], os, offset);\n\t    }\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          2718,
+          0
+        ],
+        [
+          2811,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nArchive::Should_include\nSized_incr_dynobj<size, big_endian>::do_should_include_member(\n    Symbol_table*,\n    Layout*,\n    Read_symbols_data*,\n    std::string*)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2815,
+          0
+        ],
+        [
+          2824,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incr_dynobj<size, big_endian>::do_for_all_global_symbols(\n    Read_symbols_data*,\n    Library_base::Symbol_visitor_base*)\n{\n  // This routine is not used for dynamic libraries.\n}",
+      "fn_code_pos": [
+        [
+          2828,
+          0
+        ],
+        [
+          2835,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incr_dynobj<size, big_endian>::do_for_all_local_got_entries(\n    Got_offset_list::Visitor*) const\n{\n}",
+      "fn_code_pos": [
+        [
+          2840,
+          0
+        ],
+        [
+          2845,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nuint64_t\nSized_incr_dynobj<size, big_endian>::do_section_size(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2849,
+          0
+        ],
+        [
+          2854,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nstd::string\nSized_incr_dynobj<size, big_endian>::do_section_name(unsigned int) const\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2858,
+          0
+        ],
+        [
+          2863,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nconst unsigned char*\nSized_incr_dynobj<size, big_endian>::do_section_contents(\n    unsigned int,\n    section_size_type*,\n    bool)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2867,
+          0
+        ],
+        [
+          2875,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nuint64_t\nSized_incr_dynobj<size, big_endian>::do_section_flags(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2879,
+          0
+        ],
+        [
+          2884,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nuint64_t\nSized_incr_dynobj<size, big_endian>::do_section_entsize(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2888,
+          0
+        ],
+        [
+          2893,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nuint64_t\nSized_incr_dynobj<size, big_endian>::do_section_address(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2897,
+          0
+        ],
+        [
+          2902,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned int\nSized_incr_dynobj<size, big_endian>::do_section_type(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2906,
+          0
+        ],
+        [
+          2911,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned int\nSized_incr_dynobj<size, big_endian>::do_section_link(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2915,
+          0
+        ],
+        [
+          2920,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned int\nSized_incr_dynobj<size, big_endian>::do_section_info(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2924,
+          0
+        ],
+        [
+          2929,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nuint64_t\nSized_incr_dynobj<size, big_endian>::do_section_addralign(unsigned int)\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2933,
+          0
+        ],
+        [
+          2938,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nXindex*\nSized_incr_dynobj<size, big_endian>::do_initialize_xindex()\n{\n  gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          2942,
+          0
+        ],
+        [
+          2947,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_incr_dynobj<size, big_endian>::do_get_global_symbol_counts(\n    const Symbol_table*,\n    size_t* defined,\n    size_t* used) const\n{\n  *defined = this->defined_count_;\n  size_t count = 0;\n  for (typename Symbols::const_iterator p = this->symbols_.begin();\n       p != this->symbols_.end();\n       ++p)\n    if (*p != NULL\n\t&& (*p)->source() == Symbol::FROM_OBJECT\n\t&& (*p)->object() == this\n\t&& (*p)->is_defined()\n\t&& (*p)->dynsym_index() != -1U)\n      ++count;\n  *used = count;\n}",
+      "fn_code_pos": [
+        [
+          2951,
+          0
+        ],
+        [
+          2970,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Output_section_incremental_inputs(const Incremental_inputs* inputs,\n\t\t\t\t    const Symbol_table* symtab)\n    : Output_section_data(size / 8), inputs_(inputs), symtab_(symtab)\n  { }",
+      "fn_code_pos": [
+        [
+          55,
+          2
+        ],
+        [
+          58,
+          5
+        ]
+      ],
+      "class_code": "1f2304b7dde5fb244f9646dfd91a7a103b9411475ab0febc32cf168a7a00875f",
+      "class_node_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "Output_section_incremental_inputs",
+        "parameters": {
+          "inputs": "Incremental_inputs",
+          "symtab": "Symbol_table"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n  update_data_size()\n  { this->set_final_data_size(); }",
+      "fn_code_pos": [
+        [
+          63,
+          2
+        ],
+        [
+          65,
+          34
+        ]
+      ],
+      "class_code": "1f2304b7dde5fb244f9646dfd91a7a103b9411475ab0febc32cf168a7a00875f",
+      "class_node_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "update_data_size",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n  do_print_to_mapfile(Mapfile* mapfile) const\n  { mapfile->print_output_data(this, _(\"** incremental_inputs\")); }",
+      "fn_code_pos": [
+        [
+          76,
+          2
+        ],
+        [
+          78,
+          67
+        ]
+      ],
+      "class_code": "1f2304b7dde5fb244f9646dfd91a7a103b9411475ab0febc32cf168a7a00875f",
+      "class_node_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "do_print_to_mapfile",
+        "parameters": {
+          "mapfile": "Mapfile"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nvexplain_no_incremental(const char* format, va_list args)\n{\n  char* buf = NULL;\n  if (vasprintf(&buf, format, args) < 0)\n    gold_nomem();\n  gold_info(_(\"the link might take longer: \"\n\t      \"cannot perform incremental link: %s\"), buf);\n  free(buf);\n}",
+      "fn_code_pos": [
+        [
+          137,
+          0
+        ],
+        [
+          146,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "vexplain_no_incremental",
+        "parameters": {
+          "format": "char",
+          "args": "va_list"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nexplain_no_incremental(const char* format, ...)\n{\n  va_list args;\n  va_start(args, format);\n  vexplain_no_incremental(format, args);\n  va_end(args);\n}",
+      "fn_code_pos": [
+        [
+          148,
+          0
+        ],
+        [
+          155,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "explain_no_incremental",
+        "parameters": {
+          "format": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_binary::error(const char* format, ...) const\n{\n  va_list args;\n  va_start(args, format);\n  // Current code only checks if the file can be used for incremental linking,\n  // so errors shouldn't fail the build, but only result in a fallback to a\n  // full build.\n  // TODO: when we implement incremental editing of the file, we may need a\n  // flag that will cause errors to be treated seriously.\n  vexplain_no_incremental(format, args);\n  va_end(args);\n}",
+      "fn_code_pos": [
+        [
+          159,
+          0
+        ],
+        [
+          171,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_binary::error",
+        "parameters": {
+          "format": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "bool\ncan_incremental_update(unsigned int sh_type)\n{\n  return (sh_type == elfcpp::SHT_PROGBITS\n\t  || sh_type == elfcpp::SHT_NOBITS\n\t  || sh_type == elfcpp::SHT_INIT_ARRAY\n\t  || sh_type == elfcpp::SHT_FINI_ARRAY\n\t  || sh_type == elfcpp::SHT_PREINIT_ARRAY\n\t  || sh_type == elfcpp::SHT_NOTE);\n}",
+      "fn_code_pos": [
+        [
+          178,
+          0
+        ],
+        [
+          187,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "can_incremental_update",
+        "parameters": {
+          "sh_type": "unsigned int"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "void\ncheck_input_args(std::vector<const Input_argument*>& input_args_map,\n\t\t Input_arguments::const_iterator begin,\n\t\t Input_arguments::const_iterator end)\n{\n  for (Input_arguments::const_iterator p = begin;\n       p != end;\n       ++p)\n    {\n      if (p->is_group())\n\t{\n\t  const Input_file_group* group = p->group();\n\t  check_input_args(input_args_map, group->begin(), group->end());\n\t}\n      else if (p->is_lib())\n\t{\n\t  const Input_file_lib* lib = p->lib();\n\t  check_input_args(input_args_map, lib->begin(), lib->end());\n\t}\n      else\n\t{\n\t  gold_assert(p->is_file());\n\t  unsigned int arg_serial = p->file().arg_serial();\n\t  if (arg_serial > 0)\n\t    {\n\t      gold_assert(arg_serial <= input_args_map.size());\n\t      gold_assert(input_args_map[arg_serial - 1] == 0);\n\t      input_args_map[arg_serial - 1] = &*p;\n\t    }\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          363,
+          0
+        ],
+        [
+          394,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "check_input_args",
+        "parameters": {
+          "input_args_map": "std::vector<const Input_argument*>",
+          "begin": "Input_arguments::const_iterator",
+          "end": "Input_arguments::const_iterator"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Incremental_binary*\nopen_incremental_binary(Output_file* file)\n{\n  off_t filesize = file->filesize();\n  int want = elfcpp::Elf_recognizer::max_header_size;\n  if (filesize < want)\n    want = filesize;\n\n  const unsigned char* p = file->get_input_view(0, want);\n  if (!elfcpp::Elf_recognizer::is_elf_file(p, want))\n    {\n      explain_no_incremental(_(\"output is not an ELF file.\"));\n      return NULL;\n    }\n\n  int size = 0;\n  bool big_endian = false;\n  std::string error;\n  if (!elfcpp::Elf_recognizer::is_valid_header(p, want, &size, &big_endian,\n\t\t\t\t\t       &error))\n    {\n      explain_no_incremental(error.c_str());\n      return NULL;\n    }\n\n  Incremental_binary* result = NULL;\n  if (size == 32)\n    {\n      if (big_endian)\n\t{\n#ifdef HAVE_TARGET_32_BIG\n\t  result = make_sized_incremental_binary<32, true>(\n\t      file, elfcpp::Ehdr<32, true>(p));\n#else\n\t  explain_no_incremental(_(\"unsupported file: 32-bit, big-endian\"));\n#endif\n\t}\n      else\n\t{\n#ifdef HAVE_TARGET_32_LITTLE\n\t  result = make_sized_incremental_binary<32, false>(\n\t      file, elfcpp::Ehdr<32, false>(p));\n#else\n\t  explain_no_incremental(_(\"unsupported file: 32-bit, little-endian\"));\n#endif\n\t}\n    }\n  else if (size == 64)\n    {\n      if (big_endian)\n\t{\n#ifdef HAVE_TARGET_64_BIG\n\t  result = make_sized_incremental_binary<64, true>(\n\t      file, elfcpp::Ehdr<64, true>(p));\n#else\n\t  explain_no_incremental(_(\"unsupported file: 64-bit, big-endian\"));\n#endif\n\t}\n      else\n\t{\n#ifdef HAVE_TARGET_64_LITTLE\n\t  result = make_sized_incremental_binary<64, false>(\n\t      file, elfcpp::Ehdr<64, false>(p));\n#else\n\t  explain_no_incremental(_(\"unsupported file: 64-bit, little-endian\"));\n#endif\n\t}\n    }\n  else\n    gold_unreachable();\n\n  return result;\n}",
+      "fn_code_pos": [
+        [
+          876,
+          0
+        ],
+        [
+          948,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "open_incremental_binary",
+        "parameters": {
+          "file": "Output_file"
+        },
+        "return_type": "Incremental_binary"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_inputs::report_command_line(int argc, const char* const* argv)\n{\n  // Always store 'gold' as argv[0] to avoid a full relink if the user used a\n  // different path to the linker.\n  std::string args(\"gold\");\n  // Copied from collect_argv in main.cc.\n  for (int i = 1; i < argc; ++i)\n    {\n      // Adding/removing these options should not result in a full relink.\n      if (strcmp(argv[i], \"--incremental\") == 0\n\t  || strcmp(argv[i], \"--incremental-full\") == 0\n\t  || strcmp(argv[i], \"--incremental-update\") == 0\n\t  || strcmp(argv[i], \"--incremental-changed\") == 0\n\t  || strcmp(argv[i], \"--incremental-unchanged\") == 0\n\t  || strcmp(argv[i], \"--incremental-unknown\") == 0\n\t  || strcmp(argv[i], \"--incremental-startup-unchanged\") == 0\n\t  || is_prefix_of(\"--incremental-base=\", argv[i])\n\t  || is_prefix_of(\"--incremental-patch=\", argv[i])\n\t  || is_prefix_of(\"--debug=\", argv[i]))\n\tcontinue;\n      if (strcmp(argv[i], \"--incremental-base\") == 0\n\t  || strcmp(argv[i], \"--incremental-patch\") == 0\n\t  || strcmp(argv[i], \"--debug\") == 0)\n\t{\n\t  // When these options are used without the '=', skip the\n\t  // following parameter as well.\n\t  ++i;\n\t  continue;\n\t}\n\n      args.append(\" '\");\n      // Now append argv[i], but with all single-quotes escaped\n      const char* argpos = argv[i];\n      while (1)\n\t{\n\t  const int len = strcspn(argpos, \"'\");\n\t  args.append(argpos, len);\n\t  if (argpos[len] == '\\0')\n\t    break;\n\t  args.append(\"'\\\"'\\\"'\");\n\t  argpos += len + 1;\n\t}\n      args.append(\"'\");\n    }\n\n  this->command_line_ = args;\n  this->strtab_->add(this->command_line_.c_str(), false,\n\t\t     &this->command_line_key_);\n}",
+      "fn_code_pos": [
+        [
+          957,
+          0
+        ],
+        [
+          1006,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_inputs::report_command_line",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_inputs::report_archive_begin(Library_base* arch,\n\t\t\t\t\t unsigned int arg_serial,\n\t\t\t\t\t Script_info* script_info)\n{\n  Stringpool::Key filename_key;\n  Timespec mtime = arch->get_mtime();\n\n  // For a file loaded from a script, don't record its argument serial number.\n  if (script_info != NULL)\n    arg_serial = 0;\n\n  this->strtab_->add(arch->filename().c_str(), false, &filename_key);\n  Incremental_archive_entry* entry =\n      new Incremental_archive_entry(filename_key, arg_serial, mtime);\n  arch->set_incremental_info(entry);\n\n  if (script_info != NULL)\n    {\n      Incremental_script_entry* script_entry = script_info->incremental_info();\n      gold_assert(script_entry != NULL);\n      script_entry->add_object(entry);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1014,
+          0
+        ],
+        [
+          1037,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_inputs::report_archive_begin",
+        "parameters": {
+          "arch": "Library_base",
+          "arg_serial": "unsigned int",
+          "script_info": "Script_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Unused_symbol_visitor(Incremental_archive_entry* entry, Stringpool* strtab)\n    : entry_(entry), strtab_(strtab)\n  { }",
+      "fn_code_pos": [
+        [
+          1049,
+          2
+        ],
+        [
+          1051,
+          5
+        ]
+      ],
+      "class_code": "c7321263f8d34582148667c21bc2bbf89c6a1684e7b1df7bd5d9393e31652239",
+      "class_node_pos": [
+        [
+          1046,
+          0
+        ],
+        [
+          1064,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "Unused_symbol_visitor",
+        "parameters": {
+          "entry": "Incremental_archive_entry",
+          "strtab": "Stringpool"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n  visit(const char* sym)\n  {\n    Stringpool::Key symbol_key;\n    this->strtab_->add(sym, true, &symbol_key);\n    this->entry_->add_unused_global_symbol(symbol_key);\n  }",
+      "fn_code_pos": [
+        [
+          1053,
+          2
+        ],
+        [
+          1059,
+          3
+        ]
+      ],
+      "class_code": "c7321263f8d34582148667c21bc2bbf89c6a1684e7b1df7bd5d9393e31652239",
+      "class_node_pos": [
+        [
+          1046,
+          0
+        ],
+        [
+          1064,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "visit",
+        "parameters": {
+          "sym": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_inputs::report_archive_end(Library_base* arch)\n{\n  Incremental_archive_entry* entry = arch->incremental_info();\n\n  gold_assert(entry != NULL);\n  this->inputs_.push_back(entry);\n\n  // Collect unused global symbols.\n  Unused_symbol_visitor v(entry, this->strtab_);\n  arch->for_all_unused_symbols(&v);\n}",
+      "fn_code_pos": [
+        [
+          1070,
+          0
+        ],
+        [
+          1081,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_inputs::report_archive_end",
+        "parameters": {
+          "arch": "Library_base"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_inputs::report_object(Object* obj, unsigned int arg_serial,\n\t\t\t\t  Library_base* arch, Script_info* script_info)\n{\n  Stringpool::Key filename_key;\n  Timespec mtime = obj->get_mtime();\n\n  // For a file loaded from a script, don't record its argument serial number.\n  if (script_info != NULL)\n    arg_serial = 0;\n\n  this->strtab_->add(obj->name().c_str(), false, &filename_key);\n\n  Incremental_input_entry* input_entry;\n\n  this->current_object_ = obj;\n\n  if (!obj->is_dynamic())\n    {\n      this->current_object_entry_ =\n\t  new Incremental_object_entry(filename_key, obj, arg_serial, mtime);\n      input_entry = this->current_object_entry_;\n      if (arch != NULL)\n\t{\n\t  Incremental_archive_entry* arch_entry = arch->incremental_info();\n\t  gold_assert(arch_entry != NULL);\n\t  arch_entry->add_object(this->current_object_entry_);\n\t}\n    }\n  else\n    {\n      this->current_object_entry_ = NULL;\n      Stringpool::Key soname_key;\n      Dynobj* dynobj = obj->dynobj();\n      gold_assert(dynobj != NULL);\n      this->strtab_->add(dynobj->soname(), false, &soname_key);\n      input_entry = new Incremental_dynobj_entry(filename_key, soname_key, obj,\n\t\t\t\t\t\t arg_serial, mtime);\n    }\n\n  if (obj->is_in_system_directory())\n    input_entry->set_is_in_system_directory();\n\n  if (obj->as_needed())\n    input_entry->set_as_needed();\n\n  this->inputs_.push_back(input_entry);\n\n  if (script_info != NULL)\n    {\n      Incremental_script_entry* script_entry = script_info->incremental_info();\n      gold_assert(script_entry != NULL);\n      script_entry->add_object(input_entry);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1087,
+          0
+        ],
+        [
+          1141,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_inputs::report_object",
+        "parameters": {
+          "obj": "Object",
+          "arg_serial": "unsigned int",
+          "arch": "Library_base",
+          "script_info": "Script_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_inputs::report_input_section(Object* obj, unsigned int shndx,\n\t\t\t\t\t const char* name, off_t sh_size)\n{\n  Stringpool::Key key = 0;\n\n  if (name != NULL)\n    this->strtab_->add(name, true, &key);\n\n  gold_assert(obj == this->current_object_);\n  gold_assert(this->current_object_entry_ != NULL);\n  this->current_object_entry_->add_input_section(shndx, key, sh_size);\n}",
+      "fn_code_pos": [
+        [
+          1145,
+          0
+        ],
+        [
+          1157,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_inputs::report_input_section",
+        "parameters": {
+          "obj": "Object",
+          "shndx": "unsigned int",
+          "name": "char",
+          "sh_size": "off_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_inputs::report_comdat_group(Object* obj, const char* name)\n{\n  Stringpool::Key key = 0;\n\n  if (name != NULL)\n    this->strtab_->add(name, true, &key);\n  gold_assert(obj == this->current_object_);\n  gold_assert(this->current_object_entry_ != NULL);\n  this->current_object_entry_->add_comdat_group(key);\n}",
+      "fn_code_pos": [
+        [
+          1161,
+          0
+        ],
+        [
+          1171,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_inputs::report_comdat_group",
+        "parameters": {
+          "obj": "Object",
+          "name": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_inputs::report_script(Script_info* script,\n\t\t\t\t  unsigned int arg_serial,\n\t\t\t\t  Timespec mtime)\n{\n  Stringpool::Key filename_key;\n\n  this->strtab_->add(script->filename().c_str(), false, &filename_key);\n  Incremental_script_entry* entry =\n      new Incremental_script_entry(filename_key, arg_serial, script, mtime);\n  this->inputs_.push_back(entry);\n  script->set_incremental_info(entry);\n}",
+      "fn_code_pos": [
+        [
+          1177,
+          0
+        ],
+        [
+          1189,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_inputs::report_script",
+        "parameters": {
+          "script": "Script_info",
+          "arg_serial": "unsigned int",
+          "mtime": "Timespec"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_inputs::finalize()\n{\n  // Finalize the string table.\n  this->strtab_->set_string_offsets();\n}",
+      "fn_code_pos": [
+        [
+          1194,
+          0
+        ],
+        [
+          1199,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_inputs::finalize",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_inputs::create_data_sections(Symbol_table* symtab)\n{\n  int reloc_align = 4;\n\n  switch (parameters->size_and_endianness())\n    {\n#ifdef HAVE_TARGET_32_LITTLE\n    case Parameters::TARGET_32_LITTLE:\n      this->inputs_section_ =\n\t  new Output_section_incremental_inputs<32, false>(this, symtab);\n      reloc_align = 4;\n      break;\n#endif\n#ifdef HAVE_TARGET_32_BIG\n    case Parameters::TARGET_32_BIG:\n      this->inputs_section_ =\n\t  new Output_section_incremental_inputs<32, true>(this, symtab);\n      reloc_align = 4;\n      break;\n#endif\n#ifdef HAVE_TARGET_64_LITTLE\n    case Parameters::TARGET_64_LITTLE:\n      this->inputs_section_ =\n\t  new Output_section_incremental_inputs<64, false>(this, symtab);\n      reloc_align = 8;\n      break;\n#endif\n#ifdef HAVE_TARGET_64_BIG\n    case Parameters::TARGET_64_BIG:\n      this->inputs_section_ =\n\t  new Output_section_incremental_inputs<64, true>(this, symtab);\n      reloc_align = 8;\n      break;\n#endif\n    default:\n      gold_unreachable();\n    }\n  this->symtab_section_ = new Output_data_space(4, \"** incremental_symtab\");\n  this->relocs_section_ = new Output_data_space(reloc_align,\n\t\t\t\t\t\t\"** incremental_relocs\");\n  this->got_plt_section_ = new Output_data_space(4, \"** incremental_got_plt\");\n}",
+      "fn_code_pos": [
+        [
+          1203,
+          0
+        ],
+        [
+          1245,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_inputs::create_data_sections",
+        "parameters": {
+          "symtab": "Symbol_table"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "unsigned int\nIncremental_inputs::relocs_entsize() const\n{\n  return 8 + 2 * parameters->target().get_size() / 8;\n}",
+      "fn_code_pos": [
+        [
+          1248,
+          0
+        ],
+        [
+          1252,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_inputs::relocs_entsize",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Local_got_offset_visitor(struct Got_plt_view_info& info)\n    : info_(info)\n  { }",
+      "fn_code_pos": [
+        [
+          1840,
+          2
+        ],
+        [
+          1842,
+          5
+        ]
+      ],
+      "class_code": "99c532cd313c37b442e69d8e7da8f426f15ea17c51e3bba2c33b978375e844e9",
+      "class_node_pos": [
+        [
+          1837,
+          0
+        ],
+        [
+          1861,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "Local_got_offset_visitor",
+        "parameters": {
+          "info": "struct Got_plt_view_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n  visit(unsigned int got_type, unsigned int got_offset)\n  {\n    unsigned int got_index = got_offset / this->info_.got_entry_size;\n    gold_assert(got_index < this->info_.got_count);\n    // We can only handle GOT entry types in the range 0..0x7e\n    // because we use a byte array to store them, and we use the\n    // high bit to flag a local symbol.\n    gold_assert(got_type < 0x7f);\n    this->info_.got_type_p[got_index] = got_type | 0x80;\n    unsigned char* pov = this->info_.got_desc_p + got_index * 8;\n    elfcpp::Swap<32, big_endian>::writeval(pov, this->info_.sym_index);\n    elfcpp::Swap<32, big_endian>::writeval(pov + 4, this->info_.input_index);\n  }",
+      "fn_code_pos": [
+        [
+          1844,
+          2
+        ],
+        [
+          1857,
+          3
+        ]
+      ],
+      "class_code": "99c532cd313c37b442e69d8e7da8f426f15ea17c51e3bba2c33b978375e844e9",
+      "class_node_pos": [
+        [
+          1837,
+          0
+        ],
+        [
+          1861,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "visit",
+        "parameters": {
+          "got_type": "unsigned int",
+          "got_offset": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Global_got_offset_visitor(struct Got_plt_view_info& info)\n    : info_(info)\n  { }",
+      "fn_code_pos": [
+        [
+          1871,
+          2
+        ],
+        [
+          1873,
+          5
+        ]
+      ],
+      "class_code": "c4c91a14a567019fcb4bf6883b9ed1749c5895d03afadeebd106154ea31fa0e5",
+      "class_node_pos": [
+        [
+          1868,
+          0
+        ],
+        [
+          1892,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "Global_got_offset_visitor",
+        "parameters": {
+          "info": "struct Got_plt_view_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n  visit(unsigned int got_type, unsigned int got_offset)\n  {\n    unsigned int got_index = got_offset / this->info_.got_entry_size;\n    gold_assert(got_index < this->info_.got_count);\n    // We can only handle GOT entry types in the range 0..0x7e\n    // because we use a byte array to store them, and we use the\n    // high bit to flag a local symbol.\n    gold_assert(got_type < 0x7f);\n    this->info_.got_type_p[got_index] = got_type;\n    unsigned char* pov = this->info_.got_desc_p + got_index * 8;\n    elfcpp::Swap<32, big_endian>::writeval(pov, this->info_.sym_index);\n    elfcpp::Swap<32, big_endian>::writeval(pov + 4, 0);\n  }",
+      "fn_code_pos": [
+        [
+          1875,
+          2
+        ],
+        [
+          1888,
+          3
+        ]
+      ],
+      "class_code": "c4c91a14a567019fcb4bf6883b9ed1749c5895d03afadeebd106154ea31fa0e5",
+      "class_node_pos": [
+        [
+          1868,
+          0
+        ],
+        [
+          1892,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "visit",
+        "parameters": {
+          "got_type": "unsigned int",
+          "got_offset": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Global_symbol_visitor_got_plt(struct Got_plt_view_info& info)\n    : info_(info)\n  { }",
+      "fn_code_pos": [
+        [
+          1902,
+          2
+        ],
+        [
+          1904,
+          5
+        ]
+      ],
+      "class_code": "1570a5a111d9dce3b18d4f91ba798ca5372d7dcbaa51659b26323dbed0ad3818",
+      "class_node_pos": [
+        [
+          1899,
+          0
+        ],
+        [
+          1931,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "Global_symbol_visitor_got_plt",
+        "parameters": {
+          "info": "struct Got_plt_view_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n  operator()(const Sized_symbol<size>* sym)\n  {\n    typedef Global_got_offset_visitor<size, big_endian> Got_visitor;\n    const Got_offset_list* got_offsets = sym->got_offset_list();\n    if (got_offsets != NULL)\n      {\n\tthis->info_.sym_index = sym->symtab_index();\n\tthis->info_.input_index = 0;\n\tGot_visitor v(this->info_);\n\tgot_offsets->for_all_got_offsets(&v);\n      }\n    if (sym->has_plt_offset())\n      {\n\tunsigned int plt_index =\n\t    ((sym->plt_offset() - this->info_.first_plt_entry_offset)\n\t     / this->info_.plt_entry_size);\n\tgold_assert(plt_index < this->info_.plt_count);\n\tunsigned char* pov = this->info_.plt_desc_p + plt_index * 4;\n\telfcpp::Swap<32, big_endian>::writeval(pov, sym->symtab_index());\n      }\n  }",
+      "fn_code_pos": [
+        [
+          1906,
+          2
+        ],
+        [
+          1927,
+          3
+        ]
+      ],
+      "class_code": "1570a5a111d9dce3b18d4f91ba798ca5372d7dcbaa51659b26323dbed0ad3818",
+      "class_node_pos": [
+        [
+          1899,
+          0
+        ],
+        [
+          1931,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "sym": "Sized_symbol<size>"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Object*\nmake_sized_incremental_object(\n    Incremental_binary* ibase,\n    unsigned int input_file_index,\n    Incremental_input_type input_type,\n    const Incremental_binary::Input_reader* input_reader)\n{\n  Object* obj = NULL;\n  std::string name(input_reader->filename());\n\n  switch (parameters->size_and_endianness())\n    {\n#ifdef HAVE_TARGET_32_LITTLE\n    case Parameters::TARGET_32_LITTLE:\n      {\n\tSized_incremental_binary<32, false>* sized_ibase =\n\t    static_cast<Sized_incremental_binary<32, false>*>(ibase);\n\tif (input_type == INCREMENTAL_INPUT_SHARED_LIBRARY)\n\t  obj = new Sized_incr_dynobj<32, false>(name, sized_ibase,\n\t\t\t\t\t\t input_file_index);\n\telse\n\t  obj = new Sized_relobj_incr<32, false>(name, sized_ibase,\n\t\t\t\t\t\t input_file_index);\n      }\n      break;\n#endif\n#ifdef HAVE_TARGET_32_BIG\n    case Parameters::TARGET_32_BIG:\n      {\n\tSized_incremental_binary<32, true>* sized_ibase =\n\t    static_cast<Sized_incremental_binary<32, true>*>(ibase);\n\tif (input_type == INCREMENTAL_INPUT_SHARED_LIBRARY)\n\t  obj = new Sized_incr_dynobj<32, true>(name, sized_ibase,\n\t\t\t\t\t\tinput_file_index);\n\telse\n\t  obj = new Sized_relobj_incr<32, true>(name, sized_ibase,\n\t\t\t\t\t\tinput_file_index);\n      }\n      break;\n#endif\n#ifdef HAVE_TARGET_64_LITTLE\n    case Parameters::TARGET_64_LITTLE:\n      {\n\tSized_incremental_binary<64, false>* sized_ibase =\n\t    static_cast<Sized_incremental_binary<64, false>*>(ibase);\n\tif (input_type == INCREMENTAL_INPUT_SHARED_LIBRARY)\n\t  obj = new Sized_incr_dynobj<64, false>(name, sized_ibase,\n\t\t\t\t\t\t input_file_index);\n\telse\n\t  obj = new Sized_relobj_incr<64, false>(name, sized_ibase,\n\t\t\t\t\t\t input_file_index);\n     }\n      break;\n#endif\n#ifdef HAVE_TARGET_64_BIG\n    case Parameters::TARGET_64_BIG:\n      {\n\tSized_incremental_binary<64, true>* sized_ibase =\n\t    static_cast<Sized_incremental_binary<64, true>*>(ibase);\n\tif (input_type == INCREMENTAL_INPUT_SHARED_LIBRARY)\n\t  obj = new Sized_incr_dynobj<64, true>(name, sized_ibase,\n\t\t\t\t\t\tinput_file_index);\n\telse\n\t  obj = new Sized_relobj_incr<64, true>(name, sized_ibase,\n\t\t\t\t\t\tinput_file_index);\n      }\n      break;\n#endif\n    default:\n      gold_unreachable();\n    }\n\n  gold_assert(obj != NULL);\n  return obj;\n}",
+      "fn_code_pos": [
+        [
+          2974,
+          0
+        ],
+        [
+          3048,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "make_sized_incremental_object",
+        "parameters": {
+          "ibase": "Incremental_binary",
+          "input_file_index": "unsigned int",
+          "input_type": "Incremental_input_type",
+          "input_reader": "Incremental_binary::Input_reader"
+        },
+        "return_type": "Object"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_library::copy_unused_symbols()\n{\n  unsigned int symcount = this->input_reader_->get_unused_symbol_count();\n  this->unused_symbols_.reserve(symcount);\n  for (unsigned int i = 0; i < symcount; ++i)\n    {\n      std::string name(this->input_reader_->get_unused_symbol(i));\n      this->unused_symbols_.push_back(name);\n    }\n}",
+      "fn_code_pos": [
+        [
+          3054,
+          0
+        ],
+        [
+          3064,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_library::copy_unused_symbols",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nIncremental_library::do_for_all_unused_symbols(Symbol_visitor_base* v) const\n{\n  for (Symbol_list::const_iterator p = this->unused_symbols_.begin();\n       p != this->unused_symbols_.end();\n       ++p)\n  v->visit(p->c_str());\n}",
+      "fn_code_pos": [
+        [
+          3067,
+          0
+        ],
+        [
+          3074,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Incremental_library::do_for_all_unused_symbols",
+        "parameters": {
+          "v": "Symbol_visitor_base"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "set_final_data_size()",
+      "fn_dec_pos": [
+        [
+          69,
+          2
+        ],
+        [
+          69,
+          23
+        ]
+      ],
+      "class_code": "1f2304b7dde5fb244f9646dfd91a7a103b9411475ab0febc32cf168a7a00875f",
+      "class_node_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "set_final_data_size",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "do_write(Output_file*)",
+      "fn_dec_pos": [
+        [
+          73,
+          2
+        ],
+        [
+          73,
+          24
+        ]
+      ],
+      "class_code": "1f2304b7dde5fb244f9646dfd91a7a103b9411475ab0febc32cf168a7a00875f",
+      "class_node_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "do_write",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "write_header(unsigned char* pov, unsigned int input_file_count,\n\t       section_offset_type command_line_offset)",
+      "fn_dec_pos": [
+        [
+          83,
+          2
+        ],
+        [
+          84,
+          48
+        ]
+      ],
+      "class_code": "1f2304b7dde5fb244f9646dfd91a7a103b9411475ab0febc32cf168a7a00875f",
+      "class_node_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "write_header",
+        "parameters": {
+          "pov": "unsigned char",
+          "input_file_count": "unsigned int",
+          "command_line_offset": "section_offset_type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "write_input_files(unsigned char* oview, unsigned char* pov,\n\t\t    Stringpool* strtab)",
+      "fn_dec_pos": [
+        [
+          88,
+          2
+        ],
+        [
+          89,
+          25
+        ]
+      ],
+      "class_code": "1f2304b7dde5fb244f9646dfd91a7a103b9411475ab0febc32cf168a7a00875f",
+      "class_node_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "write_input_files",
+        "parameters": {
+          "oview": "unsigned char",
+          "pov": "unsigned char",
+          "strtab": "Stringpool"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "write_info_blocks(unsigned char* oview, unsigned char* pov,\n\t\t    Stringpool* strtab, unsigned int* global_syms,\n\t\t    unsigned int global_sym_count)",
+      "fn_dec_pos": [
+        [
+          93,
+          2
+        ],
+        [
+          95,
+          36
+        ]
+      ],
+      "class_code": "1f2304b7dde5fb244f9646dfd91a7a103b9411475ab0febc32cf168a7a00875f",
+      "class_node_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "write_info_blocks",
+        "parameters": {
+          "oview": "unsigned char",
+          "pov": "unsigned char",
+          "strtab": "Stringpool",
+          "global_syms": "unsigned int",
+          "global_sym_count": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "write_symtab(unsigned char* pov, unsigned int* global_syms,\n\t       unsigned int global_sym_count)",
+      "fn_dec_pos": [
+        [
+          99,
+          2
+        ],
+        [
+          100,
+          38
+        ]
+      ],
+      "class_code": "1f2304b7dde5fb244f9646dfd91a7a103b9411475ab0febc32cf168a7a00875f",
+      "class_node_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "write_symtab",
+        "parameters": {
+          "pov": "unsigned char",
+          "global_syms": "unsigned int",
+          "global_sym_count": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "write_got_plt(unsigned char* pov, off_t view_size)",
+      "fn_dec_pos": [
+        [
+          104,
+          2
+        ],
+        [
+          104,
+          52
+        ]
+      ],
+      "class_code": "1f2304b7dde5fb244f9646dfd91a7a103b9411475ab0febc32cf168a7a00875f",
+      "class_node_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "write_got_plt",
+        "parameters": {
+          "pov": "unsigned char",
+          "view_size": "off_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "shdrs_location(shoff, shnum * shdr_size)",
+      "fn_dec_pos": [
+        [
+          530,
+          11
+        ],
+        [
+          530,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "shdrs_location",
+        "parameters": {
+          "shdr_size": "shnum"
+        },
+        "return_type": "Location"
+      }
+    },
+    {
+      "fn_code": "shdr(pshdr)",
+      "fn_dec_pos": [
+        [
+          544,
+          11
+        ],
+        [
+          544,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "shdr",
+        "parameters": {},
+        "return_type": "Shdr"
+      }
+    },
+    {
+      "fn_code": "gsym(sym_p)",
+      "fn_dec_pos": [
+        [
+          590,
+          37
+        ],
+        [
+          590,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gsym",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "make_sized_incremental_binary(Output_file* file,\n\t\t\t      const elfcpp::Ehdr<size, big_endian>& ehdr)",
+      "fn_dec_pos": [
+        [
+          848,
+          0
+        ],
+        [
+          849,
+          52
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "make_sized_incremental_binary",
+        "parameters": {
+          "file": "Output_file",
+          "ehdr": "elfcpp::Ehdr<size, big_endian>"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "open_incremental_binary(Output_file* file)",
+      "fn_dec_pos": [
+        [
+          877,
+          0
+        ],
+        [
+          877,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "open_incremental_binary",
+        "parameters": {
+          "file": "Output_file"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Output_section_incremental_inputs<size, big_endian>::write_header(\n    unsigned char* pov,\n    unsigned int input_file_count,\n    section_offset_type command_line_offset)",
+      "fn_dec_pos": [
+        [
+          1455,
+          0
+        ],
+        [
+          1458,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_section_incremental_inputs<size, big_endian>::write_header",
+        "parameters": {
+          "pov": "unsigned char",
+          "input_file_count": "unsigned int",
+          "command_line_offset": "section_offset_type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Output_section_incremental_inputs<size, big_endian>::write_input_files(\n    unsigned char* oview,\n    unsigned char* pov,\n    Stringpool* strtab)",
+      "fn_dec_pos": [
+        [
+          1472,
+          0
+        ],
+        [
+          1475,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_section_incremental_inputs<size, big_endian>::write_input_files",
+        "parameters": {
+          "oview": "unsigned char",
+          "pov": "unsigned char",
+          "strtab": "Stringpool"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Output_section_incremental_inputs<size, big_endian>::write_info_blocks(\n    unsigned char* oview,\n    unsigned char* pov,\n    Stringpool* strtab,\n    unsigned int* global_syms,\n    unsigned int global_sym_count)",
+      "fn_dec_pos": [
+        [
+          1509,
+          0
+        ],
+        [
+          1514,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_section_incremental_inputs<size, big_endian>::write_info_blocks",
+        "parameters": {
+          "oview": "unsigned char",
+          "pov": "unsigned char",
+          "strtab": "Stringpool",
+          "global_syms": "unsigned int",
+          "global_sym_count": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "v(view_info)",
+      "fn_dec_pos": [
+        [
+          1981,
+          18
+        ],
+        [
+          1981,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "v",
+        "parameters": {},
+        "return_type": "Got_visitor"
+      }
+    },
+    {
+      "fn_code": "sym(symbuf)",
+      "fn_dec_pos": [
+        [
+          2126,
+          32
+        ],
+        [
+          2126,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sym",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "osym(symbuf)",
+      "fn_dec_pos": [
+        [
+          2127,
+          38
+        ],
+        [
+          2127,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "osym",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "gsym(sym_p)",
+      "fn_dec_pos": [
+        [
+          2150,
+          36
+        ],
+        [
+          2150,
+          47
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gsym",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "out_sections(this->output_sections())",
+      "fn_dec_pos": [
+        [
+          2274,
+          25
+        ],
+        [
+          2274,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "out_sections",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_incr<size, big_endian>::do_section_contents(\n    unsigned int shndx,\n    section_size_type* plen,\n    bool)",
+      "fn_dec_pos": [
+        [
+          2285,
+          0
+        ],
+        [
+          2288,
+          9
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_incr<size, big_endian>::do_section_contents",
+        "parameters": {
+          "shndx": "unsigned int",
+          "plen": "section_size_type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_incr<size, big_endian>::do_initialize_xindex()",
+      "fn_dec_pos": [
+        [
+          2368,
+          0
+        ],
+        [
+          2368,
+          59
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_incr<size, big_endian>::do_initialize_xindex",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "sym(symp)",
+      "fn_dec_pos": [
+        [
+          2486,
+          36
+        ],
+        [
+          2486,
+          45
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sym",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "osym(ov)",
+      "fn_dec_pos": [
+        [
+          2623,
+          37
+        ],
+        [
+          2623,
+          45
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "osym",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "osym(dyn_ov)",
+      "fn_dec_pos": [
+        [
+          2638,
+          39
+        ],
+        [
+          2638,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "osym",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "sym(symbuf)",
+      "fn_dec_pos": [
+        [
+          2727,
+          32
+        ],
+        [
+          2727,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sym",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "osym(symbuf)",
+      "fn_dec_pos": [
+        [
+          2728,
+          38
+        ],
+        [
+          2728,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "osym",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "gsym(sym_p)",
+      "fn_dec_pos": [
+        [
+          2756,
+          36
+        ],
+        [
+          2756,
+          47
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gsym",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Sized_incr_dynobj<size, big_endian>::do_section_contents(\n    unsigned int,\n    section_size_type*,\n    bool)",
+      "fn_dec_pos": [
+        [
+          2869,
+          0
+        ],
+        [
+          2872,
+          9
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_incr_dynobj<size, big_endian>::do_section_contents",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Sized_incr_dynobj<size, big_endian>::do_initialize_xindex()",
+      "fn_dec_pos": [
+        [
+          2944,
+          0
+        ],
+        [
+          2944,
+          59
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_incr_dynobj<size, big_endian>::do_initialize_xindex",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "make_sized_incremental_object(\n    Incremental_binary* ibase,\n    unsigned int input_file_index,\n    Incremental_input_type input_type,\n    const Incremental_binary::Input_reader* input_reader)",
+      "fn_dec_pos": [
+        [
+          2975,
+          0
+        ],
+        [
+          2979,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "make_sized_incremental_object",
+        "parameters": {
+          "ibase": "Incremental_binary",
+          "input_file_index": "unsigned int",
+          "input_type": "Incremental_input_type",
+          "input_reader": "Incremental_binary::Input_reader"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {
+    "84762a3217b5fd0b5d80a8456217c82be21535545070d17df98b4dfce3830047": {
+      "class_code": "template<int size, bool big_endian>\nclass Output_section_incremental_inputs : public Output_section_data\n{\n public:\n  Output_section_incremental_inputs(const Incremental_inputs* inputs,\n\t\t\t\t    const Symbol_table* symtab)\n    : Output_section_data(size / 8), inputs_(inputs), symtab_(symtab)\n  { }\n\n protected:\n  // This is called to update the section size prior to assigning\n  // the address and file offset.\n  void\n  update_data_size()\n  { this->set_final_data_size(); }\n\n  // Set the final data size.\n  void\n  set_final_data_size();\n\n  // Write the data to the file.\n  void\n  do_write(Output_file*);\n\n  // Write to a map file.\n  void\n  do_print_to_mapfile(Mapfile* mapfile) const\n  { mapfile->print_output_data(this, _(\"** incremental_inputs\")); }\n\n private:\n  // Write the section header.\n  unsigned char*\n  write_header(unsigned char* pov, unsigned int input_file_count,\n\t       section_offset_type command_line_offset);\n\n  // Write the input file entries.\n  unsigned char*\n  write_input_files(unsigned char* oview, unsigned char* pov,\n\t\t    Stringpool* strtab);\n\n  // Write the supplemental information blocks.\n  unsigned char*\n  write_info_blocks(unsigned char* oview, unsigned char* pov,\n\t\t    Stringpool* strtab, unsigned int* global_syms,\n\t\t    unsigned int global_sym_count);\n\n  // Write the contents of the .gnu_incremental_symtab section.\n  void\n  write_symtab(unsigned char* pov, unsigned int* global_syms,\n\t       unsigned int global_sym_count);\n\n  // Write the contents of the .gnu_incremental_got_plt section.\n  void\n  write_got_plt(unsigned char* pov, off_t view_size);\n\n  // Typedefs for writing the data to the output sections.\n  typedef elfcpp::Swap<size, big_endian> Swap;\n  typedef elfcpp::Swap<16, big_endian> Swap16;\n  typedef elfcpp::Swap<32, big_endian> Swap32;\n  typedef elfcpp::Swap<64, big_endian> Swap64;\n\n  // Sizes of various structures.\n  static const int sizeof_addr = size / 8;\n  static const int header_size =\n      Incremental_inputs_reader<size, big_endian>::header_size;\n  static const int input_entry_size =\n      Incremental_inputs_reader<size, big_endian>::input_entry_size;\n  static const unsigned int object_info_size =\n      Incremental_inputs_reader<size, big_endian>::object_info_size;\n  static const unsigned int input_section_entry_size =\n      Incremental_inputs_reader<size, big_endian>::input_section_entry_size;\n  static const unsigned int global_sym_entry_size =\n      Incremental_inputs_reader<size, big_endian>::global_sym_entry_size;\n  static const unsigned int incr_reloc_size =\n      Incremental_relocs_reader<size, big_endian>::reloc_size;\n\n  // The Incremental_inputs object.\n  const Incremental_inputs* inputs_;\n\n  // The symbol table.\n  const Symbol_table* symtab_;\n};",
+      "class_name": "Output_section_incremental_inputs",
+      "class_pos": [
+        [
+          51,
+          0
+        ],
+        [
+          132,
+          2
+        ]
+      ]
+    },
+    "c7321263f8d34582148667c21bc2bbf89c6a1684e7b1df7bd5d9393e31652239": {
+      "class_code": "class Unused_symbol_visitor : public Library_base::Symbol_visitor_base\n{\n public:\n  Unused_symbol_visitor(Incremental_archive_entry* entry, Stringpool* strtab)\n    : entry_(entry), strtab_(strtab)\n  { }\n\n  void\n  visit(const char* sym)\n  {\n    Stringpool::Key symbol_key;\n    this->strtab_->add(sym, true, &symbol_key);\n    this->entry_->add_unused_global_symbol(symbol_key);\n  }\n\n private:\n  Incremental_archive_entry* entry_;\n  Stringpool* strtab_;\n}",
+      "class_name": "Unused_symbol_visitor",
+      "class_pos": [
+        [
+          1046,
+          0
+        ],
+        [
+          1064,
+          1
+        ]
+      ]
+    },
+    "09b67f1f0d18e336ffca36706901184f4c996ea2bc8432e6ff36c2673fec56d7": {
+      "class_code": "template<int size, bool big_endian>\nclass Local_got_offset_visitor : public Got_offset_list::Visitor\n{\n public:\n  Local_got_offset_visitor(struct Got_plt_view_info& info)\n    : info_(info)\n  { }\n\n  void\n  visit(unsigned int got_type, unsigned int got_offset)\n  {\n    unsigned int got_index = got_offset / this->info_.got_entry_size;\n    gold_assert(got_index < this->info_.got_count);\n    // We can only handle GOT entry types in the range 0..0x7e\n    // because we use a byte array to store them, and we use the\n    // high bit to flag a local symbol.\n    gold_assert(got_type < 0x7f);\n    this->info_.got_type_p[got_index] = got_type | 0x80;\n    unsigned char* pov = this->info_.got_desc_p + got_index * 8;\n    elfcpp::Swap<32, big_endian>::writeval(pov, this->info_.sym_index);\n    elfcpp::Swap<32, big_endian>::writeval(pov + 4, this->info_.input_index);\n  }\n\n private:\n  struct Got_plt_view_info& info_;\n};",
+      "class_name": "Local_got_offset_visitor",
+      "class_pos": [
+        [
+          1836,
+          0
+        ],
+        [
+          1861,
+          2
+        ]
+      ]
+    },
+    "da53bc46682642d776b494bbe8c903d3ad76699e235355c03ce52678cf59b1d4": {
+      "class_code": "template<int size, bool big_endian>\nclass Global_got_offset_visitor : public Got_offset_list::Visitor\n{\n public:\n  Global_got_offset_visitor(struct Got_plt_view_info& info)\n    : info_(info)\n  { }\n\n  void\n  visit(unsigned int got_type, unsigned int got_offset)\n  {\n    unsigned int got_index = got_offset / this->info_.got_entry_size;\n    gold_assert(got_index < this->info_.got_count);\n    // We can only handle GOT entry types in the range 0..0x7e\n    // because we use a byte array to store them, and we use the\n    // high bit to flag a local symbol.\n    gold_assert(got_type < 0x7f);\n    this->info_.got_type_p[got_index] = got_type;\n    unsigned char* pov = this->info_.got_desc_p + got_index * 8;\n    elfcpp::Swap<32, big_endian>::writeval(pov, this->info_.sym_index);\n    elfcpp::Swap<32, big_endian>::writeval(pov + 4, 0);\n  }\n\n private:\n  struct Got_plt_view_info& info_;\n};",
+      "class_name": "Global_got_offset_visitor",
+      "class_pos": [
+        [
+          1867,
+          0
+        ],
+        [
+          1892,
+          2
+        ]
+      ]
+    },
+    "b6b8fe070a2fec2175189e4eb861121161e0f14d66dce9a8b8e1a234cd204123": {
+      "class_code": "template<int size, bool big_endian>\nclass Global_symbol_visitor_got_plt\n{\n public:\n  Global_symbol_visitor_got_plt(struct Got_plt_view_info& info)\n    : info_(info)\n  { }\n\n  void\n  operator()(const Sized_symbol<size>* sym)\n  {\n    typedef Global_got_offset_visitor<size, big_endian> Got_visitor;\n    const Got_offset_list* got_offsets = sym->got_offset_list();\n    if (got_offsets != NULL)\n      {\n\tthis->info_.sym_index = sym->symtab_index();\n\tthis->info_.input_index = 0;\n\tGot_visitor v(this->info_);\n\tgot_offsets->for_all_got_offsets(&v);\n      }\n    if (sym->has_plt_offset())\n      {\n\tunsigned int plt_index =\n\t    ((sym->plt_offset() - this->info_.first_plt_entry_offset)\n\t     / this->info_.plt_entry_size);\n\tgold_assert(plt_index < this->info_.plt_count);\n\tunsigned char* pov = this->info_.plt_desc_p + plt_index * 4;\n\telfcpp::Swap<32, big_endian>::writeval(pov, sym->symtab_index());\n      }\n  }\n\n private:\n  struct Got_plt_view_info& info_;\n};",
+      "class_name": "Global_symbol_visitor_got_plt",
+      "class_pos": [
+        [
+          1898,
+          0
+        ],
+        [
+          1931,
+          2
+        ]
+      ]
+    }
+  },
+  "struct_node_list": [
+    [
+      "struct Got_plt_view_info\n{\n  // Start of the GOT type array in the output view.\n  unsigned char* got_type_p;\n  // Start of the GOT descriptor array in the output view.\n  unsigned char* got_desc_p;\n  // Start of the PLT descriptor array in the output view.\n  unsigned char* plt_desc_p;\n  // Number of GOT entries.\n  unsigned int got_count;\n  // Number of PLT entries.\n  unsigned int plt_count;\n  // Offset of the first non-reserved PLT entry (this is a target-dependent value).\n  unsigned int first_plt_entry_offset;\n  // Size of a PLT entry (this is a target-dependent value).\n  unsigned int plt_entry_size;\n  // Size of a GOT entry (this is a target-dependent value).\n  unsigned int got_entry_size;\n  // Symbol index to write in the GOT descriptor array.  For global symbols,\n  // this is the global symbol table index; for local symbols, it is the\n  // local symbol table index.\n  unsigned int sym_index;\n  // Input file index to write in the GOT descriptor array.  For global\n  // symbols, this is 0; for local symbols, it is the index of the input\n  // file entry in the .gnu_incremental_inputs section.\n  unsigned int input_index;\n}",
+      {
+        "* got_type_p": "unsigned char",
+        "* got_desc_p": "unsigned char",
+        "* plt_desc_p": "unsigned char",
+        "got_count": "unsigned int",
+        "plt_count": "unsigned int",
+        "first_plt_entry_offset": "unsigned int",
+        "plt_entry_size": "unsigned int",
+        "got_entry_size": "unsigned int",
+        "sym_index": "unsigned int",
+        "input_index": "unsigned int"
+      },
+      "Got_plt_view_info",
+      [
+        1804,
+        0
+      ],
+      [
+        1830,
+        1
+      ]
+    ],
+    [
+      "struct Got_plt_view_info\n{\n  // Start of the GOT type array in the output view.\n  unsigned char* got_type_p;\n  // Start of the GOT descriptor array in the output view.\n  unsigned char* got_desc_p;\n  // Start of the PLT descriptor array in the output view.\n  unsigned char* plt_desc_p;\n  // Number of GOT entries.\n  unsigned int got_count;\n  // Number of PLT entries.\n  unsigned int plt_count;\n  // Offset of the first non-reserved PLT entry (this is a target-dependent value).\n  unsigned int first_plt_entry_offset;\n  // Size of a PLT entry (this is a target-dependent value).\n  unsigned int plt_entry_size;\n  // Size of a GOT entry (this is a target-dependent value).\n  unsigned int got_entry_size;\n  // Symbol index to write in the GOT descriptor array.  For global symbols,\n  // this is the global symbol table index; for local symbols, it is the\n  // local symbol table index.\n  unsigned int sym_index;\n  // Input file index to write in the GOT descriptor array.  For global\n  // symbols, this is 0; for local symbols, it is the index of the input\n  // file entry in the .gnu_incremental_inputs section.\n  unsigned int input_index;\n}",
+      {
+        "* got_type_p": "unsigned char",
+        "* got_desc_p": "unsigned char",
+        "* plt_desc_p": "unsigned char",
+        "got_count": "unsigned int",
+        "plt_count": "unsigned int",
+        "first_plt_entry_offset": "unsigned int",
+        "plt_entry_size": "unsigned int",
+        "got_entry_size": "unsigned int",
+        "sym_index": "unsigned int",
+        "input_index": "unsigned int"
+      },
+      "Got_plt_view_info",
+      [
+        1804,
+        0
+      ],
+      [
+        1830,
+        1
+      ]
+    ],
+    [
+      "struct Got_plt_view_info",
+      {},
+      "",
+      [
+        1840,
+        27
+      ],
+      [
+        1840,
+        51
+      ]
+    ],
+    [
+      "struct Got_plt_view_info",
+      {},
+      "",
+      [
+        1860,
+        2
+      ],
+      [
+        1860,
+        26
+      ]
+    ],
+    [
+      "struct Got_plt_view_info",
+      {},
+      "",
+      [
+        1871,
+        28
+      ],
+      [
+        1871,
+        52
+      ]
+    ],
+    [
+      "struct Got_plt_view_info",
+      {},
+      "",
+      [
+        1891,
+        2
+      ],
+      [
+        1891,
+        26
+      ]
+    ],
+    [
+      "struct Got_plt_view_info",
+      {},
+      "",
+      [
+        1902,
+        32
+      ],
+      [
+        1902,
+        56
+      ]
+    ],
+    [
+      "struct Got_plt_view_info",
+      {},
+      "",
+      [
+        1930,
+        2
+      ],
+      [
+        1930,
+        26
+      ]
+    ],
+    [
+      "struct Got_plt_view_info",
+      {},
+      "",
+      [
+        1945,
+        2
+      ],
+      [
+        1945,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"gold.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <set>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <cstdarg>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"elfcpp.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"options.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"output.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"incremental.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"archive.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"object.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"target-select.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"target.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"fileread.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"script.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

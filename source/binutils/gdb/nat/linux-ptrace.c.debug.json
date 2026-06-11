@@ -1,0 +1,761 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "void\nlinux_ptrace_attach_fail_reason (pid_t pid, struct buffer *buffer)\n{\n  pid_t tracerpid;\n\n  tracerpid = linux_proc_get_tracerpid_nowarn (pid);\n  if (tracerpid > 0)\n    buffer_xml_printf (buffer, _(\"process %d is already traced \"\n\t\t\t\t \"by process %d\"),\n\t\t       (int) pid, (int) tracerpid);\n\n  if (linux_proc_pid_is_zombie_nowarn (pid))\n    buffer_xml_printf (buffer, _(\"process %d is a zombie \"\n\t\t\t\t \"- the process has already terminated\"),\n\t\t       (int) pid);\n}",
+      "fn_code_pos": [
+        [
+          38,
+          0
+        ],
+        [
+          53,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_ptrace_attach_fail_reason",
+        "parameters": {
+          "pid": "pid_t",
+          "buffer": "struct buffer"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "char *\nlinux_ptrace_attach_fail_reason_string (ptid_t ptid, int err)\n{\n  static char *reason_string;\n  struct buffer buffer;\n  char *warnings;\n  long lwpid = ptid_get_lwp (ptid);\n\n  xfree (reason_string);\n\n  buffer_init (&buffer);\n  linux_ptrace_attach_fail_reason (lwpid, &buffer);\n  buffer_grow_str0 (&buffer, \"\");\n  warnings = buffer_finish (&buffer);\n  if (warnings[0] != '\\0')\n    reason_string = xstrprintf (\"%s (%d), %s\",\n\t\t\t\tsafe_strerror (err), err, warnings);\n  else\n    reason_string = xstrprintf (\"%s (%d)\",\n\t\t\t\tsafe_strerror (err), err);\n  xfree (warnings);\n  return reason_string;\n}",
+      "fn_code_pos": [
+        [
+          57,
+          0
+        ],
+        [
+          79,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_ptrace_attach_fail_reason_string",
+        "parameters": {
+          "ptid": "ptid_t",
+          "err": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nlinux_ptrace_test_ret_to_nx (void)\n{\n#if defined __i386__ || defined __x86_64__\n  pid_t child, got_pid;\n  gdb_byte *return_address, *pc;\n  long l;\n  int status, kill_status;\n  elf_gregset_t regs;\n\n  return_address\n    = (gdb_byte *) mmap (NULL, 2, PROT_READ | PROT_WRITE,\n\t\t\t MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n  if (return_address == MAP_FAILED)\n    {\n      warning (_(\"linux_ptrace_test_ret_to_nx: Cannot mmap: %s\"),\n\t       safe_strerror (errno));\n      return;\n    }\n\n  /* Put there 'int3'.  */\n  *return_address = 0xcc;\n\n  child = fork ();\n  switch (child)\n    {\n    case -1:\n      warning (_(\"linux_ptrace_test_ret_to_nx: Cannot fork: %s\"),\n\t       safe_strerror (errno));\n      return;\n\n    case 0:\n      l = ptrace (PTRACE_TRACEME, 0, (PTRACE_TYPE_ARG3) NULL,\n\t\t  (PTRACE_TYPE_ARG4) NULL);\n      if (l != 0)\n\twarning (_(\"linux_ptrace_test_ret_to_nx: Cannot PTRACE_TRACEME: %s\"),\n\t\t safe_strerror (errno));\n      else\n\t{\n#if defined __i386__\n\t  asm volatile (\"pushl %0;\"\n\t\t\t\".globl linux_ptrace_test_ret_to_nx_instr;\"\n\t\t\t\"linux_ptrace_test_ret_to_nx_instr:\"\n\t\t\t\"ret\"\n\t\t\t: : \"r\" (return_address) : \"%esp\", \"memory\");\n#elif defined __x86_64__\n\t  asm volatile (\"pushq %0;\"\n\t\t\t\".globl linux_ptrace_test_ret_to_nx_instr;\"\n\t\t\t\"linux_ptrace_test_ret_to_nx_instr:\"\n\t\t\t\"ret\"\n\t\t\t: : \"r\" ((uint64_t) (uintptr_t) return_address)\n\t\t\t: \"%rsp\", \"memory\");\n#else\n# error \"!__i386__ && !__x86_64__\"\n#endif\n\t  gdb_assert_not_reached (\"asm block did not terminate\");\n\t}\n\n      _exit (1);\n    }\n\n  errno = 0;\n  got_pid = waitpid (child, &status, 0);\n  if (got_pid != child)\n    {\n      warning (_(\"linux_ptrace_test_ret_to_nx: waitpid returned %ld: %s\"),\n\t       (long) got_pid, safe_strerror (errno));\n      return;\n    }\n\n  if (WIFSIGNALED (status))\n    {\n      if (WTERMSIG (status) != SIGKILL)\n\twarning (_(\"linux_ptrace_test_ret_to_nx: WTERMSIG %d is not SIGKILL!\"),\n\t\t (int) WTERMSIG (status));\n      else\n\twarning (_(\"Cannot call inferior functions, Linux kernel PaX \"\n\t\t   \"protection forbids return to non-executable pages!\"));\n      return;\n    }\n\n  if (!WIFSTOPPED (status))\n    {\n      warning (_(\"linux_ptrace_test_ret_to_nx: status %d is not WIFSTOPPED!\"),\n\t       status);\n      return;\n    }\n\n  /* We may get SIGSEGV due to missing PROT_EXEC of the return_address.  */\n  if (WSTOPSIG (status) != SIGTRAP && WSTOPSIG (status) != SIGSEGV)\n    {\n      warning (_(\"linux_ptrace_test_ret_to_nx: \"\n\t\t \"WSTOPSIG %d is neither SIGTRAP nor SIGSEGV!\"),\n\t       (int) WSTOPSIG (status));\n      return;\n    }\n\n  if (ptrace (PTRACE_GETREGS, child, (PTRACE_TYPE_ARG3) 0,\n\t      (PTRACE_TYPE_ARG4) &regs) < 0)\n    {\n      warning (_(\"linux_ptrace_test_ret_to_nx: Cannot PTRACE_GETREGS: %s\"),\n\t       safe_strerror (errno));\n    }\n#if defined __i386__\n  pc = (gdb_byte *) (uintptr_t) regs[EIP];\n#elif defined __x86_64__\n  pc = (gdb_byte *) (uintptr_t) regs[RIP];\n#else\n# error \"!__i386__ && !__x86_64__\"\n#endif\n\n  kill (child, SIGKILL);\n  ptrace (PTRACE_KILL, child, (PTRACE_TYPE_ARG3) NULL,\n\t  (PTRACE_TYPE_ARG4) NULL);\n\n  errno = 0;\n  got_pid = waitpid (child, &kill_status, 0);\n  if (got_pid != child)\n    {\n      warning (_(\"linux_ptrace_test_ret_to_nx: \"\n\t\t \"PTRACE_KILL waitpid returned %ld: %s\"),\n\t       (long) got_pid, safe_strerror (errno));\n      return;\n    }\n  if (!WIFSIGNALED (kill_status))\n    {\n      warning (_(\"linux_ptrace_test_ret_to_nx: \"\n\t\t \"PTRACE_KILL status %d is not WIFSIGNALED!\"),\n\t       status);\n      return;\n    }\n\n  /* + 1 is there as x86* stops after the 'int3' instruction.  */\n  if (WSTOPSIG (status) == SIGTRAP && pc == return_address + 1)\n    {\n      /* PASS */\n      return;\n    }\n\n  /* We may get SIGSEGV due to missing PROT_EXEC of the RETURN_ADDRESS page.  */\n  if (WSTOPSIG (status) == SIGSEGV && pc == return_address)\n    {\n      /* PASS */\n      return;\n    }\n\n  if ((void (*) (void)) pc != &linux_ptrace_test_ret_to_nx_instr)\n    warning (_(\"linux_ptrace_test_ret_to_nx: PC %p is neither near return \"\n\t       \"address %p nor is the return instruction %p!\"),\n\t     pc, return_address, &linux_ptrace_test_ret_to_nx_instr);\n  else\n    warning (_(\"Cannot call inferior functions on this system - \"\n\t       \"Linux kernel with broken i386 NX (non-executable pages) \"\n\t       \"support detected!\"));\n#endif /* defined __i386__ || defined __x86_64__ */\n}",
+      "fn_code_pos": [
+        [
+          97,
+          0
+        ],
+        [
+          252,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_ptrace_test_ret_to_nx",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nlinux_fork_to_function (gdb_byte *child_stack, int (*function) (void *))\n{\n  int child_pid;\n\n  /* Sanity check the function pointer.  */\n  gdb_assert (function != NULL);\n\n#if defined(__UCLIBC__) && defined(HAS_NOMMU)\n#define STACK_SIZE 4096\n\n    if (child_stack == NULL)\n      child_stack = (gdb_byte *) xmalloc (STACK_SIZE * 4);\n\n    /* Use CLONE_VM instead of fork, to support uClinux (no MMU).  */\n#ifdef __ia64__\n      child_pid = __clone2 (function, child_stack, STACK_SIZE,\n\t\t\t    CLONE_VM | SIGCHLD, child_stack + STACK_SIZE * 2);\n#else /* !__ia64__ */\n      child_pid = clone (function, child_stack + STACK_SIZE,\n\t\t\t CLONE_VM | SIGCHLD, child_stack + STACK_SIZE * 2);\n#endif /* !__ia64__ */\n#else /* !defined(__UCLIBC) && defined(HAS_NOMMU) */\n  child_pid = fork ();\n\n  if (child_pid == 0)\n    function (NULL);\n#endif /* defined(__UCLIBC) && defined(HAS_NOMMU) */\n\n  if (child_pid == -1)\n    perror_with_name ((\"fork\"));\n\n  return child_pid;\n}",
+      "fn_code_pos": [
+        [
+          262,
+          0
+        ],
+        [
+          295,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_fork_to_function",
+        "parameters": {
+          "child_stack": "gdb_byte",
+          "function": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nlinux_grandchild_function (void *child_stack)\n{\n  /* Free any allocated stack.  */\n  xfree (child_stack);\n\n  /* This code is only reacheable by the grandchild (child's child)\n     process.  */\n  _exit (0);\n}",
+      "fn_code_pos": [
+        [
+          300,
+          0
+        ],
+        [
+          309,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_grandchild_function",
+        "parameters": {
+          "child_stack": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nlinux_child_function (void *child_stack)\n{\n  ptrace (PTRACE_TRACEME, 0, (PTRACE_TYPE_ARG3) 0, (PTRACE_TYPE_ARG4) 0);\n  kill (getpid (), SIGSTOP);\n\n  /* Fork a grandchild.  */\n  linux_fork_to_function ((gdb_byte *) child_stack, linux_grandchild_function);\n\n  /* This code is only reacheable by the child (grandchild's parent)\n     process.  */\n  _exit (0);\n}",
+      "fn_code_pos": [
+        [
+          315,
+          0
+        ],
+        [
+          327,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_child_function",
+        "parameters": {
+          "child_stack": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nlinux_check_ptrace_features (void)\n{\n  int child_pid, ret, status;\n\n  /* Initialize the options.  */\n  supported_ptrace_options = 0;\n\n  /* Fork a child so we can do some testing.  The child will call\n     linux_child_function and will get traced.  The child will\n     eventually fork a grandchild so we can test fork event\n     reporting.  */\n  child_pid = linux_fork_to_function (NULL, linux_child_function);\n\n  ret = my_waitpid (child_pid, &status, 0);\n  if (ret == -1)\n    perror_with_name ((\"waitpid\"));\n  else if (ret != child_pid)\n    error (_(\"linux_check_ptrace_features: waitpid: unexpected result %d.\"),\n\t   ret);\n  if (! WIFSTOPPED (status))\n    error (_(\"linux_check_ptrace_features: waitpid: unexpected status %d.\"),\n\t   status);\n\n  linux_test_for_tracesysgood (child_pid);\n\n  linux_test_for_tracefork (child_pid);\n\n  linux_test_for_exitkill (child_pid);\n\n  /* Clean things up and kill any pending children.  */\n  do\n    {\n      ret = ptrace (PTRACE_KILL, child_pid, (PTRACE_TYPE_ARG3) 0,\n\t\t    (PTRACE_TYPE_ARG4) 0);\n      if (ret != 0)\n\twarning (_(\"linux_check_ptrace_features: failed to kill child\"));\n      my_waitpid (child_pid, &status, 0);\n    }\n  while (WIFSTOPPED (status));\n}",
+      "fn_code_pos": [
+        [
+          335,
+          0
+        ],
+        [
+          375,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_check_ptrace_features",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nlinux_test_for_tracesysgood (int child_pid)\n{\n  int ret;\n\n  ret = ptrace (PTRACE_SETOPTIONS, child_pid, (PTRACE_TYPE_ARG3) 0,\n\t\t(PTRACE_TYPE_ARG4) PTRACE_O_TRACESYSGOOD);\n\n  if (ret == 0)\n    supported_ptrace_options |= PTRACE_O_TRACESYSGOOD;\n}",
+      "fn_code_pos": [
+        [
+          380,
+          0
+        ],
+        [
+          390,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_test_for_tracesysgood",
+        "parameters": {
+          "child_pid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nlinux_test_for_tracefork (int child_pid)\n{\n  int ret, status;\n  long second_pid;\n\n  /* First, set the PTRACE_O_TRACEFORK option.  If this fails, we\n     know for sure that it is not supported.  */\n  ret = ptrace (PTRACE_SETOPTIONS, child_pid, (PTRACE_TYPE_ARG3) 0,\n\t\t(PTRACE_TYPE_ARG4) PTRACE_O_TRACEFORK);\n\n  if (ret != 0)\n    return;\n\n  /* Check if the target supports PTRACE_O_TRACEVFORKDONE.  */\n  ret = ptrace (PTRACE_SETOPTIONS, child_pid, (PTRACE_TYPE_ARG3) 0,\n\t\t(PTRACE_TYPE_ARG4) (PTRACE_O_TRACEFORK\n\t\t\t\t    | PTRACE_O_TRACEVFORKDONE));\n  if (ret == 0)\n    supported_ptrace_options |= PTRACE_O_TRACEVFORKDONE;\n\n  /* Setting PTRACE_O_TRACEFORK did not cause an error, however we\n     don't know for sure that the feature is available; old\n     versions of PTRACE_SETOPTIONS ignored unknown options.\n     Therefore, we attach to the child process, use PTRACE_SETOPTIONS\n     to enable fork tracing, and let it fork.  If the process exits,\n     we assume that we can't use PTRACE_O_TRACEFORK; if we get the\n     fork notification, and we can extract the new child's PID, then\n     we assume that we can.\n\n     We do not explicitly check for vfork tracing here.  It is\n     assumed that vfork tracing is available whenever fork tracing\n     is available.  */\n  ret = ptrace (PTRACE_CONT, child_pid, (PTRACE_TYPE_ARG3) 0,\n\t\t(PTRACE_TYPE_ARG4) 0);\n  if (ret != 0)\n    warning (_(\"linux_test_for_tracefork: failed to resume child\"));\n\n  ret = my_waitpid (child_pid, &status, 0);\n\n  /* Check if we received a fork event notification.  */\n  if (ret == child_pid && WIFSTOPPED (status)\n      && linux_ptrace_get_extended_event (status) == PTRACE_EVENT_FORK)\n    {\n      /* We did receive a fork event notification.  Make sure its PID\n\t is reported.  */\n      second_pid = 0;\n      ret = ptrace (PTRACE_GETEVENTMSG, child_pid, (PTRACE_TYPE_ARG3) 0,\n\t\t    (PTRACE_TYPE_ARG4) &second_pid);\n      if (ret == 0 && second_pid != 0)\n\t{\n\t  int second_status;\n\n\t  /* We got the PID from the grandchild, which means fork\n\t     tracing is supported.  */\n\t  supported_ptrace_options |= PTRACE_O_TRACECLONE;\n\t  supported_ptrace_options |= (PTRACE_O_TRACEFORK\n\t\t\t\t       | PTRACE_O_TRACEVFORK\n\t\t\t\t       | PTRACE_O_TRACEEXEC);\n\n\t  /* Do some cleanup and kill the grandchild.  */\n\t  my_waitpid (second_pid, &second_status, 0);\n\t  ret = ptrace (PTRACE_KILL, second_pid, (PTRACE_TYPE_ARG3) 0,\n\t\t\t(PTRACE_TYPE_ARG4) 0);\n\t  if (ret != 0)\n\t    warning (_(\"linux_test_for_tracefork: \"\n\t\t       \"failed to kill second child\"));\n\t  my_waitpid (second_pid, &status, 0);\n\t}\n    }\n  else\n    warning (_(\"linux_test_for_tracefork: unexpected result from waitpid \"\n\t     \"(%d, status 0x%x)\"), ret, status);\n}",
+      "fn_code_pos": [
+        [
+          395,
+          0
+        ],
+        [
+          468,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_test_for_tracefork",
+        "parameters": {
+          "child_pid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nlinux_test_for_exitkill (int child_pid)\n{\n  int ret;\n\n  ret = ptrace (PTRACE_SETOPTIONS, child_pid, (PTRACE_TYPE_ARG3) 0,\n\t\t(PTRACE_TYPE_ARG4) PTRACE_O_EXITKILL);\n\n  if (ret == 0)\n    supported_ptrace_options |= PTRACE_O_EXITKILL;\n}",
+      "fn_code_pos": [
+        [
+          472,
+          0
+        ],
+        [
+          482,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_test_for_exitkill",
+        "parameters": {
+          "child_pid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nlinux_enable_event_reporting (pid_t pid, int options)\n{\n  /* Check if we have initialized the ptrace features for this\n     target.  If not, do it now.  */\n  if (supported_ptrace_options == -1)\n    linux_check_ptrace_features ();\n\n  /* We always want clone events.  */\n  options |= PTRACE_O_TRACECLONE;\n\n  /* Filter out unsupported options.  */\n  options &= supported_ptrace_options;\n\n  /* Set the options.  */\n  ptrace (PTRACE_SETOPTIONS, pid, (PTRACE_TYPE_ARG3) 0,\n\t  (PTRACE_TYPE_ARG4) (uintptr_t) options);\n}",
+      "fn_code_pos": [
+        [
+          489,
+          0
+        ],
+        [
+          506,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_enable_event_reporting",
+        "parameters": {
+          "pid": "pid_t",
+          "options": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nlinux_disable_event_reporting (pid_t pid)\n{\n  /* Set the options.  */\n  ptrace (PTRACE_SETOPTIONS, pid, (PTRACE_TYPE_ARG3) 0, 0);\n}",
+      "fn_code_pos": [
+        [
+          510,
+          0
+        ],
+        [
+          515,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_disable_event_reporting",
+        "parameters": {
+          "pid": "pid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nptrace_supports_feature (int ptrace_options)\n{\n  if (supported_ptrace_options == -1)\n    linux_check_ptrace_features ();\n\n  return ((supported_ptrace_options & ptrace_options) == ptrace_options);\n}",
+      "fn_code_pos": [
+        [
+          521,
+          0
+        ],
+        [
+          528,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ptrace_supports_feature",
+        "parameters": {
+          "ptrace_options": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nlinux_supports_tracefork (void)\n{\n  return ptrace_supports_feature (PTRACE_O_TRACEFORK);\n}",
+      "fn_code_pos": [
+        [
+          535,
+          0
+        ],
+        [
+          539,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_supports_tracefork",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nlinux_supports_traceexec (void)\n{\n  return ptrace_supports_feature (PTRACE_O_TRACEEXEC);\n}",
+      "fn_code_pos": [
+        [
+          546,
+          0
+        ],
+        [
+          550,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_supports_traceexec",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nlinux_supports_traceclone (void)\n{\n  return ptrace_supports_feature (PTRACE_O_TRACECLONE);\n}",
+      "fn_code_pos": [
+        [
+          557,
+          0
+        ],
+        [
+          561,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_supports_traceclone",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nlinux_supports_tracevforkdone (void)\n{\n  return ptrace_supports_feature (PTRACE_O_TRACEVFORKDONE);\n}",
+      "fn_code_pos": [
+        [
+          566,
+          0
+        ],
+        [
+          570,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_supports_tracevforkdone",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nlinux_supports_tracesysgood (void)\n{\n  return ptrace_supports_feature (PTRACE_O_TRACESYSGOOD);\n}",
+      "fn_code_pos": [
+        [
+          575,
+          0
+        ],
+        [
+          579,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_supports_tracesysgood",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nlinux_ptrace_init_warnings (void)\n{\n  static int warned = 0;\n\n  if (warned)\n    return;\n  warned = 1;\n\n  linux_ptrace_test_ret_to_nx ();\n}",
+      "fn_code_pos": [
+        [
+          584,
+          0
+        ],
+        [
+          594,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_ptrace_init_warnings",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\nlinux_ptrace_get_extended_event (int wstat)\n{\n  return (wstat >> 16);\n}",
+      "fn_code_pos": [
+        [
+          598,
+          0
+        ],
+        [
+          602,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_ptrace_get_extended_event",
+        "parameters": {
+          "wstat": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nlinux_is_extended_waitstatus (int wstat)\n{\n  return (linux_ptrace_get_extended_event (wstat) != 0);\n}",
+      "fn_code_pos": [
+        [
+          606,
+          0
+        ],
+        [
+          610,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_is_extended_waitstatus",
+        "parameters": {
+          "wstat": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nlinux_wstatus_maybe_breakpoint (int wstat)\n{\n  return (WIFSTOPPED (wstat)\n\t  && (WSTOPSIG (wstat) == SIGTRAP\n\t      /* SIGILL and SIGSEGV are also treated as traps in case a\n\t\t breakpoint is inserted at the current PC.  */\n\t      || WSTOPSIG (wstat) == SIGILL\n\t      || WSTOPSIG (wstat) == SIGSEGV));\n}",
+      "fn_code_pos": [
+        [
+          614,
+          0
+        ],
+        [
+          623,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_wstatus_maybe_breakpoint",
+        "parameters": {
+          "wstat": "int"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "linux_ptrace_attach_fail_reason_string (ptid_t ptid, int err)",
+      "fn_dec_pos": [
+        [
+          58,
+          0
+        ],
+        [
+          58,
+          61
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_ptrace_attach_fail_reason_string",
+        "parameters": {
+          "ptid": "ptid_t",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "linux_ptrace_test_ret_to_nx_instr (void)",
+      "fn_dec_pos": [
+        [
+          84,
+          14
+        ],
+        [
+          84,
+          54
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_ptrace_test_ret_to_nx_instr",
+        "parameters": {},
+        "return_type": "EXTERN_C"
+      }
+    },
+    {
+      "fn_code": "(*function) (void *)",
+      "fn_dec_pos": [
+        [
+          263,
+          51
+        ],
+        [
+          263,
+          71
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "linux_test_for_tracesysgood (int child_pid)",
+      "fn_dec_pos": [
+        [
+          329,
+          12
+        ],
+        [
+          329,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_test_for_tracesysgood",
+        "parameters": {
+          "child_pid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "linux_test_for_tracefork (int child_pid)",
+      "fn_dec_pos": [
+        [
+          330,
+          12
+        ],
+        [
+          330,
+          52
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_test_for_tracefork",
+        "parameters": {
+          "child_pid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "linux_test_for_exitkill (int child_pid)",
+      "fn_dec_pos": [
+        [
+          331,
+          12
+        ],
+        [
+          331,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_test_for_exitkill",
+        "parameters": {
+          "child_pid": "int"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        39,
+        44
+      ],
+      [
+        39,
+        57
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        61,
+        2
+      ],
+      [
+        61,
+        15
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"common-defs.h\"\n",
+      [
+        18,
+        0
+      ],
+      [
+        19,
+        0
+      ]
+    ],
+    [
+      "#include \"linux-ptrace.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"linux-procfs.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"linux-waitpid.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"buffer.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_wait.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_ptrace.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <sys/procfs.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <sys/reg.h>\n",
+      [
+        86,
+        0
+      ],
+      [
+        87,
+        0
+      ]
+    ],
+    [
+      "#include <sys/mman.h>\n",
+      [
+        87,
+        0
+      ],
+      [
+        88,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        88,
+        0
+      ],
+      [
+        89,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

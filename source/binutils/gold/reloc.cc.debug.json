@@ -1,0 +1,2395 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::do_read_relocs(Read_relocs_data* rd)\n{\n  rd->relocs.clear();\n\n  unsigned int shnum = this->shnum();\n  if (shnum == 0)\n    return;\n\n  rd->relocs.reserve(shnum / 2);\n\n  const Output_sections& out_sections(this->output_sections());\n  const std::vector<Address>& out_offsets(this->section_offsets());\n\n  const unsigned char* pshdrs = this->get_view(this->elf_file_.shoff(),\n\t\t\t\t\t       shnum * This::shdr_size,\n\t\t\t\t\t       true, true);\n  // Skip the first, dummy, section.\n  const unsigned char* ps = pshdrs + This::shdr_size;\n  for (unsigned int i = 1; i < shnum; ++i, ps += This::shdr_size)\n    {\n      typename This::Shdr shdr(ps);\n\n      unsigned int sh_type = shdr.get_sh_type();\n      if (sh_type != elfcpp::SHT_REL && sh_type != elfcpp::SHT_RELA)\n\tcontinue;\n\n      unsigned int shndx = this->adjust_shndx(shdr.get_sh_info());\n      if (shndx >= shnum)\n\t{\n\t  this->error(_(\"relocation section %u has bad info %u\"),\n\t\t      i, shndx);\n\t  continue;\n\t}\n\n      Output_section* os = out_sections[shndx];\n      if (os == NULL)\n\tcontinue;\n\n      // We are scanning relocations in order to fill out the GOT and\n      // PLT sections.  Relocations for sections which are not\n      // allocated (typically debugging sections) should not add new\n      // GOT and PLT entries.  So we skip them unless this is a\n      // relocatable link or we need to emit relocations.  FIXME: What\n      // should we do if a linker script maps a section with SHF_ALLOC\n      // clear to a section with SHF_ALLOC set?\n      typename This::Shdr secshdr(pshdrs + shndx * This::shdr_size);\n      bool is_section_allocated = ((secshdr.get_sh_flags() & elfcpp::SHF_ALLOC)\n\t\t\t\t   != 0);\n      if (!is_section_allocated\n\t  && !parameters->options().relocatable()\n\t  && !parameters->options().emit_relocs()\n\t  && !parameters->incremental())\n\tcontinue;\n\n      if (this->adjust_shndx(shdr.get_sh_link()) != this->symtab_shndx_)\n\t{\n\t  this->error(_(\"relocation section %u uses unexpected \"\n\t\t\t\"symbol table %u\"),\n\t\t      i, this->adjust_shndx(shdr.get_sh_link()));\n\t  continue;\n\t}\n\n      off_t sh_size = shdr.get_sh_size();\n\n      if (sh_size == 0)\n\tcontinue;\n\n      unsigned int reloc_size;\n      if (sh_type == elfcpp::SHT_REL)\n\treloc_size = elfcpp::Elf_sizes<size>::rel_size;\n      else\n\treloc_size = elfcpp::Elf_sizes<size>::rela_size;\n      if (reloc_size != shdr.get_sh_entsize())\n\t{\n\t  this->error(_(\"unexpected entsize for reloc section %u: %lu != %u\"),\n\t\t      i, static_cast<unsigned long>(shdr.get_sh_entsize()),\n\t\t      reloc_size);\n\t  continue;\n\t}\n\n      size_t reloc_count = sh_size / reloc_size;\n      if (static_cast<off_t>(reloc_count * reloc_size) != sh_size)\n\t{\n\t  this->error(_(\"reloc section %u size %lu uneven\"),\n\t\t      i, static_cast<unsigned long>(sh_size));\n\t  continue;\n\t}\n\n      rd->relocs.push_back(Section_relocs());\n      Section_relocs& sr(rd->relocs.back());\n      sr.reloc_shndx = i;\n      sr.data_shndx = shndx;\n      sr.contents = this->get_lasting_view(shdr.get_sh_offset(), sh_size,\n\t\t\t\t\t   true, true);\n      sr.sh_type = sh_type;\n      sr.reloc_count = reloc_count;\n      sr.output_section = os;\n      sr.needs_special_offset_handling = out_offsets[shndx] == invalid_address;\n      sr.is_data_section_allocated = is_section_allocated;\n    }\n\n  // Read the local symbols.\n  gold_assert(this->symtab_shndx_ != -1U);\n  if (this->symtab_shndx_ == 0 || this->local_symbol_count_ == 0)\n    rd->local_symbols = NULL;\n  else\n    {\n      typename This::Shdr symtabshdr(pshdrs\n\t\t\t\t     + this->symtab_shndx_ * This::shdr_size);\n      gold_assert(symtabshdr.get_sh_type() == elfcpp::SHT_SYMTAB);\n      const int sym_size = This::sym_size;\n      const unsigned int loccount = this->local_symbol_count_;\n      gold_assert(loccount == symtabshdr.get_sh_info());\n      off_t locsize = loccount * sym_size;\n      rd->local_symbols = this->get_lasting_view(symtabshdr.get_sh_offset(),\n\t\t\t\t\t\t locsize, true, true);\n    }\n}",
+      "fn_code_pos": [
+        [
+          258,
+          0
+        ],
+        [
+          377,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::do_gc_process_relocs(Symbol_table* symtab,\n\t\t\t\t\t\t\t  Layout* layout,\n\t\t\t\t\t\t\t  Read_relocs_data* rd)\n{  \n  Sized_target<size, big_endian>* target =\n    parameters->sized_target<size, big_endian>();\n\n  const unsigned char* local_symbols;\n  if (rd->local_symbols == NULL)\n    local_symbols = NULL;\n  else\n    local_symbols = rd->local_symbols->data();\n\n  for (Read_relocs_data::Relocs_list::iterator p = rd->relocs.begin();\n       p != rd->relocs.end();\n       ++p)\n    {\n      if (!parameters->options().relocatable())\n\t  {\n\t    // As noted above, when not generating an object file, we\n\t    // only scan allocated sections.  We may see a non-allocated\n\t    // section here if we are emitting relocs.\n\t    if (p->is_data_section_allocated)\n              target->gc_process_relocs(symtab, layout, this, \n                                        p->data_shndx, p->sh_type, \n                                        p->contents->data(), p->reloc_count, \n                                        p->output_section,\n                                        p->needs_special_offset_handling,\n                                        this->local_symbol_count_, \n                                        local_symbols);\n        }\n    }\n}",
+      "fn_code_pos": [
+        [
+          383,
+          0
+        ],
+        [
+          417,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::do_scan_relocs(Symbol_table* symtab,\n\t\t\t\t\t\t    Layout* layout,\n\t\t\t\t\t\t    Read_relocs_data* rd)\n{\n  Sized_target<size, big_endian>* target =\n    parameters->sized_target<size, big_endian>();\n\n  const unsigned char* local_symbols;\n  if (rd->local_symbols == NULL)\n    local_symbols = NULL;\n  else\n    local_symbols = rd->local_symbols->data();\n\n  // For incremental links, allocate the counters for incremental relocations.\n  if (layout->incremental_inputs() != NULL)\n    this->allocate_incremental_reloc_counts();\n\n  for (Read_relocs_data::Relocs_list::iterator p = rd->relocs.begin();\n       p != rd->relocs.end();\n       ++p)\n    {\n      // When garbage collection is on, unreferenced sections are not included\n      // in the link that would have been included normally. This is known only\n      // after Read_relocs hence this check has to be done again.\n      if (parameters->options().gc_sections()\n\t  || parameters->options().icf_enabled())\n        {\n          if (p->output_section == NULL)\n            continue;\n        }\n      if (!parameters->options().relocatable())\n\t{\n\t  // As noted above, when not generating an object file, we\n\t  // only scan allocated sections.  We may see a non-allocated\n\t  // section here if we are emitting relocs.\n\t  if (p->is_data_section_allocated)\n\t    target->scan_relocs(symtab, layout, this, p->data_shndx,\n\t\t\t\tp->sh_type, p->contents->data(),\n\t\t\t\tp->reloc_count, p->output_section,\n\t\t\t\tp->needs_special_offset_handling,\n\t\t\t\tthis->local_symbol_count_,\n\t\t\t\tlocal_symbols);\n\t  if (parameters->options().emit_relocs())\n\t    this->emit_relocs_scan(symtab, layout, local_symbols, p);\n\t  if (layout->incremental_inputs() != NULL)\n\t    this->incremental_relocs_scan(p);\n\t}\n      else\n\t{\n\t  Relocatable_relocs* rr = this->relocatable_relocs(p->reloc_shndx);\n\t  gold_assert(rr != NULL);\n\t  rr->set_reloc_count(p->reloc_count);\n\t  target->scan_relocatable_relocs(symtab, layout, this,\n\t\t\t\t\t  p->data_shndx, p->sh_type,\n\t\t\t\t\t  p->contents->data(),\n\t\t\t\t\t  p->reloc_count,\n\t\t\t\t\t  p->output_section,\n\t\t\t\t\t  p->needs_special_offset_handling,\n\t\t\t\t\t  this->local_symbol_count_,\n\t\t\t\t\t  local_symbols,\n\t\t\t\t\t  rr);\n\t}\n\n      delete p->contents;\n      p->contents = NULL;\n    }\n\n  // For incremental links, finalize the allocation of relocations.\n  if (layout->incremental_inputs() != NULL)\n    this->finalize_incremental_relocs(layout, true);\n\n  if (rd->local_symbols != NULL)\n    {\n      delete rd->local_symbols;\n      rd->local_symbols = NULL;\n    }\n}",
+      "fn_code_pos": [
+        [
+          423,
+          0
+        ],
+        [
+          501,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::emit_relocs_scan(\n    Symbol_table* symtab,\n    Layout* layout,\n    const unsigned char* plocal_syms,\n    const Read_relocs_data::Relocs_list::iterator& p)\n{\n  Sized_target<size, big_endian>* target =\n      parameters->sized_target<size, big_endian>();\n\n  Relocatable_relocs* rr = this->relocatable_relocs(p->reloc_shndx);\n  gold_assert(rr != NULL);\n  rr->set_reloc_count(p->reloc_count);\n  target->emit_relocs_scan(\n    symtab,\n    layout,\n    this,\n    p->data_shndx,\n    p->sh_type,\n    p->contents->data(),\n    p->reloc_count,\n    p->output_section,\n    p->needs_special_offset_handling,\n    this->local_symbol_count_,\n    plocal_syms,\n    rr);\n}",
+      "fn_code_pos": [
+        [
+          505,
+          0
+        ],
+        [
+          532,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::incremental_relocs_scan(\n    const Read_relocs_data::Relocs_list::iterator& p)\n{\n  if (p->sh_type == elfcpp::SHT_REL)\n    this->incremental_relocs_scan_reltype<elfcpp::SHT_REL>(p);\n  else\n    {\n      gold_assert(p->sh_type == elfcpp::SHT_RELA);\n      this->incremental_relocs_scan_reltype<elfcpp::SHT_RELA>(p);\n    }\n}",
+      "fn_code_pos": [
+        [
+          536,
+          0
+        ],
+        [
+          548,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int sh_type>\nvoid\nSized_relobj_file<size, big_endian>::incremental_relocs_scan_reltype(\n    const Read_relocs_data::Relocs_list::iterator& p)\n{\n  typedef typename Reloc_types<sh_type, size, big_endian>::Reloc Reltype;\n  const int reloc_size = Reloc_types<sh_type, size, big_endian>::reloc_size;\n  const unsigned char* prelocs = p->contents->data();\n  size_t reloc_count = p->reloc_count;\n\n  for (size_t i = 0; i < reloc_count; ++i, prelocs += reloc_size)\n    {\n      Reltype reloc(prelocs);\n\n      if (p->needs_special_offset_handling\n\t  && !p->output_section->is_input_address_mapped(this, p->data_shndx,\n\t\t\t\t\t\t         reloc.get_r_offset()))\n\tcontinue;\n\n      // FIXME: Some targets have a non-standard r_info field.\n      typename elfcpp::Elf_types<size>::Elf_WXword r_info = reloc.get_r_info();\n      const unsigned int r_sym = elfcpp::elf_r_sym<size>(r_info);\n\n      if (r_sym >= this->local_symbol_count_)\n\tthis->count_incremental_reloc(r_sym - this->local_symbol_count_);\n    }\n}",
+      "fn_code_pos": [
+        [
+          554,
+          0
+        ],
+        [
+          580,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::do_relocate(const Symbol_table* symtab,\n\t\t\t\t\t\t const Layout* layout,\n\t\t\t\t\t\t Output_file* of)\n{\n  unsigned int shnum = this->shnum();\n\n  // Read the section headers.\n  const unsigned char* pshdrs = this->get_view(this->elf_file_.shoff(),\n\t\t\t\t\t       shnum * This::shdr_size,\n\t\t\t\t\t       true, true);\n\n  Views views;\n  views.resize(shnum);\n\n  // Make two passes over the sections.  The first one copies the\n  // section data to the output file.  The second one applies\n  // relocations.\n\n  this->write_sections(layout, pshdrs, of, &views);\n\n  // To speed up relocations, we set up hash tables for fast lookup of\n  // input offsets to output addresses.\n  this->initialize_input_to_output_maps();\n\n  // Make the views available through get_output_view() for the duration\n  // of this routine.  This RAII class will reset output_views_ to NULL\n  // when the views go out of scope.\n  struct Set_output_views\n  {\n    Set_output_views(const Views** ppviews, const Views* pviews)\n    {\n      ppviews_ = ppviews;\n      *ppviews = pviews;\n    }\n\n    ~Set_output_views()\n    { *ppviews_ = NULL; }\n\n    const Views** ppviews_;\n  };\n  Set_output_views set_output_views(&this->output_views_, &views);\n\n  // Apply relocations.\n\n  this->relocate_sections(symtab, layout, pshdrs, of, &views);\n\n  // After we've done the relocations, we release the hash tables,\n  // since we no longer need them.\n  this->free_input_to_output_maps();\n\n  // Write out the accumulated views.\n  for (unsigned int i = 1; i < shnum; ++i)\n    {\n      if (views[i].view != NULL)\n\t{\n\t  if (views[i].is_ctors_reverse_view)\n\t    this->reverse_words(views[i].view, views[i].view_size);\n\t  if (!views[i].is_postprocessing_view)\n\t    {\n\t      if (views[i].is_input_output_view)\n\t\tof->write_input_output_view(views[i].offset,\n\t\t\t\t\t    views[i].view_size,\n\t\t\t\t\t    views[i].view);\n\t      else\n\t\tof->write_output_view(views[i].offset, views[i].view_size,\n\t\t\t\t      views[i].view);\n\t    }\n\t}\n    }\n\n  // Write out the local symbols.\n  this->write_local_symbols(of, layout->sympool(), layout->dynpool(),\n\t\t\t    layout->symtab_xindex(), layout->dynsym_xindex(),\n\t\t\t    layout->symtab_section_offset());\n}",
+      "fn_code_pos": [
+        [
+          584,
+          0
+        ],
+        [
+          660,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::write_sections(const Layout* layout,\n\t\t\t\t\t\t    const unsigned char* pshdrs,\n\t\t\t\t\t\t    Output_file* of,\n\t\t\t\t\t\t    Views* pviews)\n{\n  unsigned int shnum = this->shnum();\n  const Output_sections& out_sections(this->output_sections());\n  const std::vector<Address>& out_offsets(this->section_offsets());\n\n  File_read::Read_multiple rm;\n  bool is_sorted = true;\n\n  const unsigned char* p = pshdrs + This::shdr_size;\n  for (unsigned int i = 1; i < shnum; ++i, p += This::shdr_size)\n    {\n      View_size* pvs = &(*pviews)[i];\n\n      pvs->view = NULL;\n\n      const Output_section* os = out_sections[i];\n      if (os == NULL)\n\tcontinue;\n      Address output_offset = out_offsets[i];\n\n      typename This::Shdr shdr(p);\n\n      if (shdr.get_sh_type() == elfcpp::SHT_NOBITS)\n\tcontinue;\n\n      if ((parameters->options().relocatable()\n\t   || parameters->options().emit_relocs())\n\t  && (shdr.get_sh_type() == elfcpp::SHT_REL\n\t      || shdr.get_sh_type() == elfcpp::SHT_RELA)\n\t  && (shdr.get_sh_flags() & elfcpp::SHF_ALLOC) == 0)\n\t{\n\t  // This is a reloc section in a relocatable link or when\n\t  // emitting relocs.  We don't need to read the input file.\n\t  // The size and file offset are stored in the\n\t  // Relocatable_relocs structure.\n\t  Relocatable_relocs* rr = this->relocatable_relocs(i);\n\t  gold_assert(rr != NULL);\n\t  Output_data* posd = rr->output_data();\n\t  gold_assert(posd != NULL);\n\n\t  pvs->offset = posd->offset();\n\t  pvs->view_size = posd->data_size();\n\t  pvs->view = of->get_output_view(pvs->offset, pvs->view_size);\n\t  pvs->address = posd->address();\n\t  pvs->is_input_output_view = false;\n\t  pvs->is_postprocessing_view = false;\n\t  pvs->is_ctors_reverse_view = false;\n\n\t  continue;\n\t}\n\n      // In the normal case, this input section is simply mapped to\n      // the output section at offset OUTPUT_OFFSET.\n\n      // However, if OUTPUT_OFFSET == INVALID_ADDRESS, then input data is\n      // handled specially--e.g., a .eh_frame section.  The relocation\n      // routines need to check for each reloc where it should be\n      // applied.  For this case, we need an input/output view for the\n      // entire contents of the section in the output file.  We don't\n      // want to copy the contents of the input section to the output\n      // section; the output section contents were already written,\n      // and we waited for them in Relocate_task::is_runnable because\n      // relocs_must_follow_section_writes is set for the object.\n\n      // Regardless of which of the above cases is true, we have to\n      // check requires_postprocessing of the output section.  If that\n      // is false, then we work with views of the output file\n      // directly.  If it is true, then we work with a separate\n      // buffer, and the output section is responsible for writing the\n      // final data to the output file.\n\n      off_t output_section_offset;\n      Address output_section_size;\n      if (!os->requires_postprocessing())\n\t{\n\t  output_section_offset = os->offset();\n\t  output_section_size = convert_types<Address, off_t>(os->data_size());\n\t}\n      else\n\t{\n\t  output_section_offset = 0;\n\t  output_section_size =\n              convert_types<Address, off_t>(os->postprocessing_buffer_size());\n\t}\n\n      off_t view_start;\n      section_size_type view_size;\n      bool must_decompress = false;\n      if (output_offset != invalid_address)\n\t{\n\t  view_start = output_section_offset + output_offset;\n\t  view_size = convert_to_section_size_type(shdr.get_sh_size());\n\t  section_size_type uncompressed_size;\n\t  if (this->section_is_compressed(i, &uncompressed_size))\n\t    {\n\t      view_size = uncompressed_size;\n\t      must_decompress = true;\n\t    }\n\t}\n      else\n\t{\n\t  view_start = output_section_offset;\n\t  view_size = convert_to_section_size_type(output_section_size);\n\t}\n\n      if (view_size == 0)\n\tcontinue;\n\n      gold_assert(output_offset == invalid_address\n\t\t  || output_offset + view_size <= output_section_size);\n\n      unsigned char* view;\n      if (os->requires_postprocessing())\n\t{\n\t  unsigned char* buffer = os->postprocessing_buffer();\n\t  view = buffer + view_start;\n\t  if (output_offset != invalid_address && !must_decompress)\n\t    {\n\t      off_t sh_offset = shdr.get_sh_offset();\n\t      if (!rm.empty() && rm.back().file_offset > sh_offset)\n\t\tis_sorted = false;\n\t      rm.push_back(File_read::Read_multiple_entry(sh_offset,\n\t\t\t\t\t\t\t  view_size, view));\n\t    }\n\t}\n      else\n\t{\n\t  if (output_offset == invalid_address)\n\t    view = of->get_input_output_view(view_start, view_size);\n\t  else\n\t    {\n\t      view = of->get_output_view(view_start, view_size);\n\t      if (!must_decompress)\n\t\t{\n\t\t  off_t sh_offset = shdr.get_sh_offset();\n\t\t  if (!rm.empty() && rm.back().file_offset > sh_offset)\n\t\t    is_sorted = false;\n\t\t  rm.push_back(File_read::Read_multiple_entry(sh_offset,\n\t\t\t\t\t\t\t      view_size, view));\n\t\t}\n\t    }\n\t}\n\n      if (must_decompress)\n        {\n\t  // Read and decompress the section.\n          section_size_type len;\n\t  const unsigned char* p = this->section_contents(i, &len, false);\n\t  if (!decompress_input_section(p, len, view, view_size,\n\t\t\t\t\tsize, big_endian,\n\t\t\t\t\tshdr.get_sh_flags()))\n\t    this->error(_(\"could not decompress section %s\"),\n\t\t\tthis->section_name(i).c_str());\n        }\n\n      pvs->view = view;\n      pvs->address = os->address();\n      if (output_offset != invalid_address)\n\tpvs->address += output_offset;\n      pvs->offset = view_start;\n      pvs->view_size = view_size;\n      pvs->is_input_output_view = output_offset == invalid_address;\n      pvs->is_postprocessing_view = os->requires_postprocessing();\n      pvs->is_ctors_reverse_view =\n\t(!parameters->options().relocatable()\n\t && view_size > size / 8\n\t && (strcmp(os->name(), \".init_array\") == 0\n\t     || strcmp(os->name(), \".fini_array\") == 0)\n\t && layout->is_ctors_in_init_array(this, i));\n    }\n\n  // Actually read the data.\n  if (!rm.empty())\n    {\n      if (!is_sorted)\n\tstd::sort(rm.begin(), rm.end(), Read_multiple_compare());\n      this->read_multiple(rm);\n    }\n}",
+      "fn_code_pos": [
+        [
+          675,
+          0
+        ],
+        [
+          859,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::do_relocate_sections(\n    const Symbol_table* symtab,\n    const Layout* layout,\n    const unsigned char* pshdrs,\n    Output_file* of,\n    Views* pviews)\n{\n  this->relocate_section_range(symtab, layout, pshdrs, of, pviews,\n\t\t\t       1, this->shnum() - 1);\n}",
+      "fn_code_pos": [
+        [
+          864,
+          0
+        ],
+        [
+          875,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::relocate_section_range(\n    const Symbol_table* symtab,\n    const Layout* layout,\n    const unsigned char* pshdrs,\n    Output_file* of,\n    Views* pviews,\n    unsigned int start_shndx,\n    unsigned int end_shndx)\n{\n  gold_assert(start_shndx >= 1);\n  gold_assert(end_shndx < this->shnum());\n\n  if (end_shndx < start_shndx)\n    return;\n\n  Sized_target<size, big_endian>* target =\n    parameters->sized_target<size, big_endian>();\n\n  const Output_sections& out_sections(this->output_sections());\n  const std::vector<Address>& out_offsets(this->section_offsets());\n\n  Relocate_info<size, big_endian> relinfo;\n  relinfo.symtab = symtab;\n  relinfo.layout = layout;\n  relinfo.object = this;\n\n  const unsigned char* p = pshdrs + start_shndx * This::shdr_size;\n  for (unsigned int i = start_shndx; i <= end_shndx; ++i, p += This::shdr_size)\n    {\n      typename This::Shdr shdr(p);\n\n      unsigned int sh_type = shdr.get_sh_type();\n      if (sh_type != elfcpp::SHT_REL && sh_type != elfcpp::SHT_RELA)\n\tcontinue;\n\n      off_t sh_size = shdr.get_sh_size();\n      if (sh_size == 0)\n\tcontinue;\n\n      unsigned int index = this->adjust_shndx(shdr.get_sh_info());\n      if (index >= this->shnum())\n\t{\n\t  this->error(_(\"relocation section %u has bad info %u\"),\n\t\t      i, index);\n\t  continue;\n\t}\n\n      Output_section* os = out_sections[index];\n      if (os == NULL)\n\t{\n\t  // This relocation section is against a section which we\n\t  // discarded.\n\t  continue;\n\t}\n      Address output_offset = out_offsets[index];\n\n      gold_assert((*pviews)[index].view != NULL);\n      if (parameters->options().relocatable())\n\tgold_assert((*pviews)[i].view != NULL);\n\n      if (this->adjust_shndx(shdr.get_sh_link()) != this->symtab_shndx_)\n\t{\n\t  gold_error(_(\"relocation section %u uses unexpected \"\n\t\t       \"symbol table %u\"),\n\t\t     i, this->adjust_shndx(shdr.get_sh_link()));\n\t  continue;\n\t}\n\n      const unsigned char* prelocs = this->get_view(shdr.get_sh_offset(),\n\t\t\t\t\t\t    sh_size, true, false);\n\n      unsigned int reloc_size;\n      if (sh_type == elfcpp::SHT_REL)\n\treloc_size = elfcpp::Elf_sizes<size>::rel_size;\n      else\n\treloc_size = elfcpp::Elf_sizes<size>::rela_size;\n\n      if (reloc_size != shdr.get_sh_entsize())\n\t{\n\t  gold_error(_(\"unexpected entsize for reloc section %u: %lu != %u\"),\n\t\t     i, static_cast<unsigned long>(shdr.get_sh_entsize()),\n\t\t     reloc_size);\n\t  continue;\n\t}\n\n      size_t reloc_count = sh_size / reloc_size;\n      if (static_cast<off_t>(reloc_count * reloc_size) != sh_size)\n\t{\n\t  gold_error(_(\"reloc section %u size %lu uneven\"),\n\t\t     i, static_cast<unsigned long>(sh_size));\n\t  continue;\n\t}\n\n      gold_assert(output_offset != invalid_address\n\t\t  || this->relocs_must_follow_section_writes());\n\n      relinfo.reloc_shndx = i;\n      relinfo.reloc_shdr = p;\n      relinfo.data_shndx = index;\n      relinfo.data_shdr = pshdrs + index * This::shdr_size;\n      unsigned char* view = (*pviews)[index].view;\n      Address address = (*pviews)[index].address;\n      section_size_type view_size = (*pviews)[index].view_size;\n\n      Reloc_symbol_changes* reloc_map = NULL;\n      if (this->uses_split_stack() && output_offset != invalid_address)\n\t{\n\t  typename This::Shdr data_shdr(pshdrs + index * This::shdr_size);\n\t  if ((data_shdr.get_sh_flags() & elfcpp::SHF_EXECINSTR) != 0)\n\t    this->split_stack_adjust(symtab, pshdrs, sh_type, index,\n\t\t\t\t     prelocs, reloc_count, view, view_size,\n\t\t\t\t     &reloc_map, target);\n\t}\n\n      Relocatable_relocs* rr = NULL;\n      if (parameters->options().emit_relocs()\n\t  || parameters->options().relocatable())\n\trr = this->relocatable_relocs(i);\n      relinfo.rr = rr;\n\n      if (!parameters->options().relocatable())\n\t{\n\t  target->relocate_section(&relinfo, sh_type, prelocs, reloc_count, os,\n\t\t\t\t   output_offset == invalid_address,\n\t\t\t\t   view, address, view_size, reloc_map);\n\t  if (parameters->options().emit_relocs())\n\t    target->relocate_relocs(&relinfo, sh_type, prelocs, reloc_count,\n\t\t\t\t    os, output_offset,\n\t\t\t\t    view, address, view_size,\n\t\t\t\t    (*pviews)[i].view,\n\t\t\t\t    (*pviews)[i].view_size);\n\t  if (parameters->incremental())\n\t    this->incremental_relocs_write(&relinfo, sh_type, prelocs,\n\t\t\t\t\t   reloc_count, os, output_offset, of);\n\t}\n      else\n\ttarget->relocate_relocs(&relinfo, sh_type, prelocs, reloc_count,\n\t\t\t\tos, output_offset,\n\t\t\t\tview, address, view_size,\n\t\t\t\t(*pviews)[i].view,\n\t\t\t\t(*pviews)[i].view_size);\n    }\n}",
+      "fn_code_pos": [
+        [
+          880,
+          0
+        ],
+        [
+          1024,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned char*\nSized_relobj_file<size, big_endian>::do_get_output_view(\n    unsigned int shndx,\n    section_size_type* plen) const\n{\n  gold_assert(this->output_views_ != NULL);\n  gold_assert(shndx < this->output_views_->size());\n  const View_size& v = (*this->output_views_)[shndx];\n  *plen = v.view_size;\n  return v.view;\n}",
+      "fn_code_pos": [
+        [
+          1028,
+          0
+        ],
+        [
+          1039,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::incremental_relocs_write(\n    const Relocate_info<size, big_endian>* relinfo,\n    unsigned int sh_type,\n    const unsigned char* prelocs,\n    size_t reloc_count,\n    Output_section* output_section,\n    Address output_offset,\n    Output_file* of)\n{\n  if (sh_type == elfcpp::SHT_REL)\n    this->incremental_relocs_write_reltype<elfcpp::SHT_REL>(\n\trelinfo,\n\tprelocs,\n\treloc_count,\n\toutput_section,\n\toutput_offset,\n\tof);\n  else\n    {\n      gold_assert(sh_type == elfcpp::SHT_RELA);\n      this->incremental_relocs_write_reltype<elfcpp::SHT_RELA>(\n\t  relinfo,\n\t  prelocs,\n\t  reloc_count,\n\t  output_section,\n\t  output_offset,\n\t  of);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1043,
+          0
+        ],
+        [
+          1073,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int sh_type>\nvoid\nSized_relobj_file<size, big_endian>::incremental_relocs_write_reltype(\n    const Relocate_info<size, big_endian>* relinfo,\n    const unsigned char* prelocs,\n    size_t reloc_count,\n    Output_section* output_section,\n    Address output_offset,\n    Output_file* of)\n{\n  typedef typename Reloc_types<sh_type, size, big_endian>::Reloc Reloc;\n  const unsigned int reloc_size =\n      Reloc_types<sh_type, size, big_endian>::reloc_size;\n  const unsigned int sizeof_addr = size / 8;\n  const unsigned int incr_reloc_size =\n      Incremental_relocs_reader<size, big_endian>::reloc_size;\n\n  unsigned int out_shndx = output_section->out_shndx();\n\n  // Get a view for the .gnu_incremental_relocs section.\n\n  Incremental_inputs* inputs = relinfo->layout->incremental_inputs();\n  gold_assert(inputs != NULL);\n  const off_t relocs_off = inputs->relocs_section()->offset();\n  const off_t relocs_size = inputs->relocs_section()->data_size();\n  unsigned char* const view = of->get_output_view(relocs_off, relocs_size);\n\n  for (size_t i = 0; i < reloc_count; ++i, prelocs += reloc_size)\n    {\n      Reloc reloc(prelocs);\n\n      // FIXME: Some targets have a non-standard r_info field.\n      typename elfcpp::Elf_types<size>::Elf_WXword r_info = reloc.get_r_info();\n      const unsigned int r_sym = elfcpp::elf_r_sym<size>(r_info);\n      const unsigned int r_type = elfcpp::elf_r_type<size>(r_info);\n\n      if (r_sym < this->local_symbol_count_)\n        continue;\n\n      // Get the new offset--the location in the output section where\n      // this relocation should be applied.\n\n      Address offset = reloc.get_r_offset();\n      if (output_offset != invalid_address)\n\toffset += output_offset;\n      else\n\t{\n          section_offset_type sot_offset =\n              convert_types<section_offset_type, Address>(offset);\n\t  section_offset_type new_sot_offset =\n\t      output_section->output_offset(relinfo->object,\n\t\t\t\t\t    relinfo->data_shndx,\n\t\t\t\t\t    sot_offset);\n\t  gold_assert(new_sot_offset != -1);\n\t  offset += new_sot_offset;\n\t}\n\n      // Get the addend.\n      typename elfcpp::Elf_types<size>::Elf_Swxword addend;\n      if (sh_type == elfcpp::SHT_RELA)\n\taddend =\n\t    Reloc_types<sh_type, size, big_endian>::get_reloc_addend(&reloc);\n      else\n        {\n          // FIXME: Get the addend for SHT_REL.\n          addend = 0;\n        }\n\n      // Get the index of the output relocation.\n\n      unsigned int reloc_index =\n          this->next_incremental_reloc_index(r_sym - this->local_symbol_count_);\n\n      // Write the relocation.\n\n      unsigned char* pov = view + reloc_index * incr_reloc_size;\n      elfcpp::Swap<32, big_endian>::writeval(pov, r_type);\n      elfcpp::Swap<32, big_endian>::writeval(pov + 4, out_shndx);\n      elfcpp::Swap<size, big_endian>::writeval(pov + 8, offset);\n      elfcpp::Swap<size, big_endian>::writeval(pov + 8 + sizeof_addr, addend);\n      of->write_output_view(pov - view, incr_reloc_size, view);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1079,
+          0
+        ],
+        [
+          1161,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::initialize_input_to_output_maps()\n{\n  const unsigned int loccount = this->local_symbol_count_;\n  for (unsigned int i = 1; i < loccount; ++i)\n    {\n      Symbol_value<size>& lv(this->local_values_[i]);\n      lv.initialize_input_to_output_map(this);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1166,
+          0
+        ],
+        [
+          1176,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::free_input_to_output_maps()\n{\n  const unsigned int loccount = this->local_symbol_count_;\n  for (unsigned int i = 1; i < loccount; ++i)\n    {\n      Symbol_value<size>& lv(this->local_values_[i]);\n      lv.free_input_to_output_map();\n    }\n}",
+      "fn_code_pos": [
+        [
+          1180,
+          0
+        ],
+        [
+          1190,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::split_stack_adjust(\n    const Symbol_table* symtab,\n    const unsigned char* pshdrs,\n    unsigned int sh_type,\n    unsigned int shndx,\n    const unsigned char* prelocs,\n    size_t reloc_count,\n    unsigned char* view,\n    section_size_type view_size,\n    Reloc_symbol_changes** reloc_map,\n    const Sized_target<size, big_endian>* target)\n{\n  if (sh_type == elfcpp::SHT_REL)\n    this->split_stack_adjust_reltype<elfcpp::SHT_REL>(symtab, pshdrs, shndx,\n\t\t\t\t\t\t      prelocs, reloc_count,\n\t\t\t\t\t\t      view, view_size,\n\t\t\t\t\t\t      reloc_map, target);\n  else\n    {\n      gold_assert(sh_type == elfcpp::SHT_RELA);\n      this->split_stack_adjust_reltype<elfcpp::SHT_RELA>(symtab, pshdrs, shndx,\n\t\t\t\t\t\t\t prelocs, reloc_count,\n\t\t\t\t\t\t\t view, view_size,\n\t\t\t\t\t\t\t reloc_map, target);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1198,
+          0
+        ],
+        [
+          1225,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int sh_type>\nvoid\nSized_relobj_file<size, big_endian>::split_stack_adjust_reltype(\n    const Symbol_table* symtab,\n    const unsigned char* pshdrs,\n    unsigned int shndx,\n    const unsigned char* prelocs,\n    size_t reloc_count,\n    unsigned char* view,\n    section_size_type view_size,\n    Reloc_symbol_changes** reloc_map,\n    const Sized_target<size, big_endian>* target)\n{\n  typedef typename Reloc_types<sh_type, size, big_endian>::Reloc Reltype;\n  const int reloc_size = Reloc_types<sh_type, size, big_endian>::reloc_size;\n\n  size_t local_count = this->local_symbol_count();\n\n  std::vector<section_offset_type> non_split_refs;\n\n  const unsigned char* pr = prelocs;\n  for (size_t i = 0; i < reloc_count; ++i, pr += reloc_size)\n    {\n      // Some supported targets have a non-standard r_info field.\n      // If this call is too slow, we can move this routine to\n      // target-reloc.h and templatize it on Classify_reloc.\n      unsigned int r_sym = target->get_r_sym(pr);\n      if (r_sym < local_count)\n\tcontinue;\n\n      const Symbol* gsym = this->global_symbol(r_sym);\n      gold_assert(gsym != NULL);\n      if (gsym->is_forwarder())\n\tgsym = symtab->resolve_forwards(gsym);\n\n      // See if this relocation refers to a function defined in an\n      // object compiled without -fsplit-stack.  Note that we don't\n      // care about the type of relocation--this means that in some\n      // cases we will ask for a large stack unnecessarily, but this\n      // is not fatal.  FIXME: Some targets have symbols which are\n      // functions but are not type STT_FUNC, e.g., STT_ARM_TFUNC.\n      if (!gsym->is_undefined()\n\t  && gsym->source() == Symbol::FROM_OBJECT\n\t  && !gsym->object()->uses_split_stack())\n\t{\n\t  if (parameters->target().is_call_to_non_split(gsym, pr, view,\n\t\t\t\t\t\t\tview_size))\n\t    {\n\t      Reltype reloc(pr);\n\t      section_offset_type offset =\n\t\tconvert_to_section_size_type(reloc.get_r_offset());\n\t      non_split_refs.push_back(offset);\n\t    }\n\t}\n    }\n\n  if (non_split_refs.empty())\n    return;\n\n  // At this point, every entry in NON_SPLIT_REFS indicates a\n  // relocation which refers to a function in an object compiled\n  // without -fsplit-stack.  We now have to convert that list into a\n  // set of offsets to functions.  First, we find all the functions.\n\n  Function_offsets function_offsets;\n  this->find_functions(pshdrs, shndx, &function_offsets);\n  if (function_offsets.empty())\n    return;\n\n  // Now get a list of the function with references to non split-stack\n  // code.\n\n  Function_offsets calls_non_split;\n  for (std::vector<section_offset_type>::const_iterator p\n\t = non_split_refs.begin();\n       p != non_split_refs.end();\n       ++p)\n    {\n      Function_offsets::const_iterator low = function_offsets.lower_bound(*p);\n      if (low == function_offsets.end())\n\t--low;\n      else if (low->first == *p)\n\t;\n      else if (low == function_offsets.begin())\n\tcontinue;\n      else\n\t--low;\n\n      calls_non_split.insert(*low);\n    }\n  if (calls_non_split.empty())\n    return;\n\n  // Now we have a set of functions to adjust.  The adjustments are\n  // target specific.  Besides changing the output section view\n  // however, it likes, the target may request a relocation change\n  // from one global symbol name to another.\n\n  for (Function_offsets::const_iterator p = calls_non_split.begin();\n       p != calls_non_split.end();\n       ++p)\n    {\n      std::string from;\n      std::string to;\n      parameters->target().calls_non_split(this, shndx, p->first, p->second,\n\t\t\t\t\t   prelocs, reloc_count,\n\t\t\t\t\t   view, view_size, &from, &to);\n      if (!from.empty())\n\t{\n\t  gold_assert(!to.empty());\n\t  Symbol* tosym = NULL;\n\n\t  // Find relocations in the relevant function which are for\n\t  // FROM.\n\t  pr = prelocs;\n\t  for (size_t i = 0; i < reloc_count; ++i, pr += reloc_size)\n\t    {\n\t      Reltype reloc(pr);\n\n\t      unsigned int r_sym = target->get_r_sym(pr);\n\t      if (r_sym < local_count)\n\t\tcontinue;\n\n\t      section_offset_type offset =\n\t\tconvert_to_section_size_type(reloc.get_r_offset());\n\t      if (offset < p->first\n\t\t  || (offset\n\t\t      >= (p->first\n\t\t\t  + static_cast<section_offset_type>(p->second))))\n\t\tcontinue;\n\n\t      const Symbol* gsym = this->global_symbol(r_sym);\n\t      if (from == gsym->name())\n\t\t{\n\t\t  if (tosym == NULL)\n\t\t    {\n\t\t      tosym = symtab->lookup(to.c_str());\n\t\t      if (tosym == NULL)\n\t\t\t{\n\t\t\t  this->error(_(\"could not convert call \"\n\t\t\t\t\t\"to '%s' to '%s'\"),\n\t\t\t\t      from.c_str(), to.c_str());\n\t\t\t  break;\n\t\t\t}\n\t\t    }\n\n\t\t  if (*reloc_map == NULL)\n\t\t    *reloc_map = new Reloc_symbol_changes(reloc_count);\n\t\t  (*reloc_map)->set(i, tosym);\n\t\t}\n\t    }\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          1231,
+          0
+        ],
+        [
+          1384,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::find_functions(\n    const unsigned char* pshdrs,\n    unsigned int shndx,\n    Sized_relobj_file<size, big_endian>::Function_offsets* function_offsets)\n{\n  // We need to read the symbols to find the functions.  If we wanted\n  // to, we could cache reading the symbols across all sections in the\n  // object.\n  const unsigned int symtab_shndx = this->symtab_shndx_;\n  typename This::Shdr symtabshdr(pshdrs + symtab_shndx * This::shdr_size);\n  gold_assert(symtabshdr.get_sh_type() == elfcpp::SHT_SYMTAB);\n\n  typename elfcpp::Elf_types<size>::Elf_WXword sh_size =\n    symtabshdr.get_sh_size();\n  const unsigned char* psyms = this->get_view(symtabshdr.get_sh_offset(),\n\t\t\t\t\t      sh_size, true, true);\n\n  const int sym_size = This::sym_size;\n  const unsigned int symcount = sh_size / sym_size;\n  for (unsigned int i = 0; i < symcount; ++i, psyms += sym_size)\n    {\n      typename elfcpp::Sym<size, big_endian> isym(psyms);\n\n      // FIXME: Some targets can have functions which do not have type\n      // STT_FUNC, e.g., STT_ARM_TFUNC.\n      if (isym.get_st_type() != elfcpp::STT_FUNC\n\t  || isym.get_st_size() == 0)\n\tcontinue;\n\n      bool is_ordinary;\n      Symbol_location loc;\n      loc.shndx = this->adjust_sym_shndx(i, isym.get_st_shndx(),\n\t\t\t\t\t &is_ordinary);\n      if (!is_ordinary)\n\tcontinue;\n\n      loc.object = this;\n      loc.offset = isym.get_st_value();\n      parameters->target().function_location(&loc);\n\n      if (loc.shndx != shndx)\n\tcontinue;\n\n      section_offset_type value =\n\tconvert_to_section_size_type(loc.offset);\n      section_size_type fnsize =\n\tconvert_to_section_size_type(isym.get_st_size());\n\n      (*function_offsets)[value] = fnsize;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1389,
+          0
+        ],
+        [
+          1441,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nSized_relobj_file<size, big_endian>::reverse_words(unsigned char* view,\n\t\t\t\t\t\t   section_size_type view_size)\n{\n  typedef typename elfcpp::Swap<size, big_endian>::Valtype Valtype;\n  Valtype* vview = reinterpret_cast<Valtype*>(view);\n  section_size_type vview_size = view_size / (size / 8);\n  for (section_size_type i = 0; i < vview_size / 2; ++i)\n    {\n      Valtype tmp = vview[i];\n      vview[i] = vview[vview_size - 1 - i];\n      vview[vview_size - 1 - i] = tmp;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1447,
+          0
+        ],
+        [
+          1461,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size>\nvoid\nMerged_symbol_value<size>::initialize_input_to_output_map(\n    const Relobj* object,\n    unsigned int input_shndx)\n{\n  object->initialize_input_to_output_map<size>(input_shndx,\n\t\t\t\t\t       this->output_start_address_,\n\t\t\t\t\t       &this->output_addresses_);\n}",
+      "fn_code_pos": [
+        [
+          1465,
+          0
+        ],
+        [
+          1474,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size>\ntypename elfcpp::Elf_types<size>::Elf_Addr\nMerged_symbol_value<size>::value_from_output_section(\n    const Relobj* object,\n    unsigned int input_shndx,\n    typename elfcpp::Elf_types<size>::Elf_Addr input_offset) const\n{\n  section_offset_type output_offset;\n  bool found = object->merge_output_offset(input_shndx, input_offset,\n\t\t\t\t\t   &output_offset);\n\n  // If this assertion fails, it means that some relocation was\n  // against a portion of an input merge section which we didn't map\n  // to the output file and we didn't explicitly discard.  We should\n  // always map all portions of input merge sections.\n  gold_assert(found);\n\n  if (output_offset == -1)\n    return 0;\n  else\n    return this->output_start_address_ + output_offset;\n}",
+      "fn_code_pos": [
+        [
+          1479,
+          0
+        ],
+        [
+          1500,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nbool\nTrack_relocs<size, big_endian>::initialize(\n    Object* object,\n    unsigned int reloc_shndx,\n    unsigned int reloc_type)\n{\n  // If RELOC_SHNDX is -1U, it means there is more than one reloc\n  // section for the .eh_frame section.  We can't handle that case.\n  if (reloc_shndx == -1U)\n    return false;\n\n  // If RELOC_SHNDX is 0, there is no reloc section.\n  if (reloc_shndx == 0)\n    return true;\n\n  // Get the contents of the reloc section.\n  this->prelocs_ = object->section_contents(reloc_shndx, &this->len_, false);\n\n  if (reloc_type == elfcpp::SHT_REL)\n    this->reloc_size_ = elfcpp::Elf_sizes<size>::rel_size;\n  else if (reloc_type == elfcpp::SHT_RELA)\n    this->reloc_size_ = elfcpp::Elf_sizes<size>::rela_size;\n  else\n    gold_unreachable();\n\n  if (this->len_ % this->reloc_size_ != 0)\n    {\n      object->error(_(\"reloc section size %zu is not a multiple of \"\n\t\t      \"reloc size %d\\n\"),\n\t\t    static_cast<size_t>(this->len_),\n\t\t    this->reloc_size_);\n      return false;\n    }\n\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          1508,
+          0
+        ],
+        [
+          1544,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\noff_t\nTrack_relocs<size, big_endian>::next_offset() const\n{\n  if (this->pos_ >= this->len_)\n    return -1;\n\n  // Rel and Rela start out the same, so we can always use Rel to find\n  // the r_offset value.\n  elfcpp::Rel<size, big_endian> rel(this->prelocs_ + this->pos_);\n  return rel.get_r_offset();\n}",
+      "fn_code_pos": [
+        [
+          1548,
+          0
+        ],
+        [
+          1559,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nunsigned int\nTrack_relocs<size, big_endian>::next_symndx() const\n{\n  if (this->pos_ >= this->len_)\n    return -1U;\n  Sized_target<size, big_endian>* target\n      = parameters->sized_target<size, big_endian>();\n  return target->get_r_sym(this->prelocs_ + this->pos_);\n}",
+      "fn_code_pos": [
+        [
+          1564,
+          0
+        ],
+        [
+          1573,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nuint64_t\nTrack_relocs<size, big_endian>::next_addend() const\n{\n  if (this->pos_ >= this->len_)\n    return 0;\n  if (this->reloc_size_ == elfcpp::Elf_sizes<size>::rel_size)\n    return 0;\n  elfcpp::Rela<size, big_endian> rela(this->prelocs_ + this->pos_);\n  return rela.get_r_addend();\n}",
+      "fn_code_pos": [
+        [
+          1577,
+          0
+        ],
+        [
+          1587,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nint\nTrack_relocs<size, big_endian>::advance(off_t offset)\n{\n  int ret = 0;\n  while (this->pos_ < this->len_)\n    {\n      // Rel and Rela start out the same, so we can always use Rel to\n      // find the r_offset value.\n      elfcpp::Rel<size, big_endian> rel(this->prelocs_ + this->pos_);\n      if (static_cast<off_t>(rel.get_r_offset()) >= offset)\n\tbreak;\n      ++ret;\n      this->pos_ += this->reloc_size_;\n    }\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          1592,
+          0
+        ],
+        [
+          1608,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Task_token*\nRead_relocs::is_runnable()\n{\n  return this->object_->is_locked() ? this->object_->token() : NULL;\n}",
+      "fn_code_pos": [
+        [
+          47,
+          0
+        ],
+        [
+          51,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Read_relocs::is_runnable",
+        "parameters": {},
+        "return_type": "Task_token"
+      }
+    },
+    {
+      "fn_code": "void\nRead_relocs::locks(Task_locker* tl)\n{\n  Task_token* token = this->object_->token();\n  if (token != NULL)\n    tl->add(this, token);\n}",
+      "fn_code_pos": [
+        [
+          55,
+          0
+        ],
+        [
+          61,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Read_relocs::locks",
+        "parameters": {
+          "tl": "Task_locker"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nRead_relocs::run(Workqueue* workqueue)\n{\n  Read_relocs_data* rd = new Read_relocs_data;\n  this->object_->read_relocs(rd);\n  this->object_->set_relocs_data(rd);\n  this->object_->release();\n\n  // If garbage collection or identical comdat folding is desired, we  \n  // process the relocs first before scanning them.  Scanning of relocs is\n  // done only after garbage or identical sections is identified.\n  if (parameters->options().gc_sections()\n      || parameters->options().icf_enabled())\n    {\n      workqueue->queue_next(new Gc_process_relocs(this->symtab_,\n                                                  this->layout_, \n                                                  this->object_, rd,\n                                                  this->this_blocker_,\n\t\t\t\t\t\t  this->next_blocker_));\n    }\n  else\n    {\n      workqueue->queue_next(new Scan_relocs(this->symtab_, this->layout_,\n\t\t\t\t\t    this->object_, rd,\n                                            this->this_blocker_,\n\t\t\t\t\t    this->next_blocker_));\n    }\n}",
+      "fn_code_pos": [
+        [
+          65,
+          0
+        ],
+        [
+          92,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Read_relocs::run",
+        "parameters": {
+          "workqueue": "Workqueue"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "std::string\nRead_relocs::get_name() const\n{\n  return \"Read_relocs \" + this->object_->name();\n}",
+      "fn_code_pos": [
+        [
+          96,
+          0
+        ],
+        [
+          100,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Read_relocs::get_name",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Gc_process_relocs::~Gc_process_relocs()\n{\n  if (this->this_blocker_ != NULL)\n    delete this->this_blocker_;\n}",
+      "fn_code_pos": [
+        [
+          104,
+          0
+        ],
+        [
+          108,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Gc_process_relocs::~Gc_process_relocs",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Task_token*\nGc_process_relocs::is_runnable()\n{\n  if (this->this_blocker_ != NULL && this->this_blocker_->is_blocked())\n    return this->this_blocker_;\n  if (this->object_->is_locked())\n    return this->object_->token();\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          115,
+          0
+        ],
+        [
+          123,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Gc_process_relocs::is_runnable",
+        "parameters": {},
+        "return_type": "Task_token"
+      }
+    },
+    {
+      "fn_code": "void\nGc_process_relocs::locks(Task_locker* tl)\n{\n  tl->add(this, this->object_->token());\n  tl->add(this, this->next_blocker_);\n}",
+      "fn_code_pos": [
+        [
+          125,
+          0
+        ],
+        [
+          130,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Gc_process_relocs::locks",
+        "parameters": {
+          "tl": "Task_locker"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nGc_process_relocs::run(Workqueue*)\n{\n  this->object_->gc_process_relocs(this->symtab_, this->layout_, this->rd_);\n  this->object_->release();\n}",
+      "fn_code_pos": [
+        [
+          132,
+          0
+        ],
+        [
+          137,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Gc_process_relocs::run",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "std::string\nGc_process_relocs::get_name() const\n{\n  return \"Gc_process_relocs \" + this->object_->name();\n}",
+      "fn_code_pos": [
+        [
+          141,
+          0
+        ],
+        [
+          145,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Gc_process_relocs::get_name",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Scan_relocs::~Scan_relocs()\n{\n  if (this->this_blocker_ != NULL)\n    delete this->this_blocker_;\n}",
+      "fn_code_pos": [
+        [
+          149,
+          0
+        ],
+        [
+          153,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Scan_relocs::~Scan_relocs",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Task_token*\nScan_relocs::is_runnable()\n{\n  if (this->this_blocker_ != NULL && this->this_blocker_->is_blocked())\n    return this->this_blocker_;\n  if (this->object_->is_locked())\n    return this->object_->token();\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          160,
+          0
+        ],
+        [
+          168,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Scan_relocs::is_runnable",
+        "parameters": {},
+        "return_type": "Task_token"
+      }
+    },
+    {
+      "fn_code": "void\nScan_relocs::locks(Task_locker* tl)\n{\n  Task_token* token = this->object_->token();\n  if (token != NULL)\n    tl->add(this, token);\n  tl->add(this, this->next_blocker_);\n}",
+      "fn_code_pos": [
+        [
+          173,
+          0
+        ],
+        [
+          180,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Scan_relocs::locks",
+        "parameters": {
+          "tl": "Task_locker"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nScan_relocs::run(Workqueue*)\n{\n  this->object_->scan_relocs(this->symtab_, this->layout_, this->rd_);\n  delete this->rd_;\n  this->rd_ = NULL;\n  this->object_->release();\n}",
+      "fn_code_pos": [
+        [
+          184,
+          0
+        ],
+        [
+          191,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Scan_relocs::run",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "std::string\nScan_relocs::get_name() const\n{\n  return \"Scan_relocs \" + this->object_->name();\n}",
+      "fn_code_pos": [
+        [
+          195,
+          0
+        ],
+        [
+          199,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Scan_relocs::get_name",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Task_token*\nRelocate_task::is_runnable()\n{\n  if (this->object_->relocs_must_follow_section_writes()\n      && this->output_sections_blocker_->is_blocked())\n    return this->output_sections_blocker_;\n\n  if (this->object_->is_locked())\n    return this->object_->token();\n\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          205,
+          0
+        ],
+        [
+          216,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Relocate_task::is_runnable",
+        "parameters": {},
+        "return_type": "Task_token"
+      }
+    },
+    {
+      "fn_code": "void\nRelocate_task::locks(Task_locker* tl)\n{\n  if (this->input_sections_blocker_ != NULL)\n    tl->add(this, this->input_sections_blocker_);\n  tl->add(this, this->final_blocker_);\n  Task_token* token = this->object_->token();\n  if (token != NULL)\n    tl->add(this, token);\n}",
+      "fn_code_pos": [
+        [
+          222,
+          0
+        ],
+        [
+          231,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Relocate_task::locks",
+        "parameters": {
+          "tl": "Task_locker"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nRelocate_task::run(Workqueue*)\n{\n  this->object_->relocate(this->symtab_, this->layout_, this->of_);\n\n  // This is normally the last thing we will do with an object, so\n  // uncache all views.\n  this->object_->clear_view_cache_marks();\n\n  this->object_->release();\n}",
+      "fn_code_pos": [
+        [
+          235,
+          0
+        ],
+        [
+          245,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Relocate_task::run",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "std::string\nRelocate_task::get_name() const\n{\n  return \"Relocate_task \" + this->object_->name();\n}",
+      "fn_code_pos": [
+        [
+          249,
+          0
+        ],
+        [
+          253,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Relocate_task::get_name",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Set_output_views(const Views** ppviews, const Views* pviews)\n    {\n      ppviews_ = ppviews;\n      *ppviews = pviews;\n    }",
+      "fn_code_pos": [
+        [
+          615,
+          4
+        ],
+        [
+          619,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Set_output_views",
+        "parameters": {
+          "ppviews": "Views",
+          "pviews": "Views"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "~Set_output_views()\n    { *ppviews_ = NULL; }",
+      "fn_code_pos": [
+        [
+          621,
+          4
+        ],
+        [
+          622,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "inline bool\n  operator()(const File_read::Read_multiple_entry& rme1,\n\t     const File_read::Read_multiple_entry& rme2) const\n  { return rme1.file_offset < rme2.file_offset; }",
+      "fn_code_pos": [
+        [
+          665,
+          2
+        ],
+        [
+          668,
+          49
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "rme1": "File_read::Read_multiple_entry",
+          "rme2": "File_read::Read_multiple_entry"
+        },
+        "return_type": "bool"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "Read_relocs::is_runnable()",
+      "fn_dec_pos": [
+        [
+          48,
+          0
+        ],
+        [
+          48,
+          26
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Read_relocs::is_runnable",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Gc_process_relocs::is_runnable()",
+      "fn_dec_pos": [
+        [
+          116,
+          0
+        ],
+        [
+          116,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Gc_process_relocs::is_runnable",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Scan_relocs::is_runnable()",
+      "fn_dec_pos": [
+        [
+          161,
+          0
+        ],
+        [
+          161,
+          26
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Scan_relocs::is_runnable",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Relocate_task::is_runnable()",
+      "fn_dec_pos": [
+        [
+          206,
+          0
+        ],
+        [
+          206,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Relocate_task::is_runnable",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "out_sections(this->output_sections())",
+      "fn_dec_pos": [
+        [
+          270,
+          25
+        ],
+        [
+          270,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "out_sections",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "out_offsets(this->section_offsets())",
+      "fn_dec_pos": [
+        [
+          271,
+          30
+        ],
+        [
+          271,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "out_offsets",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "shdr(ps)",
+      "fn_dec_pos": [
+        [
+          280,
+          26
+        ],
+        [
+          280,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "shdr",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "reloc(prelocs)",
+      "fn_dec_pos": [
+        [
+          566,
+          14
+        ],
+        [
+          566,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "reloc",
+        "parameters": {},
+        "return_type": "Reltype"
+      }
+    },
+    {
+      "fn_code": "out_sections(this->output_sections())",
+      "fn_dec_pos": [
+        [
+          683,
+          25
+        ],
+        [
+          683,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "out_sections",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "out_offsets(this->section_offsets())",
+      "fn_dec_pos": [
+        [
+          684,
+          30
+        ],
+        [
+          684,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "out_offsets",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "shdr(p)",
+      "fn_dec_pos": [
+        [
+          701,
+          26
+        ],
+        [
+          701,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "shdr",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "out_sections(this->output_sections())",
+      "fn_dec_pos": [
+        [
+          900,
+          25
+        ],
+        [
+          900,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "out_sections",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "out_offsets(this->section_offsets())",
+      "fn_dec_pos": [
+        [
+          901,
+          30
+        ],
+        [
+          901,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "out_offsets",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "shdr(p)",
+      "fn_dec_pos": [
+        [
+          911,
+          26
+        ],
+        [
+          911,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "shdr",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<size, big_endian>::do_get_output_view(\n    unsigned int shndx,\n    section_size_type* plen) const",
+      "fn_dec_pos": [
+        [
+          1030,
+          0
+        ],
+        [
+          1032,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<size, big_endian>::do_get_output_view",
+        "parameters": {
+          "shndx": "unsigned int",
+          "plen": "section_size_type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "reloc(prelocs)",
+      "fn_dec_pos": [
+        [
+          1108,
+          12
+        ],
+        [
+          1108,
+          26
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "reloc",
+        "parameters": {},
+        "return_type": "Reloc"
+      }
+    },
+    {
+      "fn_code": "reloc(pr)",
+      "fn_dec_pos": [
+        [
+          1279,
+          15
+        ],
+        [
+          1279,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "reloc",
+        "parameters": {},
+        "return_type": "Reltype"
+      }
+    },
+    {
+      "fn_code": "reloc(pr)",
+      "fn_dec_pos": [
+        [
+          1348,
+          15
+        ],
+        [
+          1348,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "reloc",
+        "parameters": {},
+        "return_type": "Reltype"
+      }
+    },
+    {
+      "fn_code": "isym(psyms)",
+      "fn_dec_pos": [
+        [
+          1412,
+          45
+        ],
+        [
+          1412,
+          56
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "isym",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, false>::do_read_relocs(Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1615,
+          0
+        ],
+        [
+          1615,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, false>::do_read_relocs",
+        "parameters": {
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, true>::do_read_relocs(Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1621,
+          0
+        ],
+        [
+          1621,
+          65
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, true>::do_read_relocs",
+        "parameters": {
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, false>::do_read_relocs(Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1627,
+          0
+        ],
+        [
+          1627,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, false>::do_read_relocs",
+        "parameters": {
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, true>::do_read_relocs(Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1633,
+          0
+        ],
+        [
+          1633,
+          65
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, true>::do_read_relocs",
+        "parameters": {
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, false>::do_gc_process_relocs(Symbol_table* symtab,\n\t\t\t\t\t\t   Layout* layout,\n\t\t\t\t\t\t   Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1639,
+          0
+        ],
+        [
+          1641,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, false>::do_gc_process_relocs",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, true>::do_gc_process_relocs(Symbol_table* symtab,\n\t\t\t\t\t\t  Layout* layout,\n\t\t\t\t\t\t  Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1647,
+          0
+        ],
+        [
+          1649,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, true>::do_gc_process_relocs",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, false>::do_gc_process_relocs(Symbol_table* symtab,\n\t\t\t\t\t\t   Layout* layout,\n\t\t\t\t\t\t   Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1655,
+          0
+        ],
+        [
+          1657,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, false>::do_gc_process_relocs",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, true>::do_gc_process_relocs(Symbol_table* symtab,\n\t\t\t\t\t\t  Layout* layout,\n\t\t\t\t\t\t  Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1663,
+          0
+        ],
+        [
+          1665,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, true>::do_gc_process_relocs",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, false>::do_scan_relocs(Symbol_table* symtab,\n\t\t\t\t\t     Layout* layout,\n\t\t\t\t\t     Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1671,
+          0
+        ],
+        [
+          1673,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, false>::do_scan_relocs",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, true>::do_scan_relocs(Symbol_table* symtab,\n\t\t\t\t\t    Layout* layout,\n\t\t\t\t\t    Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1679,
+          0
+        ],
+        [
+          1681,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, true>::do_scan_relocs",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, false>::do_scan_relocs(Symbol_table* symtab,\n\t\t\t\t\t     Layout* layout,\n\t\t\t\t\t     Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1687,
+          0
+        ],
+        [
+          1689,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, false>::do_scan_relocs",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, true>::do_scan_relocs(Symbol_table* symtab,\n\t\t\t\t\t    Layout* layout,\n\t\t\t\t\t    Read_relocs_data* rd)",
+      "fn_dec_pos": [
+        [
+          1695,
+          0
+        ],
+        [
+          1697,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, true>::do_scan_relocs",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "rd": "Read_relocs_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, false>::do_relocate(const Symbol_table* symtab,\n\t\t\t\t\t  const Layout* layout,\n\t\t\t\t\t  Output_file* of)",
+      "fn_dec_pos": [
+        [
+          1703,
+          0
+        ],
+        [
+          1705,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, false>::do_relocate",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "of": "Output_file"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, true>::do_relocate(const Symbol_table* symtab,\n\t\t\t\t\t const Layout* layout,\n\t\t\t\t\t Output_file* of)",
+      "fn_dec_pos": [
+        [
+          1711,
+          0
+        ],
+        [
+          1713,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, true>::do_relocate",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "of": "Output_file"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, false>::do_relocate(const Symbol_table* symtab,\n\t\t\t\t\t  const Layout* layout,\n\t\t\t\t\t  Output_file* of)",
+      "fn_dec_pos": [
+        [
+          1719,
+          0
+        ],
+        [
+          1721,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, false>::do_relocate",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "of": "Output_file"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, true>::do_relocate(const Symbol_table* symtab,\n\t\t\t\t\t const Layout* layout,\n\t\t\t\t\t Output_file* of)",
+      "fn_dec_pos": [
+        [
+          1727,
+          0
+        ],
+        [
+          1729,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, true>::do_relocate",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "of": "Output_file"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, false>::do_relocate_sections(\n    const Symbol_table* symtab,\n    const Layout* layout,\n    const unsigned char* pshdrs,\n    Output_file* of,\n    Views* pviews)",
+      "fn_dec_pos": [
+        [
+          1735,
+          0
+        ],
+        [
+          1740,
+          18
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, false>::do_relocate_sections",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "pshdrs": "unsigned char",
+          "of": "Output_file",
+          "pviews": "Views"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, false>::relocate_section_range(\n    const Symbol_table* symtab,\n    const Layout* layout,\n    const unsigned char* pshdrs,\n    Output_file* of,\n    Views* pviews,\n    unsigned int start_shndx,\n    unsigned int end_shndx)",
+      "fn_dec_pos": [
+        [
+          1744,
+          0
+        ],
+        [
+          1751,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, false>::relocate_section_range",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "pshdrs": "unsigned char",
+          "of": "Output_file",
+          "pviews": "Views",
+          "start_shndx": "unsigned int",
+          "end_shndx": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, false>::do_get_output_view(\n    unsigned int shndx,\n    section_size_type* plen) const",
+      "fn_dec_pos": [
+        [
+          1755,
+          0
+        ],
+        [
+          1757,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, false>::do_get_output_view",
+        "parameters": {
+          "shndx": "unsigned int",
+          "plen": "section_size_type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, true>::do_relocate_sections(\n    const Symbol_table* symtab,\n    const Layout* layout,\n    const unsigned char* pshdrs,\n    Output_file* of,\n    Views* pviews)",
+      "fn_dec_pos": [
+        [
+          1763,
+          0
+        ],
+        [
+          1768,
+          18
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, true>::do_relocate_sections",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "pshdrs": "unsigned char",
+          "of": "Output_file",
+          "pviews": "Views"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, true>::relocate_section_range(\n    const Symbol_table* symtab,\n    const Layout* layout,\n    const unsigned char* pshdrs,\n    Output_file* of,\n    Views* pviews,\n    unsigned int start_shndx,\n    unsigned int end_shndx)",
+      "fn_dec_pos": [
+        [
+          1772,
+          0
+        ],
+        [
+          1779,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, true>::relocate_section_range",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "pshdrs": "unsigned char",
+          "of": "Output_file",
+          "pviews": "Views",
+          "start_shndx": "unsigned int",
+          "end_shndx": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, true>::do_get_output_view(\n    unsigned int shndx,\n    section_size_type* plen) const",
+      "fn_dec_pos": [
+        [
+          1783,
+          0
+        ],
+        [
+          1785,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, true>::do_get_output_view",
+        "parameters": {
+          "shndx": "unsigned int",
+          "plen": "section_size_type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, false>::do_relocate_sections(\n    const Symbol_table* symtab,\n    const Layout* layout,\n    const unsigned char* pshdrs,\n    Output_file* of,\n    Views* pviews)",
+      "fn_dec_pos": [
+        [
+          1791,
+          0
+        ],
+        [
+          1796,
+          18
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, false>::do_relocate_sections",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "pshdrs": "unsigned char",
+          "of": "Output_file",
+          "pviews": "Views"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, false>::relocate_section_range(\n    const Symbol_table* symtab,\n    const Layout* layout,\n    const unsigned char* pshdrs,\n    Output_file* of,\n    Views* pviews,\n    unsigned int start_shndx,\n    unsigned int end_shndx)",
+      "fn_dec_pos": [
+        [
+          1800,
+          0
+        ],
+        [
+          1807,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, false>::relocate_section_range",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "pshdrs": "unsigned char",
+          "of": "Output_file",
+          "pviews": "Views",
+          "start_shndx": "unsigned int",
+          "end_shndx": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, false>::do_get_output_view(\n    unsigned int shndx,\n    section_size_type* plen) const",
+      "fn_dec_pos": [
+        [
+          1811,
+          0
+        ],
+        [
+          1813,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, false>::do_get_output_view",
+        "parameters": {
+          "shndx": "unsigned int",
+          "plen": "section_size_type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, true>::do_relocate_sections(\n    const Symbol_table* symtab,\n    const Layout* layout,\n    const unsigned char* pshdrs,\n    Output_file* of,\n    Views* pviews)",
+      "fn_dec_pos": [
+        [
+          1819,
+          0
+        ],
+        [
+          1824,
+          18
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, true>::do_relocate_sections",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "pshdrs": "unsigned char",
+          "of": "Output_file",
+          "pviews": "Views"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, true>::relocate_section_range(\n    const Symbol_table* symtab,\n    const Layout* layout,\n    const unsigned char* pshdrs,\n    Output_file* of,\n    Views* pviews,\n    unsigned int start_shndx,\n    unsigned int end_shndx)",
+      "fn_dec_pos": [
+        [
+          1828,
+          0
+        ],
+        [
+          1835,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, true>::relocate_section_range",
+        "parameters": {
+          "symtab": "Symbol_table",
+          "layout": "Layout",
+          "pshdrs": "unsigned char",
+          "of": "Output_file",
+          "pviews": "Views",
+          "start_shndx": "unsigned int",
+          "end_shndx": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, true>::do_get_output_view(\n    unsigned int shndx,\n    section_size_type* plen) const",
+      "fn_dec_pos": [
+        [
+          1839,
+          0
+        ],
+        [
+          1841,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, true>::do_get_output_view",
+        "parameters": {
+          "shndx": "unsigned int",
+          "plen": "section_size_type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, false>::initialize_input_to_output_maps()",
+      "fn_dec_pos": [
+        [
+          1847,
+          0
+        ],
+        [
+          1847,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, false>::initialize_input_to_output_maps",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, false>::free_input_to_output_maps()",
+      "fn_dec_pos": [
+        [
+          1851,
+          0
+        ],
+        [
+          1851,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, false>::free_input_to_output_maps",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, true>::initialize_input_to_output_maps()",
+      "fn_dec_pos": [
+        [
+          1857,
+          0
+        ],
+        [
+          1857,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, true>::initialize_input_to_output_maps",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<32, true>::free_input_to_output_maps()",
+      "fn_dec_pos": [
+        [
+          1861,
+          0
+        ],
+        [
+          1861,
+          56
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<32, true>::free_input_to_output_maps",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, false>::initialize_input_to_output_maps()",
+      "fn_dec_pos": [
+        [
+          1867,
+          0
+        ],
+        [
+          1867,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, false>::initialize_input_to_output_maps",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, false>::free_input_to_output_maps()",
+      "fn_dec_pos": [
+        [
+          1871,
+          0
+        ],
+        [
+          1871,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, false>::free_input_to_output_maps",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, true>::initialize_input_to_output_maps()",
+      "fn_dec_pos": [
+        [
+          1877,
+          0
+        ],
+        [
+          1877,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, true>::initialize_input_to_output_maps",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Sized_relobj_file<64, true>::free_input_to_output_maps()",
+      "fn_dec_pos": [
+        [
+          1881,
+          0
+        ],
+        [
+          1881,
+          56
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Sized_relobj_file<64, true>::free_input_to_output_maps",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct Set_output_views\n  {\n    Set_output_views(const Views** ppviews, const Views* pviews)\n    {\n      ppviews_ = ppviews;\n      *ppviews = pviews;\n    }\n\n    ~Set_output_views()\n    { *ppviews_ = NULL; }\n\n    const Views** ppviews_;\n  }",
+      {
+        "Views": "const"
+      },
+      "Set_output_views",
+      [
+        613,
+        2
+      ],
+      [
+        625,
+        3
+      ]
+    ],
+    [
+      "struct Read_multiple_compare\n{\n  inline bool\n  operator()(const File_read::Read_multiple_entry& rme1,\n\t     const File_read::Read_multiple_entry& rme2) const\n  { return rme1.file_offset < rme2.file_offset; }\n}",
+      {},
+      "Read_multiple_compare",
+      [
+        663,
+        0
+      ],
+      [
+        669,
+        1
+      ]
+    ],
+    [
+      "struct Set_output_views\n  {\n    Set_output_views(const Views** ppviews, const Views* pviews)\n    {\n      ppviews_ = ppviews;\n      *ppviews = pviews;\n    }\n\n    ~Set_output_views()\n    { *ppviews_ = NULL; }\n\n    const Views** ppviews_;\n  }",
+      {
+        "Views": "const"
+      },
+      "Set_output_views",
+      [
+        613,
+        2
+      ],
+      [
+        625,
+        3
+      ]
+    ],
+    [
+      "struct Read_multiple_compare\n{\n  inline bool\n  operator()(const File_read::Read_multiple_entry& rme1,\n\t     const File_read::Read_multiple_entry& rme2) const\n  { return rme1.file_offset < rme2.file_offset; }\n}",
+      {},
+      "Read_multiple_compare",
+      [
+        663,
+        0
+      ],
+      [
+        669,
+        1
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"gold.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <algorithm>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"workqueue.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"layout.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"output.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"merge.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"object.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"target-reloc.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"reloc.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"icf.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"compressed_output.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"incremental.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

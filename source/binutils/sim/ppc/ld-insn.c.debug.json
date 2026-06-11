@@ -1,0 +1,795 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nupdate_depth(insn_table *entry,\n\t     lf *file,\n\t     void *data,\n\t     insn *instruction,\n\t     int depth)\n{\n  int *max_depth = (int*)data;\n  if (*max_depth < depth)\n    *max_depth = depth;\n}",
+      "fn_code_pos": [
+        [
+          30,
+          0
+        ],
+        [
+          40,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "update_depth",
+        "parameters": {
+          "entry": "insn_table",
+          "file": "lf",
+          "data": "void",
+          "instruction": "insn",
+          "depth": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\ninsn_table_depth(insn_table *table)\n{\n  int depth = 0;\n  insn_table_traverse_tree(table,\n\t\t\t   NULL,\n\t\t\t   &depth,\n\t\t\t   1,\n\t\t\t   NULL, /*start*/\n\t\t\t   update_depth,\n\t\t\t   NULL, /*end*/\n\t\t\t   NULL); /*padding*/\n  return depth;\n}",
+      "fn_code_pos": [
+        [
+          43,
+          0
+        ],
+        [
+          56,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_depth",
+        "parameters": {
+          "table": "insn_table"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static insn_fields *\nparse_insn_format(table_entry *entry,\n\t\t  char *format)\n{\n  char *chp;\n  insn_fields *fields = ZALLOC(insn_fields);\n\n  /* create a leading sentinal */\n  fields->first = ZALLOC(insn_field);\n  fields->first->first = -1;\n  fields->first->last = -1;\n  fields->first->width = 0;\n\n  /* and a trailing sentinal */\n  fields->last = ZALLOC(insn_field);\n  fields->last->first = insn_bit_size;\n  fields->last->last = insn_bit_size;\n  fields->last->width = 0;\n\n  /* link them together */\n  fields->first->next = fields->last;\n  fields->last->prev = fields->first;\n\n  /* now work through the formats */\n  chp = format;\n\n  while (*chp != '\\0') {\n    char *start_pos;\n    char *start_val;\n    int strlen_val;\n    int strlen_pos;\n    insn_field *new_field;\n\n    /* sanity check */\n    if (!isdigit(*chp)) {\n      error(\"%s:%d: missing position field at `%s'\\n\",\n\t    entry->file_name, entry->line_nr, chp);\n    }\n\n    /* break out the bit position */\n    start_pos = chp;\n    while (isdigit(*chp))\n      chp++;\n    strlen_pos = chp - start_pos;\n    if (*chp == '.' && strlen_pos > 0)\n      chp++;\n    else {\n      error(\"%s:%d: missing field value at %s\\n\",\n\t    entry->file_name, entry->line_nr, chp);\n      break;\n    }\n\n    /* break out the value */\n    start_val = chp;\n    while ((*start_val == '/' && *chp == '/')\n\t   || (isdigit(*start_val) && isdigit(*chp))\n\t   || (isalpha(*start_val) && (isalnum(*chp) || *chp == '_')))\n      chp++;\n    strlen_val = chp - start_val;\n    if (*chp == ',')\n      chp++;\n    else if (*chp != '\\0' || strlen_val == 0) {\n      error(\"%s:%d: missing field terminator at %s\\n\",\n\t    entry->file_name, entry->line_nr, chp);\n      break;\n    }\n\n    /* create a new field and insert it */\n    new_field = ZALLOC(insn_field);\n    new_field->next = fields->last;\n    new_field->prev = fields->last->prev;\n    new_field->next->prev = new_field;\n    new_field->prev->next = new_field;\n\n    /* the value */\n    new_field->val_string = (char*)zalloc(strlen_val+1);\n    strncpy(new_field->val_string, start_val, strlen_val);\n    if (isdigit(*new_field->val_string)) {\n      new_field->val_int = a2i(new_field->val_string);\n      new_field->is_int = 1;\n    }\n    else if (new_field->val_string[0] == '/') {\n      new_field->is_slash = 1;\n    }\n    else {\n      new_field->is_string = 1;\n    }\n    \n    /* the pos */\n    new_field->pos_string = (char*)zalloc(strlen_pos+1);\n    strncpy(new_field->pos_string, start_pos, strlen_pos);\n    new_field->first = target_a2i(hi_bit_nr, new_field->pos_string);\n    new_field->last = new_field->next->first - 1; /* guess */\n    new_field->width = new_field->last - new_field->first + 1; /* guess */\n    new_field->prev->last = new_field->first-1; /*fix*/\n    new_field->prev->width = new_field->first - new_field->prev->first; /*fix*/\n  }\n\n  /* fiddle first/last so that the sentinals `disapear' */\n  ASSERT(fields->first->last < 0);\n  ASSERT(fields->last->first >= insn_bit_size);\n  fields->first = fields->first->next;\n  fields->last = fields->last->prev;\n\n  /* now go over this again, pointing each bit position at a field\n     record */\n  {\n    int i;\n    insn_field *field;\n    field = fields->first;\n    for (i = 0; i < insn_bit_size; i++) {\n      while (field->last < i)\n\tfield = field->next;\n      fields->bits[i] = field;\n    }\n  }\n\n  /* go over each of the fields, and compute a `value' for the insn */\n  {\n    insn_field *field;\n    fields->value = 0;\n    for (field = fields->first;\n\t field->last < insn_bit_size;\n\t field = field->next) {\n      fields->value <<= field->width;\n      if (field->is_int)\n\tfields->value |= field->val_int;\n    }\n  }\n  return fields;\n}",
+      "fn_code_pos": [
+        [
+          59,
+          0
+        ],
+        [
+          189,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "parse_insn_format",
+        "parameters": {
+          "entry": "table_entry",
+          "format": "char"
+        },
+        "return_type": "insn_fields"
+      }
+    },
+    {
+      "fn_code": "void\nparse_include_entry (table *file,\n                     table_entry *file_entry,\n\t\t     filter *filters,\n\t\t     table_include *includes)\n{\n  /* parse the include file_entry */\n  if (file_entry->nr_fields < 4)\n    error (\"Incorrect nr fields for include record\\n\");\n  /* process it */\n  if (!is_filtered_out(file_entry->fields[include_flags], filters))\n    {\n      table_push (file, includes,\n                file_entry->fields[include_path],\n\t\tfile_entry->nr_fields, file_entry->nr_fields);\n    }\n}",
+      "fn_code_pos": [
+        [
+          192,
+          0
+        ],
+        [
+          208,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "parse_include_entry",
+        "parameters": {
+          "file": "table",
+          "file_entry": "table_entry",
+          "filters": "filter",
+          "includes": "table_include"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nmodel_table_insert(insn_table *table,\n\t\t   table_entry *file_entry)\n{\n  int len;\n\n  /* create a new model */\n  model *new_model = ZALLOC(model);\n\n  new_model->name = file_entry->fields[model_identifer];\n  new_model->printable_name = file_entry->fields[model_name];\n  new_model->insn_default = file_entry->fields[model_default];\n\n  while (*new_model->insn_default && isspace(*new_model->insn_default))\n    new_model->insn_default++;\n\n  len = strlen(new_model->insn_default);\n  if (max_model_fields_len < len)\n    max_model_fields_len = len;\n\n  /* append it to the end of the model list */\n  if (last_model)\n    last_model->next = new_model;\n  else\n    models = new_model;\n  last_model = new_model;\n}",
+      "fn_code_pos": [
+        [
+          210,
+          0
+        ],
+        [
+          236,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "model_table_insert",
+        "parameters": {
+          "table": "insn_table",
+          "file_entry": "table_entry"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nmodel_table_insert_specific(insn_table *table,\n\t\t\t    table_entry *file_entry,\n\t\t\t    insn **start_ptr,\n\t\t\t    insn **end_ptr)\n{\n  insn *ptr = ZALLOC(insn);\n  ptr->file_entry = file_entry;\n  if (*end_ptr)\n    (*end_ptr)->next = ptr;\n  else\n    (*start_ptr) = ptr;\n  (*end_ptr) = ptr;\n}",
+      "fn_code_pos": [
+        [
+          238,
+          0
+        ],
+        [
+          251,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "model_table_insert_specific",
+        "parameters": {
+          "table": "insn_table",
+          "file_entry": "table_entry",
+          "start_ptr": "insn",
+          "end_ptr": "insn"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ninsn_table_insert_function(insn_table *table,\n\t\t\t   table_entry *file_entry)\n{\n  /* create a new function */\n  insn *new_function = ZALLOC(insn);\n  new_function->file_entry = file_entry;\n\n  /* append it to the end of the function list */\n  if (table->last_function)\n    table->last_function->next = new_function;\n  else\n    table->functions = new_function;\n  table->last_function = new_function;\n}",
+      "fn_code_pos": [
+        [
+          254,
+          0
+        ],
+        [
+          268,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_insert_function",
+        "parameters": {
+          "table": "insn_table",
+          "file_entry": "table_entry"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "extern void\ninsn_table_insert_insn(insn_table *table,\n\t\t       table_entry *file_entry,\n\t\t       insn_fields *fields)\n{\n  insn **ptr_to_cur_insn = &table->insns;\n  insn *cur_insn = *ptr_to_cur_insn;\n  table_model_entry *insn_model_ptr;\n  model *model_ptr;\n\n  /* create a new instruction */\n  insn *new_insn = ZALLOC(insn);\n  new_insn->file_entry = file_entry;\n  new_insn->fields = fields;\n\n  /* Check out any model information returned to make sure the model\n     is correct.  */\n  for(insn_model_ptr = file_entry->model_first; insn_model_ptr; insn_model_ptr = insn_model_ptr->next) {\n    char *name = insn_model_ptr->fields[insn_model_name];\n    int len = strlen (insn_model_ptr->fields[insn_model_fields]);\n\n    while (len > 0 && isspace(*insn_model_ptr->fields[insn_model_fields])) {\n      len--;\n      insn_model_ptr->fields[insn_model_fields]++;\n    }\n\n    if (max_model_fields_len < len)\n      max_model_fields_len = len;\n\n    for(model_ptr = models; model_ptr; model_ptr = model_ptr->next) {\n      if (strcmp(name, model_ptr->printable_name) == 0) {\n\n\t/* Replace the name field with that of the global model, so that when we\n\t   want to print it out, we can just compare pointers.  */\n\tinsn_model_ptr->fields[insn_model_name] = model_ptr->printable_name;\n\tbreak;\n      }\n    }\n\n    if (!model_ptr)\n      error(\"%s:%d: machine model `%s' was not known about\\n\",\n\t    file_entry->file_name, file_entry->line_nr, name);\n  }\n\n  /* insert it according to the order of the fields */\n  while (cur_insn != NULL\n\t && new_insn->fields->value >= cur_insn->fields->value) {\n    ptr_to_cur_insn = &cur_insn->next;\n    cur_insn = *ptr_to_cur_insn;\n  }\n\n  new_insn->next = cur_insn;\n  *ptr_to_cur_insn = new_insn;\n\n  table->nr_insn++;\n}",
+      "fn_code_pos": [
+        [
+          270,
+          0
+        ],
+        [
+          325,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_insert_insn",
+        "parameters": {
+          "table": "insn_table",
+          "file_entry": "table_entry",
+          "fields": "insn_fields"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "insn_table *\nload_insn_table(const char *file_name,\n\t\tdecode_table *decode_rules,\n\t\tfilter *filters,\n\t\ttable_include *includes,\n\t\tcache_table **cache_rules)\n{\n  table *file = table_open(file_name, nr_insn_table_fields, nr_insn_model_table_fields);\n  insn_table *table = ZALLOC(insn_table);\n  table_entry *file_entry;\n  table->opcode_rule = decode_rules;\n\n  while ((file_entry = table_entry_read(file)) != NULL) {\n    if (it_is(\"function\", file_entry->fields[insn_flags])\n\t|| it_is(\"internal\", file_entry->fields[insn_flags])) {\n      insn_table_insert_function(table, file_entry);\n    }\n    else if ((it_is(\"function\", file_entry->fields[insn_form])\n\t      || it_is(\"internal\", file_entry->fields[insn_form]))\n\t     && !is_filtered_out(file_entry->fields[insn_flags], filters)) {\n      /* Ok, this is evil.  Need to convert a new style function into\n         an old style function.  Construct an old style table and then\n         copy it back.  */\n      char *fields[nr_insn_table_fields];\n      memset (fields, 0, sizeof fields);\n      fields[insn_flags] = file_entry->fields[insn_form];\n      fields[function_type] = file_entry->fields[insn_name];\n      fields[function_name] = file_entry->fields[insn_comment];\n      fields[function_param] = file_entry->fields[insn_field_6];\n      memcpy (file_entry->fields, fields,\n\t      sizeof (fields[0]) * file_entry->nr_fields);\n      insn_table_insert_function(table, file_entry);\n#if 0\n      \":\" \"...\"\n       \":\" <filter-flags>\n       \":\" <filter-models>\n       \":\" <typedef>\n       \":\" <name>\n       [ \":\" <parameter-list> ]\n       <nl>\n       [ <function-model> ]\n       <code-block>\n#endif\n    }\t     \n    else if (it_is(\"model\", file_entry->fields[insn_flags])) {\n      model_table_insert(table, file_entry);\n    }\n    else if (it_is(\"model-macro\", file_entry->fields[insn_flags])) {\n      model_table_insert_specific(table, file_entry, &model_macros, &last_model_macro);\n    }\n    else if (it_is(\"model-function\", file_entry->fields[insn_flags])) {\n      model_table_insert_specific(table, file_entry, &model_functions, &last_model_function);\n    }\n    else if (it_is(\"model-internal\", file_entry->fields[insn_flags])) {\n      model_table_insert_specific(table, file_entry, &model_internal, &last_model_internal);\n    }\n    else if (it_is(\"model-static\", file_entry->fields[insn_flags])) {\n      model_table_insert_specific(table, file_entry, &model_static, &last_model_static);\n    }\n    else if (it_is(\"model-data\", file_entry->fields[insn_flags])) {\n      model_table_insert_specific(table, file_entry, &model_data, &last_model_data);\n    }\n    else if (it_is(\"include\", file_entry->fields[insn_form])\n             && !is_filtered_out(file_entry->fields[insn_flags], filters)) {\n      parse_include_entry (file, file_entry, filters, includes);\n    }\n    else if ((it_is(\"cache\", file_entry->fields[insn_form])\n\t      || it_is(\"compute\", file_entry->fields[insn_form])\n\t      || it_is(\"scratch\", file_entry->fields[insn_form]))\n\t     && !is_filtered_out(file_entry->fields[insn_flags], filters)) {\n      append_cache_rule (cache_rules,\n\t\t\t file_entry->fields[insn_form], /* type */\n\t\t\t file_entry->fields[cache_name],\n\t\t\t file_entry->fields[cache_derived_name],\n\t\t\t file_entry->fields[cache_type_def],\n\t\t\t file_entry->fields[cache_expression],\n\t\t\t file_entry);\n    }\n    else {\n      insn_fields *fields;\n      /* skip instructions that aren't relevant to the mode */\n      if (is_filtered_out(file_entry->fields[insn_flags], filters)) {\n\tfprintf(stderr, \"Dropping %s - %s\\n\",\n\t\tfile_entry->fields[insn_name],\n\t\tfile_entry->fields[insn_flags]);\n      }\n      else {\n\t/* create/insert the new instruction */\n\tfields = parse_insn_format(file_entry,\n\t\t\t\t   file_entry->fields[insn_format]);\n\tinsn_table_insert_insn(table, file_entry, fields);\n      }\n    }\n  }\n  return table;\n}",
+      "fn_code_pos": [
+        [
+          329,
+          0
+        ],
+        [
+          424,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "load_insn_table",
+        "parameters": {
+          "file_name": "char",
+          "decode_rules": "decode_table",
+          "filters": "filter",
+          "includes": "table_include",
+          "cache_rules": "cache_table"
+        },
+        "return_type": "insn_table"
+      }
+    },
+    {
+      "fn_code": "extern void\ninsn_table_traverse_tree(insn_table *table,\n\t\t\t lf *file,\n\t\t\t void *data,\n\t\t\t int depth,\n\t\t\t leaf_handler *start,\n\t\t\t insn_handler *leaf,\n\t\t\t leaf_handler *end,\n\t\t\t padding_handler *padding)\n{\n  insn_table *entry;\n  int entry_nr;\n  \n  ASSERT(table != NULL\n\t && table->opcode != NULL\n\t && table->nr_entries > 0\n\t && table->entries != 0);\n\n  if (start != NULL && depth >= 0)\n    start(table, file, data, depth);\n\n  for (entry_nr = 0, entry = table->entries;\n       entry_nr < (table->opcode->is_boolean\n\t\t   ? 2\n\t\t   : (1 << (table->opcode->last - table->opcode->first + 1)));\n       entry_nr ++) {\n    if (entry == NULL\n\t|| (!table->opcode->is_boolean\n\t    && entry_nr < entry->opcode_nr)) {\n      if (padding != NULL && depth >= 0)\n\tpadding(table, file, data, depth, entry_nr);\n    }\n    else {\n      ASSERT(entry != NULL && (entry->opcode_nr == entry_nr\n\t\t\t       || table->opcode->is_boolean));\n      if (entry->opcode != NULL && depth != 0) {\n\tinsn_table_traverse_tree(entry, file, data, depth+1,\n\t\t\t\t start, leaf, end, padding);\n      }\n      else if (depth >= 0) {\n\tif (leaf != NULL)\n\t  leaf(entry, file, data, entry->insns, depth);\n      }\n      entry = entry->sibling;\n    }\n  }\n  if (end != NULL && depth >= 0)\n    end(table, file, data, depth);\n}",
+      "fn_code_pos": [
+        [
+          427,
+          0
+        ],
+        [
+          475,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_traverse_tree",
+        "parameters": {
+          "table": "insn_table",
+          "file": "lf",
+          "data": "void",
+          "depth": "int",
+          "start": "leaf_handler",
+          "leaf": "insn_handler",
+          "end": "leaf_handler",
+          "padding": "padding_handler"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "extern void\ninsn_table_traverse_function(insn_table *table,\n\t\t\t     lf *file,\n\t\t\t     void *data,\n\t\t\t     function_handler *leaf)\n{\n  insn *function;\n  for (function = table->functions;\n       function != NULL;\n       function = function->next) {\n    leaf(table, file, data, function->file_entry);\n  }\n}",
+      "fn_code_pos": [
+        [
+          478,
+          0
+        ],
+        [
+          490,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_traverse_function",
+        "parameters": {
+          "table": "insn_table",
+          "file": "lf",
+          "data": "void",
+          "leaf": "function_handler"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "extern void\ninsn_table_traverse_insn(insn_table *table,\n\t\t\t lf *file,\n\t\t\t void *data,\n\t\t\t insn_handler *handler)\n{\n  insn *instruction;\n  for (instruction = table->insns;\n       instruction != NULL;\n       instruction = instruction->next) {\n    handler(table, file, data, instruction, 0);\n  }\n}",
+      "fn_code_pos": [
+        [
+          492,
+          0
+        ],
+        [
+          504,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_traverse_insn",
+        "parameters": {
+          "table": "insn_table",
+          "file": "lf",
+          "data": "void",
+          "handler": "insn_handler"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ninsn_field_is_constant(insn_field *field,\n\t\t       decode_table *rule)\n{\n  /* field is an integer */\n  if (field->is_int)\n    return field_constant_int;\n  /* field is `/' and treating that as a constant */\n  if (field->is_slash && rule->force_slash)\n    return field_constant_slash;\n  /* field, though variable is on the list */\n  if (field->is_string && rule->force_expansion != NULL) {\n    char *forced_fields = rule->force_expansion;\n    while (*forced_fields != '\\0') {\n      int field_len;\n      char *end = strchr(forced_fields, ',');\n      if (end == NULL)\n\tfield_len = strlen(forced_fields);\n      else\n\tfield_len = end-forced_fields;\n      if (strncmp(forced_fields, field->val_string, field_len) == 0\n\t  && field->val_string[field_len] == '\\0')\n\treturn field_constant_string;\n      forced_fields += field_len;\n      if (*forced_fields == ',')\n\tforced_fields++;\n    }\n  }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          516,
+          0
+        ],
+        [
+          545,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_field_is_constant",
+        "parameters": {
+          "field": "insn_field",
+          "rule": "decode_table"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static opcode_field *\ninsn_table_find_opcode_field(insn *insns,\n\t\t\t     decode_table *rule,\n\t\t\t     int string_only)\n{\n  opcode_field *curr_opcode = ZALLOC(opcode_field);\n  insn *entry;\n  ASSERT(rule);\n\n  curr_opcode->first = insn_bit_size;\n  curr_opcode->last = -1;\n  for (entry = insns; entry != NULL; entry = entry->next) {\n    insn_fields *fields = entry->fields;\n    opcode_field new_opcode;\n\n    /* find a start point for the opcode field */\n    new_opcode.first = rule->first;\n    while (new_opcode.first <= rule->last\n\t   && (!string_only\n\t       || insn_field_is_constant(fields->bits[new_opcode.first],\n\t\t\t\t\t rule) != field_constant_string)\n\t   && (string_only\n\t       || !insn_field_is_constant(fields->bits[new_opcode.first],\n\t\t\t\t\t  rule)))\n      new_opcode.first = fields->bits[new_opcode.first]->last + 1;\n    ASSERT(new_opcode.first > rule->last\n\t   || (string_only\n\t       && insn_field_is_constant(fields->bits[new_opcode.first],\n\t\t\t\t\t rule) == field_constant_string)\n\t   || (!string_only\n\t       && insn_field_is_constant(fields->bits[new_opcode.first],\n\t\t\t\t\t rule)));\n  \n    /* find the end point for the opcode field */\n    new_opcode.last = rule->last;\n    while (new_opcode.last >= rule->first\n\t   && (!string_only\n\t       || insn_field_is_constant(fields->bits[new_opcode.last],\n\t\t\t\t\t rule) != field_constant_string)\n\t   && (string_only\n\t       || !insn_field_is_constant(fields->bits[new_opcode.last],\n\t\t\t\t\t  rule)))\n      new_opcode.last = fields->bits[new_opcode.last]->first - 1;\n    ASSERT(new_opcode.last < rule->first\n\t   || (string_only\n\t       && insn_field_is_constant(fields->bits[new_opcode.last],\n\t\t\t\t\t rule) == field_constant_string)\n\t   || (!string_only\n\t       && insn_field_is_constant(fields->bits[new_opcode.last],\n\t\t\t\t\t rule)));\n\n    /* now see if our current opcode needs expanding */\n    if (new_opcode.first <= rule->last\n\t&& curr_opcode->first > new_opcode.first)\n      curr_opcode->first = new_opcode.first;\n    if (new_opcode.last >= rule->first\n\t&& curr_opcode->last < new_opcode.last)\n      curr_opcode->last = new_opcode.last;\n    \n  }\n\n  /* was any thing interesting found? */\n  if (curr_opcode->first > rule->last) {\n    ASSERT(curr_opcode->last < rule->first);\n    return NULL;\n  }\n  ASSERT(curr_opcode->last >= rule->first);\n  ASSERT(curr_opcode->first <= rule->last);\n\n  /* if something was found, check it includes the forced field range */\n  if (!string_only\n      && curr_opcode->first > rule->force_first) {\n    curr_opcode->first = rule->force_first;\n  }\n  if (!string_only\n      && curr_opcode->last < rule->force_last) {\n    curr_opcode->last = rule->force_last;\n  }\n  /* handle special case elminating any need to do shift after mask */\n  if (string_only\n      && rule->force_last == insn_bit_size-1) {\n    curr_opcode->last = insn_bit_size-1;\n  }\n\n  /* handle any special cases */\n  switch (rule->type) {\n  case normal_decode_rule:\n    /* let the above apply */\n    break;\n  case expand_forced_rule:\n    /* expand a limited nr of bits, ignoring the rest */\n    curr_opcode->first = rule->force_first;\n    curr_opcode->last = rule->force_last;\n    break;\n  case boolean_rule:\n    curr_opcode->is_boolean = 1;\n    curr_opcode->boolean_constant = rule->special_constant;\n    break;\n  default:\n    error(\"Something is going wrong\\n\");\n  }\n\n  return curr_opcode;\n}",
+      "fn_code_pos": [
+        [
+          548,
+          0
+        ],
+        [
+          651,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_find_opcode_field",
+        "parameters": {
+          "insns": "insn",
+          "rule": "decode_table",
+          "string_only": "int"
+        },
+        "return_type": "opcode_field"
+      }
+    },
+    {
+      "fn_code": "static void\ninsn_table_insert_expanded(insn_table *table,\n\t\t\t   insn *old_insn,\n\t\t\t   int new_opcode_nr,\n\t\t\t   insn_bits *new_bits)\n{\n  insn_table **ptr_to_cur_entry = &table->entries;\n  insn_table *cur_entry = *ptr_to_cur_entry;\n\n  /* find the new table for this entry */\n  while (cur_entry != NULL\n\t && cur_entry->opcode_nr < new_opcode_nr) {\n    ptr_to_cur_entry = &cur_entry->sibling;\n    cur_entry = *ptr_to_cur_entry;\n  }\n\n  if (cur_entry == NULL || cur_entry->opcode_nr != new_opcode_nr) {\n    insn_table *new_entry = ZALLOC(insn_table);\n    new_entry->opcode_nr = new_opcode_nr;\n    new_entry->expanded_bits = new_bits;\n    new_entry->opcode_rule = table->opcode_rule->next;\n    new_entry->sibling = cur_entry;\n    new_entry->parent = table;\n    *ptr_to_cur_entry = new_entry;\n    cur_entry = new_entry;\n    table->nr_entries++;\n  }\n  /* ASSERT new_bits == cur_entry bits */\n  ASSERT(cur_entry != NULL && cur_entry->opcode_nr == new_opcode_nr);\n  insn_table_insert_insn(cur_entry,\n\t\t\t old_insn->file_entry,\n\t\t\t old_insn->fields);\n}",
+      "fn_code_pos": [
+        [
+          654,
+          0
+        ],
+        [
+          686,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_insert_expanded",
+        "parameters": {
+          "table": "insn_table",
+          "old_insn": "insn",
+          "new_opcode_nr": "int",
+          "new_bits": "insn_bits"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ninsn_table_expand_opcode(insn_table *table,\n\t\t\t insn *instruction,\n\t\t\t int field_nr,\n\t\t\t int opcode_nr,\n\t\t\t insn_bits *bits)\n{\n\n  if (field_nr > table->opcode->last) {\n    insn_table_insert_expanded(table, instruction, opcode_nr, bits);\n  }\n  else {\n    insn_field *field = instruction->fields->bits[field_nr];\n    if (field->is_int || field->is_slash) {\n      ASSERT(field->first >= table->opcode->first\n\t     && field->last <= table->opcode->last);\n      insn_table_expand_opcode(table, instruction, field->last+1,\n\t\t\t       ((opcode_nr << field->width) + field->val_int),\n\t\t\t       bits);\n    }\n    else {\n      int val;\n      int last_pos = ((field->last < table->opcode->last)\n\t\t\t? field->last : table->opcode->last);\n      int first_pos = ((field->first > table->opcode->first)\n\t\t\t ? field->first : table->opcode->first);\n      int width = last_pos - first_pos + 1;\n      int last_val = (table->opcode->is_boolean\n\t\t      ? 2 : (1 << width));\n      for (val = 0; val < last_val; val++) {\n\tinsn_bits *new_bits = ZALLOC(insn_bits);\n\tnew_bits->field = field;\n\tnew_bits->value = val;\n\tnew_bits->last = bits;\n\tnew_bits->opcode = table->opcode;\n\tinsn_table_expand_opcode(table, instruction, last_pos+1,\n\t\t\t\t ((opcode_nr << width) | val),\n\t\t\t\t new_bits);\n      }\n    }\n  }\n}",
+      "fn_code_pos": [
+        [
+          688,
+          0
+        ],
+        [
+          729,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_expand_opcode",
+        "parameters": {
+          "table": "insn_table",
+          "instruction": "insn",
+          "field_nr": "int",
+          "opcode_nr": "int",
+          "bits": "insn_bits"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ninsn_table_insert_expanding(insn_table *table,\n\t\t\t    insn *entry)\n{\n  insn_table_expand_opcode(table,\n\t\t\t   entry,\n\t\t\t   table->opcode->first,\n\t\t\t   0,\n\t\t\t   table->expanded_bits);\n}",
+      "fn_code_pos": [
+        [
+          731,
+          0
+        ],
+        [
+          740,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_insert_expanding",
+        "parameters": {
+          "table": "insn_table",
+          "entry": "insn"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "extern void\ninsn_table_expand_insns(insn_table *table)\n{\n\n  ASSERT(table->nr_insn >= 1);\n\n  /* determine a valid opcode */\n  while (table->opcode_rule) {\n    /* specials only for single instructions */\n    if ((table->nr_insn > 1\n\t && table->opcode_rule->special_mask == 0\n\t && table->opcode_rule->type == normal_decode_rule)\n\t|| (table->nr_insn == 1\n\t    && table->opcode_rule->special_mask != 0\n\t    && ((table->insns->fields->value\n\t\t & table->opcode_rule->special_mask)\n\t\t== table->opcode_rule->special_value))\n\t|| (generate_expanded_instructions\n\t    && table->opcode_rule->special_mask == 0\n\t    && table->opcode_rule->type == normal_decode_rule))\n      table->opcode =\n\tinsn_table_find_opcode_field(table->insns,\n\t\t\t\t     table->opcode_rule,\n\t\t\t\t     table->nr_insn == 1/*string*/\n\t\t\t\t     );\n    if (table->opcode != NULL)\n      break;\n    table->opcode_rule = table->opcode_rule->next;\n  }\n\n  /* did we find anything */\n  if (table->opcode == NULL) {\n    return;\n  }\n  ASSERT(table->opcode != NULL);\n\n  /* back link what we found to its parent */\n  if (table->parent != NULL) {\n    ASSERT(table->parent->opcode != NULL);\n    table->opcode->parent = table->parent->opcode;\n  }\n\n  /* expand the raw instructions according to the opcode */\n  {\n    insn *entry;\n    for (entry = table->insns; entry != NULL; entry = entry->next) {\n      insn_table_insert_expanding(table, entry);\n    }\n  }\n\n  /* and do the same for the sub entries */\n  {\n    insn_table *entry;\n    for (entry = table->entries; entry != NULL; entry =  entry->sibling) {\n      insn_table_expand_insns(entry);\n    }\n  }\n}",
+      "fn_code_pos": [
+        [
+          743,
+          0
+        ],
+        [
+          800,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_expand_insns",
+        "parameters": {
+          "table": "insn_table"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndump_insn_field(insn_field *field,\n\t\tint indent)\n{\n\n  printf(\"(insn_field*)0x%x\\n\", (unsigned)field);\n\n  dumpf(indent, \"(first %d)\\n\", field->first);\n\n  dumpf(indent, \"(last %d)\\n\", field->last);\n\n  dumpf(indent, \"(width %d)\\n\", field->width);\n\n  if (field->is_int)\n    dumpf(indent, \"(is_int %d)\\n\", field->val_int);\n\n  if (field->is_slash)\n    dumpf(indent, \"(is_slash)\\n\");\n\n  if (field->is_string)\n    dumpf(indent, \"(is_string `%s')\\n\", field->val_string);\n  \n  dumpf(indent, \"(next 0x%x)\\n\", field->next);\n  \n  dumpf(indent, \"(prev 0x%x)\\n\", field->prev);\n  \n\n}",
+      "fn_code_pos": [
+        [
+          807,
+          0
+        ],
+        [
+          834,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dump_insn_field",
+        "parameters": {
+          "field": "insn_field",
+          "indent": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndump_insn_fields(insn_fields *fields,\n\t\t int indent)\n{\n  int i;\n\n  printf(\"(insn_fields*)%p\\n\", fields);\n\n  dumpf(indent, \"(first 0x%x)\\n\", fields->first);\n  dumpf(indent, \"(last 0x%x)\\n\", fields->last);\n\n  dumpf(indent, \"(value 0x%x)\\n\", fields->value);\n\n  for (i = 0; i < insn_bit_size; i++) {\n    dumpf(indent, \"(bits[%d] \", i, fields->bits[i]);\n    dump_insn_field(fields->bits[i], indent+1);\n    dumpf(indent, \" )\\n\");\n  }\n\n}",
+      "fn_code_pos": [
+        [
+          836,
+          0
+        ],
+        [
+          855,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dump_insn_fields",
+        "parameters": {
+          "fields": "insn_fields",
+          "indent": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndump_opcode_field(opcode_field *field, int indent, int levels)\n{\n  printf(\"(opcode_field*)%p\\n\", field);\n  if (levels && field != NULL) {\n    dumpf(indent, \"(first %d)\\n\", field->first);\n    dumpf(indent, \"(last %d)\\n\", field->last);\n    dumpf(indent, \"(is_boolean %d)\\n\", field->is_boolean);\n    dumpf(indent, \"(parent \");\n    dump_opcode_field(field->parent, indent, levels-1);\n  }\n}",
+      "fn_code_pos": [
+        [
+          858,
+          0
+        ],
+        [
+          869,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dump_opcode_field",
+        "parameters": {
+          "field": "opcode_field",
+          "indent": "int",
+          "levels": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndump_insn_bits(insn_bits *bits, int indent, int levels)\n{\n  printf(\"(insn_bits*)%p\\n\", bits);\n\n  if (levels && bits != NULL) {\n    dumpf(indent, \"(value %d)\\n\", bits->value);\n    dumpf(indent, \"(opcode \");\n    dump_opcode_field(bits->opcode, indent+1, 0);\n    dumpf(indent, \" )\\n\");\n    dumpf(indent, \"(field \");\n    dump_insn_field(bits->field, indent+1);\n    dumpf(indent, \" )\\n\");\n    dumpf(indent, \"(last \");\n    dump_insn_bits(bits->last, indent+1, levels-1);\n  }\n}",
+      "fn_code_pos": [
+        [
+          872,
+          0
+        ],
+        [
+          888,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dump_insn_bits",
+        "parameters": {
+          "bits": "insn_bits",
+          "indent": "int",
+          "levels": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndump_insn(insn *entry, int indent, int levels)\n{\n  printf(\"(insn*)%p\\n\", entry);\n\n  if (levels && entry != NULL) {\n\n    dumpf(indent, \"(file_entry \");\n    dump_table_entry(entry->file_entry, indent+1);\n    dumpf(indent, \" )\\n\");\n\n    dumpf(indent, \"(fields \");\n    dump_insn_fields(entry->fields, indent+1);\n    dumpf(indent, \" )\\n\");\n\n    dumpf(indent, \"(next \");\n    dump_insn(entry->next, indent+1, levels-1);\n    dumpf(indent, \" )\\n\");\n\n  }\n\n}",
+      "fn_code_pos": [
+        [
+          892,
+          0
+        ],
+        [
+          913,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dump_insn",
+        "parameters": {
+          "entry": "insn",
+          "indent": "int",
+          "levels": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndump_insn_table(insn_table *table,\n\t\tint indent, int levels)\n{\n\n  printf(\"(insn_table*)%p\\n\", table);\n\n  if (levels && table != NULL) {\n\n    dumpf(indent, \"(opcode_nr %d)\\n\", table->opcode_nr);\n\n    dumpf(indent, \"(expanded_bits \");\n    dump_insn_bits(table->expanded_bits, indent+1, -1);\n    dumpf(indent, \" )\\n\");\n\n    dumpf(indent, \"(int nr_insn %d)\\n\", table->nr_insn);\n\n    dumpf(indent, \"(insns \");\n    dump_insn(table->insns, indent+1, table->nr_insn);\n    dumpf(indent, \" )\\n\");\n\n    dumpf(indent, \"(opcode_rule \");\n    dump_decode_rule(table->opcode_rule, indent+1);\n    dumpf(indent, \" )\\n\");\n\n    dumpf(indent, \"(opcode \");\n    dump_opcode_field(table->opcode, indent+1, 1);\n    dumpf(indent, \" )\\n\");\n\n    dumpf(indent, \"(nr_entries %d)\\n\", table->entries);\n    dumpf(indent, \"(entries \");\n    dump_insn_table(table->entries, indent+1, table->nr_entries);\n    dumpf(indent, \" )\\n\");\n\n    dumpf(indent, \"(sibling \", table->sibling);\n    dump_insn_table(table->sibling, indent+1, levels-1);\n    dumpf(indent, \" )\\n\");\n\n    dumpf(indent, \"(parent \", table->parent);\n    dump_insn_table(table->parent, indent+1, 0);\n    dumpf(indent, \" )\\n\");\n\n  }\n}",
+      "fn_code_pos": [
+        [
+          916,
+          0
+        ],
+        [
+          959,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dump_insn_table",
+        "parameters": {
+          "table": "insn_table",
+          "indent": "int",
+          "levels": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\nmain(int argc, char **argv)\n{\n  filter *filters = NULL;\n  decode_table *decode_rules = NULL;\n  insn_table *instructions = NULL;\n  cache_table *cache_rules = NULL;\n\n  if (argc != 5)\n    error(\"Usage: insn <filter> <hi-bit-nr> <decode-table> <insn-table>\\n\");\n\n  filters = new_filter(argv[1], filters);\n  hi_bit_nr = a2i(argv[2]);\n  ASSERT(hi_bit_nr < insn_bit_size);\n  decode_rules = load_decode_table(argv[3], hi_bit_nr);\n  instructions = load_insn_table(argv[4], decode_rules, filters, NULL,\n\t\t\t\t &cache_rules);\n  insn_table_expand_insns(instructions);\n\n  dump_insn_table(instructions, 0, -1);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          965,
+          0
+        ],
+        [
+          986,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "parse_insn_format(table_entry *entry,\n\t\t  char *format)",
+      "fn_dec_pos": [
+        [
+          60,
+          0
+        ],
+        [
+          61,
+          17
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "parse_insn_format",
+        "parameters": {
+          "entry": "table_entry",
+          "format": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "load_insn_table(const char *file_name,\n\t\tdecode_table *decode_rules,\n\t\tfilter *filters,\n\t\ttable_include *includes,\n\t\tcache_table **cache_rules)",
+      "fn_dec_pos": [
+        [
+          330,
+          0
+        ],
+        [
+          334,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "load_insn_table",
+        "parameters": {
+          "file_name": "char",
+          "decode_rules": "decode_table",
+          "filters": "filter",
+          "includes": "table_include",
+          "cache_rules": "cache_table"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "insn_table_find_opcode_field(insn *insns,\n\t\t\t     decode_table *rule,\n\t\t\t     int string_only)",
+      "fn_dec_pos": [
+        [
+          549,
+          0
+        ],
+        [
+          551,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "insn_table_find_opcode_field",
+        "parameters": {
+          "insns": "insn",
+          "rule": "decode_table",
+          "string_only": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"misc.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"lf.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"table.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"filter.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"ld-decode.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"ld-cache.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"ld-insn.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"igen.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "typedef enum {\n  field_constant_int = 1,\n  field_constant_slash = 2,\n  field_constant_string = 3\n} constant_field_types;",
+      {
+        "field_constant_int": "",
+        "field_constant_slash": "",
+        "field_constant_string": ""
+      },
+      "constant_field_types",
+      [
+        509,
+        0
+      ],
+      [
+        513,
+        23
+      ]
+    ]
+  ]
+}

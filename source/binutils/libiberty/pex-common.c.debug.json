@@ -1,0 +1,938 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "struct pex_obj *\npex_init_common (int flags, const char *pname, const char *tempbase,\n\t\t const struct pex_funcs *funcs)\n{\n  struct pex_obj *obj;\n\n  obj = XNEW (struct pex_obj);\n  obj->flags = flags;\n  obj->pname = pname;\n  obj->tempbase = tempbase;\n  obj->next_input = STDIN_FILE_NO;\n  obj->next_input_name = NULL;\n  obj->next_input_name_allocated = 0;\n  obj->stderr_pipe = -1;\n  obj->count = 0;\n  obj->children = NULL;\n  obj->status = NULL;\n  obj->time = NULL;\n  obj->number_waited = 0;\n  obj->input_file = NULL;\n  obj->read_output = NULL;\n  obj->read_err = NULL;\n  obj->remove_count = 0;\n  obj->remove = NULL;\n  obj->funcs = funcs;\n  obj->sysdep = NULL;\n  return obj;\n}",
+      "fn_code_pos": [
+        [
+          51,
+          0
+        ],
+        [
+          78,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_init_common",
+        "parameters": {
+          "flags": "int",
+          "pname": "char",
+          "tempbase": "char",
+          "funcs": "struct pex_funcs"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\npex_add_remove (struct pex_obj *obj, const char *name, int allocated)\n{\n  char *add;\n\n  ++obj->remove_count;\n  obj->remove = XRESIZEVEC (char *, obj->remove, obj->remove_count);\n  if (allocated)\n    add = (char *) name;\n  else\n    add = xstrdup (name);\n  obj->remove[obj->remove_count - 1] = add;\n}",
+      "fn_code_pos": [
+        [
+          82,
+          0
+        ],
+        [
+          94,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_add_remove",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "name": "char",
+          "allocated": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\ntemp_file (struct pex_obj *obj, int flags, char *name)\n{\n  if (name == NULL)\n    {\n      if (obj->tempbase == NULL)\n        {\n          name = make_temp_file (NULL);\n        }\n      else\n        {\n          int len = strlen (obj->tempbase);\n          int out;\n\n          if (len >= 6\n              && strcmp (obj->tempbase + len - 6, \"XXXXXX\") == 0)\n            name = xstrdup (obj->tempbase);\n          else\n            name = concat (obj->tempbase, \"XXXXXX\", NULL);\n\n          out = mkstemps (name, 0);\n          if (out < 0)\n            {\n              free (name);\n              return NULL;\n            }\n\n          /* This isn't obj->funcs->close because we got the\n             descriptor from mkstemps, not from a function in\n             obj->funcs.  Calling close here is just like what\n             make_temp_file does.  */\n          close (out);\n        }\n    }\n  else if ((flags & PEX_SUFFIX) != 0)\n    {\n      if (obj->tempbase == NULL)\n        name = make_temp_file (name);\n      else\n        name = concat (obj->tempbase, name, NULL);\n    }\n\n  return name;\n}",
+      "fn_code_pos": [
+        [
+          101,
+          0
+        ],
+        [
+          144,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "temp_file",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "flags": "int",
+          "name": "char"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "const char *\npex_run_in_environment (struct pex_obj *obj, int flags, const char *executable,\n       \t                char * const * argv, char * const * env,\n                        const char *orig_outname, const char *errname,\n                  \tint *err)\n{\n  const char *errmsg;\n  int in, out, errdes;\n  char *outname;\n  int outname_allocated;\n  int p[2];\n  int toclose;\n  pid_t pid;\n\n  in = -1;\n  out = -1;\n  errdes = -1;\n  outname = (char *) orig_outname;\n  outname_allocated = 0;\n\n  /* If the user called pex_input_file, close the file now.  */\n  if (obj->input_file)\n    {\n      if (fclose (obj->input_file) == EOF)\n        {\n          errmsg = \"closing pipeline input file\";\n          goto error_exit;\n        }\n      obj->input_file = NULL;\n    }\n\n  /* Set IN.  */\n\n  if (obj->next_input_name != NULL)\n    {\n      /* We have to make sure that the previous process has completed\n\t before we try to read the file.  */\n      if (!pex_get_status_and_time (obj, 0, &errmsg, err))\n\tgoto error_exit;\n\n      in = obj->funcs->open_read (obj, obj->next_input_name,\n\t\t\t\t  (flags & PEX_BINARY_INPUT) != 0);\n      if (in < 0)\n\t{\n\t  *err = errno;\n\t  errmsg = \"open temporary file\";\n\t  goto error_exit;\n\t}\n      if (obj->next_input_name_allocated)\n\t{\n\t  free (obj->next_input_name);\n\t  obj->next_input_name_allocated = 0;\n\t}\n      obj->next_input_name = NULL;\n    }\n  else\n    {\n      in = obj->next_input;\n      if (in < 0)\n\t{\n\t  *err = 0;\n\t  errmsg = \"pipeline already complete\";\n\t  goto error_exit;\n\t}\n    }\n\n  /* Set OUT and OBJ->NEXT_INPUT/OBJ->NEXT_INPUT_NAME.  */\n\n  if ((flags & PEX_LAST) != 0)\n    {\n      if (outname == NULL)\n\tout = STDOUT_FILE_NO;\n      else if ((flags & PEX_SUFFIX) != 0)\n\t{\n\t  outname = concat (obj->tempbase, outname, NULL);\n\t  outname_allocated = 1;\n\t}\n      obj->next_input = -1;\n    }\n  else if ((obj->flags & PEX_USE_PIPES) == 0)\n    {\n      outname = temp_file (obj, flags, outname);\n      if (! outname)\n        {\n          *err = 0;\n          errmsg = \"could not create temporary file\";\n          goto error_exit;\n        }\n\n      if (outname != orig_outname)\n        outname_allocated = 1;\n\n      if ((obj->flags & PEX_SAVE_TEMPS) == 0)\n\t{\n\t  pex_add_remove (obj, outname, outname_allocated);\n\t  outname_allocated = 0;\n\t}\n\n      /* Hand off ownership of outname to the next stage.  */\n      obj->next_input_name = outname;\n      obj->next_input_name_allocated = outname_allocated;\n      outname_allocated = 0;\n    }\n  else\n    {\n      if (obj->funcs->pipe (obj, p, (flags & PEX_BINARY_OUTPUT) != 0) < 0)\n\t{\n\t  *err = errno;\n\t  errmsg = \"pipe\";\n\t  goto error_exit;\n\t}\n\n      out = p[WRITE_PORT];\n      obj->next_input = p[READ_PORT];\n    }\n\n  if (out < 0)\n    {\n      out = obj->funcs->open_write (obj, outname,\n\t\t\t\t    (flags & PEX_BINARY_OUTPUT) != 0,\n\t\t\t\t    (flags & PEX_STDOUT_APPEND) != 0);\n      if (out < 0)\n\t{\n\t  *err = errno;\n\t  errmsg = \"open temporary output file\";\n\t  goto error_exit;\n\t}\n    }\n\n  if (outname_allocated)\n    {\n      free (outname);\n      outname_allocated = 0;\n    }\n\n  /* Set ERRDES.  */\n\n  if (errname != NULL && (flags & PEX_STDERR_TO_PIPE) != 0)\n    {\n      *err = 0;\n      errmsg = \"both ERRNAME and PEX_STDERR_TO_PIPE specified.\";\n      goto error_exit;\n    }\n\n  if (obj->stderr_pipe != -1)\n    {\n      *err = 0;\n      errmsg = \"PEX_STDERR_TO_PIPE used in the middle of pipeline\";\n      goto error_exit;\n    }\n\n  if (errname == NULL)\n    {\n      if (flags & PEX_STDERR_TO_PIPE)\n\t{\n\t  if (obj->funcs->pipe (obj, p, (flags & PEX_BINARY_ERROR) != 0) < 0)\n\t    {\n\t      *err = errno;\n\t      errmsg = \"pipe\";\n\t      goto error_exit;\n\t    }\n\t  \n\t  errdes = p[WRITE_PORT];\n\t  obj->stderr_pipe = p[READ_PORT];\t  \n\t}\n      else\n\t{\n\t  errdes = STDERR_FILE_NO;\n\t}\n    }\n  else\n    {\n      errdes = obj->funcs->open_write (obj, errname,\n\t\t\t\t       (flags & PEX_BINARY_ERROR) != 0,\n\t\t\t\t       (flags & PEX_STDERR_APPEND) != 0);\n      if (errdes < 0)\n\t{\n\t  *err = errno;\n\t  errmsg = \"open error file\";\n\t  goto error_exit;\n\t}\n    }\n\n  /* If we are using pipes, the child process has to close the next\n     input pipe.  */\n\n  if ((obj->flags & PEX_USE_PIPES) == 0)\n    toclose = -1;\n  else\n    toclose = obj->next_input;\n\n  /* Run the program.  */\n\n  pid = obj->funcs->exec_child (obj, flags, executable, argv, env,\n\t\t\t\tin, out, errdes, toclose, &errmsg, err);\n  if (pid < 0)\n    goto error_exit;\n\n  ++obj->count;\n  obj->children = XRESIZEVEC (pid_t, obj->children, obj->count);\n  obj->children[obj->count - 1] = pid;\n\n  return NULL;\n\n error_exit:\n  if (in >= 0 && in != STDIN_FILE_NO)\n    obj->funcs->close (obj, in);\n  if (out >= 0 && out != STDOUT_FILE_NO)\n    obj->funcs->close (obj, out);\n  if (errdes >= 0 && errdes != STDERR_FILE_NO)\n    obj->funcs->close (obj, errdes);\n  if (outname_allocated)\n    free (outname);\n  return errmsg;\n}",
+      "fn_code_pos": [
+        [
+          150,
+          0
+        ],
+        [
+          364,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_run_in_environment",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "flags": "int",
+          "executable": "char",
+          "argv": "char",
+          "env": "char",
+          "orig_outname": "char",
+          "errname": "char",
+          "err": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "const char *\npex_run (struct pex_obj *obj, int flags, const char *executable,\n       \t char * const * argv, const char *orig_outname, const char *errname,\n         int *err)\n{\n  return pex_run_in_environment (obj, flags, executable, argv, NULL,\n\t\t\t\t orig_outname, errname, err);\n}",
+      "fn_code_pos": [
+        [
+          368,
+          0
+        ],
+        [
+          375,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_run",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "flags": "int",
+          "executable": "char",
+          "argv": "char",
+          "orig_outname": "char",
+          "errname": "char",
+          "err": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "FILE *\npex_input_file (struct pex_obj *obj, int flags, const char *in_name)\n{\n  char *name = (char *) in_name;\n  FILE *f;\n\n  /* This must be called before the first pipeline stage is run, and\n     there must not have been any other input selected.  */\n  if (obj->count != 0\n      || (obj->next_input >= 0 && obj->next_input != STDIN_FILE_NO)\n      || obj->next_input_name)\n    {\n      errno = EINVAL;\n      return NULL;\n    }\n\n  name = temp_file (obj, flags, name);\n  if (! name)\n    return NULL;\n\n  f = fopen (name, (flags & PEX_BINARY_OUTPUT) ? \"wb\" : \"w\");\n  if (! f)\n    {\n      free (name);\n      return NULL;\n    }\n\n  obj->input_file = f;\n  obj->next_input_name = name;\n  obj->next_input_name_allocated = (name != in_name);\n\n  return f;\n}",
+      "fn_code_pos": [
+        [
+          379,
+          0
+        ],
+        [
+          411,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_input_file",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "flags": "int",
+          "in_name": "char"
+        },
+        "return_type": "FILE"
+      }
+    },
+    {
+      "fn_code": "FILE *\npex_input_pipe (struct pex_obj *obj, int binary)\n{\n  int p[2];\n  FILE *f;\n\n  /* You must call pex_input_pipe before the first pex_run or pex_one.  */\n  if (obj->count > 0)\n    goto usage_error;\n\n  /* You must be using pipes.  Implementations that don't support\n     pipes clear this flag before calling pex_init_common.  */\n  if (! (obj->flags & PEX_USE_PIPES))\n    goto usage_error;\n\n  /* If we have somehow already selected other input, that's a\n     mistake.  */\n  if ((obj->next_input >= 0 && obj->next_input != STDIN_FILE_NO)\n      || obj->next_input_name)\n    goto usage_error;\n\n  if (obj->funcs->pipe (obj, p, binary != 0) < 0)\n    return NULL;\n\n  f = obj->funcs->fdopenw (obj, p[WRITE_PORT], binary != 0);\n  if (! f)\n    {\n      int saved_errno = errno;\n      obj->funcs->close (obj, p[READ_PORT]);\n      obj->funcs->close (obj, p[WRITE_PORT]);\n      errno = saved_errno;\n      return NULL;\n    }\n\n  obj->next_input = p[READ_PORT];\n\n  return f;\n\n usage_error:\n  errno = EINVAL;\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          415,
+          0
+        ],
+        [
+          456,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_input_pipe",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "binary": "int"
+        },
+        "return_type": "FILE"
+      }
+    },
+    {
+      "fn_code": "FILE *\npex_read_output (struct pex_obj *obj, int binary)\n{\n  if (obj->next_input_name != NULL)\n    {\n      const char *errmsg;\n      int err;\n\n      /* We have to make sure that the process has completed before we\n\t try to read the file.  */\n      if (!pex_get_status_and_time (obj, 0, &errmsg, &err))\n\t{\n\t  errno = err;\n\t  return NULL;\n\t}\n\n      obj->read_output = fopen (obj->next_input_name, binary ? \"rb\" : \"r\");\n\n      if (obj->next_input_name_allocated)\n\t{\n\t  free (obj->next_input_name);\n\t  obj->next_input_name_allocated = 0;\n\t}\n      obj->next_input_name = NULL;\n    }\n  else\n    {\n      int o;\n\n      o = obj->next_input;\n      if (o < 0 || o == STDIN_FILE_NO)\n\treturn NULL;\n      obj->read_output = obj->funcs->fdopenr (obj, o, binary);\n      obj->next_input = -1;\n    }\n\n  return obj->read_output;\n}",
+      "fn_code_pos": [
+        [
+          461,
+          0
+        ],
+        [
+          498,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_read_output",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "binary": "int"
+        },
+        "return_type": "FILE"
+      }
+    },
+    {
+      "fn_code": "FILE *\npex_read_err (struct pex_obj *obj, int binary)\n{\n  int o;\n  \n  o = obj->stderr_pipe;\n  if (o < 0 || o == STDIN_FILE_NO)\n    return NULL;\n  obj->read_err = obj->funcs->fdopenr (obj, o, binary);\n  obj->stderr_pipe = -1;\n  return obj->read_err;    \n}",
+      "fn_code_pos": [
+        [
+          500,
+          0
+        ],
+        [
+          511,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_read_err",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "binary": "int"
+        },
+        "return_type": "FILE"
+      }
+    },
+    {
+      "fn_code": "static int\npex_get_status_and_time (struct pex_obj *obj, int done, const char **errmsg,\n\t\t\t int *err)\n{\n  int ret;\n  int i;\n\n  if (obj->number_waited == obj->count)\n    return 1;\n\n  obj->status = XRESIZEVEC (int, obj->status, obj->count);\n  if ((obj->flags & PEX_RECORD_TIMES) != 0)\n    obj->time = XRESIZEVEC (struct pex_time, obj->time, obj->count);\n\n  ret = 1;\n  for (i = obj->number_waited; i < obj->count; ++i)\n    {\n      if (obj->funcs->wait (obj, obj->children[i], &obj->status[i],\n\t\t\t    obj->time == NULL ? NULL : &obj->time[i],\n\t\t\t    done, errmsg, err) < 0)\n\tret = 0;\n    }\n  obj->number_waited = i;\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          516,
+          0
+        ],
+        [
+          541,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_get_status_and_time",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "done": "int",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npex_get_status (struct pex_obj *obj, int count, int *vector)\n{\n  if (obj->status == NULL)\n    {\n      const char *errmsg;\n      int err;\n\n      if (!pex_get_status_and_time (obj, 0, &errmsg, &err))\n\treturn 0;\n    }\n\n  if (count > obj->count)\n    {\n      memset (vector + obj->count, 0, (count - obj->count) * sizeof (int));\n      count = obj->count;\n    }\n\n  memcpy (vector, obj->status, count * sizeof (int));\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          545,
+          0
+        ],
+        [
+          566,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_get_status",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "count": "int",
+          "vector": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npex_get_times (struct pex_obj *obj, int count, struct pex_time *vector)\n{\n  if (obj->status == NULL)\n    {\n      const char *errmsg;\n      int err;\n\n      if (!pex_get_status_and_time (obj, 0, &errmsg, &err))\n\treturn 0;\n    }\n\n  if (obj->time == NULL)\n    return 0;\n\n  if (count > obj->count)\n    {\n      memset (vector + obj->count, 0,\n\t      (count - obj->count) * sizeof (struct pex_time));\n      count = obj->count;\n    }\n\n  memcpy (vector, obj->time, count * sizeof (struct pex_time));\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          570,
+          0
+        ],
+        [
+          595,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_get_times",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "count": "int",
+          "vector": "struct pex_time"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\npex_free (struct pex_obj *obj)\n{\n  /* Close pipe file descriptors corresponding to child's stdout and\n     stderr so that the child does not hang trying to output something\n     while we're waiting for it.  */\n  if (obj->next_input >= 0 && obj->next_input != STDIN_FILE_NO)\n    obj->funcs->close (obj, obj->next_input);\n  if (obj->stderr_pipe >= 0 && obj->stderr_pipe != STDIN_FILE_NO)\n    obj->funcs->close (obj, obj->stderr_pipe);\n  if (obj->read_output != NULL)\n    fclose (obj->read_output);\n  if (obj->read_err != NULL)\n    fclose (obj->read_err);\n\n  /* If the caller forgot to wait for the children, we do it here, to\n     avoid zombies.  */\n  if (obj->status == NULL)\n    {\n      const char *errmsg;\n      int err;\n\n      obj->flags &= ~ PEX_RECORD_TIMES;\n      pex_get_status_and_time (obj, 1, &errmsg, &err);\n    }\n\n  if (obj->next_input_name_allocated)\n    free (obj->next_input_name);\n  free (obj->children);\n  free (obj->status);\n  free (obj->time);\n\n  if (obj->remove_count > 0)\n    {\n      int i;\n\n      for (i = 0; i < obj->remove_count; ++i)\n\t{\n\t  remove (obj->remove[i]);\n\t  free (obj->remove[i]);\n\t}\n      free (obj->remove);\n    }\n\n  if (obj->funcs->cleanup != NULL)\n    obj->funcs->cleanup (obj);\n\n  free (obj);\n}",
+      "fn_code_pos": [
+        [
+          599,
+          0
+        ],
+        [
+          647,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_free",
+        "parameters": {
+          "obj": "struct pex_obj"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "mkstemps (char *, int)",
+      "fn_dec_pos": [
+        [
+          39,
+          11
+        ],
+        [
+          39,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mkstemps",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pex_add_remove (struct pex_obj *, const char *, int)",
+      "fn_dec_pos": [
+        [
+          45,
+          12
+        ],
+        [
+          45,
+          64
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_add_remove",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pex_get_status_and_time (struct pex_obj *, int, const char **,\n\t\t\t\t    int *)",
+      "fn_dec_pos": [
+        [
+          46,
+          11
+        ],
+        [
+          47,
+          14
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_get_status_and_time",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pex_init_common (int flags, const char *pname, const char *tempbase,\n\t\t const struct pex_funcs *funcs)",
+      "fn_dec_pos": [
+        [
+          52,
+          0
+        ],
+        [
+          53,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_init_common",
+        "parameters": {
+          "flags": "int",
+          "pname": "char",
+          "tempbase": "char",
+          "funcs": "struct pex_funcs"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "temp_file (struct pex_obj *obj, int flags, char *name)",
+      "fn_dec_pos": [
+        [
+          102,
+          0
+        ],
+        [
+          102,
+          54
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "temp_file",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "flags": "int",
+          "name": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pex_run_in_environment (struct pex_obj *obj, int flags, const char *executable,\n       \t                char * const * argv, char * const * env,\n                        const char *orig_outname, const char *errname,\n                  \tint *err)",
+      "fn_dec_pos": [
+        [
+          151,
+          0
+        ],
+        [
+          154,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_run_in_environment",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "flags": "int",
+          "executable": "char",
+          "argv": "char",
+          "env": "char",
+          "orig_outname": "char",
+          "errname": "char",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pex_run (struct pex_obj *obj, int flags, const char *executable,\n       \t char * const * argv, const char *orig_outname, const char *errname,\n         int *err)",
+      "fn_dec_pos": [
+        [
+          369,
+          0
+        ],
+        [
+          371,
+          18
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_run",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "flags": "int",
+          "executable": "char",
+          "argv": "char",
+          "orig_outname": "char",
+          "errname": "char",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pex_input_file (struct pex_obj *obj, int flags, const char *in_name)",
+      "fn_dec_pos": [
+        [
+          380,
+          0
+        ],
+        [
+          380,
+          68
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_input_file",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "flags": "int",
+          "in_name": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pex_input_pipe (struct pex_obj *obj, int binary)",
+      "fn_dec_pos": [
+        [
+          416,
+          0
+        ],
+        [
+          416,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_input_pipe",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "binary": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pex_read_output (struct pex_obj *obj, int binary)",
+      "fn_dec_pos": [
+        [
+          462,
+          0
+        ],
+        [
+          462,
+          49
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_read_output",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "binary": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pex_read_err (struct pex_obj *obj, int binary)",
+      "fn_dec_pos": [
+        [
+          501,
+          0
+        ],
+        [
+          501,
+          46
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pex_read_err",
+        "parameters": {
+          "obj": "struct pex_obj",
+          "binary": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        45,
+        28
+      ],
+      [
+        45,
+        42
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        46,
+        36
+      ],
+      [
+        46,
+        50
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        51,
+        0
+      ],
+      [
+        51,
+        14
+      ]
+    ],
+    [
+      "struct pex_funcs",
+      {},
+      "",
+      [
+        53,
+        9
+      ],
+      [
+        53,
+        25
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        55,
+        2
+      ],
+      [
+        55,
+        16
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        83,
+        16
+      ],
+      [
+        83,
+        30
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        102,
+        11
+      ],
+      [
+        102,
+        25
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        151,
+        24
+      ],
+      [
+        151,
+        38
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        369,
+        9
+      ],
+      [
+        369,
+        23
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        380,
+        16
+      ],
+      [
+        380,
+        30
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        416,
+        16
+      ],
+      [
+        416,
+        30
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        462,
+        17
+      ],
+      [
+        462,
+        31
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        501,
+        14
+      ],
+      [
+        501,
+        28
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        517,
+        25
+      ],
+      [
+        517,
+        39
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        546,
+        16
+      ],
+      [
+        546,
+        30
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        571,
+        15
+      ],
+      [
+        571,
+        29
+      ]
+    ],
+    [
+      "struct pex_time",
+      {},
+      "",
+      [
+        571,
+        47
+      ],
+      [
+        571,
+        62
+      ]
+    ],
+    [
+      "struct pex_time",
+      {},
+      "",
+      [
+        588,
+        38
+      ],
+      [
+        588,
+        53
+      ]
+    ],
+    [
+      "struct pex_time",
+      {},
+      "",
+      [
+        592,
+        45
+      ],
+      [
+        592,
+        60
+      ]
+    ],
+    [
+      "struct pex_obj",
+      {},
+      "",
+      [
+        600,
+        10
+      ],
+      [
+        600,
+        24
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"pex-common.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

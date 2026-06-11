@@ -1,0 +1,282 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nhw_sem_init_data(device *me)\n{\n  hw_sem_device *sem = (hw_sem_device*)device_data(me);\n  const device_unit *d;\n  int status;\n  union semun help;\n\n  /* initialize the properties of the sem */\n\n  if (device_find_property(me, \"key\") == NULL)\n    error(\"sem_init_data() required key property is missing\\n\");\n\n  if (device_find_property(me, \"value\") == NULL)\n    error(\"sem_init_data() required value property is missing\\n\");\n\n  sem->key = (key_t) device_find_integer_property(me, \"key\");\n  DTRACE(sem, (\"semaphore key (%d)\\n\", sem->key) );\n\n  sem->initial = (int) device_find_integer_property(me, \"value\");\n  DTRACE(sem, (\"semaphore initial value (%d)\\n\", sem->initial) );\n\n  d = device_unit_address(me);\n  sem->physical_address = d->cells[ d->nr_cells-1 ];\n  DTRACE(sem, (\"semaphore physical_address=0x%x\\n\", sem->physical_address));\n\n  /* Now to initialize the semaphore */\n\n  if ( sem->initial != -1 ) {\n\n    sem->id = semget(sem->key, 1, IPC_CREAT | 0660);\n    if (sem->id == -1)\n      error(\"hw_sem_init_data() semget failed\\n\");\n\n    help.val = sem->initial;\n    status = semctl( sem->id, 0, SETVAL, help );\n    if (status == -1)\n      error(\"hw_sem_init_data() semctl -- set value failed\\n\");\n\n  } else {\n    sem->id = semget(sem->key, 1, 0660);\n    if (sem->id == -1)\n      error(\"hw_sem_init_data() semget failed\\n\");\n  }\n\n  sem->count = semctl( sem->id, 0, GETVAL, help );\n  if (sem->count == -1)\n    error(\"hw_sem_init_data() semctl -- get value failed\\n\");\n  DTRACE(sem, (\"semaphore OS value (%d)\\n\", sem->count) );\n}",
+      "fn_code_pos": [
+        [
+          112,
+          0
+        ],
+        [
+          161,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_sem_init_data",
+        "parameters": {
+          "me": "device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_sem_attach_address_callback(device *me,\n\t\t\t\tattach_type attach,\n\t\t\t\tint space,\n\t\t\t\tunsigned_word addr,\n\t\t\t\tunsigned nr_bytes,\n\t\t\t\taccess_type access,\n\t\t\t\tdevice *client) /*callback/default*/\n{\n  hw_sem_device *sem = (hw_sem_device*)device_data(me);\n\n  if (space != 0)\n    error(\"sem_attach_address_callback() invalid address space\\n\");\n\n  if (nr_bytes == 12)\n    error(\"sem_attach_address_callback() invalid size\\n\");\n\n  sem->physical_address = addr;\n  DTRACE(sem, (\"semaphore physical_address=0x%x\\n\", addr));\n}",
+      "fn_code_pos": [
+        [
+          163,
+          0
+        ],
+        [
+          182,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_sem_attach_address_callback",
+        "parameters": {
+          "me": "device",
+          "attach": "attach_type",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "access": "access_type",
+          "client": "device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_sem_io_read_buffer(device *me,\n\t\t\t void *dest,\n\t\t\t int space,\n\t\t\t unsigned_word addr,\n\t\t\t unsigned nr_bytes,\n\t\t\t cpu *processor,\n\t\t\t unsigned_word cia)\n{\n  hw_sem_device *sem = (hw_sem_device*)device_data(me);\n  struct sembuf sb;\n  int status;\n  unsigned32 u32;\n  union semun help;\n\n  /* do we need to worry about out of range addresses? */\n\n  DTRACE(sem, (\"semaphore read addr=0x%x length=%d\\n\", addr, nr_bytes));\n\n  if (!(addr >= sem->physical_address && addr <= sem->physical_address + 11))\n    error(\"hw_sem_io_read_buffer() invalid address - out of range\\n\");\n\n  if ((addr % 4) != 0)\n    error(\"hw_sem_io_read_buffer() invalid address - alignment\\n\");\n\n  if (nr_bytes != 4)\n    error(\"hw_sem_io_read_buffer() invalid length\\n\");\n\n  switch ( (addr - sem->physical_address) / 4 ) {\n\n    case 0:  /* OBTAIN CURRENT VALUE */\n      break; \n\n    case 1:  /* LOCK */\n      sb.sem_num = 0;\n      sb.sem_op  = -1;\n      sb.sem_flg = 0;\n\n      status = semop(sem->id, &sb, 1);\n      if (status == -1) {\n        perror( \"hw_sem.c: lock\" );\n        error(\"hw_sem_io_read_buffer() sem lock\\n\");\n      }\n\n      DTRACE(sem, (\"semaphore lock %d\\n\", sem->count));\n      break; \n\n    case 2: /* UNLOCK */\n      sb.sem_num = 0;\n      sb.sem_op  = 1;\n      sb.sem_flg = 0;\n\n      status = semop(sem->id, &sb, 1);\n      if (status == -1) {\n        perror( \"hw_sem.c: unlock\" );\n        error(\"hw_sem_io_read_buffer() sem unlock\\n\");\n      }\n      DTRACE(sem, (\"semaphore unlock %d\\n\", sem->count));\n      break; \n\n    default:\n      error(\"hw_sem_io_read_buffer() invalid address - unknown error\\n\");\n      break; \n  }\n\n  /* assume target is big endian */\n  u32 = H2T_4(semctl( sem->id, 0, GETVAL, help ));\n\n  DTRACE(sem, (\"semaphore OS value (%d)\\n\", u32) );\n  if (u32 == 0xffffffff) {\n    perror( \"hw_sem.c: getval\" );\n    error(\"hw_sem_io_read_buffer() semctl -- get value failed\\n\");\n  }\n\n  memcpy(dest, &u32, nr_bytes);\n  return nr_bytes;\n\n}",
+      "fn_code_pos": [
+        [
+          184,
+          0
+        ],
+        [
+          261,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_sem_io_read_buffer",
+        "parameters": {
+          "me": "device",
+          "dest": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void *\nhw_sem_create(const char *name,\n\t\t const device_unit *unit_address,\n\t\t const char *args)\n{\n  hw_sem_device *sem = ZALLOC(hw_sem_device);\n  return sem;\n}",
+      "fn_code_pos": [
+        [
+          273,
+          0
+        ],
+        [
+          280,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_sem_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "hw_sem_create(const char *name,\n\t\t const device_unit *unit_address,\n\t\t const char *args)",
+      "fn_dec_pos": [
+        [
+          274,
+          0
+        ],
+        [
+          276,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_sem_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct _hw_sem_device {\n  unsigned_word physical_address;\n  key_t key;\n  int id;\n  int initial;\n  int count;\n} hw_sem_device;",
+      {
+        "physical_address": "unsigned_word",
+        "key": "key_t",
+        "id": "int",
+        "initial": "int",
+        "count": "int"
+      },
+      "hw_sem_device",
+      [
+        93,
+        0
+      ],
+      [
+        99,
+        16
+      ]
+    ],
+    [
+      "typedef struct _hw_sem_device {\n  unsigned_word physical_address;\n  key_t key;\n  int id;\n  int initial;\n  int count;\n} hw_sem_device;",
+      {
+        "physical_address": "unsigned_word",
+        "key": "key_t",
+        "id": "int",
+        "initial": "int",
+        "count": "int"
+      },
+      "hw_sem_device",
+      [
+        93,
+        0
+      ],
+      [
+        99,
+        16
+      ]
+    ],
+    [
+      "struct semid_ds",
+      {},
+      "",
+      [
+        104,
+        2
+      ],
+      [
+        104,
+        17
+      ]
+    ],
+    [
+      "struct seminfo",
+      {},
+      "",
+      [
+        107,
+        2
+      ],
+      [
+        107,
+        16
+      ]
+    ],
+    [
+      "struct sembuf",
+      {},
+      "",
+      [
+        194,
+        2
+      ],
+      [
+        194,
+        15
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"device_table.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <strings.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ipc.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <sys/sem.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

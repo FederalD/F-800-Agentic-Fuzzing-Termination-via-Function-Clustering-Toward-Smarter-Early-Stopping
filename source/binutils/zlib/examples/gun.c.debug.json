@@ -1,0 +1,488 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "local unsigned in(void *in_desc, z_const unsigned char **buf)\n{\n    int ret;\n    unsigned len;\n    unsigned char *next;\n    struct ind *me = (struct ind *)in_desc;\n\n    next = me->inbuf;\n    *buf = next;\n    len = 0;\n    do {\n        ret = PIECE;\n        if ((unsigned)ret > SIZE - len)\n            ret = (int)(SIZE - len);\n        ret = (int)read(me->infile, next, ret);\n        if (ret == -1) {\n            len = 0;\n            break;\n        }\n        next += ret;\n        len += ret;\n    } while (ret != 0 && len < SIZE);\n    return len;\n}",
+      "fn_code_pos": [
+        [
+          88,
+          0
+        ],
+        [
+          111,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "in",
+        "parameters": {
+          "in_desc": "void",
+          "char": "z_const unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "local int out(void *out_desc, unsigned char *buf, unsigned len)\n{\n    int ret;\n    struct outd *me = (struct outd *)out_desc;\n\n    if (me->check) {\n        me->crc = crc32(me->crc, buf, len);\n        me->total += len;\n    }\n    if (me->outfile != -1)\n        do {\n            ret = PIECE;\n            if ((unsigned)ret > len)\n                ret = (int)len;\n            ret = (int)write(me->outfile, buf, ret);\n            if (ret == -1)\n                return 1;\n            buf += ret;\n            len -= ret;\n        } while (len != 0);\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          130,
+          0
+        ],
+        [
+          151,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "out",
+        "parameters": {
+          "out_desc": "void",
+          "buf": "unsigned char",
+          "len": "unsigned"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int lunpipe(unsigned have, z_const unsigned char *next, struct ind *indp,\n                  int outfile, z_stream *strm)\n{\n    int last;                   /* last byte read by NEXT(), or -1 if EOF */\n    unsigned chunk;             /* bytes left in current chunk */\n    int left;                   /* bits left in rem */\n    unsigned rem;               /* unused bits from input */\n    int bits;                   /* current bits per code */\n    unsigned code;              /* code, table traversal index */\n    unsigned mask;              /* mask for current bits codes */\n    int max;                    /* maximum bits per code for this stream */\n    unsigned flags;             /* compress flags, then block compress flag */\n    unsigned end;               /* last valid entry in prefix/suffix tables */\n    unsigned temp;              /* current code */\n    unsigned prev;              /* previous code */\n    unsigned final;             /* last character written for previous code */\n    unsigned stack;             /* next position for reversed string */\n    unsigned outcnt;            /* bytes in output buffer */\n    struct outd outd;           /* output structure */\n    unsigned char *p;\n\n    /* set up output */\n    outd.outfile = outfile;\n    outd.check = 0;\n\n    /* process remainder of compress header -- a flags byte */\n    flags = NEXT();\n    if (last == -1)\n        return Z_BUF_ERROR;\n    if (flags & 0x60) {\n        strm->msg = (char *)\"unknown lzw flags set\";\n        return Z_DATA_ERROR;\n    }\n    max = flags & 0x1f;\n    if (max < 9 || max > 16) {\n        strm->msg = (char *)\"lzw bits out of range\";\n        return Z_DATA_ERROR;\n    }\n    if (max == 9)                           /* 9 doesn't really mean 9 */\n        max = 10;\n    flags &= 0x80;                          /* true if block compress */\n\n    /* clear table */\n    bits = 9;\n    mask = 0x1ff;\n    end = flags ? 256 : 255;\n\n    /* set up: get first 9-bit code, which is the first decompressed byte, but\n       don't create a table entry until the next code */\n    if (NEXT() == -1)                       /* no compressed data is ok */\n        return Z_OK;\n    final = prev = (unsigned)last;          /* low 8 bits of code */\n    if (NEXT() == -1)                       /* missing a bit */\n        return Z_BUF_ERROR;\n    if (last & 1) {                         /* code must be < 256 */\n        strm->msg = (char *)\"invalid lzw code\";\n        return Z_DATA_ERROR;\n    }\n    rem = (unsigned)last >> 1;              /* remaining 7 bits */\n    left = 7;\n    chunk = bits - 2;                       /* 7 bytes left in this chunk */\n    outbuf[0] = (unsigned char)final;       /* write first decompressed byte */\n    outcnt = 1;\n\n    /* decode codes */\n    stack = 0;\n    for (;;) {\n        /* if the table will be full after this, increment the code size */\n        if (end >= mask && bits < max) {\n            FLUSHCODE();\n            bits++;\n            mask <<= 1;\n            mask++;\n        }\n\n        /* get a code of length bits */\n        if (chunk == 0)                     /* decrement chunk modulo bits */\n            chunk = bits;\n        code = rem;                         /* low bits of code */\n        if (NEXT() == -1) {                 /* EOF is end of compressed data */\n            /* write remaining buffered output */\n            if (outcnt && out(&outd, outbuf, outcnt)) {\n                strm->next_in = outbuf;     /* signal write error */\n                return Z_BUF_ERROR;\n            }\n            return Z_OK;\n        }\n        code += (unsigned)last << left;     /* middle (or high) bits of code */\n        left += 8;\n        chunk--;\n        if (bits > left) {                  /* need more bits */\n            if (NEXT() == -1)               /* can't end in middle of code */\n                return Z_BUF_ERROR;\n            code += (unsigned)last << left; /* high bits of code */\n            left += 8;\n            chunk--;\n        }\n        code &= mask;                       /* mask to current code length */\n        left -= bits;                       /* number of unused bits */\n        rem = (unsigned)last >> (8 - left); /* unused bits from last byte */\n\n        /* process clear code (256) */\n        if (code == 256 && flags) {\n            FLUSHCODE();\n            bits = 9;                       /* initialize bits and mask */\n            mask = 0x1ff;\n            end = 255;                      /* empty table */\n            continue;                       /* get next code */\n        }\n\n        /* special code to reuse last match */\n        temp = code;                        /* save the current code */\n        if (code > end) {\n            /* Be picky on the allowed code here, and make sure that the code\n               we drop through (prev) will be a valid index so that random\n               input does not cause an exception.  The code != end + 1 check is\n               empirically derived, and not checked in the original uncompress\n               code.  If this ever causes a problem, that check could be safely\n               removed.  Leaving this check in greatly improves gun's ability\n               to detect random or corrupted input after a compress header.\n               In any case, the prev > end check must be retained. */\n            if (code != end + 1 || prev > end) {\n                strm->msg = (char *)\"invalid lzw code\";\n                return Z_DATA_ERROR;\n            }\n            match[stack++] = (unsigned char)final;\n            code = prev;\n        }\n\n        /* walk through linked list to generate output in reverse order */\n        p = match + stack;\n        while (code >= 256) {\n            *p++ = suffix[code];\n            code = prefix[code];\n        }\n        stack = p - match;\n        match[stack++] = (unsigned char)code;\n        final = code;\n\n        /* link new table entry */\n        if (end < mask) {\n            end++;\n            prefix[end] = (unsigned short)prev;\n            suffix[end] = (unsigned char)final;\n        }\n\n        /* set previous code for next iteration */\n        prev = temp;\n\n        /* write output in forward order */\n        while (stack > SIZE - outcnt) {\n            while (outcnt < SIZE)\n                outbuf[outcnt++] = match[--stack];\n            if (out(&outd, outbuf, outcnt)) {\n                strm->next_in = outbuf; /* signal write error */\n                return Z_BUF_ERROR;\n            }\n            outcnt = 0;\n        }\n        p = match + stack;\n        do {\n            outbuf[outcnt++] = *--p;\n        } while (p > match);\n        stack = 0;\n\n        /* loop for next code with final and prev as the last match, rem and\n           left provide the first 0..7 bits of the next code, end is the last\n           valid table entry */\n    }\n}",
+      "fn_code_pos": [
+        [
+          199,
+          0
+        ],
+        [
+          368,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "lunpipe",
+        "parameters": {
+          "have": "unsigned",
+          "char": "z_const unsigned",
+          "indp": "struct ind",
+          "outfile": "int",
+          "strm": "z_stream"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int gunpipe(z_stream *strm, int infile, int outfile)\n{\n    int ret, first, last;\n    unsigned have, flags, len;\n    z_const unsigned char *next = NULL;\n    struct ind ind, *indp;\n    struct outd outd;\n\n    /* setup input buffer */\n    ind.infile = infile;\n    ind.inbuf = inbuf;\n    indp = &ind;\n\n    /* decompress concatenated gzip streams */\n    have = 0;                               /* no input data read in yet */\n    first = 1;                              /* looking for first gzip header */\n    strm->next_in = Z_NULL;                 /* so Z_BUF_ERROR means EOF */\n    for (;;) {\n        /* look for the two magic header bytes for a gzip stream */\n        if (NEXT() == -1) {\n            ret = Z_OK;\n            break;                          /* empty gzip stream is ok */\n        }\n        if (last != 31 || (NEXT() != 139 && last != 157)) {\n            strm->msg = (char *)\"incorrect header check\";\n            ret = first ? Z_DATA_ERROR : Z_ERRNO;\n            break;                          /* not a gzip or compress header */\n        }\n        first = 0;                          /* next non-header is junk */\n\n        /* process a compress (LZW) file -- can't be concatenated after this */\n        if (last == 157) {\n            ret = lunpipe(have, next, indp, outfile, strm);\n            break;\n        }\n\n        /* process remainder of gzip header */\n        ret = Z_BUF_ERROR;\n        if (NEXT() != 8) {                  /* only deflate method allowed */\n            if (last == -1) break;\n            strm->msg = (char *)\"unknown compression method\";\n            ret = Z_DATA_ERROR;\n            break;\n        }\n        flags = NEXT();                     /* header flags */\n        NEXT();                             /* discard mod time, xflgs, os */\n        NEXT();\n        NEXT();\n        NEXT();\n        NEXT();\n        NEXT();\n        if (last == -1) break;\n        if (flags & 0xe0) {\n            strm->msg = (char *)\"unknown header flags set\";\n            ret = Z_DATA_ERROR;\n            break;\n        }\n        if (flags & 4) {                    /* extra field */\n            len = NEXT();\n            len += (unsigned)(NEXT()) << 8;\n            if (last == -1) break;\n            while (len > have) {\n                len -= have;\n                have = 0;\n                if (NEXT() == -1) break;\n                len--;\n            }\n            if (last == -1) break;\n            have -= len;\n            next += len;\n        }\n        if (flags & 8)                      /* file name */\n            while (NEXT() != 0 && last != -1)\n                ;\n        if (flags & 16)                     /* comment */\n            while (NEXT() != 0 && last != -1)\n                ;\n        if (flags & 2) {                    /* header crc */\n            NEXT();\n            NEXT();\n        }\n        if (last == -1) break;\n\n        /* set up output */\n        outd.outfile = outfile;\n        outd.check = 1;\n        outd.crc = crc32(0L, Z_NULL, 0);\n        outd.total = 0;\n\n        /* decompress data to output */\n        strm->next_in = next;\n        strm->avail_in = have;\n        ret = inflateBack(strm, in, indp, out, &outd);\n        if (ret != Z_STREAM_END) break;\n        next = strm->next_in;\n        have = strm->avail_in;\n        strm->next_in = Z_NULL;             /* so Z_BUF_ERROR means EOF */\n\n        /* check trailer */\n        ret = Z_BUF_ERROR;\n        if (NEXT() != (int)(outd.crc & 0xff) ||\n            NEXT() != (int)((outd.crc >> 8) & 0xff) ||\n            NEXT() != (int)((outd.crc >> 16) & 0xff) ||\n            NEXT() != (int)((outd.crc >> 24) & 0xff)) {\n            /* crc error */\n            if (last != -1) {\n                strm->msg = (char *)\"incorrect data check\";\n                ret = Z_DATA_ERROR;\n            }\n            break;\n        }\n        if (NEXT() != (int)(outd.total & 0xff) ||\n            NEXT() != (int)((outd.total >> 8) & 0xff) ||\n            NEXT() != (int)((outd.total >> 16) & 0xff) ||\n            NEXT() != (int)((outd.total >> 24) & 0xff)) {\n            /* length error */\n            if (last != -1) {\n                strm->msg = (char *)\"incorrect length check\";\n                ret = Z_DATA_ERROR;\n            }\n            break;\n        }\n\n        /* go back and look for another gzip stream */\n    }\n\n    /* clean up and return */\n    return ret;\n}",
+      "fn_code_pos": [
+        [
+          382,
+          0
+        ],
+        [
+          510,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gunpipe",
+        "parameters": {
+          "strm": "z_stream",
+          "infile": "int",
+          "outfile": "int"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local void copymeta(char *from, char *to)\n{\n    struct stat was;\n    struct utimbuf when;\n\n    /* get all of from's Unix meta data, return if not a regular file */\n    if (stat(from, &was) != 0 || (was.st_mode & S_IFMT) != S_IFREG)\n        return;\n\n    /* set to's mode bits, ignore errors */\n    (void)chmod(to, was.st_mode & 07777);\n\n    /* copy owner's user and group, ignore errors */\n    (void)chown(to, was.st_uid, was.st_gid);\n\n    /* copy access and modify times, ignore errors */\n    when.actime = was.st_atime;\n    when.modtime = was.st_mtime;\n    (void)utime(to, &when);\n}",
+      "fn_code_pos": [
+        [
+          516,
+          0
+        ],
+        [
+          535,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "copymeta",
+        "parameters": {
+          "from": "char",
+          "to": "char"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int gunzip(z_stream *strm, char *inname, char *outname, int test)\n{\n    int ret;\n    int infile, outfile;\n\n    /* open files */\n    if (inname == NULL || *inname == 0) {\n        inname = \"-\";\n        infile = 0;     /* stdin */\n    }\n    else {\n        infile = open(inname, O_RDONLY, 0);\n        if (infile == -1) {\n            fprintf(stderr, \"gun cannot open %s\\n\", inname);\n            return 0;\n        }\n    }\n    if (test)\n        outfile = -1;\n    else if (outname == NULL || *outname == 0) {\n        outname = \"-\";\n        outfile = 1;    /* stdout */\n    }\n    else {\n        outfile = open(outname, O_CREAT | O_TRUNC | O_WRONLY, 0666);\n        if (outfile == -1) {\n            close(infile);\n            fprintf(stderr, \"gun cannot create %s\\n\", outname);\n            return 0;\n        }\n    }\n    errno = 0;\n\n    /* decompress */\n    ret = gunpipe(strm, infile, outfile);\n    if (outfile > 2) close(outfile);\n    if (infile > 2) close(infile);\n\n    /* interpret result */\n    switch (ret) {\n    case Z_OK:\n    case Z_ERRNO:\n        if (infile > 2 && outfile > 2) {\n            copymeta(inname, outname);          /* copy attributes */\n            unlink(inname);\n        }\n        if (ret == Z_ERRNO)\n            fprintf(stderr, \"gun warning: trailing garbage ignored in %s\\n\",\n                    inname);\n        break;\n    case Z_DATA_ERROR:\n        if (outfile > 2) unlink(outname);\n        fprintf(stderr, \"gun data error on %s: %s\\n\", inname, strm->msg);\n        break;\n    case Z_MEM_ERROR:\n        if (outfile > 2) unlink(outname);\n        fprintf(stderr, \"gun out of memory error--aborting\\n\");\n        return 1;\n    case Z_BUF_ERROR:\n        if (outfile > 2) unlink(outname);\n        if (strm->next_in != Z_NULL) {\n            fprintf(stderr, \"gun write error on %s: %s\\n\",\n                    outname, strerror(errno));\n        }\n        else if (errno) {\n            fprintf(stderr, \"gun read error on %s: %s\\n\",\n                    inname, strerror(errno));\n        }\n        else {\n            fprintf(stderr, \"gun unexpected end of file on %s\\n\",\n                    inname);\n        }\n        break;\n    default:\n        if (outfile > 2) unlink(outname);\n        fprintf(stderr, \"gun internal error--aborting\\n\");\n        return 1;\n    }\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          547,
+          0
+        ],
+        [
+          626,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gunzip",
+        "parameters": {
+          "strm": "z_stream",
+          "inname": "char",
+          "outname": "char",
+          "test": "int"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "int main(int argc, char **argv)\n{\n    int ret, len, test;\n    char *outname;\n    unsigned char *window;\n    z_stream strm;\n\n    /* initialize inflateBack state for repeated use */\n    window = match;                         /* reuse LZW match buffer */\n    strm.zalloc = Z_NULL;\n    strm.zfree = Z_NULL;\n    strm.opaque = Z_NULL;\n    ret = inflateBackInit(&strm, 15, window);\n    if (ret != Z_OK) {\n        fprintf(stderr, \"gun out of memory error--aborting\\n\");\n        return 1;\n    }\n\n    /* decompress each file to the same name with the suffix removed */\n    argc--;\n    argv++;\n    test = 0;\n    if (argc && strcmp(*argv, \"-h\") == 0) {\n        fprintf(stderr, \"gun 1.6 (17 Jan 2010)\\n\");\n        fprintf(stderr, \"Copyright (C) 2003-2010 Mark Adler\\n\");\n        fprintf(stderr, \"usage: gun [-t] [file1.gz [file2.Z ...]]\\n\");\n        return 0;\n    }\n    if (argc && strcmp(*argv, \"-t\") == 0) {\n        test = 1;\n        argc--;\n        argv++;\n    }\n    if (argc)\n        do {\n            if (test)\n                outname = NULL;\n            else {\n                len = (int)strlen(*argv);\n                if (strcmp(*argv + len - 3, \".gz\") == 0 ||\n                    strcmp(*argv + len - 3, \"-gz\") == 0)\n                    len -= 3;\n                else if (strcmp(*argv + len - 2, \".z\") == 0 ||\n                    strcmp(*argv + len - 2, \"-z\") == 0 ||\n                    strcmp(*argv + len - 2, \"_z\") == 0 ||\n                    strcmp(*argv + len - 2, \".Z\") == 0)\n                    len -= 2;\n                else {\n                    fprintf(stderr, \"gun error: no gz type on %s--skipping\\n\",\n                            *argv);\n                    continue;\n                }\n                outname = malloc(len + 1);\n                if (outname == NULL) {\n                    fprintf(stderr, \"gun out of memory error--aborting\\n\");\n                    ret = 1;\n                    break;\n                }\n                memcpy(outname, *argv, len);\n                outname[len] = 0;\n            }\n            ret = gunzip(&strm, *argv, outname, test);\n            if (outname != NULL) free(outname);\n            if (ret) break;\n        } while (argv++, --argc);\n    else\n        ret = gunzip(&strm, NULL, NULL, test);\n\n    /* clean up */\n    inflateBackEnd(&strm);\n    return ret;\n}",
+      "fn_code_pos": [
+        [
+          630,
+          0
+        ],
+        [
+          701,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct ind {\n    int infile;\n    unsigned char *inbuf;\n}",
+      {
+        "infile": "int",
+        "*inbuf": "unsigned char"
+      },
+      "ind",
+      [
+        80,
+        0
+      ],
+      [
+        83,
+        1
+      ]
+    ],
+    [
+      "struct outd {\n    int outfile;\n    int check;                  /* true if checking crc and total */\n    unsigned long crc;\n    unsigned long total;\n}",
+      {
+        "outfile": "int",
+        "check": "int",
+        "crc": "unsigned long",
+        "total": "unsigned long"
+      },
+      "outd",
+      [
+        118,
+        0
+      ],
+      [
+        123,
+        1
+      ]
+    ],
+    [
+      "struct ind {\n    int infile;\n    unsigned char *inbuf;\n}",
+      {
+        "infile": "int",
+        "*inbuf": "unsigned char"
+      },
+      "ind",
+      [
+        80,
+        0
+      ],
+      [
+        83,
+        1
+      ]
+    ],
+    [
+      "struct ind",
+      {},
+      "",
+      [
+        93,
+        4
+      ],
+      [
+        93,
+        14
+      ]
+    ],
+    [
+      "struct ind",
+      {},
+      "",
+      [
+        93,
+        22
+      ],
+      [
+        93,
+        32
+      ]
+    ],
+    [
+      "struct outd {\n    int outfile;\n    int check;                  /* true if checking crc and total */\n    unsigned long crc;\n    unsigned long total;\n}",
+      {
+        "outfile": "int",
+        "check": "int",
+        "crc": "unsigned long",
+        "total": "unsigned long"
+      },
+      "outd",
+      [
+        118,
+        0
+      ],
+      [
+        123,
+        1
+      ]
+    ],
+    [
+      "struct outd",
+      {},
+      "",
+      [
+        133,
+        4
+      ],
+      [
+        133,
+        15
+      ]
+    ],
+    [
+      "struct outd",
+      {},
+      "",
+      [
+        133,
+        23
+      ],
+      [
+        133,
+        34
+      ]
+    ],
+    [
+      "struct ind",
+      {},
+      "",
+      [
+        199,
+        62
+      ],
+      [
+        199,
+        72
+      ]
+    ],
+    [
+      "struct outd",
+      {},
+      "",
+      [
+        217,
+        4
+      ],
+      [
+        217,
+        15
+      ]
+    ],
+    [
+      "struct ind",
+      {},
+      "",
+      [
+        387,
+        4
+      ],
+      [
+        387,
+        14
+      ]
+    ],
+    [
+      "struct outd",
+      {},
+      "",
+      [
+        388,
+        4
+      ],
+      [
+        388,
+        15
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        518,
+        4
+      ],
+      [
+        518,
+        15
+      ]
+    ],
+    [
+      "struct utimbuf",
+      {},
+      "",
+      [
+        519,
+        4
+      ],
+      [
+        519,
+        18
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <stdio.h>          /* fprintf() */\n",
+      [
+        59,
+        0
+      ],
+      [
+        60,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>         /* malloc(), free() */\n",
+      [
+        60,
+        0
+      ],
+      [
+        61,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>         /* strerror(), strcmp(), strlen(), memcpy() */\n",
+      [
+        61,
+        0
+      ],
+      [
+        62,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>          /* errno */\n",
+      [
+        62,
+        0
+      ],
+      [
+        63,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>          /* open() */\n",
+      [
+        63,
+        0
+      ],
+      [
+        64,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>         /* read(), write(), close(), chown(), unlink() */\n",
+      [
+        64,
+        0
+      ],
+      [
+        65,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        65,
+        0
+      ],
+      [
+        66,
+        0
+      ]
+    ],
+    [
+      "#include <sys/stat.h>       /* stat(), chmod() */\n",
+      [
+        66,
+        0
+      ],
+      [
+        67,
+        0
+      ]
+    ],
+    [
+      "#include <utime.h>          /* utime() */\n",
+      [
+        67,
+        0
+      ],
+      [
+        68,
+        0
+      ]
+    ],
+    [
+      "#include \"zlib.h\"           /* inflateBackInit(), inflateBack(), */\n",
+      [
+        68,
+        0
+      ],
+      [
+        69,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

@@ -1,0 +1,160 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "size_t\nmbrtowc (wchar_t *pwc, const char *s, size_t n, mbstate_t *ps)\n{\n  char *pstate = (char *)ps;\n\n  if (s == NULL)\n    {\n      pwc = NULL;\n      s = \"\";\n      n = 1;\n    }\n\n  if (n == 0)\n    return (size_t)(-2);\n\n  /* Here n > 0.  */\n\n  if (pstate == NULL)\n    pstate = internal_state;\n\n  {\n    size_t nstate = pstate[0];\n    char buf[4];\n    const char *p;\n    size_t m;\n\n    switch (nstate)\n      {\n      case 0:\n        p = s;\n        m = n;\n        break;\n      case 3:\n        buf[2] = pstate[3];\n        /*FALLTHROUGH*/\n      case 2:\n        buf[1] = pstate[2];\n        /*FALLTHROUGH*/\n      case 1:\n        buf[0] = pstate[1];\n        p = buf;\n        m = nstate;\n        buf[m++] = s[0];\n        if (n >= 2 && m < 4)\n          {\n            buf[m++] = s[1];\n            if (n >= 3 && m < 4)\n              buf[m++] = s[2];\n          }\n        break;\n      default:\n        errno = EINVAL;\n        return (size_t)(-1);\n      }\n\n    /* Here m > 0.  */\n\n# if __GLIBC__ || defined __UCLIBC__\n    /* Work around bug <http://sourceware.org/bugzilla/show_bug.cgi?id=9674> */\n    mbtowc (NULL, NULL, 0);\n# endif\n    {\n      int res = mbtowc (pwc, p, m);\n\n      if (res >= 0)\n        {\n          if (pwc != NULL && ((*pwc == 0) != (res == 0)))\n            abort ();\n          if (nstate >= (res > 0 ? res : 1))\n            abort ();\n          res -= nstate;\n          pstate[0] = 0;\n          return res;\n        }\n\n      /* mbtowc does not distinguish between invalid and incomplete multibyte\n         sequences.  But mbrtowc needs to make this distinction.\n         There are two possible approaches:\n           - Use iconv() and its return value.\n           - Use built-in knowledge about the possible encodings.\n         Given the low quality of implementation of iconv() on the systems that\n         lack mbrtowc(), we use the second approach.\n         The possible encodings are:\n           - 8-bit encodings,\n           - EUC-JP, EUC-KR, GB2312, EUC-TW, BIG5, GB18030, SJIS,\n           - UTF-8.\n         Use specialized code for each.  */\n      if (m >= 4 || m >= MB_CUR_MAX)\n        goto invalid;\n      /* Here MB_CUR_MAX > 1 and 0 < m < 4.  */\n      {\n        const char *encoding = locale_charset ();\n\n        if (STREQ_OPT (encoding, \"UTF-8\", 'U', 'T', 'F', '-', '8', 0, 0, 0, 0))\n          {\n            /* Cf. unistr/u8-mblen.c.  */\n            unsigned char c = (unsigned char) p[0];\n\n            if (c >= 0xc2)\n              {\n                if (c < 0xe0)\n                  {\n                    if (m == 1)\n                      goto incomplete;\n                  }\n                else if (c < 0xf0)\n                  {\n                    if (m == 1)\n                      goto incomplete;\n                    if (m == 2)\n                      {\n                        unsigned char c2 = (unsigned char) p[1];\n\n                        if ((c2 ^ 0x80) < 0x40\n                            && (c >= 0xe1 || c2 >= 0xa0)\n                            && (c != 0xed || c2 < 0xa0))\n                          goto incomplete;\n                      }\n                  }\n                else if (c <= 0xf4)\n                  {\n                    if (m == 1)\n                      goto incomplete;\n                    else /* m == 2 || m == 3 */\n                      {\n                        unsigned char c2 = (unsigned char) p[1];\n\n                        if ((c2 ^ 0x80) < 0x40\n                            && (c >= 0xf1 || c2 >= 0x90)\n                            && (c < 0xf4 || (c == 0xf4 && c2 < 0x90)))\n                          {\n                            if (m == 2)\n                              goto incomplete;\n                            else /* m == 3 */\n                              {\n                                unsigned char c3 = (unsigned char) p[2];\n\n                                if ((c3 ^ 0x80) < 0x40)\n                                  goto incomplete;\n                              }\n                          }\n                      }\n                  }\n              }\n            goto invalid;\n          }\n\n        /* As a reference for this code, you can use the GNU libiconv\n           implementation.  Look for uses of the RET_TOOFEW macro.  */\n\n        if (STREQ_OPT (encoding,\n                       \"EUC-JP\", 'E', 'U', 'C', '-', 'J', 'P', 0, 0, 0))\n          {\n            if (m == 1)\n              {\n                unsigned char c = (unsigned char) p[0];\n\n                if ((c >= 0xa1 && c < 0xff) || c == 0x8e || c == 0x8f)\n                  goto incomplete;\n              }\n            if (m == 2)\n              {\n                unsigned char c = (unsigned char) p[0];\n\n                if (c == 0x8f)\n                  {\n                    unsigned char c2 = (unsigned char) p[1];\n\n                    if (c2 >= 0xa1 && c2 < 0xff)\n                      goto incomplete;\n                  }\n              }\n            goto invalid;\n          }\n        if (STREQ_OPT (encoding,\n                       \"EUC-KR\", 'E', 'U', 'C', '-', 'K', 'R', 0, 0, 0)\n            || STREQ_OPT (encoding,\n                          \"GB2312\", 'G', 'B', '2', '3', '1', '2', 0, 0, 0)\n            || STREQ_OPT (encoding,\n                          \"BIG5\", 'B', 'I', 'G', '5', 0, 0, 0, 0, 0))\n          {\n            if (m == 1)\n              {\n                unsigned char c = (unsigned char) p[0];\n\n                if (c >= 0xa1 && c < 0xff)\n                  goto incomplete;\n              }\n            goto invalid;\n          }\n        if (STREQ_OPT (encoding,\n                       \"EUC-TW\", 'E', 'U', 'C', '-', 'T', 'W', 0, 0, 0))\n          {\n            if (m == 1)\n              {\n                unsigned char c = (unsigned char) p[0];\n\n                if ((c >= 0xa1 && c < 0xff) || c == 0x8e)\n                  goto incomplete;\n              }\n            else /* m == 2 || m == 3 */\n              {\n                unsigned char c = (unsigned char) p[0];\n\n                if (c == 0x8e)\n                  goto incomplete;\n              }\n            goto invalid;\n          }\n        if (STREQ_OPT (encoding,\n                       \"GB18030\", 'G', 'B', '1', '8', '0', '3', '0', 0, 0))\n          {\n            if (m == 1)\n              {\n                unsigned char c = (unsigned char) p[0];\n\n                if ((c >= 0x90 && c <= 0xe3) || (c >= 0xf8 && c <= 0xfe))\n                  goto incomplete;\n              }\n            else /* m == 2 || m == 3 */\n              {\n                unsigned char c = (unsigned char) p[0];\n\n                if (c >= 0x90 && c <= 0xe3)\n                  {\n                    unsigned char c2 = (unsigned char) p[1];\n\n                    if (c2 >= 0x30 && c2 <= 0x39)\n                      {\n                        if (m == 2)\n                          goto incomplete;\n                        else /* m == 3 */\n                          {\n                            unsigned char c3 = (unsigned char) p[2];\n\n                            if (c3 >= 0x81 && c3 <= 0xfe)\n                              goto incomplete;\n                          }\n                      }\n                  }\n              }\n            goto invalid;\n          }\n        if (STREQ_OPT (encoding, \"SJIS\", 'S', 'J', 'I', 'S', 0, 0, 0, 0, 0))\n          {\n            if (m == 1)\n              {\n                unsigned char c = (unsigned char) p[0];\n\n                if ((c >= 0x81 && c <= 0x9f) || (c >= 0xe0 && c <= 0xea)\n                    || (c >= 0xf0 && c <= 0xf9))\n                  goto incomplete;\n              }\n            goto invalid;\n          }\n\n        /* An unknown multibyte encoding.  */\n        goto incomplete;\n      }\n\n     incomplete:\n      {\n        size_t k = nstate;\n        /* Here 0 <= k < m < 4.  */\n        pstate[++k] = s[0];\n        if (k < m)\n          {\n            pstate[++k] = s[1];\n            if (k < m)\n              pstate[++k] = s[2];\n          }\n        if (k != m)\n          abort ();\n      }\n      pstate[0] = m;\n      return (size_t)(-2);\n\n     invalid:\n      errno = EILSEQ;\n      /* The conversion state is undefined, says POSIX.  */\n      return (size_t)(-1);\n    }\n  }\n}",
+      "fn_code_pos": [
+        [
+          42,
+          0
+        ],
+        [
+          325,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mbrtowc",
+        "parameters": {
+          "pwc": "wchar_t",
+          "s": "char",
+          "n": "size_t",
+          "ps": "mbstate_t"
+        },
+        "return_type": "size_t"
+      }
+    },
+    {
+      "fn_code": "size_t\nrpl_mbrtowc (wchar_t *pwc, const char *s, size_t n, mbstate_t *ps)\n{\n  size_t ret;\n  wchar_t wc;\n\n# if MBRTOWC_NULL_ARG2_BUG || MBRTOWC_RETVAL_BUG || MBRTOWC_EMPTY_INPUT_BUG\n  if (s == NULL)\n    {\n      pwc = NULL;\n      s = \"\";\n      n = 1;\n    }\n# endif\n\n# if MBRTOWC_EMPTY_INPUT_BUG\n  if (n == 0)\n    return (size_t) -2;\n# endif\n\n  if (! pwc)\n    pwc = &wc;\n\n# if MBRTOWC_RETVAL_BUG\n  {\n    static mbstate_t internal_state;\n\n    /* Override mbrtowc's internal state.  We cannot call mbsinit() on the\n       hidden internal state, but we can call it on our variable.  */\n    if (ps == NULL)\n      ps = &internal_state;\n\n    if (!mbsinit (ps))\n      {\n        /* Parse the rest of the multibyte character byte for byte.  */\n        size_t count = 0;\n        for (; n > 0; s++, n--)\n          {\n            ret = mbrtowc (&wc, s, 1, ps);\n\n            if (ret == (size_t)(-1))\n              return (size_t)(-1);\n            count++;\n            if (ret != (size_t)(-2))\n              {\n                /* The multibyte character has been completed.  */\n                *pwc = wc;\n                return (wc == 0 ? 0 : count);\n              }\n          }\n        return (size_t)(-2);\n      }\n  }\n# endif\n\n  ret = mbrtowc (pwc, s, n, ps);\n\n# if MBRTOWC_NUL_RETVAL_BUG\n  if (ret < (size_t) -2 && !*pwc)\n    return 0;\n# endif\n\n# if C_LOCALE_MAYBE_EILSEQ\n  if ((size_t) -2 <= ret && n != 0 && ! hard_locale (LC_CTYPE))\n    {\n      unsigned char uc = *s;\n      *pwc = uc;\n      return 1;\n    }\n# endif\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          332,
+          0
+        ],
+        [
+          404,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rpl_mbrtowc",
+        "parameters": {
+          "pwc": "wchar_t",
+          "s": "char",
+          "n": "size_t",
+          "ps": "mbstate_t"
+        },
+        "return_type": "size_t"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        17,
+        0
+      ],
+      [
+        18,
+        0
+      ]
+    ],
+    [
+      "#include <wchar.h>\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "# include \"hard-locale.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "# include <locale.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "# include <errno.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "# include <stdlib.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "# include \"localcharset.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "# include \"streq.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "# include \"verify.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

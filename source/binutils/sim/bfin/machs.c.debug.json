@@ -1,0 +1,1838 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\ndv_bfin_hw_port_parse (SIM_DESC sd, const struct bfin_model_data *mdata,\n\t\t       const char *dev)\n{\n  size_t i;\n  const char *sdev;\n\n  sdev = strchr (dev, '/');\n  if (sdev)\n    ++sdev;\n  else\n    sdev = dev;\n\n  for (i = 0; i < mdata->port_count; ++i)\n    {\n      const struct bfin_port_layout *port = &mdata->port[i];\n\n      /* There might be more than one mapping.  */\n      if (!strcmp (sdev, port->src))\n\tsim_hw_parse (sd, \"/core/%s > %s %s /core/%s\", dev,\n\t\t      port->src_port, port->dst_port, port->dst);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1417,
+          0
+        ],
+        [
+          1439,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dv_bfin_hw_port_parse",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "mdata": "struct bfin_model_data",
+          "dev": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_model_hw_tree_init (SIM_DESC sd, SIM_CPU *cpu)\n{\n  const SIM_MODEL *model = CPU_MODEL (cpu);\n  const struct bfin_model_data *mdata = CPU_MODEL_DATA (cpu);\n  const struct bfin_board_data *board = STATE_BOARD_DATA (sd);\n  int mnum = MODEL_NUM (model);\n  unsigned i, j, dma_chan;\n\n  /* Map the core devices.  */\n  for (i = 0; i < ARRAY_SIZE (bfin_core_dev); ++i)\n    {\n      const struct bfin_dev_layout *dev = &bfin_core_dev[i];\n      sim_hw_parse (sd, \"/core/%s/reg %#x %i\", dev->dev, dev->base, dev->len);\n    }\n  sim_hw_parse (sd, \"/core/bfin_ctimer > ivtmr ivtmr /core/bfin_cec\");\n\n  if (mnum == MODEL_BF000)\n    goto done;\n\n  /* Map the system devices.  */\n  dv_bfin_hw_parse (sd, sic, SIC);\n  for (i = 7; i < 16; ++i)\n    sim_hw_parse (sd, \"/core/bfin_sic > ivg%i ivg%i /core/bfin_cec\", i, i);\n\n  dv_bfin_hw_parse (sd, pll, PLL);\n\n  dma_chan = 0;\n  for (i = 0; i < mdata->dmac_count; ++i)\n    {\n      const struct bfin_dmac_layout *dmac = &mdata->dmac[i];\n\n      sim_hw_parse (sd, \"/core/bfin_dmac@%u/type %i\", i, mdata->model_num);\n\n      /* Hook up the non-mdma channels.  */\n      for (j = 0; j < dmac->dma_count; ++j)\n\t{\n\t  char dev[64];\n\n\t  sprintf (dev, \"bfin_dmac@%u/bfin_dma@%u\", i, dma_chan);\n\t  sim_hw_parse (sd, \"/core/%s/reg %#x %i\", dev,\n\t\t\tdmac->base + j * BFIN_MMR_DMA_SIZE, BFIN_MMR_DMA_SIZE);\n\t  dv_bfin_hw_port_parse (sd, mdata, dev);\n\n\t  ++dma_chan;\n\t}\n\n      /* Hook up the mdma channels -- assume every DMAC has 4.  */\n      for (j = 0; j < 4; ++j)\n\t{\n\t  char dev[64];\n\n\t  sprintf (dev, \"bfin_dmac@%u/bfin_dma@%u\", i, j + BFIN_DMAC_MDMA_BASE);\n\t  sim_hw_parse (sd, \"/core/%s/reg %#x %i\", dev,\n\t\t\tdmac->base + (j + dmac->dma_count) * BFIN_MMR_DMA_SIZE,\n\t\t\tBFIN_MMR_DMA_SIZE);\n\t  dv_bfin_hw_port_parse (sd, mdata, dev);\n\t}\n    }\n\n  for (i = 0; i < mdata->dev_count; ++i)\n    {\n      const struct bfin_dev_layout *dev = &mdata->dev[i];\n\n      if (dev->len)\n\t{\n\t  sim_hw_parse (sd, \"/core/%s/reg %#x %i\", dev->dev, dev->base, dev->len);\n\t  sim_hw_parse (sd, \"/core/%s/type %i\", dev->dev, mdata->model_num);\n\t}\n      else\n\t{\n\t  sim_hw_parse (sd, \"/core/%s\", dev->dev);\n\t}\n\n      dv_bfin_hw_port_parse (sd, mdata, dev->dev);\n      if (strchr (dev->dev, '/'))\n\tcontinue;\n\n      if (!strncmp (dev->dev, \"bfin_uart\", 9)\n\t  || !strncmp (dev->dev, \"bfin_emac\", 9)\n\t  || !strncmp (dev->dev, \"bfin_sport\", 10))\n\t{\n\t  const char *sint = dev->dev + 5;\n\t  sim_hw_parse (sd, \"/core/%s > tx   %s_tx   /core/bfin_dmac@%u\", dev->dev, sint, dev->dmac);\n\t  sim_hw_parse (sd, \"/core/%s > rx   %s_rx   /core/bfin_dmac@%u\", dev->dev, sint, dev->dmac);\n\t}\n      else if (!strncmp (dev->dev, \"bfin_wdog\", 9))\n\t{\n\t  sim_hw_parse (sd, \"/core/%s > reset rst  /core/bfin_cec\", dev->dev);\n\t  sim_hw_parse (sd, \"/core/%s > nmi   nmi  /core/bfin_cec\", dev->dev);\n\t}\n    }\n\n done:\n  /* Add any additional user board content.  */\n  if (board->hw_file)\n    sim_do_commandf (sd, \"hw-file %s\", board->hw_file);\n\n  /* Trigger all the new devices' finish func.  */\n  hw_tree_finish (dv_get_device (cpu, \"/\"));\n}",
+      "fn_code_pos": [
+        [
+          1450,
+          0
+        ],
+        [
+          1550,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_model_hw_tree_init",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_model_map_bfrom (SIM_DESC sd, SIM_CPU *cpu)\n{\n  const struct bfin_model_data *mdata = CPU_MODEL_DATA (cpu);\n  const struct bfin_board_data *board = STATE_BOARD_DATA (sd);\n  int mnum = mdata->model_num;\n  const struct bfrom *bfrom;\n  unsigned int sirev;\n\n  if (mnum >= 500 && mnum <= 509)\n    bfrom = bf50x_roms;\n  else if (mnum >= 510 && mnum <= 519)\n    bfrom = bf51x_roms;\n  else if (mnum >= 520 && mnum <= 529)\n    bfrom = (mnum & 1) ? bf527_roms : bf526_roms;\n  else if (mnum >= 531 && mnum <= 533)\n    bfrom = bf533_roms;\n  else if (mnum == 535)\n    return; /* Stub.  */\n  else if (mnum >= 534 && mnum <= 537)\n    bfrom = bf537_roms;\n  else if (mnum >= 538 && mnum <= 539)\n    bfrom = bf538_roms;\n  else if (mnum >= 540 && mnum <= 549)\n    bfrom = bf54x_roms;\n  else if (mnum == 561)\n    bfrom = bf561_roms;\n  else if (mnum >= 590 && mnum <= 599)\n    bfrom = bf59x_roms;\n  else\n    return;\n\n  if (board->sirev_valid)\n    sirev = board->sirev;\n  else\n    sirev = bfrom->sirev;\n  while (bfrom->buf)\n    {\n      /* Map all the ranges for this model/sirev.  */\n      if (bfrom->sirev == sirev)\n        sim_core_attach (sd, NULL, 0, access_read_exec, 0, bfrom->addr,\n\t\t\t bfrom->alias_len ? : bfrom->len, bfrom->len, NULL,\n\t\t\t (char *)bfrom->buf);\n      ++bfrom;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1645,
+          0
+        ],
+        [
+          1690,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_model_map_bfrom",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nbfin_model_cpu_init (SIM_DESC sd, SIM_CPU *cpu)\n{\n  const SIM_MODEL *model = CPU_MODEL (cpu);\n  const struct bfin_model_data *mdata = CPU_MODEL_DATA (cpu);\n  int mnum = MODEL_NUM (model);\n  size_t idx;\n\n  /* These memory maps are supposed to be cpu-specific, but the common sim\n     code does not yet allow that (2nd arg is \"cpu\" rather than \"NULL\".  */\n  sim_core_attach (sd, NULL, 0, access_read_write, 0, BFIN_L1_SRAM_SCRATCH,\n\t\t   BFIN_L1_SRAM_SCRATCH_SIZE, 0, NULL, NULL);\n\n  if (STATE_ENVIRONMENT (CPU_STATE (cpu)) != OPERATING_ENVIRONMENT)\n    return;\n\n  if (mnum == MODEL_BF000)\n    goto core_only;\n\n  /* Map in the on-chip memories (SRAMs).  */\n  mdata = &bfin_model_data[MODEL_NUM (model)];\n  for (idx = 0; idx < mdata->mem_count; ++idx)\n    {\n      const struct bfin_memory_layout *mem = &mdata->mem[idx];\n      sim_core_attach (sd, NULL, 0, mem->mask, 0, mem->addr,\n\t\t       mem->len, 0, NULL, NULL);\n    }\n\n  /* Map the on-chip ROMs.  */\n  bfin_model_map_bfrom (sd, cpu);\n\n core_only:\n  /* Finally, build up the tree for this cpu model.  */\n  bfin_model_hw_tree_init (sd, cpu);\n}",
+      "fn_code_pos": [
+        [
+          1692,
+          0
+        ],
+        [
+          1726,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_model_cpu_init",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "bu32\nbfin_model_get_chipid (SIM_DESC sd)\n{\n  SIM_CPU *cpu = STATE_CPU (sd, 0);\n  const struct bfin_model_data *mdata = CPU_MODEL_DATA (cpu);\n  const struct bfin_board_data *board = STATE_BOARD_DATA (sd);\n  return\n\t (board->sirev << 28) |\n\t (mdata->chipid << 12) |\n\t (((0xE5 << 1) | 1) & 0xFF);\n}",
+      "fn_code_pos": [
+        [
+          1728,
+          0
+        ],
+        [
+          1738,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_model_get_chipid",
+        "parameters": {
+          "sd": "SIM_DESC"
+        },
+        "return_type": "bu32"
+      }
+    },
+    {
+      "fn_code": "bu32\nbfin_model_get_dspid (SIM_DESC sd)\n{\n  const struct bfin_board_data *board = STATE_BOARD_DATA (sd);\n  return\n\t (0xE5 << 24) |\n\t (0x04 << 16) |\n\t (board->sirev);\n}",
+      "fn_code_pos": [
+        [
+          1740,
+          0
+        ],
+        [
+          1748,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_model_get_dspid",
+        "parameters": {
+          "sd": "SIM_DESC"
+        },
+        "return_type": "bu32"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_model_init (SIM_CPU *cpu)\n{\n  CPU_MODEL_DATA (cpu) = (void *) &bfin_model_data[MODEL_NUM (CPU_MODEL (cpu))];\n}",
+      "fn_code_pos": [
+        [
+          1750,
+          0
+        ],
+        [
+          1754,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_model_init",
+        "parameters": {
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static bu32\nbfin_extract_unsigned_integer (unsigned char *addr, int len)\n{\n  bu32 retval;\n  unsigned char * p;\n  unsigned char * startaddr = (unsigned char *)addr;\n  unsigned char * endaddr = startaddr + len;\n\n  retval = 0;\n\n  for (p = endaddr; p > startaddr;)\n    retval = (retval << 8) | *--p;\n\n  return retval;\n}",
+      "fn_code_pos": [
+        [
+          1756,
+          0
+        ],
+        [
+          1770,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_extract_unsigned_integer",
+        "parameters": {
+          "addr": "unsigned char",
+          "len": "int"
+        },
+        "return_type": "bu32"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_store_unsigned_integer (unsigned char *addr, int len, bu32 val)\n{\n  unsigned char *p;\n  unsigned char *startaddr = addr;\n  unsigned char *endaddr = startaddr + len;\n\n  for (p = startaddr; p < endaddr;)\n    {\n      *p++ = val & 0xff;\n      val >>= 8;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1772,
+          0
+        ],
+        [
+          1784,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_store_unsigned_integer",
+        "parameters": {
+          "addr": "unsigned char",
+          "len": "int",
+          "val": "bu32"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static bu32 *\nbfin_get_reg (SIM_CPU *cpu, int rn)\n{\n  switch (rn)\n    {\n    case SIM_BFIN_R0_REGNUM: return &DREG (0);\n    case SIM_BFIN_R1_REGNUM: return &DREG (1);\n    case SIM_BFIN_R2_REGNUM: return &DREG (2);\n    case SIM_BFIN_R3_REGNUM: return &DREG (3);\n    case SIM_BFIN_R4_REGNUM: return &DREG (4);\n    case SIM_BFIN_R5_REGNUM: return &DREG (5);\n    case SIM_BFIN_R6_REGNUM: return &DREG (6);\n    case SIM_BFIN_R7_REGNUM: return &DREG (7);\n    case SIM_BFIN_P0_REGNUM: return &PREG (0);\n    case SIM_BFIN_P1_REGNUM: return &PREG (1);\n    case SIM_BFIN_P2_REGNUM: return &PREG (2);\n    case SIM_BFIN_P3_REGNUM: return &PREG (3);\n    case SIM_BFIN_P4_REGNUM: return &PREG (4);\n    case SIM_BFIN_P5_REGNUM: return &PREG (5);\n    case SIM_BFIN_SP_REGNUM: return &SPREG;\n    case SIM_BFIN_FP_REGNUM: return &FPREG;\n    case SIM_BFIN_I0_REGNUM: return &IREG (0);\n    case SIM_BFIN_I1_REGNUM: return &IREG (1);\n    case SIM_BFIN_I2_REGNUM: return &IREG (2);\n    case SIM_BFIN_I3_REGNUM: return &IREG (3);\n    case SIM_BFIN_M0_REGNUM: return &MREG (0);\n    case SIM_BFIN_M1_REGNUM: return &MREG (1);\n    case SIM_BFIN_M2_REGNUM: return &MREG (2);\n    case SIM_BFIN_M3_REGNUM: return &MREG (3);\n    case SIM_BFIN_B0_REGNUM: return &BREG (0);\n    case SIM_BFIN_B1_REGNUM: return &BREG (1);\n    case SIM_BFIN_B2_REGNUM: return &BREG (2);\n    case SIM_BFIN_B3_REGNUM: return &BREG (3);\n    case SIM_BFIN_L0_REGNUM: return &LREG (0);\n    case SIM_BFIN_L1_REGNUM: return &LREG (1);\n    case SIM_BFIN_L2_REGNUM: return &LREG (2);\n    case SIM_BFIN_L3_REGNUM: return &LREG (3);\n    case SIM_BFIN_RETS_REGNUM: return &RETSREG;\n    case SIM_BFIN_A0_DOT_X_REGNUM: return &AXREG (0);\n    case SIM_BFIN_A0_DOT_W_REGNUM: return &AWREG (0);\n    case SIM_BFIN_A1_DOT_X_REGNUM: return &AXREG (1);\n    case SIM_BFIN_A1_DOT_W_REGNUM: return &AWREG (1);\n    case SIM_BFIN_LC0_REGNUM: return &LCREG (0);\n    case SIM_BFIN_LT0_REGNUM: return &LTREG (0);\n    case SIM_BFIN_LB0_REGNUM: return &LBREG (0);\n    case SIM_BFIN_LC1_REGNUM: return &LCREG (1);\n    case SIM_BFIN_LT1_REGNUM: return &LTREG (1);\n    case SIM_BFIN_LB1_REGNUM: return &LBREG (1);\n    case SIM_BFIN_CYCLES_REGNUM: return &CYCLESREG;\n    case SIM_BFIN_CYCLES2_REGNUM: return &CYCLES2REG;\n    case SIM_BFIN_USP_REGNUM: return &USPREG;\n    case SIM_BFIN_SEQSTAT_REGNUM: return &SEQSTATREG;\n    case SIM_BFIN_SYSCFG_REGNUM: return &SYSCFGREG;\n    case SIM_BFIN_RETI_REGNUM: return &RETIREG;\n    case SIM_BFIN_RETX_REGNUM: return &RETXREG;\n    case SIM_BFIN_RETN_REGNUM: return &RETNREG;\n    case SIM_BFIN_RETE_REGNUM: return &RETEREG;\n    case SIM_BFIN_PC_REGNUM: return &PCREG;\n    default: return NULL;\n  }\n}",
+      "fn_code_pos": [
+        [
+          1786,
+          0
+        ],
+        [
+          1846,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_get_reg",
+        "parameters": {
+          "cpu": "SIM_CPU",
+          "rn": "int"
+        },
+        "return_type": "bu32"
+      }
+    },
+    {
+      "fn_code": "static int\nbfin_reg_fetch (SIM_CPU *cpu, int rn, unsigned char *buf, int len)\n{\n  bu32 value, *reg;\n\n  reg = bfin_get_reg (cpu, rn);\n  if (reg)\n    value = *reg;\n  else if (rn == SIM_BFIN_ASTAT_REGNUM)\n    value = ASTAT;\n  else if (rn == SIM_BFIN_CC_REGNUM)\n    value = CCREG;\n  else\n    return -1;\n\n  /* Handle our KSP/USP shadowing in SP.  While in supervisor mode, we\n     have the normal SP/USP behavior.  User mode is tricky though.  */\n  if (STATE_ENVIRONMENT (CPU_STATE (cpu)) == OPERATING_ENVIRONMENT\n      && cec_is_user_mode (cpu))\n    {\n      if (rn == SIM_BFIN_SP_REGNUM)\n\tvalue = KSPREG;\n      else if (rn == SIM_BFIN_USP_REGNUM)\n\tvalue = SPREG;\n    }\n\n  bfin_store_unsigned_integer (buf, 4, value);\n\n  return 4;\n}",
+      "fn_code_pos": [
+        [
+          1848,
+          0
+        ],
+        [
+          1877,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_reg_fetch",
+        "parameters": {
+          "cpu": "SIM_CPU",
+          "rn": "int",
+          "buf": "unsigned char",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nbfin_reg_store (SIM_CPU *cpu, int rn, unsigned char *buf, int len)\n{\n  bu32 value, *reg;\n\n  value = bfin_extract_unsigned_integer (buf, 4);\n  reg = bfin_get_reg (cpu, rn);\n\n  if (reg)\n    /* XXX: Need register trace ?  */\n    *reg = value;\n  else if (rn == SIM_BFIN_ASTAT_REGNUM)\n    SET_ASTAT (value);\n  else if (rn == SIM_BFIN_CC_REGNUM)\n    SET_CCREG (value);\n  else\n    return -1;\n\n  return 4;\n}",
+      "fn_code_pos": [
+        [
+          1879,
+          0
+        ],
+        [
+          1898,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_reg_store",
+        "parameters": {
+          "cpu": "SIM_CPU",
+          "rn": "int",
+          "buf": "unsigned char",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static sim_cia\nbfin_pc_get (SIM_CPU *cpu)\n{\n  return PCREG;\n}",
+      "fn_code_pos": [
+        [
+          1900,
+          0
+        ],
+        [
+          1904,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_pc_get",
+        "parameters": {
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "sim_cia"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_pc_set (SIM_CPU *cpu, sim_cia newpc)\n{\n  SET_PCREG (newpc);\n}",
+      "fn_code_pos": [
+        [
+          1906,
+          0
+        ],
+        [
+          1910,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_pc_set",
+        "parameters": {
+          "cpu": "SIM_CPU",
+          "newpc": "sim_cia"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static const char *\nbfin_insn_name (SIM_CPU *cpu, int i)\n{\n  static const char * const insn_name[] = {\n#define I(insn) #insn,\n#include \"insn_list.def\"\n#undef I\n  };\n  return insn_name[i];\n}",
+      "fn_code_pos": [
+        [
+          1912,
+          0
+        ],
+        [
+          1921,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_insn_name",
+        "parameters": {
+          "cpu": "SIM_CPU",
+          "i": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_init_cpu (SIM_CPU *cpu)\n{\n  CPU_REG_FETCH (cpu) = bfin_reg_fetch;\n  CPU_REG_STORE (cpu) = bfin_reg_store;\n  CPU_PC_FETCH (cpu) = bfin_pc_get;\n  CPU_PC_STORE (cpu) = bfin_pc_set;\n  CPU_MAX_INSNS (cpu) = BFIN_INSN_MAX;\n  CPU_INSN_NAME (cpu) = bfin_insn_name;\n}",
+      "fn_code_pos": [
+        [
+          1923,
+          0
+        ],
+        [
+          1932,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_init_cpu",
+        "parameters": {
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_prepare_run (SIM_CPU *cpu)\n{\n}",
+      "fn_code_pos": [
+        [
+          1934,
+          0
+        ],
+        [
+          1937,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_prepare_run",
+        "parameters": {
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static SIM_RC\nbfin_mach_option_handler (SIM_DESC sd, sim_cpu *current_cpu, int opt,\n\t\t\t  char *arg, int is_command)\n{\n  struct bfin_board_data *board = STATE_BOARD_DATA (sd);\n\n  switch (opt)\n    {\n    case OPTION_MACH_SIREV:\n      board->sirev_valid = 1;\n      /* Accept (and throw away) a leading \"0.\" in the version.  */\n      if (!strncmp (arg, \"0.\", 2))\n\targ += 2;\n      board->sirev = atoi (arg);\n      if (board->sirev > 0xf)\n\t{\n\t  sim_io_eprintf (sd, \"sirev '%s' needs to fit into 4 bits\\n\", arg);\n\t  return SIM_RC_FAIL;\n\t}\n      return SIM_RC_OK;\n\n    case OPTION_MACH_HW_BOARD_FILE:\n      board->hw_file = xstrdup (arg);\n      return SIM_RC_OK;\n\n    default:\n      sim_io_eprintf (sd, \"Unknown Blackfin option %d\\n\", opt);\n      return SIM_RC_FAIL;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1989,
+          0
+        ],
+        [
+          2018,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_mach_option_handler",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "current_cpu": "sim_cpu",
+          "opt": "int",
+          "arg": "char",
+          "is_command": "int"
+        },
+        "return_type": "SIM_RC"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "bfin_get_reg (SIM_CPU *cpu, int rn)",
+      "fn_dec_pos": [
+        [
+          1787,
+          0
+        ],
+        [
+          1787,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_get_reg",
+        "parameters": {
+          "cpu": "SIM_CPU",
+          "rn": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "bfin_insn_name (SIM_CPU *cpu, int i)",
+      "fn_dec_pos": [
+        [
+          1913,
+          0
+        ],
+        [
+          1913,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_insn_name",
+        "parameters": {
+          "cpu": "SIM_CPU",
+          "i": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct bfin_memory_layout {\n  address_word addr, len;\n  unsigned mask;\t/* see mapmask in sim_core_attach() */\n}",
+      {
+        "addr": "address_word",
+        "mask": "unsigned"
+      },
+      "bfin_memory_layout",
+      [
+        33,
+        0
+      ],
+      [
+        36,
+        1
+      ]
+    ],
+    [
+      "struct bfin_dev_layout {\n  address_word base, len;\n  unsigned int dmac;\n  const char *dev;\n}",
+      {
+        "base": "address_word",
+        "dmac": "unsigned int",
+        "char": "const"
+      },
+      "bfin_dev_layout",
+      [
+        37,
+        0
+      ],
+      [
+        41,
+        1
+      ]
+    ],
+    [
+      "struct bfin_dmac_layout {\n  address_word base;\n  unsigned int dma_count;\n}",
+      {
+        "base": "address_word",
+        "dma_count": "unsigned int"
+      },
+      "bfin_dmac_layout",
+      [
+        42,
+        0
+      ],
+      [
+        45,
+        1
+      ]
+    ],
+    [
+      "struct bfin_port_layout {\n  /* Which device this routes to (name/port).  */\n  const char *dst, *dst_port;\n  /* Which device this routes from (name/port).  */\n  const char *src, *src_port;\n}",
+      {
+        "char": "const"
+      },
+      "bfin_port_layout",
+      [
+        46,
+        0
+      ],
+      [
+        51,
+        1
+      ]
+    ],
+    [
+      "struct bfin_model_data {\n  bu32 chipid;\n  int model_num;\n  const struct bfin_memory_layout *mem;\n  size_t mem_count;\n  const struct bfin_dev_layout *dev;\n  size_t dev_count;\n  const struct bfin_dmac_layout *dmac;\n  size_t dmac_count;\n  const struct bfin_port_layout *port;\n  size_t port_count;\n}",
+      {
+        "chipid": "bu32",
+        "model_num": "int",
+        "struct bfin_memory_layout": "const",
+        "mem_count": "size_t",
+        "struct bfin_dev_layout": "const",
+        "dev_count": "size_t",
+        "struct bfin_dmac_layout": "const",
+        "dmac_count": "size_t",
+        "struct bfin_port_layout": "const",
+        "port_count": "size_t"
+      },
+      "bfin_model_data",
+      [
+        52,
+        0
+      ],
+      [
+        63,
+        1
+      ]
+    ],
+    [
+      "struct bfrom {\n  bu32 addr, len, alias_len;\n  int sirev;\n  const char *buf;\n}",
+      {
+        "addr": "bu32",
+        "sirev": "int",
+        "char": "const"
+      },
+      "bfrom",
+      [
+        1554,
+        0
+      ],
+      [
+        1558,
+        1
+      ]
+    ],
+    [
+      "struct bfin_memory_layout {\n  address_word addr, len;\n  unsigned mask;\t/* see mapmask in sim_core_attach() */\n}",
+      {
+        "addr": "address_word",
+        "mask": "unsigned"
+      },
+      "bfin_memory_layout",
+      [
+        33,
+        0
+      ],
+      [
+        36,
+        1
+      ]
+    ],
+    [
+      "struct bfin_dev_layout {\n  address_word base, len;\n  unsigned int dmac;\n  const char *dev;\n}",
+      {
+        "base": "address_word",
+        "dmac": "unsigned int",
+        "char": "const"
+      },
+      "bfin_dev_layout",
+      [
+        37,
+        0
+      ],
+      [
+        41,
+        1
+      ]
+    ],
+    [
+      "struct bfin_dmac_layout {\n  address_word base;\n  unsigned int dma_count;\n}",
+      {
+        "base": "address_word",
+        "dma_count": "unsigned int"
+      },
+      "bfin_dmac_layout",
+      [
+        42,
+        0
+      ],
+      [
+        45,
+        1
+      ]
+    ],
+    [
+      "struct bfin_port_layout {\n  /* Which device this routes to (name/port).  */\n  const char *dst, *dst_port;\n  /* Which device this routes from (name/port).  */\n  const char *src, *src_port;\n}",
+      {
+        "char": "const"
+      },
+      "bfin_port_layout",
+      [
+        46,
+        0
+      ],
+      [
+        51,
+        1
+      ]
+    ],
+    [
+      "struct bfin_model_data {\n  bu32 chipid;\n  int model_num;\n  const struct bfin_memory_layout *mem;\n  size_t mem_count;\n  const struct bfin_dev_layout *dev;\n  size_t dev_count;\n  const struct bfin_dmac_layout *dmac;\n  size_t dmac_count;\n  const struct bfin_port_layout *port;\n  size_t port_count;\n}",
+      {
+        "chipid": "bu32",
+        "model_num": "int",
+        "struct bfin_memory_layout": "const",
+        "mem_count": "size_t",
+        "struct bfin_dev_layout": "const",
+        "dev_count": "size_t",
+        "struct bfin_dmac_layout": "const",
+        "dmac_count": "size_t",
+        "struct bfin_port_layout": "const",
+        "port_count": "size_t"
+      },
+      "bfin_model_data",
+      [
+        52,
+        0
+      ],
+      [
+        63,
+        1
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        55,
+        8
+      ],
+      [
+        55,
+        33
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        57,
+        8
+      ],
+      [
+        57,
+        30
+      ]
+    ],
+    [
+      "struct bfin_dmac_layout",
+      {},
+      "",
+      [
+        59,
+        8
+      ],
+      [
+        59,
+        31
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        61,
+        8
+      ],
+      [
+        61,
+        31
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        81,
+        13
+      ],
+      [
+        81,
+        38
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        82,
+        13
+      ],
+      [
+        82,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dmac_layout",
+      {},
+      "",
+      [
+        83,
+        13
+      ],
+      [
+        83,
+        36
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        84,
+        13
+      ],
+      [
+        84,
+        36
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        89,
+        13
+      ],
+      [
+        89,
+        38
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        103,
+        13
+      ],
+      [
+        103,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dmac_layout",
+      {},
+      "",
+      [
+        127,
+        13
+      ],
+      [
+        127,
+        36
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        133,
+        13
+      ],
+      [
+        133,
+        36
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        202,
+        13
+      ],
+      [
+        202,
+        38
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        221,
+        13
+      ],
+      [
+        221,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        247,
+        13
+      ],
+      [
+        247,
+        35
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        279,
+        13
+      ],
+      [
+        279,
+        36
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        351,
+        13
+      ],
+      [
+        351,
+        38
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        372,
+        13
+      ],
+      [
+        372,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        400,
+        13
+      ],
+      [
+        400,
+        35
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        434,
+        13
+      ],
+      [
+        434,
+        36
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        503,
+        13
+      ],
+      [
+        503,
+        38
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        512,
+        13
+      ],
+      [
+        512,
+        38
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        523,
+        13
+      ],
+      [
+        523,
+        38
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        537,
+        13
+      ],
+      [
+        537,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dmac_layout",
+      {},
+      "",
+      [
+        553,
+        13
+      ],
+      [
+        553,
+        36
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        559,
+        13
+      ],
+      [
+        559,
+        36
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        594,
+        13
+      ],
+      [
+        594,
+        38
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        608,
+        13
+      ],
+      [
+        608,
+        38
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        620,
+        13
+      ],
+      [
+        620,
+        38
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        634,
+        13
+      ],
+      [
+        634,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        669,
+        13
+      ],
+      [
+        669,
+        35
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        710,
+        13
+      ],
+      [
+        710,
+        36
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        773,
+        13
+      ],
+      [
+        773,
+        38
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        790,
+        13
+      ],
+      [
+        790,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dmac_layout",
+      {},
+      "",
+      [
+        811,
+        13
+      ],
+      [
+        811,
+        36
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        817,
+        13
+      ],
+      [
+        817,
+        36
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        883,
+        13
+      ],
+      [
+        883,
+        38
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        906,
+        13
+      ],
+      [
+        906,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        946,
+        13
+      ],
+      [
+        946,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        991,
+        13
+      ],
+      [
+        991,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dmac_layout",
+      {},
+      "",
+      [
+        1038,
+        13
+      ],
+      [
+        1038,
+        36
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        1065,
+        13
+      ],
+      [
+        1065,
+        36
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        1199,
+        13
+      ],
+      [
+        1199,
+        38
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        1211,
+        13
+      ],
+      [
+        1211,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dmac_layout",
+      {},
+      "",
+      [
+        1237,
+        13
+      ],
+      [
+        1237,
+        36
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        1243,
+        13
+      ],
+      [
+        1243,
+        36
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        1318,
+        13
+      ],
+      [
+        1318,
+        38
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        1326,
+        13
+      ],
+      [
+        1326,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dmac_layout",
+      {},
+      "",
+      [
+        1340,
+        13
+      ],
+      [
+        1340,
+        36
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        1346,
+        13
+      ],
+      [
+        1346,
+        36
+      ]
+    ],
+    [
+      "struct bfin_model_data",
+      {},
+      "",
+      [
+        1389,
+        13
+      ],
+      [
+        1389,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        1405,
+        13
+      ],
+      [
+        1405,
+        35
+      ]
+    ],
+    [
+      "struct bfin_model_data",
+      {},
+      "",
+      [
+        1418,
+        42
+      ],
+      [
+        1418,
+        64
+      ]
+    ],
+    [
+      "struct bfin_port_layout",
+      {},
+      "",
+      [
+        1432,
+        12
+      ],
+      [
+        1432,
+        35
+      ]
+    ],
+    [
+      "struct bfin_model_data",
+      {},
+      "",
+      [
+        1454,
+        8
+      ],
+      [
+        1454,
+        30
+      ]
+    ],
+    [
+      "struct bfin_board_data",
+      {},
+      "",
+      [
+        1455,
+        8
+      ],
+      [
+        1455,
+        30
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        1462,
+        12
+      ],
+      [
+        1462,
+        34
+      ]
+    ],
+    [
+      "struct bfin_dmac_layout",
+      {},
+      "",
+      [
+        1480,
+        12
+      ],
+      [
+        1480,
+        35
+      ]
+    ],
+    [
+      "struct bfin_dev_layout",
+      {},
+      "",
+      [
+        1512,
+        12
+      ],
+      [
+        1512,
+        34
+      ]
+    ],
+    [
+      "struct bfrom {\n  bu32 addr, len, alias_len;\n  int sirev;\n  const char *buf;\n}",
+      {
+        "addr": "bu32",
+        "sirev": "int",
+        "char": "const"
+      },
+      "bfrom",
+      [
+        1554,
+        0
+      ],
+      [
+        1558,
+        1
+      ]
+    ],
+    [
+      "struct bfrom",
+      {},
+      "",
+      [
+        1565,
+        13
+      ],
+      [
+        1565,
+        25
+      ]
+    ],
+    [
+      "struct bfrom",
+      {},
+      "",
+      [
+        1570,
+        13
+      ],
+      [
+        1570,
+        25
+      ]
+    ],
+    [
+      "struct bfrom",
+      {},
+      "",
+      [
+        1577,
+        13
+      ],
+      [
+        1577,
+        25
+      ]
+    ],
+    [
+      "struct bfrom",
+      {},
+      "",
+      [
+        1584,
+        13
+      ],
+      [
+        1584,
+        25
+      ]
+    ],
+    [
+      "struct bfrom",
+      {},
+      "",
+      [
+        1591,
+        13
+      ],
+      [
+        1591,
+        25
+      ]
+    ],
+    [
+      "struct bfrom",
+      {},
+      "",
+      [
+        1601,
+        13
+      ],
+      [
+        1601,
+        25
+      ]
+    ],
+    [
+      "struct bfrom",
+      {},
+      "",
+      [
+        1609,
+        13
+      ],
+      [
+        1609,
+        25
+      ]
+    ],
+    [
+      "struct bfrom",
+      {},
+      "",
+      [
+        1619,
+        13
+      ],
+      [
+        1619,
+        25
+      ]
+    ],
+    [
+      "struct bfrom",
+      {},
+      "",
+      [
+        1631,
+        13
+      ],
+      [
+        1631,
+        25
+      ]
+    ],
+    [
+      "struct bfrom",
+      {},
+      "",
+      [
+        1637,
+        13
+      ],
+      [
+        1637,
+        25
+      ]
+    ],
+    [
+      "struct bfin_model_data",
+      {},
+      "",
+      [
+        1648,
+        8
+      ],
+      [
+        1648,
+        30
+      ]
+    ],
+    [
+      "struct bfin_board_data",
+      {},
+      "",
+      [
+        1649,
+        8
+      ],
+      [
+        1649,
+        30
+      ]
+    ],
+    [
+      "struct bfrom",
+      {},
+      "",
+      [
+        1651,
+        8
+      ],
+      [
+        1651,
+        20
+      ]
+    ],
+    [
+      "struct bfin_model_data",
+      {},
+      "",
+      [
+        1696,
+        8
+      ],
+      [
+        1696,
+        30
+      ]
+    ],
+    [
+      "struct bfin_memory_layout",
+      {},
+      "",
+      [
+        1715,
+        12
+      ],
+      [
+        1715,
+        37
+      ]
+    ],
+    [
+      "struct bfin_model_data",
+      {},
+      "",
+      [
+        1732,
+        8
+      ],
+      [
+        1732,
+        30
+      ]
+    ],
+    [
+      "struct bfin_board_data",
+      {},
+      "",
+      [
+        1733,
+        8
+      ],
+      [
+        1733,
+        30
+      ]
+    ],
+    [
+      "struct bfin_board_data",
+      {},
+      "",
+      [
+        1743,
+        8
+      ],
+      [
+        1743,
+        30
+      ]
+    ],
+    [
+      "struct bfin_board_data",
+      {},
+      "",
+      [
+        1993,
+        2
+      ],
+      [
+        1993,
+        24
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb/sim-bfin.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-hw.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"devices.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"dv-bfin_cec.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"dv-bfin_dmac.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"proc_list.def\"\n",
+      [
+        1399,
+        0
+      ],
+      [
+        1400,
+        0
+      ]
+    ],
+    [
+      "#include \"bfroms/all.h\"\n",
+      [
+        1552,
+        0
+      ],
+      [
+        1553,
+        0
+      ]
+    ],
+    [
+      "#include \"proc_list.def\"\n",
+      [
+        1942,
+        0
+      ],
+      [
+        1943,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum {\n  OPTION_MACH_SIREV = OPTION_START,\n  OPTION_MACH_HW_BOARD_FILE,\n}",
+      {
+        "OPTION_MACH_SIREV": "",
+        "OPTION_MACH_HW_BOARD_FILE": ""
+      },
+      "",
+      [
+        1971,
+        0
+      ],
+      [
+        1974,
+        1
+      ]
+    ]
+  ]
+}

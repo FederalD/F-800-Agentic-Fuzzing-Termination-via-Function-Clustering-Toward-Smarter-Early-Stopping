@@ -1,0 +1,388 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\ndeliver_cris_interrupt (struct hw *me, void *data)\n{\n  struct cris_hw *crishw = hw_data (me);\n  SIM_DESC simulator = hw_system (me);\n  sim_cpu *cpu = STATE_CPU (simulator, 0);\n  unsigned int intno = crishw->pending_vector;\n\n if (CPU_CRIS_DELIVER_INTERRUPT (cpu) (cpu, CRIS_INT_INT, intno))\n    {\n      crishw->pending_vector = 0;\n      crishw->pending_handler = NULL;\n      return;\n    }\n\n {\n   /* Bug workaround: at time T with a pending number of cycles N to\n      process, if re-scheduling an event at time T+M, M < N,\n      sim_events_process gets stuck at T (updating the \"time\" to\n      before the event rather than after the event, or somesuch).\n\n      Hacking this locally is thankfully easy: if we see the same\n      simulation time, increase the number of cycles.  Do this every\n      time we get here, until a new time is seen (supposedly unstuck\n      re-delivery).  (Fixing in SIM/GDB source will hopefully then\n      also be easier, having a tangible test-case.)  */\n   static signed64 last_events_time = 0;\n   static signed64 delta = 1;\n   signed64 this_events_time = hw_event_queue_time (me);\n\n   if (this_events_time == last_events_time)\n     delta++;\n   else\n     {\n       delta = 1;\n       last_events_time = this_events_time;\n     }\n\n   crishw->pending_handler\n     = hw_event_queue_schedule (me, delta, deliver_cris_interrupt, NULL);\n }\n}",
+      "fn_code_pos": [
+        [
+          109,
+          0
+        ],
+        [
+          150,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "deliver_cris_interrupt",
+        "parameters": {
+          "me": "struct hw",
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncris_port_event (struct hw *me,\n\t\t int my_port,\n\t\t struct hw *source,\n\t\t int source_port,\n\t\t int intparam)\n{\n  struct cris_hw *crishw = hw_data (me);\n  unsigned32 vec;\n\n  /* A few placeholders; only the INT port is implemented.  */\n  switch (my_port)\n    {\n    case INT_PORT:\n      HW_TRACE ((me, \"INT value=0x%x\", intparam));\n      break;\n\n    default:\n      hw_abort (me, \"bad switch\");\n      break;\n    }\n\n  if (intparam == 0)\n    return;\n\n  if (crishw->int_to_vec != NULL)\n    {\n      unsigned int i;\n      for (i = 0; crishw->int_to_vec[i].portval != 0; i++)\n\tif (crishw->int_to_vec[i].portval == intparam)\n\t  break;\n\n      if (crishw->int_to_vec[i].portval == 0)\n\thw_abort (me, \"unsupported value for int port: 0x%x\", intparam);\n\n      vec = crishw->int_to_vec[i].vec;\n    }\n  else\n    vec = (unsigned32) intparam;\n\n  if (crishw->pending_vector != 0)\n    {\n      if (vec == crishw->pending_vector)\n\treturn;\n\n      switch (crishw->multi_int_action)\n\t{\n\tcase cris_multint_abort:\n\t  hw_abort (me, \"int 0x%x (0x%x) while int 0x%x hasn't been delivered\",\n\t\t    vec, intparam, crishw->pending_vector);\n\t  break;\n\n\tcase cris_multint_ignore_previous:\n\t  break;\n\n\tcase cris_multint_vector:\n\t  vec = crishw->multiple_int_vector;\n\t  break;\n\n\tdefault:\n\t  hw_abort (me, \"bad switch\");\n\t}\n    }\n\n  crishw->pending_vector = vec;\n\n  /* Schedule our event handler *now*.  */\n  if (crishw->pending_handler == NULL)\n    crishw->pending_handler\n      = hw_event_queue_schedule (me, 0, deliver_cris_interrupt, NULL);\n}",
+      "fn_code_pos": [
+        [
+          155,
+          0
+        ],
+        [
+          225,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cris_port_event",
+        "parameters": {
+          "me": "struct hw",
+          "my_port": "int",
+          "source": "struct hw",
+          "source_port": "int",
+          "intparam": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncris_finish (struct hw *me)\n{\n  struct cris_hw *crishw;\n  const struct hw_property *vec_for_int;\n  const struct hw_property *multiple_int;\n\n  crishw = HW_ZALLOC (me, struct cris_hw);\n  set_hw_data (me, crishw);\n  set_hw_ports (me, cris_ports);\n  set_hw_port_event (me, cris_port_event);\n\n  vec_for_int = hw_find_property (me, \"vec-for-int\");\n  if (vec_for_int != NULL)\n    {\n      unsigned32 vecsize;\n      unsigned32 i;\n\n      if (hw_property_type (vec_for_int) != array_property)\n\thw_abort (me, \"property \\\"vec-for-int\\\" has the wrong type\");\n\n      vecsize = hw_property_sizeof_array (vec_for_int) / sizeof (signed_cell);\n\n      if ((vecsize % 2) != 0)\n\thw_abort (me, \"translation vector does not consist of even pairs\");\n\n      crishw->int_to_vec\n\t= hw_malloc (me, (vecsize/2 + 1) * sizeof (crishw->int_to_vec[0]));\n\n      for (i = 0; i < vecsize/2; i++)\n\t{\n\t  signed_cell portval_sc;\n\t  signed_cell vec_sc;\n\n\t  if (!hw_find_integer_array_property (me, \"vec-for-int\", i*2,\n\t\t\t\t\t       &portval_sc)\n\t      || !hw_find_integer_array_property (me, \"vec-for-int\", i*2 + 1,\n\t\t\t\t\t\t  &vec_sc)\n\t      || portval_sc < 0\n\t      || vec_sc < 0)\n\t    hw_abort (me, \"no valid vector translation pair %u\", i);\n\n\t  crishw->int_to_vec[i].portval = (unsigned32) portval_sc;\n\t  crishw->int_to_vec[i].vec = (unsigned32) vec_sc;\n\t}\n\n      crishw->int_to_vec[i].portval = 0;\n      crishw->int_to_vec[i].vec = 0;\n    }\n\n  multiple_int = hw_find_property (me, \"multiple-int\");\n  if (multiple_int != NULL)\n    {\n      if (hw_property_type (multiple_int) == integer_property)\n\t{\n\t  crishw->multiple_int_vector\n\t    = hw_find_integer_property (me, \"multiple-int\");\n\t  crishw->multi_int_action = cris_multint_vector;\n\t}\n      else\n\t{\n\t  const char *action = hw_find_string_property (me, \"multiple-int\");\n\n\t  if (action == NULL)\n\t    hw_abort (me, \"property \\\"multiple-int\\\" has the wrong type\");\n\n\t  if (strcmp (action, \"abort\") == 0)\n\t    crishw->multi_int_action = cris_multint_abort;\n\t  else if (strcmp (action, \"ignore_previous\") == 0)\n\t    crishw->multi_int_action = cris_multint_ignore_previous;\n\t  else\n\t    hw_abort (me, \"property \\\"multiple-int\\\" must be one of <vector number>\\n\"\n\t\t      \"\\\"abort\\\" and \\\"ignore_previous\\\", not \\\"%s\\\"\", action);\n\t}\n    }\n  else\n    crishw->multi_int_action = cris_multint_abort;\n}",
+      "fn_code_pos": [
+        [
+          229,
+          0
+        ],
+        [
+          306,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cris_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct cris_vec_tr\n {\n   unsigned32 portval, vec;\n }",
+      {
+        "portval": "unsigned32"
+      },
+      "cris_vec_tr",
+      [
+        85,
+        0
+      ],
+      [
+        88,
+        2
+      ]
+    ],
+    [
+      "struct cris_hw\n {\n   struct hw_event *pending_handler;\n   unsigned32 pending_vector;\n   struct cris_vec_tr *int_to_vec;\n   enum cris_multiple_ints multi_int_action;\n   unsigned32 multiple_int_vector;\n }",
+      {
+        "*pending_handler": "struct hw_event",
+        "pending_vector": "unsigned32",
+        "*int_to_vec": "struct cris_vec_tr",
+        "multi_int_action": "enum cris_multiple_ints",
+        "multiple_int_vector": "unsigned32"
+      },
+      "cris_hw",
+      [
+        97,
+        0
+      ],
+      [
+        104,
+        2
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        79,
+        13
+      ],
+      [
+        79,
+        38
+      ]
+    ],
+    [
+      "struct cris_vec_tr\n {\n   unsigned32 portval, vec;\n }",
+      {
+        "portval": "unsigned32"
+      },
+      "cris_vec_tr",
+      [
+        85,
+        0
+      ],
+      [
+        88,
+        2
+      ]
+    ],
+    [
+      "struct cris_hw\n {\n   struct hw_event *pending_handler;\n   unsigned32 pending_vector;\n   struct cris_vec_tr *int_to_vec;\n   enum cris_multiple_ints multi_int_action;\n   unsigned32 multiple_int_vector;\n }",
+      {
+        "*pending_handler": "struct hw_event",
+        "pending_vector": "unsigned32",
+        "*int_to_vec": "struct cris_vec_tr",
+        "multi_int_action": "enum cris_multiple_ints",
+        "multiple_int_vector": "unsigned32"
+      },
+      "cris_hw",
+      [
+        97,
+        0
+      ],
+      [
+        104,
+        2
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        99,
+        3
+      ],
+      [
+        99,
+        18
+      ]
+    ],
+    [
+      "struct cris_vec_tr",
+      {},
+      "",
+      [
+        101,
+        3
+      ],
+      [
+        101,
+        21
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        110,
+        24
+      ],
+      [
+        110,
+        33
+      ]
+    ],
+    [
+      "struct cris_hw",
+      {},
+      "",
+      [
+        112,
+        2
+      ],
+      [
+        112,
+        16
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        156,
+        17
+      ],
+      [
+        156,
+        26
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        158,
+        3
+      ],
+      [
+        158,
+        12
+      ]
+    ],
+    [
+      "struct cris_hw",
+      {},
+      "",
+      [
+        162,
+        2
+      ],
+      [
+        162,
+        16
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        230,
+        13
+      ],
+      [
+        230,
+        22
+      ]
+    ],
+    [
+      "struct cris_hw",
+      {},
+      "",
+      [
+        232,
+        2
+      ],
+      [
+        232,
+        16
+      ]
+    ],
+    [
+      "struct hw_property",
+      {},
+      "",
+      [
+        233,
+        8
+      ],
+      [
+        233,
+        26
+      ]
+    ],
+    [
+      "struct hw_property",
+      {},
+      "",
+      [
+        234,
+        8
+      ],
+      [
+        234,
+        26
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        308,
+        6
+      ],
+      [
+        308,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum\n {\n   INT_PORT,\n }",
+      {
+        "INT_PORT": ""
+      },
+      "",
+      [
+        74,
+        0
+      ],
+      [
+        77,
+        2
+      ]
+    ],
+    [
+      "enum cris_multiple_ints\n  {\n    cris_multint_abort,\n    cris_multint_ignore_previous,\n    cris_multint_vector\n  }",
+      {
+        "cris_multint_abort": "",
+        "cris_multint_ignore_previous": "",
+        "cris_multint_vector": ""
+      },
+      "cris_multiple_ints",
+      [
+        90,
+        0
+      ],
+      [
+        95,
+        3
+      ]
+    ],
+    [
+      "enum cris_multiple_ints",
+      {},
+      "",
+      [
+        102,
+        3
+      ],
+      [
+        102,
+        26
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,408 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "jas_image_t *jp2_decode(jas_stream_t *in, char *optstr)\n{\n\tjp2_box_t *box;\n\tint found;\n\tjas_image_t *image;\n\tjp2_dec_t *dec;\n\tbool samedtype;\n\tint dtype;\n\tunsigned int i;\n\tjp2_cmap_t *cmapd;\n\tjp2_pclr_t *pclrd;\n\tjp2_cdef_t *cdefd;\n\tunsigned int channo;\n\tint newcmptno;\n\tint_fast32_t *lutents;\n#if 0\n\tjp2_cdefchan_t *cdefent;\n\tint cmptno;\n#endif\n\tjp2_cmapent_t *cmapent;\n\tjas_icchdr_t icchdr;\n\tjas_iccprof_t *iccprof;\n\n\tdec = 0;\n\tbox = 0;\n\timage = 0;\n\n\tif (!(dec = jp2_dec_create())) {\n\t\tgoto error;\n\t}\n\n\t/* Get the first box.  This should be a JP box. */\n\tif (!(box = jp2_box_get(in))) {\n\t\tjas_eprintf(\"error: cannot get box\\n\");\n\t\tgoto error;\n\t}\n\tif (box->type != JP2_BOX_JP) {\n\t\tjas_eprintf(\"error: expecting signature box\\n\");\n\t\tgoto error;\n\t}\n\tif (box->data.jp.magic != JP2_JP_MAGIC) {\n\t\tjas_eprintf(\"incorrect magic number\\n\");\n\t\tgoto error;\n\t}\n\tjp2_box_destroy(box);\n\tbox = 0;\n\n\t/* Get the second box.  This should be a FTYP box. */\n\tif (!(box = jp2_box_get(in))) {\n\t\tgoto error;\n\t}\n\tif (box->type != JP2_BOX_FTYP) {\n\t\tjas_eprintf(\"expecting file type box\\n\");\n\t\tgoto error;\n\t}\n\tjp2_box_destroy(box);\n\tbox = 0;\n\n\t/* Get more boxes... */\n\tfound = 0;\n\twhile ((box = jp2_box_get(in))) {\n\t\tif (jas_getdbglevel() >= 1) {\n\t\t\tjas_eprintf(\"box type %s\\n\", box->info->name);\n\t\t}\n\t\tswitch (box->type) {\n\t\tcase JP2_BOX_JP2C:\n\t\t\tfound = 1;\n\t\t\tbreak;\n\t\tcase JP2_BOX_IHDR:\n\t\t\tif (!dec->ihdr) {\n\t\t\t\tdec->ihdr = box;\n\t\t\t\tbox = 0;\n\t\t\t}\n\t\t\tbreak;\n\t\tcase JP2_BOX_BPCC:\n\t\t\tif (!dec->bpcc) {\n\t\t\t\tdec->bpcc = box;\n\t\t\t\tbox = 0;\n\t\t\t}\n\t\t\tbreak;\n\t\tcase JP2_BOX_CDEF:\n\t\t\tif (!dec->cdef) {\n\t\t\t\tdec->cdef = box;\n\t\t\t\tbox = 0;\n\t\t\t}\n\t\t\tbreak;\n\t\tcase JP2_BOX_PCLR:\n\t\t\tif (!dec->pclr) {\n\t\t\t\tdec->pclr = box;\n\t\t\t\tbox = 0;\n\t\t\t}\n\t\t\tbreak;\n\t\tcase JP2_BOX_CMAP:\n\t\t\tif (!dec->cmap) {\n\t\t\t\tdec->cmap = box;\n\t\t\t\tbox = 0;\n\t\t\t}\n\t\t\tbreak;\n\t\tcase JP2_BOX_COLR:\n\t\t\tif (!dec->colr) {\n\t\t\t\tdec->colr = box;\n\t\t\t\tbox = 0;\n\t\t\t}\n\t\t\tbreak;\n\t\t}\n\t\tif (box) {\n\t\t\tjp2_box_destroy(box);\n\t\t\tbox = 0;\n\t\t}\n\t\tif (found) {\n\t\t\tbreak;\n\t\t}\n\t}\n\n\tif (!found) {\n\t\tjas_eprintf(\"error: no code stream found\\n\");\n\t\tgoto error;\n\t}\n\n\tif (!(dec->image = jpc_decode(in, optstr))) {\n\t\tjas_eprintf(\"error: cannot decode code stream\\n\");\n\t\tgoto error;\n\t}\n\n\t/* An IHDR box must be present. */\n\tif (!dec->ihdr) {\n\t\tjas_eprintf(\"error: missing IHDR box\\n\");\n\t\tgoto error;\n\t}\n\n\t/* Does the number of components indicated in the IHDR box match\n\t  the value specified in the code stream? */\n\tif (dec->ihdr->data.ihdr.numcmpts != JAS_CAST(uint, jas_image_numcmpts(dec->image))) {\n\t\tjas_eprintf(\"warning: number of components mismatch\\n\");\n\t}\n\n\t/* At least one component must be present. */\n\tif (!jas_image_numcmpts(dec->image)) {\n\t\tjas_eprintf(\"error: no components\\n\");\n\t\tgoto error;\n\t}\n\n\t/* Determine if all components have the same data type. */\n\tsamedtype = true;\n\tdtype = jas_image_cmptdtype(dec->image, 0);\n\tfor (i = 1; i < JAS_CAST(uint, jas_image_numcmpts(dec->image)); ++i) {\n\t\tif (jas_image_cmptdtype(dec->image, i) != dtype) {\n\t\t\tsamedtype = false;\n\t\t\tbreak;\n\t\t}\n\t}\n\n\t/* Is the component data type indicated in the IHDR box consistent\n\t  with the data in the code stream? */\n\tif ((samedtype && dec->ihdr->data.ihdr.bpc != JP2_DTYPETOBPC(dtype)) ||\n\t  (!samedtype && dec->ihdr->data.ihdr.bpc != JP2_IHDR_BPCNULL)) {\n\t\tjas_eprintf(\"warning: component data type mismatch\\n\");\n\t}\n\n\t/* Is the compression type supported? */\n\tif (dec->ihdr->data.ihdr.comptype != JP2_IHDR_COMPTYPE) {\n\t\tjas_eprintf(\"error: unsupported compression type\\n\");\n\t\tgoto error;\n\t}\n\n\tif (dec->bpcc) {\n\t\t/* Is the number of components indicated in the BPCC box\n\t\t  consistent with the code stream data? */\n\t\tif (dec->bpcc->data.bpcc.numcmpts != JAS_CAST(uint, jas_image_numcmpts(\n\t\t  dec->image))) {\n\t\t\tjas_eprintf(\"warning: number of components mismatch\\n\");\n\t\t}\n\t\t/* Is the component data type information indicated in the BPCC\n\t\t  box consistent with the code stream data? */\n\t\tif (!samedtype) {\n\t\t\tfor (i = 0; i < JAS_CAST(uint, jas_image_numcmpts(dec->image)); ++i) {\n\t\t\t\tif (jas_image_cmptdtype(dec->image, i) != JP2_BPCTODTYPE(dec->bpcc->data.bpcc.bpcs[i])) {\n\t\t\t\t\tjas_eprintf(\"warning: component data type mismatch\\n\");\n\t\t\t\t}\n\t\t\t}\n\t\t} else {\n\t\t\tjas_eprintf(\"warning: superfluous BPCC box\\n\");\n\t\t}\n\t}\n\n\t/* A COLR box must be present. */\n\tif (!dec->colr) {\n\t\tjas_eprintf(\"error: no COLR box\\n\");\n\t\tgoto error;\n\t}\n\n\tswitch (dec->colr->data.colr.method) {\n\tcase JP2_COLR_ENUM:\n\t\tjas_image_setclrspc(dec->image, jp2_getcs(&dec->colr->data.colr));\n\t\tbreak;\n\tcase JP2_COLR_ICC:\n\t\ticcprof = jas_iccprof_createfrombuf(dec->colr->data.colr.iccp,\n\t\t  dec->colr->data.colr.iccplen);\n\t\tassert(iccprof);\n\t\tjas_iccprof_gethdr(iccprof, &icchdr);\n\t\tjas_eprintf(\"ICC Profile CS %08x\\n\", icchdr.colorspc);\n\t\tjas_image_setclrspc(dec->image, fromiccpcs(icchdr.colorspc));\n\t\tdec->image->cmprof_ = jas_cmprof_createfromiccprof(iccprof);\n\t\tassert(dec->image->cmprof_);\n\t\tjas_iccprof_destroy(iccprof);\n\t\tbreak;\n\t}\n\n\t/* If a CMAP box is present, a PCLR box must also be present. */\n\tif (dec->cmap && !dec->pclr) {\n\t\tjas_eprintf(\"warning: missing PCLR box or superfluous CMAP box\\n\");\n\t\tjp2_box_destroy(dec->cmap);\n\t\tdec->cmap = 0;\n\t}\n\n\t/* If a CMAP box is not present, a PCLR box must not be present. */\n\tif (!dec->cmap && dec->pclr) {\n\t\tjas_eprintf(\"warning: missing CMAP box or superfluous PCLR box\\n\");\n\t\tjp2_box_destroy(dec->pclr);\n\t\tdec->pclr = 0;\n\t}\n\n\t/* Determine the number of channels (which is essentially the number\n\t  of components after any palette mappings have been applied). */\n\tdec->numchans = dec->cmap ? dec->cmap->data.cmap.numchans : JAS_CAST(uint, jas_image_numcmpts(dec->image));\n\n\t/* Perform a basic sanity check on the CMAP box if present. */\n\tif (dec->cmap) {\n\t\tfor (i = 0; i < dec->numchans; ++i) {\n\t\t\t/* Is the component number reasonable? */\n\t\t\tif (dec->cmap->data.cmap.ents[i].cmptno >= JAS_CAST(uint, jas_image_numcmpts(dec->image))) {\n\t\t\t\tjas_eprintf(\"error: invalid component number in CMAP box\\n\");\n\t\t\t\tgoto error;\n\t\t\t}\n\t\t\t/* Is the LUT index reasonable? */\n\t\t\tif (dec->cmap->data.cmap.ents[i].pcol >= dec->pclr->data.pclr.numchans) {\n\t\t\t\tjas_eprintf(\"error: invalid CMAP LUT index\\n\");\n\t\t\t\tgoto error;\n\t\t\t}\n\t\t}\n\t}\n\n\t/* Allocate space for the channel-number to component-number LUT. */\n\tif (!(dec->chantocmptlut = jas_malloc(dec->numchans * sizeof(uint_fast16_t)))) {\n\t\tjas_eprintf(\"error: no memory\\n\");\n\t\tgoto error;\n\t}\n\n\tif (!dec->cmap) {\n\t\tfor (i = 0; i < dec->numchans; ++i) {\n\t\t\tdec->chantocmptlut[i] = i;\n\t\t}\n\t} else {\n\t\tcmapd = &dec->cmap->data.cmap;\n\t\tpclrd = &dec->pclr->data.pclr;\n\t\tcdefd = &dec->cdef->data.cdef;\n\t\tfor (channo = 0; channo < cmapd->numchans; ++channo) {\n\t\t\tcmapent = &cmapd->ents[channo];\n\t\t\tif (cmapent->map == JP2_CMAP_DIRECT) {\n\t\t\t\tdec->chantocmptlut[channo] = channo;\n\t\t\t} else if (cmapent->map == JP2_CMAP_PALETTE) {\n\t\t\t\tlutents = jas_malloc(pclrd->numlutents * sizeof(int_fast32_t));\n\t\t\t\tfor (i = 0; i < pclrd->numlutents; ++i) {\n\t\t\t\t\tlutents[i] = pclrd->lutdata[cmapent->pcol + i * pclrd->numchans];\n\t\t\t\t}\n\t\t\t\tnewcmptno = jas_image_numcmpts(dec->image);\n\t\t\t\tjas_image_depalettize(dec->image, cmapent->cmptno, pclrd->numlutents, lutents, JP2_BPCTODTYPE(pclrd->bpc[cmapent->pcol]), newcmptno);\n\t\t\t\tdec->chantocmptlut[channo] = newcmptno;\n\t\t\t\tjas_free(lutents);\n#if 0\n\t\t\t\tif (dec->cdef) {\n\t\t\t\t\tcdefent = jp2_cdef_lookup(cdefd, channo);\n\t\t\t\t\tif (!cdefent) {\n\t\t\t\t\t\tabort();\n\t\t\t\t\t}\n\t\t\t\tjas_image_setcmpttype(dec->image, newcmptno, jp2_getct(jas_image_clrspc(dec->image), cdefent->type, cdefent->assoc));\n\t\t\t\t} else {\n\t\t\t\tjas_image_setcmpttype(dec->image, newcmptno, jp2_getct(jas_image_clrspc(dec->image), 0, channo + 1));\n\t\t\t\t}\n#endif\n\t\t\t}\n\t\t}\n\t}\n\n\t/* Mark all components as being of unknown type. */\n\n\tfor (i = 0; i < JAS_CAST(uint, jas_image_numcmpts(dec->image)); ++i) {\n\t\tjas_image_setcmpttype(dec->image, i, JAS_IMAGE_CT_UNKNOWN);\n\t}\n\n\t/* Determine the type of each component. */\n\tif (dec->cdef) {\n\t\tfor (i = 0; i < dec->numchans; ++i) {\n\t\t\tjas_image_setcmpttype(dec->image,\n\t\t\t  dec->chantocmptlut[dec->cdef->data.cdef.ents[i].channo],\n\t\t\t  jp2_getct(jas_image_clrspc(dec->image),\n\t\t\t  dec->cdef->data.cdef.ents[i].type, dec->cdef->data.cdef.ents[i].assoc));\n\t\t}\n\t} else {\n\t\tfor (i = 0; i < dec->numchans; ++i) {\n\t\t\tjas_image_setcmpttype(dec->image, dec->chantocmptlut[i],\n\t\t\t  jp2_getct(jas_image_clrspc(dec->image), 0, i + 1));\n\t\t}\n\t}\n\n\t/* Delete any components that are not of interest. */\n\tfor (i = jas_image_numcmpts(dec->image); i > 0; --i) {\n\t\tif (jas_image_cmpttype(dec->image, i - 1) == JAS_IMAGE_CT_UNKNOWN) {\n\t\t\tjas_image_delcmpt(dec->image, i - 1);\n\t\t}\n\t}\n\n\t/* Ensure that some components survived. */\n\tif (!jas_image_numcmpts(dec->image)) {\n\t\tjas_eprintf(\"error: no components\\n\");\n\t\tgoto error;\n\t}\n#if 0\njas_eprintf(\"no of components is %d\\n\", jas_image_numcmpts(dec->image));\n#endif\n\n\t/* Prevent the image from being destroyed later. */\n\timage = dec->image;\n\tdec->image = 0;\n\n\tjp2_dec_destroy(dec);\n\n\treturn image;\n\nerror:\n\tif (box) {\n\t\tjp2_box_destroy(box);\n\t}\n\tif (dec) {\n\t\tjp2_dec_destroy(dec);\n\t}\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          95,
+          0
+        ],
+        [
+          432,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_decode",
+        "parameters": {
+          "in": "jas_stream_t",
+          "optstr": "char"
+        },
+        "return_type": "jas_image_t"
+      }
+    },
+    {
+      "fn_code": "int jp2_validate(jas_stream_t *in)\n{\n\tchar buf[JP2_VALIDATELEN];\n\tint i;\n\tint n;\n#if 0\n\tjas_stream_t *tmpstream;\n\tjp2_box_t *box;\n#endif\n\n\tassert(JAS_STREAM_MAXPUTBACK >= JP2_VALIDATELEN);\n\n\t/* Read the validation data (i.e., the data used for detecting\n\t  the format). */\n\tif ((n = jas_stream_read(in, buf, JP2_VALIDATELEN)) < 0) {\n\t\treturn -1;\n\t}\n\n\t/* Put the validation data back onto the stream, so that the\n\t  stream position will not be changed. */\n\tfor (i = n - 1; i >= 0; --i) {\n\t\tif (jas_stream_ungetc(in, buf[i]) == EOF) {\n\t\t\treturn -1;\n\t\t}\n\t}\n\n\t/* Did we read enough data? */\n\tif (n < JP2_VALIDATELEN) {\n\t\treturn -1;\n\t}\n\n\t/* Is the box type correct? */\n\tif (((buf[4] << 24) | (buf[5] << 16) | (buf[6] << 8) | buf[7]) !=\n\t  JP2_BOX_JP)\n\t{\n\t\treturn -1;\n\t}\n\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          434,
+          0
+        ],
+        [
+          473,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_validate",
+        "parameters": {
+          "in": "jas_stream_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static jp2_dec_t *jp2_dec_create(void)\n{\n\tjp2_dec_t *dec;\n\n\tif (!(dec = jas_malloc(sizeof(jp2_dec_t)))) {\n\t\treturn 0;\n\t}\n\tdec->ihdr = 0;\n\tdec->bpcc = 0;\n\tdec->cdef = 0;\n\tdec->pclr = 0;\n\tdec->image = 0;\n\tdec->chantocmptlut = 0;\n\tdec->cmap = 0;\n\tdec->colr = 0;\n\treturn dec;\n}",
+      "fn_code_pos": [
+        [
+          475,
+          0
+        ],
+        [
+          491,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_dec_create",
+        "parameters": {},
+        "return_type": "jp2_dec_t"
+      }
+    },
+    {
+      "fn_code": "static void jp2_dec_destroy(jp2_dec_t *dec)\n{\n\tif (dec->ihdr) {\n\t\tjp2_box_destroy(dec->ihdr);\n\t}\n\tif (dec->bpcc) {\n\t\tjp2_box_destroy(dec->bpcc);\n\t}\n\tif (dec->cdef) {\n\t\tjp2_box_destroy(dec->cdef);\n\t}\n\tif (dec->pclr) {\n\t\tjp2_box_destroy(dec->pclr);\n\t}\n\tif (dec->image) {\n\t\tjas_image_destroy(dec->image);\n\t}\n\tif (dec->cmap) {\n\t\tjp2_box_destroy(dec->cmap);\n\t}\n\tif (dec->colr) {\n\t\tjp2_box_destroy(dec->colr);\n\t}\n\tif (dec->chantocmptlut) {\n\t\tjas_free(dec->chantocmptlut);\n\t}\n\tjas_free(dec);\n}",
+      "fn_code_pos": [
+        [
+          493,
+          0
+        ],
+        [
+          520,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_dec_destroy",
+        "parameters": {
+          "dec": "jp2_dec_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int jp2_getct(int colorspace, int type, int assoc)\n{\n\tif (type == 1 && assoc == 0) {\n\t\treturn JAS_IMAGE_CT_OPACITY;\n\t}\n\tif (type == 0 && assoc >= 1 && assoc <= 65534) {\n\t\tswitch (colorspace) {\n\t\tcase JAS_CLRSPC_FAM_RGB:\n\t\t\tswitch (assoc) {\n\t\t\tcase JP2_CDEF_RGB_R:\n\t\t\t\treturn JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_RGB_R);\n\t\t\t\tbreak;\n\t\t\tcase JP2_CDEF_RGB_G:\n\t\t\t\treturn JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_RGB_G);\n\t\t\t\tbreak;\n\t\t\tcase JP2_CDEF_RGB_B:\n\t\t\t\treturn JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_RGB_B);\n\t\t\t\tbreak;\n\t\t\t}\n\t\t\tbreak;\n\t\tcase JAS_CLRSPC_FAM_YCBCR:\n\t\t\tswitch (assoc) {\n\t\t\tcase JP2_CDEF_YCBCR_Y:\n\t\t\t\treturn JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_YCBCR_Y);\n\t\t\t\tbreak;\n\t\t\tcase JP2_CDEF_YCBCR_CB:\n\t\t\t\treturn JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_YCBCR_CB);\n\t\t\t\tbreak;\n\t\t\tcase JP2_CDEF_YCBCR_CR:\n\t\t\t\treturn JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_YCBCR_CR);\n\t\t\t\tbreak;\n\t\t\t}\n\t\t\tbreak;\n\t\tcase JAS_CLRSPC_FAM_GRAY:\n\t\t\tswitch (assoc) {\n\t\t\tcase JP2_CDEF_GRAY_Y:\n\t\t\t\treturn JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_GRAY_Y);\n\t\t\t\tbreak;\n\t\t\t}\n\t\t\tbreak;\n\t\tdefault:\n\t\t\treturn JAS_IMAGE_CT_COLOR(assoc - 1);\n\t\t\tbreak;\n\t\t}\n\t}\n\treturn JAS_IMAGE_CT_UNKNOWN;\n}",
+      "fn_code_pos": [
+        [
+          522,
+          0
+        ],
+        [
+          568,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_getct",
+        "parameters": {
+          "colorspace": "int",
+          "type": "int",
+          "assoc": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int jp2_getcs(jp2_colr_t *colr)\n{\n\tif (colr->method == JP2_COLR_ENUM) {\n\t\tswitch (colr->csid) {\n\t\tcase JP2_COLR_SRGB:\n\t\t\treturn JAS_CLRSPC_SRGB;\n\t\t\tbreak;\n\t\tcase JP2_COLR_SYCC:\n\t\t\treturn JAS_CLRSPC_SYCBCR;\n\t\t\tbreak;\n\t\tcase JP2_COLR_SGRAY:\n\t\t\treturn JAS_CLRSPC_SGRAY;\n\t\t\tbreak;\n\t\t}\n\t}\n\treturn JAS_CLRSPC_UNKNOWN;\n}",
+      "fn_code_pos": [
+        [
+          570,
+          0
+        ],
+        [
+          586,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_getcs",
+        "parameters": {
+          "colr": "jp2_colr_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int fromiccpcs(int cs)\n{\n\tswitch (cs) {\n\tcase ICC_CS_RGB:\n\t\treturn JAS_CLRSPC_GENRGB;\n\t\tbreak;\n\tcase ICC_CS_YCBCR:\n\t\treturn JAS_CLRSPC_GENYCBCR;\n\t\tbreak;\n\tcase ICC_CS_GRAY:\n\t\treturn JAS_CLRSPC_GENGRAY;\n\t\tbreak;\n\t}\n\treturn JAS_CLRSPC_UNKNOWN;\n}",
+      "fn_code_pos": [
+        [
+          588,
+          0
+        ],
+        [
+          602,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fromiccpcs",
+        "parameters": {
+          "cs": "int"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "jp2_dec_create(void)",
+      "fn_dec_pos": [
+        [
+          85,
+          18
+        ],
+        [
+          85,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_dec_create",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "jp2_dec_destroy(jp2_dec_t *dec)",
+      "fn_dec_pos": [
+        [
+          86,
+          12
+        ],
+        [
+          86,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_dec_destroy",
+        "parameters": {
+          "dec": "jp2_dec_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "jp2_getcs(jp2_colr_t *colr)",
+      "fn_dec_pos": [
+        [
+          87,
+          11
+        ],
+        [
+          87,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_getcs",
+        "parameters": {
+          "colr": "jp2_colr_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "fromiccpcs(int cs)",
+      "fn_dec_pos": [
+        [
+          88,
+          11
+        ],
+        [
+          88,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fromiccpcs",
+        "parameters": {
+          "cs": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "jp2_getct(int colorspace, int type, int assoc)",
+      "fn_dec_pos": [
+        [
+          89,
+          11
+        ],
+        [
+          89,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_getct",
+        "parameters": {
+          "colorspace": "int",
+          "type": "int",
+          "assoc": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "jp2_decode(jas_stream_t *in, char *optstr)",
+      "fn_dec_pos": [
+        [
+          95,
+          13
+        ],
+        [
+          95,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_decode",
+        "parameters": {
+          "in": "jas_stream_t",
+          "optstr": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "jp2_dec_create(void)",
+      "fn_dec_pos": [
+        [
+          475,
+          18
+        ],
+        [
+          475,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_dec_create",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"jasper/jas_image.h\"\n",
+      [
+        73,
+        0
+      ],
+      [
+        74,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_stream.h\"\n",
+      [
+        74,
+        0
+      ],
+      [
+        75,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_math.h\"\n",
+      [
+        75,
+        0
+      ],
+      [
+        76,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_debug.h\"\n",
+      [
+        76,
+        0
+      ],
+      [
+        77,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_malloc.h\"\n",
+      [
+        77,
+        0
+      ],
+      [
+        78,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_version.h\"\n",
+      [
+        78,
+        0
+      ],
+      [
+        79,
+        0
+      ]
+    ],
+    [
+      "#include \"jp2_cod.h\"\n",
+      [
+        80,
+        0
+      ],
+      [
+        81,
+        0
+      ]
+    ],
+    [
+      "#include \"jp2_dec.h\"\n",
+      [
+        81,
+        0
+      ],
+      [
+        82,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

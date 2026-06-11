@@ -1,0 +1,777 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\npcap_read_snoop(pcap_t *p, int cnt, pcap_handler callback, u_char *user)\n{\n\tstruct pcap_snoop *psn = p->priv;\n\tint cc;\n\tregister struct snoopheader *sh;\n\tregister u_int datalen;\n\tregister u_int caplen;\n\tregister u_char *cp;\n\nagain:\n\t/*\n\t * Has \"pcap_breakloop()\" been called?\n\t */\n\tif (p->break_loop) {\n\t\t/*\n\t\t * Yes - clear the flag that indicates that it\n\t\t * has, and return -2 to indicate that we were\n\t\t * told to break out of the loop.\n\t\t */\n\t\tp->break_loop = 0;\n\t\treturn (-2);\n\t}\n\tcc = read(p->fd, (char *)p->buffer, p->bufsize);\n\tif (cc < 0) {\n\t\t/* Don't choke when we get ptraced */\n\t\tswitch (errno) {\n\n\t\tcase EINTR:\n\t\t\tgoto again;\n\n\t\tcase EWOULDBLOCK:\n\t\t\treturn (0);\t\t\t/* XXX */\n\t\t}\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, sizeof(p->errbuf),\n\t\t    errno, \"read\");\n\t\treturn (-1);\n\t}\n\tsh = (struct snoopheader *)p->buffer;\n\tdatalen = sh->snoop_packetlen;\n\n\t/*\n\t * XXX - Sigh, snoop_packetlen is a 16 bit quantity.  If we\n\t * got a short length, but read a full sized snoop pakcet,\n\t * assume we overflowed and add back the 64K...\n\t */\n\tif (cc == (p->snapshot + sizeof(struct snoopheader)) &&\n\t    (datalen < p->snapshot))\n\t\tdatalen += (64 * 1024);\n\n\tcaplen = (datalen < p->snapshot) ? datalen : p->snapshot;\n\tcp = (u_char *)(sh + 1) + p->offset;\t\t/* XXX */\n\n\t/*\n\t * XXX unfortunately snoop loopback isn't exactly like\n\t * BSD's.  The address family is encoded in the first 2\n\t * bytes rather than the first 4 bytes!  Luckily the last\n\t * two snoop loopback bytes are zeroed.\n\t */\n\tif (p->linktype == DLT_NULL && *((short *)(cp + 2)) == 0) {\n\t\tu_int *uip = (u_int *)cp;\n\t\t*uip >>= 16;\n\t}\n\n\tif (p->fcode.bf_insns == NULL ||\n\t    bpf_filter(p->fcode.bf_insns, cp, datalen, caplen)) {\n\t\tstruct pcap_pkthdr h;\n\t\t++psn->stat.ps_recv;\n\t\th.ts.tv_sec = sh->snoop_timestamp.tv_sec;\n\t\th.ts.tv_usec = sh->snoop_timestamp.tv_usec;\n\t\th.len = datalen;\n\t\th.caplen = caplen;\n\t\t(*callback)(user, &h, cp);\n\t\treturn (1);\n\t}\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          63,
+          0
+        ],
+        [
+          139,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_read_snoop",
+        "parameters": {
+          "p": "pcap_t",
+          "cnt": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_inject_snoop(pcap_t *p, const void *buf, size_t size)\n{\n\tint ret;\n\n\t/*\n\t * XXX - libnet overwrites the source address with what I\n\t * presume is the interface's address; is that required?\n\t */\n\tret = write(p->fd, buf, size);\n\tif (ret == -1) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"send\");\n\t\treturn (-1);\n\t}\n\treturn (ret);\n}",
+      "fn_code_pos": [
+        [
+          141,
+          0
+        ],
+        [
+          157,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_inject_snoop",
+        "parameters": {
+          "p": "pcap_t",
+          "buf": "void",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_stats_snoop(pcap_t *p, struct pcap_stat *ps)\n{\n\tstruct pcap_snoop *psn = p->priv;\n\tregister struct rawstats *rs;\n\tstruct rawstats rawstats;\n\n\trs = &rawstats;\n\tmemset(rs, 0, sizeof(*rs));\n\tif (ioctl(p->fd, SIOCRAWSTATS, (char *)rs) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, sizeof(p->errbuf),\n\t\t    errno, \"SIOCRAWSTATS\");\n\t\treturn (-1);\n\t}\n\n\t/*\n\t * \"ifdrops\" are those dropped by the network interface\n\t * due to resource shortages or hardware errors.\n\t *\n\t * \"sbdrops\" are those dropped due to socket buffer limits.\n\t *\n\t * As filter is done in userland, \"sbdrops\" counts packets\n\t * regardless of whether they would've passed the filter.\n\t *\n\t * XXX - does this count *all* Snoop or Drain sockets,\n\t * rather than just this socket?  If not, why does it have\n\t * both Snoop and Drain statistics?\n\t */\n\tpsn->stat.ps_drop =\n\t    rs->rs_snoop.ss_ifdrops + rs->rs_snoop.ss_sbdrops +\n\t    rs->rs_drain.ds_ifdrops + rs->rs_drain.ds_sbdrops;\n\n\t/*\n\t * \"ps_recv\" counts only packets that passed the filter.\n\t * As filtering is done in userland, this does not include\n\t * packets dropped because we ran out of buffer space.\n\t */\n\t*ps = psn->stat;\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          159,
+          0
+        ],
+        [
+          198,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stats_snoop",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_activate_snoop(pcap_t *p)\n{\n\tint fd;\n\tstruct sockaddr_raw sr;\n\tstruct snoopfilter sf;\n\tu_int v;\n\tint ll_hdrlen;\n\tint snooplen;\n\tstruct ifreq ifr;\n\n\tfd = socket(PF_RAW, SOCK_RAW, RAWPROTO_SNOOP);\n\tif (fd < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"snoop socket\");\n\t\tgoto bad;\n\t}\n\tp->fd = fd;\n\tmemset(&sr, 0, sizeof(sr));\n\tsr.sr_family = AF_RAW;\n\t(void)strncpy(sr.sr_ifname, p->opt.device, sizeof(sr.sr_ifname));\n\tif (bind(fd, (struct sockaddr *)&sr, sizeof(sr))) {\n\t\t/*\n\t\t * XXX - there's probably a particular bind error that\n\t\t * means \"there's no such device\" and a particular bind\n\t\t * error that means \"that device doesn't support snoop\";\n\t\t * they might be the same error, if they both end up\n\t\t * meaning \"snoop doesn't know about that device\".\n\t\t */\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"snoop bind\");\n\t\tgoto bad;\n\t}\n\tmemset(&sf, 0, sizeof(sf));\n\tif (ioctl(fd, SIOCADDSNOOP, &sf) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"SIOCADDSNOOP\");\n\t\tgoto bad;\n\t}\n\tif (p->opt.buffer_size != 0)\n\t\tv = p->opt.buffer_size;\n\telse\n\t\tv = 64 * 1024;\t/* default to 64K buffer size */\n\t(void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (char *)&v, sizeof(v));\n\t/*\n\t * XXX hack - map device name to link layer type\n\t */\n\tif (strncmp(\"et\", p->opt.device, 2) == 0 ||\t/* Challenge 10 Mbit */\n\t    strncmp(\"ec\", p->opt.device, 2) == 0 ||\t/* Indigo/Indy 10 Mbit,\n\t\t\t\t\t\t\t   O2 10/100 */\n\t    strncmp(\"ef\", p->opt.device, 2) == 0 ||\t/* O200/2000 10/100 Mbit */\n\t    strncmp(\"eg\", p->opt.device, 2) == 0 ||\t/* Octane/O2xxx/O3xxx Gigabit */\n\t    strncmp(\"gfe\", p->opt.device, 3) == 0 ||\t/* GIO 100 Mbit */\n\t    strncmp(\"fxp\", p->opt.device, 3) == 0 ||\t/* Challenge VME Enet */\n\t    strncmp(\"ep\", p->opt.device, 2) == 0 ||\t/* Challenge 8x10 Mbit EPLEX */\n\t    strncmp(\"vfe\", p->opt.device, 3) == 0 ||\t/* Challenge VME 100Mbit */\n\t    strncmp(\"fa\", p->opt.device, 2) == 0 ||\n\t    strncmp(\"qaa\", p->opt.device, 3) == 0 ||\n\t    strncmp(\"cip\", p->opt.device, 3) == 0 ||\n\t    strncmp(\"el\", p->opt.device, 2) == 0) {\n\t\tp->linktype = DLT_EN10MB;\n\t\tp->offset = RAW_HDRPAD(sizeof(struct ether_header));\n\t\tll_hdrlen = sizeof(struct ether_header);\n\t\t/*\n\t\t * This is (presumably) a real Ethernet capture; give it a\n\t\t * link-layer-type list with DLT_EN10MB and DLT_DOCSIS, so\n\t\t * that an application can let you choose it, in case you're\n\t\t * capturing DOCSIS traffic that a Cisco Cable Modem\n\t\t * Termination System is putting out onto an Ethernet (it\n\t\t * doesn't put an Ethernet header onto the wire, it puts raw\n\t\t * DOCSIS frames out on the wire inside the low-level\n\t\t * Ethernet framing).\n\t\t *\n\t\t * XXX - are there any sorts of \"fake Ethernet\" that have\n\t\t * Ethernet link-layer headers but that *shouldn't offer\n\t\t * DLT_DOCSIS as a Cisco CMTS won't put traffic onto it\n\t\t * or get traffic bridged onto it?  \"el\" is for ATM LANE\n\t\t * Ethernet devices, so that might be the case for them;\n\t\t * the same applies for \"qaa\" classical IP devices.  If\n\t\t * \"fa\" devices are for FORE SPANS, that'd apply to them\n\t\t * as well; what are \"cip\" devices - some other ATM\n\t\t * Classical IP devices?\n\t\t */\n\t\tp->dlt_list = (u_int *) malloc(sizeof(u_int) * 2);\n\t\t/*\n\t\t * If that fails, just leave the list empty.\n\t\t */\n\t\tif (p->dlt_list != NULL) {\n\t\t\tp->dlt_list[0] = DLT_EN10MB;\n\t\t\tp->dlt_list[1] = DLT_DOCSIS;\n\t\t\tp->dlt_count = 2;\n\t\t}\n\t} else if (strncmp(\"ipg\", p->opt.device, 3) == 0 ||\n\t\t   strncmp(\"rns\", p->opt.device, 3) == 0 ||\t/* O2/200/2000 FDDI */\n\t\t   strncmp(\"xpi\", p->opt.device, 3) == 0) {\n\t\tp->linktype = DLT_FDDI;\n\t\tp->offset = 3;\t\t\t\t/* XXX yeah? */\n\t\tll_hdrlen = 13;\n\t} else if (strncmp(\"ppp\", p->opt.device, 3) == 0) {\n\t\tp->linktype = DLT_RAW;\n\t\tll_hdrlen = 0;\t/* DLT_RAW meaning \"no PPP header, just the IP packet\"? */\n\t} else if (strncmp(\"qfa\", p->opt.device, 3) == 0) {\n\t\tp->linktype = DLT_IP_OVER_FC;\n\t\tll_hdrlen = 24;\n\t} else if (strncmp(\"pl\", p->opt.device, 2) == 0) {\n\t\tp->linktype = DLT_RAW;\n\t\tll_hdrlen = 0;\t/* Cray UNICOS/mp pseudo link */\n\t} else if (strncmp(\"lo\", p->opt.device, 2) == 0) {\n\t\tp->linktype = DLT_NULL;\n\t\tll_hdrlen = 4;\n\t} else {\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"snoop: unknown physical layer type\");\n\t\tgoto bad;\n\t}\n\n\tif (p->opt.rfmon) {\n\t\t/*\n\t\t * No monitor mode on Irix (no Wi-Fi devices on\n\t\t * hardware supported by Irix).\n\t\t */\n\t\treturn (PCAP_ERROR_RFMON_NOTSUP);\n\t}\n\n\t/*\n\t * Turn a negative snapshot value (invalid), a snapshot value of\n\t * 0 (unspecified), or a value bigger than the normal maximum\n\t * value, into the maximum allowed value.\n\t *\n\t * If some application really *needs* a bigger snapshot\n\t * length, we should just increase MAXIMUM_SNAPLEN.\n\t */\n\tif (p->snapshot <= 0 || p->snapshot > MAXIMUM_SNAPLEN)\n\t\tp->snapshot = MAXIMUM_SNAPLEN;\n\n#ifdef SIOCGIFMTU\n\t/*\n\t * XXX - IRIX appears to give you an error if you try to set the\n\t * capture length to be greater than the MTU, so let's try to get\n\t * the MTU first and, if that succeeds, trim the snap length\n\t * to be no greater than the MTU.\n\t */\n\t(void)strncpy(ifr.ifr_name, p->opt.device, sizeof(ifr.ifr_name));\n\tif (ioctl(fd, SIOCGIFMTU, (char *)&ifr) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"SIOCGIFMTU\");\n\t\tgoto bad;\n\t}\n\t/*\n\t * OK, we got it.\n\t *\n\t * XXX - some versions of IRIX 6.5 define \"ifr_mtu\" and have an\n\t * \"ifru_metric\" member of the \"ifr_ifru\" union in an \"ifreq\"\n\t * structure, others don't.\n\t *\n\t * I've no idea what's going on, so, if \"ifr_mtu\" isn't defined,\n\t * we define it as \"ifr_metric\", as using that field appears to\n\t * work on the versions that lack \"ifr_mtu\" (and, on those that\n\t * don't lack it, \"ifru_metric\" and \"ifru_mtu\" are both \"int\"\n\t * members of the \"ifr_ifru\" union, which suggests that they\n\t * may be interchangeable in this case).\n\t */\n#ifndef ifr_mtu\n#define ifr_mtu\tifr_metric\n#endif\n\tif (p->snapshot > ifr.ifr_mtu + ll_hdrlen)\n\t\tp->snapshot = ifr.ifr_mtu + ll_hdrlen;\n#endif\n\n\t/*\n\t * The argument to SIOCSNOOPLEN is the number of link-layer\n\t * payload bytes to capture - it doesn't count link-layer\n\t * header bytes.\n\t */\n\tsnooplen = p->snapshot - ll_hdrlen;\n\tif (snooplen < 0)\n\t\tsnooplen = 0;\n\tif (ioctl(fd, SIOCSNOOPLEN, &snooplen) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"SIOCSNOOPLEN\");\n\t\tgoto bad;\n\t}\n\tv = 1;\n\tif (ioctl(fd, SIOCSNOOPING, &v) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"SIOCSNOOPING\");\n\t\tgoto bad;\n\t}\n\n\tp->bufsize = 4096;\t\t\t\t/* XXX */\n\tp->buffer = malloc(p->bufsize);\n\tif (p->buffer == NULL) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"malloc\");\n\t\tgoto bad;\n\t}\n\n\t/*\n\t * \"p->fd\" is a socket, so \"select()\" should work on it.\n\t */\n\tp->selectable_fd = p->fd;\n\n\tp->read_op = pcap_read_snoop;\n\tp->inject_op = pcap_inject_snoop;\n\tp->setfilter_op = install_bpf_program;\t/* no kernel filtering */\n\tp->setdirection_op = NULL;\t/* Not implemented. */\n\tp->set_datalink_op = NULL;\t/* can't change data link type */\n\tp->getnonblock_op = pcap_getnonblock_fd;\n\tp->setnonblock_op = pcap_setnonblock_fd;\n\tp->stats_op = pcap_stats_snoop;\n\n\treturn (0);\n bad:\n\tpcap_cleanup_live_common(p);\n\treturn (PCAP_ERROR);\n}",
+      "fn_code_pos": [
+        [
+          201,
+          0
+        ],
+        [
+          416,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_activate_snoop",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\npcap_create_interface(const char *device _U_, char *ebuf)\n{\n\tpcap_t *p;\n\n\tp = pcap_create_common(ebuf, sizeof (struct pcap_snoop));\n\tif (p == NULL)\n\t\treturn (NULL);\n\n\tp->activate_op = pcap_activate_snoop;\n\treturn (p);\n}",
+      "fn_code_pos": [
+        [
+          418,
+          0
+        ],
+        [
+          429,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "static int\ncan_be_bound(const char *name _U_)\n{\n\treturn (1);\n}",
+      "fn_code_pos": [
+        [
+          435,
+          0
+        ],
+        [
+          439,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "can_be_bound",
+        "parameters": {
+          "name": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_if_flags(const char *name _U_, bpf_u_int32 *flags _U_, char *errbuf _U_)\n{\n\t/*\n\t * Nothing we can do.\n\t * XXX - is there a way to find out whether an adapter has\n\t * something plugged into it?\n\t */\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          441,
+          0
+        ],
+        [
+          450,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_if_flags",
+        "parameters": {
+          "name": "char",
+          "flags": "bpf_u_int32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npcap_platform_finddevs(pcap_if_list_t *devlistp, char *errbuf)\n{\n\treturn (pcap_findalldevs_interfaces(devlistp, errbuf, can_be_bound,\n\t    get_if_flags));\n}",
+      "fn_code_pos": [
+        [
+          452,
+          0
+        ],
+        [
+          457,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_platform_finddevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "const char *\npcap_lib_version(void)\n{\n\treturn (PCAP_VERSION_STRING);\n}",
+      "fn_code_pos": [
+        [
+          462,
+          0
+        ],
+        [
+          466,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "pcap_create_interface(const char *device _U_, char *ebuf)",
+      "fn_dec_pos": [
+        [
+          419,
+          0
+        ],
+        [
+          419,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_lib_version(void)",
+      "fn_dec_pos": [
+        [
+          463,
+          0
+        ],
+        [
+          463,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_snoop {\n\tstruct pcap_stat stat;\n}",
+      {
+        "stat": "struct pcap_stat"
+      },
+      "pcap_snoop",
+      [
+        59,
+        0
+      ],
+      [
+        61,
+        1
+      ]
+    ],
+    [
+      "struct pcap_snoop {\n\tstruct pcap_stat stat;\n}",
+      {
+        "stat": "struct pcap_stat"
+      },
+      "pcap_snoop",
+      [
+        59,
+        0
+      ],
+      [
+        61,
+        1
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        60,
+        1
+      ],
+      [
+        60,
+        17
+      ]
+    ],
+    [
+      "struct pcap_snoop",
+      {},
+      "",
+      [
+        66,
+        1
+      ],
+      [
+        66,
+        18
+      ]
+    ],
+    [
+      "struct snoopheader",
+      {},
+      "",
+      [
+        68,
+        10
+      ],
+      [
+        68,
+        28
+      ]
+    ],
+    [
+      "struct snoopheader",
+      {},
+      "",
+      [
+        101,
+        7
+      ],
+      [
+        101,
+        25
+      ]
+    ],
+    [
+      "struct snoopheader",
+      {},
+      "",
+      [
+        109,
+        33
+      ],
+      [
+        109,
+        51
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        129,
+        2
+      ],
+      [
+        129,
+        20
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        160,
+        28
+      ],
+      [
+        160,
+        44
+      ]
+    ],
+    [
+      "struct pcap_snoop",
+      {},
+      "",
+      [
+        162,
+        1
+      ],
+      [
+        162,
+        18
+      ]
+    ],
+    [
+      "struct rawstats",
+      {},
+      "",
+      [
+        163,
+        10
+      ],
+      [
+        163,
+        25
+      ]
+    ],
+    [
+      "struct rawstats",
+      {},
+      "",
+      [
+        164,
+        1
+      ],
+      [
+        164,
+        16
+      ]
+    ],
+    [
+      "struct sockaddr_raw",
+      {},
+      "",
+      [
+        205,
+        1
+      ],
+      [
+        205,
+        20
+      ]
+    ],
+    [
+      "struct snoopfilter",
+      {},
+      "",
+      [
+        206,
+        1
+      ],
+      [
+        206,
+        19
+      ]
+    ],
+    [
+      "struct ifreq",
+      {},
+      "",
+      [
+        210,
+        1
+      ],
+      [
+        210,
+        13
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        222,
+        15
+      ],
+      [
+        222,
+        30
+      ]
+    ],
+    [
+      "struct ether_header",
+      {},
+      "",
+      [
+        262,
+        32
+      ],
+      [
+        262,
+        51
+      ]
+    ],
+    [
+      "struct ether_header",
+      {},
+      "",
+      [
+        263,
+        21
+      ],
+      [
+        263,
+        40
+      ]
+    ],
+    [
+      "struct pcap_snoop",
+      {},
+      "",
+      [
+        423,
+        38
+      ],
+      [
+        423,
+        55
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <sys/param.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <sys/file.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ioctl.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <net/raw.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <net/if.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in_systm.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/ip.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/if_ether.h>\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/ip_var.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/udp.h>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/udp_var.h>\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/tcp.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/tcpip.h>\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        46,
+        0
+      ],
+      [
+        47,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        50,
+        0
+      ],
+      [
+        51,
+        0
+      ]
+    ],
+    [
+      "#include \"os-proto.h\"\n",
+      [
+        53,
+        0
+      ],
+      [
+        54,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

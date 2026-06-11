@@ -1,0 +1,936 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static struct inline_state *\nfind_inline_frame_state (ptid_t ptid)\n{\n  struct inline_state *state;\n  int ix;\n\n  for (ix = 0; VEC_iterate (inline_state_s, inline_states, ix, state); ix++)\n    {\n      if (ptid_equal (state->ptid, ptid))\n\t{\n\t  struct regcache *regcache = get_thread_regcache (ptid);\n\t  CORE_ADDR current_pc = regcache_read_pc (regcache);\n\n\t  if (current_pc != state->saved_pc)\n\t    {\n\t      /* PC has changed - this context is invalid.  Use the\n\t\t default behavior.  */\n\t      VEC_unordered_remove (inline_state_s, inline_states, ix);\n\t      return NULL;\n\t    }\n\t  else\n\t    return state;\n\t}\n    }\n\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          65,
+          0
+        ],
+        [
+          91,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_inline_frame_state",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static struct inline_state *\nallocate_inline_frame_state (ptid_t ptid)\n{\n  struct inline_state *state;\n\n  state = VEC_safe_push (inline_state_s, inline_states, NULL);\n  memset (state, 0, sizeof (*state));\n  state->ptid = ptid;\n\n  return state;\n}",
+      "fn_code_pos": [
+        [
+          95,
+          0
+        ],
+        [
+          105,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "allocate_inline_frame_state",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\nclear_inline_frame_state (ptid_t ptid)\n{\n  struct inline_state *state;\n  int ix;\n\n  if (ptid_equal (ptid, minus_one_ptid))\n    {\n      VEC_free (inline_state_s, inline_states);\n      return;\n    }\n\n  if (ptid_is_pid (ptid))\n    {\n      VEC (inline_state_s) *new_states = NULL;\n      int pid = ptid_get_pid (ptid);\n\n      for (ix = 0;\n\t   VEC_iterate (inline_state_s, inline_states, ix, state);\n\t   ix++)\n\tif (pid != ptid_get_pid (state->ptid))\n\t  VEC_safe_push (inline_state_s, new_states, state);\n      VEC_free (inline_state_s, inline_states);\n      inline_states = new_states;\n      return;\n    }\n\n  for (ix = 0; VEC_iterate (inline_state_s, inline_states, ix, state); ix++)\n    if (ptid_equal (state->ptid, ptid))\n      {\n\tVEC_unordered_remove (inline_state_s, inline_states, ix);\n\treturn;\n      }\n}",
+      "fn_code_pos": [
+        [
+          111,
+          0
+        ],
+        [
+          144,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "clear_inline_frame_state",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ninline_frame_this_id (struct frame_info *this_frame,\n\t\t      void **this_cache,\n\t\t      struct frame_id *this_id)\n{\n  struct symbol *func;\n\n  /* In order to have a stable frame ID for a given inline function,\n     we must get the stack / special addresses from the underlying\n     real frame's this_id method.  So we must call\n     get_prev_frame_always.  Because we are inlined into some\n     function, there must be previous frames, so this is safe - as\n     long as we're careful not to create any cycles.  */\n  *this_id = get_frame_id (get_prev_frame_always (this_frame));\n\n  /* We need a valid frame ID, so we need to be based on a valid\n     frame.  FSF submission NOTE: this would be a good assertion to\n     apply to all frames, all the time.  That would fix the ambiguity\n     of null_frame_id (between \"no/any frame\" and \"the outermost\n     frame\").  This will take work.  */\n  gdb_assert (frame_id_p (*this_id));\n\n  /* For now, require we don't match outer_frame_id either (see\n     comment above).  */\n  gdb_assert (!frame_id_eq (*this_id, outer_frame_id));\n\n  /* Future work NOTE: Alexandre Oliva applied a patch to GCC 4.3\n     which generates DW_AT_entry_pc for inlined functions when\n     possible.  If this attribute is available, we should use it\n     in the frame ID (and eventually, to set breakpoints).  */\n  func = get_frame_function (this_frame);\n  gdb_assert (func != NULL);\n  (*this_id).code_addr = BLOCK_START (SYMBOL_BLOCK_VALUE (func));\n  (*this_id).artificial_depth++;\n}",
+      "fn_code_pos": [
+        [
+          146,
+          0
+        ],
+        [
+          180,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inline_frame_this_id",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "this_id": "struct frame_id"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static struct value *\ninline_frame_prev_register (struct frame_info *this_frame, void **this_cache,\n\t\t\t    int regnum)\n{\n  /* Use get_frame_register_value instead of\n     frame_unwind_got_register, to avoid requiring this frame's ID.\n     This frame's ID depends on the previous frame's ID (unusual), and\n     the previous frame's ID depends on this frame's unwound\n     registers.  If unwinding registers from this frame called\n     get_frame_id, there would be a loop.\n\n     Do not copy this code into any other unwinder!  Inlined functions\n     are special; other unwinders must not have a dependency on the\n     previous frame's ID, and therefore can and should use\n     frame_unwind_got_register instead.  */\n  return get_frame_register_value (this_frame, regnum);\n}",
+      "fn_code_pos": [
+        [
+          182,
+          0
+        ],
+        [
+          198,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inline_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\ninline_frame_sniffer (const struct frame_unwind *self,\n\t\t      struct frame_info *this_frame,\n\t\t      void **this_cache)\n{\n  CORE_ADDR this_pc;\n  const struct block *frame_block, *cur_block;\n  int depth;\n  struct frame_info *next_frame;\n  struct inline_state *state = find_inline_frame_state (inferior_ptid);\n\n  this_pc = get_frame_address_in_block (this_frame);\n  frame_block = block_for_pc (this_pc);\n  if (frame_block == NULL)\n    return 0;\n\n  /* Calculate DEPTH, the number of inlined functions at this\n     location.  */\n  depth = 0;\n  cur_block = frame_block;\n  while (BLOCK_SUPERBLOCK (cur_block))\n    {\n      if (block_inlined_p (cur_block))\n\tdepth++;\n      else if (BLOCK_FUNCTION (cur_block) != NULL)\n\tbreak;\n\n      cur_block = BLOCK_SUPERBLOCK (cur_block);\n    }\n\n  /* Check how many inlined functions already have frames.  */\n  for (next_frame = get_next_frame (this_frame);\n       next_frame && get_frame_type (next_frame) == INLINE_FRAME;\n       next_frame = get_next_frame (next_frame))\n    {\n      gdb_assert (depth > 0);\n      depth--;\n    }\n\n  /* If this is the topmost frame, or all frames above us are inlined,\n     then check whether we were requested to skip some frames (so they\n     can be stepped into later).  */\n  if (state != NULL && state->skipped_frames > 0 && next_frame == NULL)\n    {\n      gdb_assert (depth >= state->skipped_frames);\n      depth -= state->skipped_frames;\n    }\n\n  /* If all the inlined functions here already have frames, then pass\n     to the normal unwinder for this PC.  */\n  if (depth == 0)\n    return 0;\n\n  /* If the next frame is an inlined function, but not the outermost, then\n     we are the next outer.  If it is not an inlined function, then we\n     are the innermost inlined function of a different real frame.  */\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          203,
+          0
+        ],
+        [
+          260,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inline_frame_sniffer",
+        "parameters": {
+          "self": "struct frame_unwind",
+          "this_frame": "struct frame_info",
+          "this_cache": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nblock_starting_point_at (CORE_ADDR pc, const struct block *block)\n{\n  const struct blockvector *bv;\n  struct block *new_block;\n\n  bv = blockvector_for_pc (pc, NULL);\n  if (BLOCKVECTOR_MAP (bv) == NULL)\n    return 0;\n\n  new_block = (struct block *) addrmap_find (BLOCKVECTOR_MAP (bv), pc - 1);\n  if (new_block == NULL)\n    return 1;\n\n  if (new_block == block || contained_in (new_block, block))\n    return 0;\n\n  /* The immediately preceding address belongs to a different block,\n     which is not a child of this one.  Treat this as an entrance into\n     BLOCK.  */\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          275,
+          0
+        ],
+        [
+          296,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "block_starting_point_at",
+        "parameters": {
+          "pc": "CORE_ADDR",
+          "block": "struct block"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nskip_inline_frames (ptid_t ptid)\n{\n  CORE_ADDR this_pc;\n  const struct block *frame_block, *cur_block;\n  struct symbol *last_sym = NULL;\n  int skip_count = 0;\n  struct inline_state *state;\n\n  /* This function is called right after reinitializing the frame\n     cache.  We try not to do more unwinding than absolutely\n     necessary, for performance.  */\n  this_pc = get_frame_pc (get_current_frame ());\n  frame_block = block_for_pc (this_pc);\n\n  if (frame_block != NULL)\n    {\n      cur_block = frame_block;\n      while (BLOCK_SUPERBLOCK (cur_block))\n\t{\n\t  if (block_inlined_p (cur_block))\n\t    {\n\t      /* See comments in inline_frame_this_id about this use\n\t\t of BLOCK_START.  */\n\t      if (BLOCK_START (cur_block) == this_pc\n\t\t  || block_starting_point_at (this_pc, cur_block))\n\t\t{\n\t\t  skip_count++;\n\t\t  last_sym = BLOCK_FUNCTION (cur_block);\n\t\t}\n\t      else\n\t\tbreak;\n\t    }\n\t  else if (BLOCK_FUNCTION (cur_block) != NULL)\n\t    break;\n\n\t  cur_block = BLOCK_SUPERBLOCK (cur_block);\n\t}\n    }\n\n  gdb_assert (find_inline_frame_state (ptid) == NULL);\n  state = allocate_inline_frame_state (ptid);\n  state->skipped_frames = skip_count;\n  state->saved_pc = this_pc;\n  state->skipped_symbol = last_sym;\n\n  if (skip_count != 0)\n    reinit_frame_cache ();\n}",
+      "fn_code_pos": [
+        [
+          302,
+          0
+        ],
+        [
+          350,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "skip_inline_frames",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nstep_into_inline_frame (ptid_t ptid)\n{\n  struct inline_state *state = find_inline_frame_state (ptid);\n\n  gdb_assert (state != NULL && state->skipped_frames > 0);\n  state->skipped_frames--;\n  reinit_frame_cache ();\n}",
+      "fn_code_pos": [
+        [
+          354,
+          0
+        ],
+        [
+          362,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "step_into_inline_frame",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\ninline_skipped_frames (ptid_t ptid)\n{\n  struct inline_state *state = find_inline_frame_state (ptid);\n\n  if (state == NULL)\n    return 0;\n  else\n    return state->skipped_frames;\n}",
+      "fn_code_pos": [
+        [
+          367,
+          0
+        ],
+        [
+          376,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inline_skipped_frames",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "struct symbol *\ninline_skipped_symbol (ptid_t ptid)\n{\n  struct inline_state *state = find_inline_frame_state (ptid);\n\n  gdb_assert (state != NULL);\n  return state->skipped_symbol;\n}",
+      "fn_code_pos": [
+        [
+          381,
+          0
+        ],
+        [
+          388,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inline_skipped_symbol",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "int\nframe_inlined_callees (struct frame_info *this_frame)\n{\n  struct frame_info *next_frame;\n  int inline_count = 0;\n\n  /* First count how many inlined functions at this PC have frames\n     above FRAME (are inlined into FRAME).  */\n  for (next_frame = get_next_frame (this_frame);\n       next_frame && get_frame_type (next_frame) == INLINE_FRAME;\n       next_frame = get_next_frame (next_frame))\n    inline_count++;\n\n  /* Simulate some most-inner inlined frames which were suppressed, so\n     they can be stepped into later.  If we are unwinding already\n     outer frames from some non-inlined frame this does not apply.  */\n  if (next_frame == NULL)\n    inline_count += inline_skipped_frames (inferior_ptid);\n\n  return inline_count;\n}",
+      "fn_code_pos": [
+        [
+          394,
+          0
+        ],
+        [
+          414,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frame_inlined_callees",
+        "parameters": {
+          "this_frame": "struct frame_info"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "find_inline_frame_state (ptid_t ptid)",
+      "fn_dec_pos": [
+        [
+          66,
+          0
+        ],
+        [
+          66,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_inline_frame_state",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "allocate_inline_frame_state (ptid_t ptid)",
+      "fn_dec_pos": [
+        [
+          96,
+          0
+        ],
+        [
+          96,
+          41
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "allocate_inline_frame_state",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "inline_frame_prev_register (struct frame_info *this_frame, void **this_cache,\n\t\t\t    int regnum)",
+      "fn_dec_pos": [
+        [
+          183,
+          0
+        ],
+        [
+          184,
+          18
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inline_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "inline_skipped_symbol (ptid_t ptid)",
+      "fn_dec_pos": [
+        [
+          382,
+          0
+        ],
+        [
+          382,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "inline_skipped_symbol",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct inline_state\n{\n  /* The thread this data relates to.  It should be a currently\n     stopped thread; we assume thread IDs never change while the\n     thread is stopped.  */\n  ptid_t ptid;\n\n  /* The number of inlined functions we are skipping.  Each of these\n     functions can be stepped in to.  */\n  int skipped_frames;\n\n  /* Only valid if SKIPPED_FRAMES is non-zero.  This is the PC used\n     when calculating SKIPPED_FRAMES; used to check whether we have\n     moved to a new location by user request.  If so, we invalidate\n     any skipped frames.  */\n  CORE_ADDR saved_pc;\n\n  /* Only valid if SKIPPED_FRAMES is non-zero.  This is the symbol\n     of the outermost skipped inline function.  It's used to find the\n     call site of the current frame.  */\n  struct symbol *skipped_symbol;\n}",
+      {
+        "ptid": "ptid_t",
+        "skipped_frames": "int",
+        "saved_pc": "CORE_ADDR",
+        "*skipped_symbol": "struct symbol"
+      },
+      "inline_state",
+      [
+        34,
+        0
+      ],
+      [
+        55,
+        1
+      ]
+    ],
+    [
+      "struct inline_state\n{\n  /* The thread this data relates to.  It should be a currently\n     stopped thread; we assume thread IDs never change while the\n     thread is stopped.  */\n  ptid_t ptid;\n\n  /* The number of inlined functions we are skipping.  Each of these\n     functions can be stepped in to.  */\n  int skipped_frames;\n\n  /* Only valid if SKIPPED_FRAMES is non-zero.  This is the PC used\n     when calculating SKIPPED_FRAMES; used to check whether we have\n     moved to a new location by user request.  If so, we invalidate\n     any skipped frames.  */\n  CORE_ADDR saved_pc;\n\n  /* Only valid if SKIPPED_FRAMES is non-zero.  This is the symbol\n     of the outermost skipped inline function.  It's used to find the\n     call site of the current frame.  */\n  struct symbol *skipped_symbol;\n}",
+      {
+        "ptid": "ptid_t",
+        "skipped_frames": "int",
+        "saved_pc": "CORE_ADDR",
+        "*skipped_symbol": "struct symbol"
+      },
+      "inline_state",
+      [
+        34,
+        0
+      ],
+      [
+        55,
+        1
+      ]
+    ],
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        54,
+        2
+      ],
+      [
+        54,
+        15
+      ]
+    ],
+    [
+      "typedef struct inline_state inline_state_s;",
+      {},
+      "inline_state_s",
+      [
+        57,
+        0
+      ],
+      [
+        57,
+        43
+      ]
+    ],
+    [
+      "struct inline_state",
+      {},
+      "",
+      [
+        65,
+        7
+      ],
+      [
+        65,
+        26
+      ]
+    ],
+    [
+      "struct inline_state",
+      {},
+      "",
+      [
+        68,
+        2
+      ],
+      [
+        68,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        75,
+        3
+      ],
+      [
+        75,
+        18
+      ]
+    ],
+    [
+      "struct inline_state",
+      {},
+      "",
+      [
+        95,
+        7
+      ],
+      [
+        95,
+        26
+      ]
+    ],
+    [
+      "struct inline_state",
+      {},
+      "",
+      [
+        98,
+        2
+      ],
+      [
+        98,
+        21
+      ]
+    ],
+    [
+      "struct inline_state",
+      {},
+      "",
+      [
+        114,
+        2
+      ],
+      [
+        114,
+        21
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        147,
+        22
+      ],
+      [
+        147,
+        39
+      ]
+    ],
+    [
+      "struct frame_id",
+      {},
+      "",
+      [
+        149,
+        8
+      ],
+      [
+        149,
+        23
+      ]
+    ],
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        151,
+        2
+      ],
+      [
+        151,
+        15
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        182,
+        7
+      ],
+      [
+        182,
+        19
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        183,
+        28
+      ],
+      [
+        183,
+        45
+      ]
+    ],
+    [
+      "struct frame_unwind",
+      {},
+      "",
+      [
+        204,
+        28
+      ],
+      [
+        204,
+        47
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        205,
+        8
+      ],
+      [
+        205,
+        25
+      ]
+    ],
+    [
+      "struct block",
+      {},
+      "",
+      [
+        209,
+        8
+      ],
+      [
+        209,
+        20
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        211,
+        2
+      ],
+      [
+        211,
+        19
+      ]
+    ],
+    [
+      "struct inline_state",
+      {},
+      "",
+      [
+        212,
+        2
+      ],
+      [
+        212,
+        21
+      ]
+    ],
+    [
+      "struct frame_unwind",
+      {},
+      "",
+      [
+        262,
+        6
+      ],
+      [
+        262,
+        25
+      ]
+    ],
+    [
+      "struct block",
+      {},
+      "",
+      [
+        276,
+        45
+      ],
+      [
+        276,
+        57
+      ]
+    ],
+    [
+      "struct blockvector",
+      {},
+      "",
+      [
+        278,
+        8
+      ],
+      [
+        278,
+        26
+      ]
+    ],
+    [
+      "struct block",
+      {},
+      "",
+      [
+        279,
+        2
+      ],
+      [
+        279,
+        14
+      ]
+    ],
+    [
+      "struct block",
+      {},
+      "",
+      [
+        285,
+        15
+      ],
+      [
+        285,
+        27
+      ]
+    ],
+    [
+      "struct block",
+      {},
+      "",
+      [
+        306,
+        8
+      ],
+      [
+        306,
+        20
+      ]
+    ],
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        307,
+        2
+      ],
+      [
+        307,
+        15
+      ]
+    ],
+    [
+      "struct inline_state",
+      {},
+      "",
+      [
+        309,
+        2
+      ],
+      [
+        309,
+        21
+      ]
+    ],
+    [
+      "struct inline_state",
+      {},
+      "",
+      [
+        357,
+        2
+      ],
+      [
+        357,
+        21
+      ]
+    ],
+    [
+      "struct inline_state",
+      {},
+      "",
+      [
+        370,
+        2
+      ],
+      [
+        370,
+        21
+      ]
+    ],
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        381,
+        0
+      ],
+      [
+        381,
+        13
+      ]
+    ],
+    [
+      "struct inline_state",
+      {},
+      "",
+      [
+        384,
+        2
+      ],
+      [
+        384,
+        21
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        395,
+        23
+      ],
+      [
+        395,
+        40
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        397,
+        2
+      ],
+      [
+        397,
+        19
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"inline-frame.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"addrmap.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"block.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"frame-unwind.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"vec.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"frame.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

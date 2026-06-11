@@ -1,0 +1,215 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\ncontains_insn (tilepro_mnemonic expected_mnemonic,\n\t       int expected_first_operand,\n\t       int expected_second_operand,\n\t       bfd_vma memaddr,\n\t       int *last_operand_ret,\n\t       disassemble_info *info)\n{\n  struct tilepro_decoded_instruction\n    decoded[TILEPRO_MAX_INSTRUCTIONS_PER_BUNDLE];\n  bfd_byte opbuf[TILEPRO_BUNDLE_SIZE_IN_BYTES];\n  int i, num_instructions;\n\n  if ((*info->read_memory_func) (memaddr, opbuf,\n\t\t\t\t TILEPRO_BUNDLE_SIZE_IN_BYTES, info) != 0)\n    /* If we cannot even read the memory, it obviously does not have the\n       instruction for which we are looking. */\n    return 0;\n\n  /* Parse the instructions in the bundle. */\n  num_instructions = parse_insn_tilepro (bfd_getl64 (opbuf), memaddr, decoded);\n\n  for (i = 0; i < num_instructions; i++)\n    {\n      const struct tilepro_opcode *opcode = decoded[i].opcode;\n\n      if (opcode->mnemonic != expected_mnemonic)\n\tcontinue;\n\n      if (expected_first_operand != -1\n\t  && decoded[i].operand_values[0] != expected_first_operand)\n\tcontinue;\n\n      if (expected_second_operand != -1\n\t  && decoded[i].operand_values[1] != expected_second_operand)\n\tcontinue;\n\n      *last_operand_ret = decoded[i].operand_values[opcode->num_operands - 1];\n      return 1;\n    }\n\n  /* No match. */\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          32,
+          0
+        ],
+        [
+          75,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "contains_insn",
+        "parameters": {
+          "expected_mnemonic": "tilepro_mnemonic",
+          "expected_first_operand": "int",
+          "expected_second_operand": "int",
+          "memaddr": "bfd_vma",
+          "last_operand_ret": "int",
+          "info": "disassemble_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nprint_insn_tilepro (bfd_vma memaddr, disassemble_info *info)\n{\n  struct tilepro_decoded_instruction\n    decoded[TILEPRO_MAX_INSTRUCTIONS_PER_BUNDLE];\n  bfd_byte opbuf[TILEPRO_BUNDLE_SIZE_IN_BYTES];\n  int status, i, num_instructions, num_printed;\n  tilepro_mnemonic padding_mnemonic;\n\n  status = (*info->read_memory_func) (memaddr, opbuf,\n                                      TILEPRO_BUNDLE_SIZE_IN_BYTES, info);\n  if (status != 0)\n    {\n      (*info->memory_error_func) (status, memaddr, info);\n      return -1;\n    }\n\n  info->bytes_per_line = TILEPRO_BUNDLE_SIZE_IN_BYTES;\n  info->bytes_per_chunk = TILEPRO_BUNDLE_SIZE_IN_BYTES;\n  info->octets_per_byte = 1;\n  info->display_endian = BFD_ENDIAN_LITTLE;\n\n  /* Parse the instructions in the bundle.  */\n  num_instructions = parse_insn_tilepro (bfd_getl64 (opbuf), memaddr, decoded);\n\n  /* Print the instructions in the bundle.  */\n  info->fprintf_func (info->stream, \"{ \");\n  num_printed = 0;\n\n  /* Determine which nop opcode is used for padding and should be skipped.  */\n  padding_mnemonic = TILEPRO_OPC_FNOP;\n  for (i = 0; i < num_instructions; i++)\n    {\n      if (!decoded[i].opcode->can_bundle)\n\t{\n\t  /* Instructions that cannot be bundled are padded out with nops,\n\t     rather than fnops. Displaying them is always clutter.  */\n\t  padding_mnemonic = TILEPRO_OPC_NOP;\n\t  break;\n\t}\n    }\n\n  for (i = 0; i < num_instructions; i++)\n    {\n      const struct tilepro_opcode *opcode = decoded[i].opcode;\n      const char *name;\n      int j;\n\n      /* Do not print out fnops, unless everything is an fnop, in\n\t which case we will print out just the last one.  */\n      if (opcode->mnemonic == padding_mnemonic\n\t  && (num_printed > 0 || i + 1 < num_instructions))\n\tcontinue;\n\n      if (num_printed > 0)\n\tinfo->fprintf_func (info->stream, \" ; \");\n      ++num_printed;\n\n      name = opcode->name;\n      if (name == NULL)\n\tname = \"<invalid>\";\n      info->fprintf_func (info->stream, \"%s\", name);\n\n      for (j = 0; j < opcode->num_operands; j++)\n\t{\n\t  int num;\n\t  const struct tilepro_operand *op;\n\t  const char *spr_name;\n\n\t  if (j > 0)\n\t    info->fprintf_func (info->stream, \",\");\n\t  info->fprintf_func (info->stream, \" \");\n\n\t  num = decoded[i].operand_values[j];\n\n\t  op = decoded[i].operands[j];\n\t  switch (op->type)\n\t    {\n\t    case TILEPRO_OP_TYPE_REGISTER:\n\t      info->fprintf_func (info->stream, \"%s\",\n\t\t\t\t  tilepro_register_names[num]);\n\t      break;\n\n\t    case TILEPRO_OP_TYPE_SPR:\n\t      spr_name = get_tilepro_spr_name(num);\n\t      if (spr_name != NULL)\n\t\tinfo->fprintf_func (info->stream, \"%s\", spr_name);\n\t      else\n\t\tinfo->fprintf_func (info->stream, \"%d\", num);\n\t      break;\n\n\t    case TILEPRO_OP_TYPE_IMMEDIATE:\n\t      {\n\t\tbfd_vma addr = 0;\n\t\tint found_addr = 0;\n\t\tint addr_piece;\n\n\t\tswitch (opcode->mnemonic)\n\t\t  {\n\t\t  case TILEPRO_OPC_ADDLI:\n\t\t    if (contains_insn (TILEPRO_OPC_AULI,\n\t\t\t\t       decoded[i].operand_values[1],\n\t\t\t\t       TREG_ZERO,\n\t\t\t\t       memaddr - TILEPRO_BUNDLE_SIZE_IN_BYTES,\n\t\t\t\t       &addr_piece,\n\t\t\t\t       info))\n\t\t      {\n\t\t\taddr = num + (addr_piece << 16);\n\t\t\tfound_addr = 1;\n\t\t      }\n\t\t    break;\n\n\t\t  case TILEPRO_OPC_AULI:\n\t\t    if (contains_insn (TILEPRO_OPC_MOVELI,\n\t\t\t\t       decoded[i].operand_values[1],\n\t\t\t\t       -1,\n\t\t\t\t       memaddr - TILEPRO_BUNDLE_SIZE_IN_BYTES,\n\t\t\t\t       &addr_piece,\n\t\t\t\t       info))\n\t\t      {\n\t\t\taddr = (num << 16) + addr_piece;\n\t\t\tfound_addr = 1;\n\t\t      }\n\t\t    break;\n\n\t\t  default:\n\t\t    /* Operand does not look like a constructed address.  */\n\t\t    break;\n\t\t  }\n\n\t\tinfo->fprintf_func (info->stream, \"%d\", num);\n\n\t\tif (found_addr)\n\t\t  {\n\t\t    info->fprintf_func (info->stream, \" /* \");\n\t\t    info->print_address_func (addr, info);\n\t\t    info->fprintf_func (info->stream, \" */\");\n\t\t  }\n\t      }\n\t      break;\n\n\t    case TILEPRO_OP_TYPE_ADDRESS:\n\t      info->print_address_func ((bfd_vma)(unsigned int) num, info);\n\t      break;\n\n\t    default:\n\t      abort ();\n\t    }\n\t}\n    }\n  info->fprintf_func (info->stream, \" }\");\n\n  return TILEPRO_BUNDLE_SIZE_IN_BYTES;\n}",
+      "fn_code_pos": [
+        [
+          78,
+          0
+        ],
+        [
+          231,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_insn_tilepro",
+        "parameters": {
+          "memaddr": "bfd_vma",
+          "info": "disassemble_info"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct tilepro_decoded_instruction",
+      {},
+      "",
+      [
+        40,
+        2
+      ],
+      [
+        40,
+        36
+      ]
+    ],
+    [
+      "struct tilepro_opcode",
+      {},
+      "",
+      [
+        56,
+        12
+      ],
+      [
+        56,
+        33
+      ]
+    ],
+    [
+      "struct tilepro_decoded_instruction",
+      {},
+      "",
+      [
+        81,
+        2
+      ],
+      [
+        81,
+        36
+      ]
+    ],
+    [
+      "struct tilepro_opcode",
+      {},
+      "",
+      [
+        122,
+        12
+      ],
+      [
+        122,
+        33
+      ]
+    ],
+    [
+      "struct tilepro_operand",
+      {},
+      "",
+      [
+        144,
+        9
+      ],
+      [
+        144,
+        31
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include <stddef.h>\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <assert.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"elf/tilepro.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"elf-bfd.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"disassemble.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"opcode/tilepro.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

@@ -1,0 +1,501 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static sim_memopt *\ndo_memopt_add (SIM_DESC sd,\n\t       int level,\n\t       int space,\n\t       address_word addr,\n\t       address_word nr_bytes,\n\t       unsigned modulo,\n\t       sim_memopt **entry,\n\t       void *buffer)\n{\n  void *fill_buffer;\n  unsigned fill_length;\n  void *free_buffer;\n  unsigned long free_length;\n\n  if (buffer != NULL)\n    {\n      /* Buffer already given.  sim_memory_uninstall will free it. */\n      sim_core_attach (sd, NULL,\n\t\t       level, access_read_write_exec, space,\n\t\t       addr, nr_bytes, modulo, NULL, buffer);\n\n      free_buffer = buffer;\n      free_length = 0;\n      fill_buffer = buffer;\n      fill_length = (modulo == 0) ? nr_bytes : modulo;\n    }\n  else\n    {\n      /* Allocate new well-aligned buffer, just as sim_core_attach(). */\n      void *aligned_buffer;\n      int padding = (addr % sizeof (unsigned64));\n      unsigned long bytes;\n\n#ifdef HAVE_MMAP\n      struct stat s;\n\n      if (mmap_next_fd >= 0)\n\t{\n\t  /* Check that given file is big enough. */\n\t  int rc = fstat (mmap_next_fd, &s);\n\n\t  if (rc < 0)\n\t    sim_io_error (sd, \"Error, unable to stat file: %s\\n\",\n\t\t\t  strerror (errno));\n\n\t  /* Autosize the mapping to the file length.  */\n\t  if (nr_bytes == 0)\n\t    nr_bytes = s.st_size;\n\t}\n#endif\n\n      bytes = (modulo == 0 ? nr_bytes : modulo) + padding;\n\n      free_buffer = NULL;\n      free_length = bytes;\n\n#ifdef HAVE_MMAP\n      /* Memory map or malloc(). */\n      if (mmap_next_fd >= 0)\n\t{\n\t  /* Some kernels will SIGBUS the application if mmap'd file\n\t     is not large enough.  */\n\t  if (s.st_size < bytes)\n\t    {\n\t      sim_io_error (sd,\n\t\t\t    \"Error, cannot confirm that mmap file is large enough \"\n\t\t\t    \"(>= %ld bytes)\\n\", bytes);\n\t    }\n\n\t  free_buffer = mmap (0, bytes, PROT_READ|PROT_WRITE, MAP_SHARED, mmap_next_fd, 0);\n\t  if (free_buffer == 0 || free_buffer == (char*)-1) /* MAP_FAILED */\n\t    {\n\t      sim_io_error (sd, \"Error, cannot mmap file (%s).\\n\",\n\t\t\t    strerror (errno));\n\t    }\n\t}\n#endif\n\n      /* Need heap allocation? */\n      if (free_buffer == NULL)\n\t{\n\t  /* If filling with non-zero value, do not use clearing allocator. */\n\t  if (fill_byte_flag && fill_byte_value != 0)\n\t    free_buffer = xmalloc (bytes); /* don't clear */\n\t  else\n\t    free_buffer = zalloc (bytes); /* clear */\n\t}\n\n      aligned_buffer = (char*) free_buffer + padding;\n\n      sim_core_attach (sd, NULL,\n\t\t       level, access_read_write_exec, space,\n\t\t       addr, nr_bytes, modulo, NULL, aligned_buffer);\n\n      fill_buffer = aligned_buffer;\n      fill_length = (modulo == 0) ? nr_bytes : modulo;\n\n      /* If we just used a clearing allocator, and are about to fill with\n         zero, truncate the redundant fill operation. */\n\n      if (fill_byte_flag && fill_byte_value == 0)\n         fill_length = 1; /* avoid boundary length=0 case */\n    }\n\n  if (fill_byte_flag)\n    {\n      ASSERT (fill_buffer != 0);\n      memset ((char*) fill_buffer, fill_byte_value, fill_length);\n    }\n\n  while ((*entry) != NULL)\n    entry = &(*entry)->next;\n  (*entry) = ZALLOC (sim_memopt);\n  (*entry)->level = level;\n  (*entry)->space = space;\n  (*entry)->addr = addr;\n  (*entry)->nr_bytes = nr_bytes;\n  (*entry)->modulo = modulo;\n  (*entry)->buffer = free_buffer;\n\n  /* Record memory unmapping info.  */\n  if (mmap_next_fd >= 0)\n    {\n      (*entry)->munmap_length = free_length;\n      close (mmap_next_fd);\n      mmap_next_fd = -1;\n    }\n  else\n    (*entry)->munmap_length = 0;\n\n  return (*entry);\n}",
+      "fn_code_pos": [
+        [
+          123,
+          0
+        ],
+        [
+          255,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_memopt_add",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "level": "int",
+          "space": "int",
+          "addr": "address_word",
+          "nr_bytes": "address_word",
+          "modulo": "unsigned",
+          "entry": "sim_memopt",
+          "buffer": "void"
+        },
+        "return_type": "sim_memopt"
+      }
+    },
+    {
+      "fn_code": "static SIM_RC\ndo_memopt_delete (SIM_DESC sd,\n\t\t  int level,\n\t\t  int space,\n\t\t  address_word addr)\n{\n  sim_memopt **entry = &STATE_MEMOPT (sd);\n  sim_memopt *alias;\n  while ((*entry) != NULL\n\t && ((*entry)->level != level\n\t      || (*entry)->space != space\n\t      || (*entry)->addr != addr))\n    entry = &(*entry)->next;\n  if ((*entry) == NULL)\n    {\n      sim_io_eprintf (sd, \"Memory at 0x%lx not found, not deleted\\n\",\n\t\t      (long) addr);\n      return SIM_RC_FAIL;\n    }\n  /* delete any buffer */\n  if ((*entry)->buffer != NULL)\n    {\n#ifdef HAVE_MUNMAP\n      if ((*entry)->munmap_length > 0)\n\tmunmap ((*entry)->buffer, (*entry)->munmap_length);\n      else\n#endif\n\tfree ((*entry)->buffer);\n    }\n\n  /* delete it and its aliases */\n  alias = *entry;\n  *entry = (*entry)->next;\n  while (alias != NULL)\n    {\n      sim_memopt *dead = alias;\n      alias = alias->alias;\n      sim_core_detach (sd, NULL, dead->level, dead->space, dead->addr);\n      free (dead);\n    }\n  return SIM_RC_OK;\n}",
+      "fn_code_pos": [
+        [
+          257,
+          0
+        ],
+        [
+          298,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_memopt_delete",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "level": "int",
+          "space": "int",
+          "addr": "address_word"
+        },
+        "return_type": "SIM_RC"
+      }
+    },
+    {
+      "fn_code": "static char *\nparse_size (char *chp,\n\t    address_word *nr_bytes,\n\t    unsigned *modulo)\n{\n  /* <nr_bytes>[K|M|G] [ \"%\" <modulo> ] */\n  *nr_bytes = strtoul (chp, &chp, 0);\n  switch (*chp)\n    {\n    case '%':\n      *modulo = strtoul (chp + 1, &chp, 0);\n      break;\n    case 'g': case 'G': /* Gigabyte suffix.  */\n      *nr_bytes <<= 10;\n      /* Fall through.  */\n    case 'm': case 'M': /* Megabyte suffix.  */\n      *nr_bytes <<= 10;\n      /* Fall through.  */\n    case 'k': case 'K': /* Kilobyte suffix.  */\n      *nr_bytes <<= 10;\n      /* Check for a modulo specifier after the suffix.  */\n      ++ chp;\n      if (* chp == 'b' || * chp == 'B')\n\t++ chp;\n      if (* chp == '%')\n\t*modulo = strtoul (chp + 1, &chp, 0);\n      break;\n    }\n  return chp;\n}",
+      "fn_code_pos": [
+        [
+          301,
+          0
+        ],
+        [
+          330,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "parse_size",
+        "parameters": {
+          "chp": "char",
+          "nr_bytes": "address_word",
+          "modulo": "unsigned"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static char *\nparse_ulong_value (char *chp,\n\t\t     unsigned long *value)\n{\n  *value = strtoul (chp, &chp, 0);\n  return chp;\n}",
+      "fn_code_pos": [
+        [
+          332,
+          0
+        ],
+        [
+          338,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "parse_ulong_value",
+        "parameters": {
+          "chp": "char",
+          "value": "unsigned long"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static char *\nparse_addr (char *chp,\n\t    int *level,\n\t    int *space,\n\t    address_word *addr)\n{\n  /* [ <space> \": \" ] <addr> [ \"@\" <level> ] */\n  *addr = (unsigned long) strtoul (chp, &chp, 0);\n  if (*chp == ':')\n    {\n      *space = *addr;\n      *addr = (unsigned long) strtoul (chp + 1, &chp, 0);\n    }\n  if (*chp == '@')\n    {\n      *level = strtoul (chp + 1, &chp, 0);\n    }\n  return chp;\n}",
+      "fn_code_pos": [
+        [
+          340,
+          0
+        ],
+        [
+          358,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "parse_addr",
+        "parameters": {
+          "chp": "char",
+          "level": "int",
+          "space": "int",
+          "addr": "address_word"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static SIM_RC\nmemory_option_handler (SIM_DESC sd, sim_cpu *cpu, int opt,\n\t\t       char *arg, int is_command)\n{\n  switch (opt)\n    {\n\n    case OPTION_MEMORY_DELETE:\n      if (strcasecmp (arg, \"all\") == 0)\n\t{\n\t  while (STATE_MEMOPT (sd) != NULL)\n\t    do_memopt_delete (sd,\n\t\t\t      STATE_MEMOPT (sd)->level,\n\t\t\t      STATE_MEMOPT (sd)->space,\n\t\t\t      STATE_MEMOPT (sd)->addr);\n\t  return SIM_RC_OK;\n\t}\n      else\n\t{\n\t  int level = 0;\n\t  int space = 0;\n\t  address_word addr = 0;\n\t  parse_addr (arg, &level, &space, &addr);\n\t  return do_memopt_delete (sd, level, space, addr);\n\t}\n\n    case OPTION_MEMORY_REGION:\n      {\n\tchar *chp = arg;\n\tint level = 0;\n\tint space = 0;\n\taddress_word addr = 0;\n\taddress_word nr_bytes = 0;\n\tunsigned modulo = 0;\n\t/* parse the arguments */\n\tchp = parse_addr (chp, &level, &space, &addr);\n\tif (*chp != ',')\n\t  {\n\t    /* let the file autosize */\n\t    if (mmap_next_fd == -1)\n\t      {\n\t\tsim_io_eprintf (sd, \"Missing size for memory-region\\n\");\n\t\treturn SIM_RC_FAIL;\n\t      }\n\t  }\n\telse\n\t  chp = parse_size (chp + 1, &nr_bytes, &modulo);\n\t/* old style */\n\tif (*chp == ',')\n\t  modulo = strtoul (chp + 1, &chp, 0);\n\t/* try to attach/insert it */\n\tdo_memopt_add (sd, level, space, addr, nr_bytes, modulo,\n\t\t       &STATE_MEMOPT (sd), NULL);\n\treturn SIM_RC_OK;\n      }\n\n    case OPTION_MEMORY_ALIAS:\n      {\n\tchar *chp = arg;\n\tint level = 0;\n\tint space = 0;\n\taddress_word addr = 0;\n\taddress_word nr_bytes = 0;\n\tunsigned modulo = 0;\n\tsim_memopt *entry;\n\t/* parse the arguments */\n\tchp = parse_addr (chp, &level, &space, &addr);\n\tif (*chp != ',')\n\t  {\n\t    sim_io_eprintf (sd, \"Missing size for memory-region\\n\");\n\t    return SIM_RC_FAIL;\n\t  }\n\tchp = parse_size (chp + 1, &nr_bytes, &modulo);\n\t/* try to attach/insert the main record */\n\tentry = do_memopt_add (sd, level, space, addr, nr_bytes, modulo,\n\t\t\t       &STATE_MEMOPT (sd),\n\t\t\t       NULL);\n\t/* now attach all the aliases */\n\twhile (*chp == ',')\n\t  {\n\t    int a_level = level;\n\t    int a_space = space;\n\t    address_word a_addr = addr;\n\t    chp = parse_addr (chp + 1, &a_level, &a_space, &a_addr);\n\t    do_memopt_add (sd, a_level, a_space, a_addr, nr_bytes, modulo,\n\t\t\t   &entry->alias, entry->buffer);\n\t  }\n\treturn SIM_RC_OK;\n      }\n\n    case OPTION_MEMORY_SIZE:\n      {\n\tint level = 0;\n\tint space = 0;\n\taddress_word addr = 0;\n\taddress_word nr_bytes = 0;\n\tunsigned modulo = 0;\n\t/* parse the arguments */\n\tparse_size (arg, &nr_bytes, &modulo);\n\t/* try to attach/insert it */\n\tdo_memopt_add (sd, level, space, addr, nr_bytes, modulo,\n\t\t       &STATE_MEMOPT (sd), NULL);\n\treturn SIM_RC_OK;\n      }\n\n    case OPTION_MEMORY_CLEAR:\n      {\n\tfill_byte_value = (unsigned8) 0;\n\tfill_byte_flag = 1;\n\treturn SIM_RC_OK;\n\tbreak;\n      }\n\n    case OPTION_MEMORY_FILL:\n      {\n\tunsigned long fill_value;\n\tparse_ulong_value (arg, &fill_value);\n\tif (fill_value > 255)\n\t  {\n\t    sim_io_eprintf (sd, \"Missing fill value between 0 and 255\\n\");\n\t    return SIM_RC_FAIL;\n\t  }\n\tfill_byte_value = (unsigned8) fill_value;\n\tfill_byte_flag = 1;\n\treturn SIM_RC_OK;\n\tbreak;\n      }\n\n    case OPTION_MEMORY_MAPFILE:\n      {\n\tif (mmap_next_fd >= 0)\n\t  {\n\t    sim_io_eprintf (sd, \"Duplicate memory-mapfile option\\n\");\n\t    return SIM_RC_FAIL;\n\t  }\n\n\tmmap_next_fd = open (arg, O_RDWR);\n\tif (mmap_next_fd < 0)\n\t  {\n\t    sim_io_eprintf (sd, \"Cannot open file `%s': %s\\n\",\n\t\t\t    arg, strerror (errno));\n\t    return SIM_RC_FAIL;\n\t  }\n\n\treturn SIM_RC_OK;\n      }\n\n    case OPTION_MEMORY_INFO:\n      {\n\tsim_memopt *entry;\n\tsim_io_printf (sd, \"Memory maps:\\n\");\n\tfor (entry = STATE_MEMOPT (sd); entry != NULL; entry = entry->next)\n\t  {\n\t    sim_memopt *alias;\n\t    sim_io_printf (sd, \" memory\");\n\t    if (entry->alias == NULL)\n\t      sim_io_printf (sd, \" region \");\n\t    else\n\t      sim_io_printf (sd, \" alias \");\n\t    if (entry->space != 0)\n\t      sim_io_printf (sd, \"0x%lx:\", (long) entry->space);\n\t    sim_io_printf (sd, \"0x%08lx\", (long) entry->addr);\n\t    if (entry->level != 0)\n\t      sim_io_printf (sd, \"@0x%lx\", (long) entry->level);\n\t    sim_io_printf (sd, \",0x%lx\",\n\t\t\t   (long) entry->nr_bytes);\n\t    if (entry->modulo != 0)\n\t      sim_io_printf (sd, \"%%0x%lx\", (long) entry->modulo);\n\t    for (alias = entry->alias;\n\t\t alias != NULL;\n\t\t alias = alias->next)\n\t      {\n\t\tif (alias->space != 0)\n\t\t  sim_io_printf (sd, \"0x%lx:\", (long) alias->space);\n\t\tsim_io_printf (sd, \",0x%08lx\", (long) alias->addr);\n\t\tif (alias->level != 0)\n\t\t  sim_io_printf (sd, \"@0x%lx\", (long) alias->level);\n\t      }\n\t    sim_io_printf (sd, \"\\n\");\n\t  }\n\treturn SIM_RC_OK;\n\tbreak;\n      }\n\n    case OPTION_MAP_INFO:\n      {\n\tsim_core *memory = STATE_CORE (sd);\n\tunsigned nr_map;\n\n\tfor (nr_map = 0; nr_map < nr_maps; ++nr_map)\n\t  {\n\t    sim_core_map *map = &memory->common.map[nr_map];\n\t    sim_core_mapping *mapping = map->first;\n\n\t    if (!mapping)\n\t      continue;\n\n\t    sim_io_printf (sd, \"%s maps:\\n\", map_to_str (nr_map));\n\t    do\n\t      {\n\t\tunsigned modulo;\n\n\t\tsim_io_printf (sd, \" map \");\n\t\tif (mapping->space != 0)\n\t\t  sim_io_printf (sd, \"0x%x:\", mapping->space);\n\t\tsim_io_printf (sd, \"0x%08lx\", (long) mapping->base);\n\t\tif (mapping->level != 0)\n\t\t  sim_io_printf (sd, \"@0x%x\", mapping->level);\n\t\tsim_io_printf (sd, \",0x%lx\", (long) mapping->nr_bytes);\n\t\tmodulo = mapping->mask + 1;\n\t\tif (modulo != 0)\n\t\t  sim_io_printf (sd, \"%%0x%x\", modulo);\n\t\tsim_io_printf (sd, \"\\n\");\n\n\t\tmapping = mapping->next;\n\t      }\n\t    while (mapping);\n\t  }\n\n\treturn SIM_RC_OK;\n\tbreak;\n      }\n\n    default:\n      sim_io_eprintf (sd, \"Unknown memory option %d\\n\", opt);\n      return SIM_RC_FAIL;\n\n    }\n\n  return SIM_RC_FAIL;\n}",
+      "fn_code_pos": [
+        [
+          361,
+          0
+        ],
+        [
+          591,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "memory_option_handler",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "cpu": "sim_cpu",
+          "opt": "int",
+          "arg": "char",
+          "is_command": "int"
+        },
+        "return_type": "SIM_RC"
+      }
+    },
+    {
+      "fn_code": "SIM_RC\nsim_memopt_install (SIM_DESC sd)\n{\n  SIM_ASSERT (STATE_MAGIC (sd) == SIM_MAGIC_NUMBER);\n  sim_add_option_table (sd, NULL, memory_options);\n  sim_module_add_uninstall_fn (sd, sim_memory_uninstall);\n  sim_module_add_init_fn (sd, sim_memory_init);\n  return SIM_RC_OK;\n}",
+      "fn_code_pos": [
+        [
+          602,
+          0
+        ],
+        [
+          610,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_memopt_install",
+        "parameters": {
+          "sd": "SIM_DESC"
+        },
+        "return_type": "SIM_RC"
+      }
+    },
+    {
+      "fn_code": "static void\nsim_memory_uninstall (SIM_DESC sd)\n{\n  sim_memopt **entry = &STATE_MEMOPT (sd);\n  sim_memopt *alias;\n\n  while ((*entry) != NULL)\n    {\n      /* delete any buffer */\n      if ((*entry)->buffer != NULL)\n\t{\n#ifdef HAVE_MUNMAP\n\t  if ((*entry)->munmap_length > 0)\n\t    munmap ((*entry)->buffer, (*entry)->munmap_length);\n\t  else\n#endif\n\t    free ((*entry)->buffer);\n\t}\n\n      /* delete it and its aliases */\n      alias = *entry;\n\n      /* next victim */\n      *entry = (*entry)->next;\n\n      while (alias != NULL)\n\t{\n\t  sim_memopt *dead = alias;\n\t  alias = alias->alias;\n\t  sim_core_detach (sd, NULL, dead->level, dead->space, dead->addr);\n\t  free (dead);\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          615,
+          0
+        ],
+        [
+          648,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_memory_uninstall",
+        "parameters": {
+          "sd": "SIM_DESC"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static SIM_RC\nsim_memory_init (SIM_DESC sd)\n{\n  /* Reinitialize option modifier flags, in case they were left\n     over from a previous sim startup event.  */\n  fill_byte_flag = 0;\n  mmap_next_fd = -1;\n\n  return SIM_RC_OK;\n}",
+      "fn_code_pos": [
+        [
+          651,
+          0
+        ],
+        [
+          660,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_memory_init",
+        "parameters": {
+          "sd": "SIM_DESC"
+        },
+        "return_type": "SIM_RC"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "do_memopt_add (SIM_DESC sd,\n\t       int level,\n\t       int space,\n\t       address_word addr,\n\t       address_word nr_bytes,\n\t       unsigned modulo,\n\t       sim_memopt **entry,\n\t       void *buffer)",
+      "fn_dec_pos": [
+        [
+          124,
+          0
+        ],
+        [
+          131,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_memopt_add",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "level": "int",
+          "space": "int",
+          "addr": "address_word",
+          "nr_bytes": "address_word",
+          "modulo": "unsigned",
+          "entry": "sim_memopt",
+          "buffer": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "parse_size (char *chp,\n\t    address_word *nr_bytes,\n\t    unsigned *modulo)",
+      "fn_dec_pos": [
+        [
+          302,
+          0
+        ],
+        [
+          304,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "parse_size",
+        "parameters": {
+          "chp": "char",
+          "nr_bytes": "address_word",
+          "modulo": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "parse_ulong_value (char *chp,\n\t\t     unsigned long *value)",
+      "fn_dec_pos": [
+        [
+          333,
+          0
+        ],
+        [
+          334,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "parse_ulong_value",
+        "parameters": {
+          "chp": "char",
+          "value": "unsigned long"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "parse_addr (char *chp,\n\t    int *level,\n\t    int *space,\n\t    address_word *addr)",
+      "fn_dec_pos": [
+        [
+          341,
+          0
+        ],
+        [
+          344,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "parse_addr",
+        "parameters": {
+          "chp": "char",
+          "level": "int",
+          "space": "int",
+          "addr": "address_word"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        158,
+        6
+      ],
+      [
+        158,
+        17
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-assert.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-options.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <strings.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include <sys/mman.h>\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <sys/stat.h>\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum {\n  OPTION_MEMORY_DELETE = OPTION_START,\n  OPTION_MEMORY_REGION,\n  OPTION_MEMORY_SIZE,\n  OPTION_MEMORY_INFO,\n  OPTION_MEMORY_ALIAS,\n  OPTION_MEMORY_CLEAR,\n  OPTION_MEMORY_FILL,\n  OPTION_MEMORY_MAPFILE,\n  OPTION_MAP_INFO\n}",
+      {
+        "OPTION_MEMORY_DELETE": "",
+        "OPTION_MEMORY_REGION": "",
+        "OPTION_MEMORY_SIZE": "",
+        "OPTION_MEMORY_INFO": "",
+        "OPTION_MEMORY_ALIAS": "",
+        "OPTION_MEMORY_CLEAR": "",
+        "OPTION_MEMORY_FILL": "",
+        "OPTION_MEMORY_MAPFILE": "",
+        "OPTION_MAP_INFO": ""
+      },
+      "",
+      [
+        60,
+        0
+      ],
+      [
+        70,
+        1
+      ]
+    ]
+  ]
+}

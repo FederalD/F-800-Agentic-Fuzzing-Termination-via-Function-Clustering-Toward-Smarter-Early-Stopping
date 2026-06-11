@@ -1,0 +1,522 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void *\nalloc_lzma (void *opaque, size_t nmemb, size_t size)\n{\n  return xmalloc (nmemb * size);\n}",
+      "fn_code_pos": [
+        [
+          32,
+          0
+        ],
+        [
+          36,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alloc_lzma",
+        "parameters": {
+          "opaque": "void",
+          "nmemb": "size_t",
+          "size": "size_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfree_lzma (void *opaque, void *ptr)\n{\n  xfree (ptr);\n}",
+      "fn_code_pos": [
+        [
+          40,
+          0
+        ],
+        [
+          44,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "free_lzma",
+        "parameters": {
+          "opaque": "void",
+          "ptr": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void *\nlzma_open (struct bfd *nbfd, void *open_closure)\n{\n  asection *section = (asection *) open_closure;\n  bfd_size_type size, offset;\n  lzma_stream_flags options;\n  gdb_byte footer[LZMA_STREAM_HEADER_SIZE];\n  gdb_byte *indexdata;\n  lzma_index *index;\n  int ret;\n  uint64_t memlimit = UINT64_MAX;\n  struct gdb_lzma_stream *lstream;\n  size_t pos;\n\n  size = bfd_get_section_size (section);\n  offset = section->filepos + size - LZMA_STREAM_HEADER_SIZE;\n  if (size < LZMA_STREAM_HEADER_SIZE\n      || bfd_seek (section->owner, offset, SEEK_SET) != 0\n      || bfd_bread (footer, LZMA_STREAM_HEADER_SIZE, section->owner)\n         != LZMA_STREAM_HEADER_SIZE\n      || lzma_stream_footer_decode (&options, footer) != LZMA_OK\n      || offset < options.backward_size)\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n\n  offset -= options.backward_size;\n  indexdata = (gdb_byte *) xmalloc (options.backward_size);\n  index = NULL;\n  pos = 0;\n  if (bfd_seek (section->owner, offset, SEEK_SET) != 0\n      || bfd_bread (indexdata, options.backward_size, section->owner)\n         != options.backward_size\n      || lzma_index_buffer_decode (&index, &memlimit, &gdb_lzma_allocator,\n\t\t\t\t   indexdata, &pos, options.backward_size)\n         != LZMA_OK\n      || lzma_index_size (index) != options.backward_size)\n    {\n      xfree (indexdata);\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n  xfree (indexdata);\n\n  lstream = XCNEW (struct gdb_lzma_stream);\n  lstream->section = section;\n  lstream->index = index;\n\n  return lstream;\n}",
+      "fn_code_pos": [
+        [
+          76,
+          0
+        ],
+        [
+          126,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "lzma_open",
+        "parameters": {
+          "nbfd": "struct bfd",
+          "open_closure": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static file_ptr\nlzma_pread (struct bfd *nbfd, void *stream, void *buf, file_ptr nbytes,\n\t    file_ptr offset)\n{\n  struct gdb_lzma_stream *lstream = (struct gdb_lzma_stream *) stream;\n  bfd_size_type chunk_size;\n  lzma_index_iter iter;\n  gdb_byte *compressed, *uncompressed;\n  file_ptr block_offset;\n  lzma_filter filters[LZMA_FILTERS_MAX + 1];\n  lzma_block block;\n  size_t compressed_pos, uncompressed_pos;\n  file_ptr res;\n\n  res = 0;\n  while (nbytes > 0)\n    {\n      if (lstream->data == NULL\n\t  || lstream->data_start > offset || offset >= lstream->data_end)\n\t{\n\t  asection *section = lstream->section;\n\n\t  lzma_index_iter_init (&iter, lstream->index);\n\t  if (lzma_index_iter_locate (&iter, offset))\n\t    break;\n\n\t  compressed = (gdb_byte *) xmalloc (iter.block.total_size);\n\t  block_offset = section->filepos + iter.block.compressed_file_offset;\n\t  if (bfd_seek (section->owner, block_offset, SEEK_SET) != 0\n\t      || bfd_bread (compressed, iter.block.total_size, section->owner)\n\t\t != iter.block.total_size)\n\t    {\n\t      xfree (compressed);\n\t      break;\n\t    }\n\n\t  uncompressed = (gdb_byte *) xmalloc (iter.block.uncompressed_size);\n\n\t  memset (&block, 0, sizeof (block));\n\t  block.filters = filters;\n\t  block.header_size = lzma_block_header_size_decode (compressed[0]);\n\t  if (lzma_block_header_decode (&block, &gdb_lzma_allocator, compressed)\n\t      != LZMA_OK)\n\t    {\n\t      xfree (compressed);\n\t      xfree (uncompressed);\n\t      break;\n\t    }\n\n\t  compressed_pos = block.header_size;\n\t  uncompressed_pos = 0;\n\t  if (lzma_block_buffer_decode (&block, &gdb_lzma_allocator,\n\t\t\t\t\tcompressed, &compressed_pos,\n\t\t\t\t\titer.block.total_size,\n\t\t\t\t\tuncompressed, &uncompressed_pos,\n\t\t\t\t\titer.block.uncompressed_size)\n\t      != LZMA_OK)\n\t    {\n\t      xfree (compressed);\n\t      xfree (uncompressed);\n\t      break;\n\t    }\n\n\t  xfree (compressed);\n\n\t  xfree (lstream->data);\n\t  lstream->data = uncompressed;\n\t  lstream->data_start = iter.block.uncompressed_file_offset;\n\t  lstream->data_end = (iter.block.uncompressed_file_offset\n\t\t\t       + iter.block.uncompressed_size);\n\t}\n\n      chunk_size = std::min (nbytes, (file_ptr) lstream->data_end - offset);\n      memcpy (buf, lstream->data + offset - lstream->data_start, chunk_size);\n      buf = (gdb_byte *) buf + chunk_size;\n      offset += chunk_size;\n      nbytes -= chunk_size;\n      res += chunk_size;\n    }\n\n  return res;\n}",
+      "fn_code_pos": [
+        [
+          132,
+          0
+        ],
+        [
+          213,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "lzma_pread",
+        "parameters": {
+          "nbfd": "struct bfd",
+          "stream": "void",
+          "buf": "void",
+          "nbytes": "file_ptr",
+          "offset": "file_ptr"
+        },
+        "return_type": "file_ptr"
+      }
+    },
+    {
+      "fn_code": "static int\nlzma_close (struct bfd *nbfd,\n\t    void *stream)\n{\n  struct gdb_lzma_stream *lstream = (struct gdb_lzma_stream *) stream;\n\n  lzma_index_end (lstream->index, &gdb_lzma_allocator);\n  xfree (lstream->data);\n  xfree (lstream);\n\n  /* Zero means success.  */\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          219,
+          0
+        ],
+        [
+          231,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "lzma_close",
+        "parameters": {
+          "nbfd": "struct bfd",
+          "stream": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nlzma_stat (struct bfd *abfd,\n\t   void *stream,\n\t   struct stat *sb)\n{\n  struct gdb_lzma_stream *lstream = (struct gdb_lzma_stream *) stream;\n\n  memset (sb, 0, sizeof (struct stat));\n  sb->st_size = lzma_index_uncompressed_size (lstream->index);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          237,
+          0
+        ],
+        [
+          247,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "lzma_stat",
+        "parameters": {
+          "abfd": "struct bfd",
+          "stream": "void",
+          "sb": "struct stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "gdb_bfd_ref_ptr\nfind_separate_debug_file_in_section (struct objfile *objfile)\n{\n  asection *section;\n  gdb_bfd_ref_ptr abfd;\n\n  if (objfile->obfd == NULL)\n    return NULL;\n\n  section = bfd_get_section_by_name (objfile->obfd, \".gnu_debugdata\");\n  if (section == NULL)\n    return NULL;\n\n#ifdef HAVE_LIBLZMA\n  abfd = gdb_bfd_openr_iovec (objfile_name (objfile), gnutarget, lzma_open,\n\t\t\t      section, lzma_pread, lzma_close, lzma_stat);\n  if (abfd == NULL)\n    return NULL;\n\n  if (!bfd_check_format (abfd.get (), bfd_object))\n    {\n      warning (_(\"Cannot parse .gnu_debugdata section; not a BFD object\"));\n      return NULL;\n    }\n#else\n  warning (_(\"Cannot parse .gnu_debugdata section; LZMA support was \"\n\t     \"disabled at compile time\"));\n#endif /* !HAVE_LIBLZMA */\n\n  return abfd;\n}",
+      "fn_code_pos": [
+        [
+          258,
+          0
+        ],
+        [
+          288,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_separate_debug_file_in_section",
+        "parameters": {
+          "objfile": "struct objfile"
+        },
+        "return_type": "gdb_bfd_ref_ptr"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "alloc_lzma (void *opaque, size_t nmemb, size_t size)",
+      "fn_dec_pos": [
+        [
+          33,
+          0
+        ],
+        [
+          33,
+          52
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alloc_lzma",
+        "parameters": {
+          "opaque": "void",
+          "nmemb": "size_t",
+          "size": "size_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "lzma_open (struct bfd *nbfd, void *open_closure)",
+      "fn_dec_pos": [
+        [
+          77,
+          0
+        ],
+        [
+          77,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "lzma_open",
+        "parameters": {
+          "nbfd": "struct bfd",
+          "open_closure": "void"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct gdb_lzma_stream\n{\n  /* Section of input BFD from which we are decoding data.  */\n  asection *section;\n\n  /* lzma library decompression state.  */\n  lzma_index *index;\n\n  /* Currently decoded block.  */\n  bfd_size_type data_start;\n  bfd_size_type data_end;\n  gdb_byte *data;\n}",
+      {
+        "*section": "asection",
+        "*index": "lzma_index",
+        "data_start": "bfd_size_type",
+        "data_end": "bfd_size_type",
+        "*data": "gdb_byte"
+      },
+      "gdb_lzma_stream",
+      [
+        55,
+        0
+      ],
+      [
+        67,
+        1
+      ]
+    ],
+    [
+      "struct gdb_lzma_stream\n{\n  /* Section of input BFD from which we are decoding data.  */\n  asection *section;\n\n  /* lzma library decompression state.  */\n  lzma_index *index;\n\n  /* Currently decoded block.  */\n  bfd_size_type data_start;\n  bfd_size_type data_end;\n  gdb_byte *data;\n}",
+      {
+        "*section": "asection",
+        "*index": "lzma_index",
+        "data_start": "bfd_size_type",
+        "data_end": "bfd_size_type",
+        "*data": "gdb_byte"
+      },
+      "gdb_lzma_stream",
+      [
+        55,
+        0
+      ],
+      [
+        67,
+        1
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        77,
+        11
+      ],
+      [
+        77,
+        21
+      ]
+    ],
+    [
+      "struct gdb_lzma_stream",
+      {},
+      "",
+      [
+        87,
+        2
+      ],
+      [
+        87,
+        24
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        133,
+        12
+      ],
+      [
+        133,
+        22
+      ]
+    ],
+    [
+      "struct gdb_lzma_stream",
+      {},
+      "",
+      [
+        136,
+        2
+      ],
+      [
+        136,
+        24
+      ]
+    ],
+    [
+      "struct gdb_lzma_stream",
+      {},
+      "",
+      [
+        136,
+        37
+      ],
+      [
+        136,
+        59
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        220,
+        12
+      ],
+      [
+        220,
+        22
+      ]
+    ],
+    [
+      "struct gdb_lzma_stream",
+      {},
+      "",
+      [
+        223,
+        2
+      ],
+      [
+        223,
+        24
+      ]
+    ],
+    [
+      "struct gdb_lzma_stream",
+      {},
+      "",
+      [
+        223,
+        37
+      ],
+      [
+        223,
+        59
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        238,
+        11
+      ],
+      [
+        238,
+        21
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        240,
+        4
+      ],
+      [
+        240,
+        15
+      ]
+    ],
+    [
+      "struct gdb_lzma_stream",
+      {},
+      "",
+      [
+        242,
+        2
+      ],
+      [
+        242,
+        24
+      ]
+    ],
+    [
+      "struct gdb_lzma_stream",
+      {},
+      "",
+      [
+        242,
+        37
+      ],
+      [
+        242,
+        59
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        244,
+        25
+      ],
+      [
+        244,
+        36
+      ]
+    ],
+    [
+      "struct objfile",
+      {},
+      "",
+      [
+        259,
+        37
+      ],
+      [
+        259,
+        51
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_bfd.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"symfile.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"objfiles.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <algorithm>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <lzma.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

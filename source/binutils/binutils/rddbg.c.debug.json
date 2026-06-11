@@ -1,0 +1,482 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "void *\nread_debugging_info (bfd *abfd, asymbol **syms, long symcount, bfd_boolean no_messages)\n{\n  void *dhandle;\n  bfd_boolean found;\n\n  dhandle = debug_init ();\n  if (dhandle == NULL)\n    return NULL;\n\n  if (! read_section_stabs_debugging_info (abfd, syms, symcount, dhandle,\n\t\t\t\t\t   &found))\n    return NULL;\n\n  if (bfd_get_flavour (abfd) == bfd_target_aout_flavour)\n    {\n      if (! read_symbol_stabs_debugging_info (abfd, syms, symcount, dhandle,\n\t\t\t\t\t      &found))\n\treturn NULL;\n    }\n\n  if (bfd_get_flavour (abfd) == bfd_target_ieee_flavour)\n    {\n      if (! read_ieee_debugging_info (abfd, dhandle, &found))\n\treturn NULL;\n    }\n\n  /* Try reading the COFF symbols if we didn't find any stabs in COFF\n     sections.  */\n  if (! found\n      && bfd_get_flavour (abfd) == bfd_target_coff_flavour\n      && symcount > 0)\n    {\n      if (! parse_coff (abfd, syms, symcount, dhandle))\n\treturn NULL;\n      found = TRUE;\n    }\n\n  if (! found)\n    {\n      if (! no_messages)\n\tnon_fatal (_(\"%s: no recognized debugging information\"),\n\t\t   bfd_get_filename (abfd));\n      return NULL;\n    }\n\n  return dhandle;\n}",
+      "fn_code_pos": [
+        [
+          45,
+          0
+        ],
+        [
+          92,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_debugging_info",
+        "parameters": {
+          "abfd": "bfd",
+          "syms": "asymbol",
+          "symcount": "long",
+          "no_messages": "bfd_boolean"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static bfd_boolean\nread_section_stabs_debugging_info (bfd *abfd, asymbol **syms, long symcount,\n\t\t\t\t   void *dhandle, bfd_boolean *pfound)\n{\n  static struct\n    {\n      const char *secname;\n      const char *strsecname;\n    }\n  names[] =\n    {\n      { \".stab\", \".stabstr\" },\n      { \"LC_SYMTAB.stabs\", \"LC_SYMTAB.stabstr\" },\n      { \"$GDB_SYMBOLS$\", \"$GDB_STRINGS$\" }\n    };\n  unsigned int i;\n  void *shandle;\n\n  *pfound = FALSE;\n  shandle = NULL;\n\n  for (i = 0; i < sizeof names / sizeof names[0]; i++)\n    {\n      asection *sec, *strsec;\n\n      sec = bfd_get_section_by_name (abfd, names[i].secname);\n      strsec = bfd_get_section_by_name (abfd, names[i].strsecname);\n      if (sec != NULL && strsec != NULL)\n\t{\n\t  bfd_size_type stabsize, strsize;\n\t  bfd_byte *stabs, *strings;\n\t  bfd_byte *stab;\n\t  bfd_size_type stroff, next_stroff;\n\n\t  stabsize = bfd_section_size (abfd, sec);\n\t  stabs = (bfd_byte *) xmalloc (stabsize);\n\t  if (! bfd_get_section_contents (abfd, sec, stabs, 0, stabsize))\n\t    {\n\t      fprintf (stderr, \"%s: %s: %s\\n\",\n\t\t       bfd_get_filename (abfd), names[i].secname,\n\t\t       bfd_errmsg (bfd_get_error ()));\n\t      return FALSE;\n\t    }\n\n\t  strsize = bfd_section_size (abfd, strsec);\n\t  strings = (bfd_byte *) xmalloc (strsize + 1);\n\t  if (! bfd_get_section_contents (abfd, strsec, strings, 0, strsize))\n\t    {\n\t      fprintf (stderr, \"%s: %s: %s\\n\",\n\t\t       bfd_get_filename (abfd), names[i].strsecname,\n\t\t       bfd_errmsg (bfd_get_error ()));\n\t      return FALSE;\n\t    }\n\t  /* Zero terminate the strings table, just in case.  */\n\t  strings [strsize] = 0;\n\t  if (shandle == NULL)\n\t    {\n\t      shandle = start_stab (dhandle, abfd, TRUE, syms, symcount);\n\t      if (shandle == NULL)\n\t\treturn FALSE;\n\t    }\n\n\t  *pfound = TRUE;\n\n\t  stroff = 0;\n\t  next_stroff = 0;\n\t  /* PR 17512: file: 078-60391-0.001:0.1.  */\n\t  for (stab = stabs; stab <= (stabs + stabsize) - 12; stab += 12)\n\t    {\n\t      unsigned int strx;\n\t      int type;\n\t      int other ATTRIBUTE_UNUSED;\n\t      int desc;\n\t      bfd_vma value;\n\n\t      /* This code presumes 32 bit values.  */\n\n\t      strx = bfd_get_32 (abfd, stab);\n\t      type = bfd_get_8 (abfd, stab + 4);\n\t      other = bfd_get_8 (abfd, stab + 5);\n\t      desc = bfd_get_16 (abfd, stab + 6);\n\t      value = bfd_get_32 (abfd, stab + 8);\n\n\t      if (type == 0)\n\t\t{\n\t\t  /* Special type 0 stabs indicate the offset to the\n\t\t     next string table.  */\n\t\t  stroff = next_stroff;\n\t\t  next_stroff += value;\n\t\t}\n\t      else\n\t\t{\n\t\t  size_t len;\n\t\t  char *f, *s;\n\n\t\t  if (stroff + strx >= strsize)\n\t\t    {\n\t\t      fprintf (stderr, _(\"%s: %s: stab entry %ld is corrupt, strx = 0x%x, type = %d\\n\"),\n\t\t\t       bfd_get_filename (abfd), names[i].secname,\n\t\t\t       (long) (stab - stabs) / 12, strx, type);\n\t\t      continue;\n\t\t    }\n\n\t\t  s = (char *) strings + stroff + strx;\n\t\t  f = NULL;\n\n\t\t  /* PR 17512: file: 002-87578-0.001:0.1.\n\t\t     It is possible to craft a file where, without the 'strlen (s) > 0',\n\t\t     an attempt to read the byte before 'strings' would occur.  */\n\t\t  while ((len = strlen (s)) > 0\n\t\t\t && s[len  - 1] == '\\\\'\n\t\t\t && stab + 12 < stabs + stabsize)\n\t\t    {\n\t\t      char *p;\n\n\t\t      stab += 12;\n\t\t      p = s + len - 1;\n\t\t      *p = '\\0';\n\t\t      strx = stroff + bfd_get_32 (abfd, stab);\n\t\t      if (strx >= strsize)\n\t\t\t{\n\t\t\t  fprintf (stderr, _(\"%s: %s: stab entry %ld is corrupt\\n\"),\n\t\t\t\t   bfd_get_filename (abfd), names[i].secname,\n\t\t\t\t   (long) (stab - stabs) / 12);\n\t\t\t  break;\n\t\t\t}\n\t\t      else\n\t\t\ts = concat (s, (char *) strings + strx,\n\t\t\t\t    (const char *) NULL);\n\n\t\t      /* We have to restore the backslash, because, if\n\t\t\t the linker is hashing stabs strings, we may\n\t\t\t see the same string more than once.  */\n\t\t      *p = '\\\\';\n\n\t\t      if (f != NULL)\n\t\t\tfree (f);\n\t\t      f = s;\n\t\t    }\n\n\t\t  save_stab (type, desc, value, s);\n\n\t\t  if (! parse_stab (dhandle, shandle, type, desc, value, s))\n\t\t    {\n\t\t      stab_context ();\n\t\t      free_saved_stabs ();\n\t\t      return FALSE;\n\t\t    }\n\n\t\t  /* Don't free f, since I think the stabs code\n\t\t     expects strings to hang around.  This should be\n\t\t     straightened out.  FIXME.  */\n\t\t}\n\t    }\n\n\t  free_saved_stabs ();\n\t  free (stabs);\n\n\t  /* Don't free strings, since I think the stabs code expects\n\t     the strings to hang around.  This should be straightened\n\t     out.  FIXME.  */\n\t}\n    }\n\n  if (shandle != NULL)\n    {\n      if (! finish_stab (dhandle, shandle))\n\treturn FALSE;\n    }\n\n  return TRUE;\n}",
+      "fn_code_pos": [
+        [
+          96,
+          0
+        ],
+        [
+          267,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_section_stabs_debugging_info",
+        "parameters": {
+          "abfd": "bfd",
+          "syms": "asymbol",
+          "symcount": "long",
+          "dhandle": "void",
+          "pfound": "bfd_boolean"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "static bfd_boolean\nread_symbol_stabs_debugging_info (bfd *abfd, asymbol **syms, long symcount,\n\t\t\t\t  void *dhandle, bfd_boolean *pfound)\n{\n  void *shandle;\n  asymbol **ps, **symend;\n\n  shandle = NULL;\n  symend = syms + symcount;\n  for (ps = syms; ps < symend; ps++)\n    {\n      symbol_info i;\n\n      bfd_get_symbol_info (abfd, *ps, &i);\n\n      if (i.type == '-')\n\t{\n\t  const char *s;\n\t  char *f;\n\n\t  if (shandle == NULL)\n\t    {\n\t      shandle = start_stab (dhandle, abfd, FALSE, syms, symcount);\n\t      if (shandle == NULL)\n\t\treturn FALSE;\n\t    }\n\n\t  *pfound = TRUE;\n\n\t  s = i.name;\n\t  if (s == NULL || strlen (s) < 1)\n\t    return FALSE;\n\t  f = NULL;\n\n\t  while (s[strlen (s) - 1] == '\\\\'\n\t\t && ps + 1 < symend)\n\t    {\n\t      char *sc, *n;\n\n\t      ++ps;\n\t      sc = xstrdup (s);\n\t      sc[strlen (sc) - 1] = '\\0';\n\t      n = concat (sc, bfd_asymbol_name (*ps), (const char *) NULL);\n\t      free (sc);\n\t      if (f != NULL)\n\t\tfree (f);\n\t      f = n;\n\t      s = n;\n\t    }\n\n\t  save_stab (i.stab_type, i.stab_desc, i.value, s);\n\n\t  if (! parse_stab (dhandle, shandle, i.stab_type, i.stab_desc,\n\t\t\t    i.value, s))\n\t    {\n\t      stab_context ();\n\t      free_saved_stabs ();\n\t      return FALSE;\n\t    }\n\n\t  /* Don't free f, since I think the stabs code expects\n\t     strings to hang around.  This should be straightened out.\n\t     FIXME.  */\n\t}\n    }\n\n  free_saved_stabs ();\n\n  if (shandle != NULL)\n    {\n      if (! finish_stab (dhandle, shandle))\n\treturn FALSE;\n    }\n\n  return TRUE;\n}",
+      "fn_code_pos": [
+        [
+          271,
+          0
+        ],
+        [
+          346,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_symbol_stabs_debugging_info",
+        "parameters": {
+          "abfd": "bfd",
+          "syms": "asymbol",
+          "symcount": "long",
+          "dhandle": "void",
+          "pfound": "bfd_boolean"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "static bfd_boolean\nread_ieee_debugging_info (bfd *abfd, void *dhandle, bfd_boolean *pfound)\n{\n  asection *dsec;\n  bfd_size_type size;\n  bfd_byte *contents;\n\n  /* The BFD backend puts the debugging information into a section\n     named .debug.  */\n\n  dsec = bfd_get_section_by_name (abfd, \".debug\");\n  if (dsec == NULL)\n    return TRUE;\n\n  size = bfd_section_size (abfd, dsec);\n  contents = (bfd_byte *) xmalloc (size);\n  if (! bfd_get_section_contents (abfd, dsec, contents, 0, size))\n    return FALSE;\n\n  if (! parse_ieee (dhandle, abfd, contents, size))\n    return FALSE;\n\n  free (contents);\n\n  *pfound = TRUE;\n\n  return TRUE;\n}",
+      "fn_code_pos": [
+        [
+          350,
+          0
+        ],
+        [
+          377,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_ieee_debugging_info",
+        "parameters": {
+          "abfd": "bfd",
+          "dhandle": "void",
+          "pfound": "bfd_boolean"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "static void\nsave_stab (int type, int desc, bfd_vma value, const char *string)\n{\n  if (saved_stabs[saved_stabs_index].string != NULL)\n    free (saved_stabs[saved_stabs_index].string);\n  saved_stabs[saved_stabs_index].type = type;\n  saved_stabs[saved_stabs_index].desc = desc;\n  saved_stabs[saved_stabs_index].value = value;\n  saved_stabs[saved_stabs_index].string = xstrdup (string);\n  saved_stabs_index = (saved_stabs_index + 1) % SAVE_STABS_COUNT;\n}",
+      "fn_code_pos": [
+        [
+          396,
+          0
+        ],
+        [
+          406,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "save_stab",
+        "parameters": {
+          "type": "int",
+          "desc": "int",
+          "value": "bfd_vma",
+          "string": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstab_context (void)\n{\n  int i;\n\n  fprintf (stderr, _(\"Last stabs entries before error:\\n\"));\n  fprintf (stderr, \"n_type n_desc n_value  string\\n\");\n\n  i = saved_stabs_index;\n  do\n    {\n      struct saved_stab *stabp;\n\n      stabp = saved_stabs + i;\n      if (stabp->string != NULL)\n\t{\n\t  const char *s;\n\n\t  s = bfd_get_stab_name (stabp->type);\n\t  if (s != NULL)\n\t    fprintf (stderr, \"%-6s\", s);\n\t  else if (stabp->type == 0)\n\t    fprintf (stderr, \"HdrSym\");\n\t  else\n\t    fprintf (stderr, \"%-6d\", stabp->type);\n\t  fprintf (stderr, \" %-6d \", stabp->desc);\n\t  fprintf_vma (stderr, stabp->value);\n\t  if (stabp->type != 0)\n\t    fprintf (stderr, \" %s\", stabp->string);\n\t  fprintf (stderr, \"\\n\");\n\t}\n      i = (i + 1) % SAVE_STABS_COUNT;\n    }\n  while (i != saved_stabs_index);\n}",
+      "fn_code_pos": [
+        [
+          410,
+          0
+        ],
+        [
+          444,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "stab_context",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfree_saved_stabs (void)\n{\n  int i;\n\n  for (i = 0; i < SAVE_STABS_COUNT; i++)\n    {\n      if (saved_stabs[i].string != NULL)\n\t{\n\t  free (saved_stabs[i].string);\n\t  saved_stabs[i].string = NULL;\n\t}\n    }\n\n  saved_stabs_index = 0;\n}",
+      "fn_code_pos": [
+        [
+          448,
+          0
+        ],
+        [
+          463,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "free_saved_stabs",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "read_section_stabs_debugging_info\n  (bfd *, asymbol **, long, void *, bfd_boolean *)",
+      "fn_dec_pos": [
+        [
+          33,
+          19
+        ],
+        [
+          34,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_section_stabs_debugging_info",
+        "parameters": {},
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "read_symbol_stabs_debugging_info\n  (bfd *, asymbol **, long, void *, bfd_boolean *)",
+      "fn_dec_pos": [
+        [
+          35,
+          19
+        ],
+        [
+          36,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_symbol_stabs_debugging_info",
+        "parameters": {},
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "read_ieee_debugging_info (bfd *, void *, bfd_boolean *)",
+      "fn_dec_pos": [
+        [
+          37,
+          19
+        ],
+        [
+          37,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_ieee_debugging_info",
+        "parameters": {},
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "save_stab (int, int, bfd_vma, const char *)",
+      "fn_dec_pos": [
+        [
+          38,
+          12
+        ],
+        [
+          38,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "save_stab",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "stab_context (void)",
+      "fn_dec_pos": [
+        [
+          39,
+          12
+        ],
+        [
+          39,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "stab_context",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "free_saved_stabs (void)",
+      "fn_dec_pos": [
+        [
+          40,
+          12
+        ],
+        [
+          40,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "free_saved_stabs",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "read_debugging_info (bfd *abfd, asymbol **syms, long symcount, bfd_boolean no_messages)",
+      "fn_dec_pos": [
+        [
+          46,
+          0
+        ],
+        [
+          46,
+          87
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_debugging_info",
+        "parameters": {
+          "abfd": "bfd",
+          "syms": "asymbol",
+          "symcount": "long",
+          "no_messages": "bfd_boolean"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct\n    {\n      const char *secname;\n      const char *strsecname;\n    }",
+      {
+        "char": "const"
+      },
+      "",
+      [
+        100,
+        9
+      ],
+      [
+        104,
+        5
+      ]
+    ],
+    [
+      "struct saved_stab\n{\n  int type;\n  int desc;\n  bfd_vma value;\n  char *string;\n}",
+      {
+        "type": "int",
+        "desc": "int",
+        "value": "bfd_vma",
+        "*string": "char"
+      },
+      "saved_stab",
+      [
+        383,
+        0
+      ],
+      [
+        389,
+        1
+      ]
+    ],
+    [
+      "struct\n    {\n      const char *secname;\n      const char *strsecname;\n    }",
+      {
+        "char": "const"
+      },
+      "",
+      [
+        100,
+        9
+      ],
+      [
+        104,
+        5
+      ]
+    ],
+    [
+      "struct saved_stab\n{\n  int type;\n  int desc;\n  bfd_vma value;\n  char *string;\n}",
+      {
+        "type": "int",
+        "desc": "int",
+        "value": "bfd_vma",
+        "*string": "char"
+      },
+      "saved_stab",
+      [
+        383,
+        0
+      ],
+      [
+        389,
+        1
+      ]
+    ],
+    [
+      "struct saved_stab",
+      {},
+      "",
+      [
+        391,
+        7
+      ],
+      [
+        391,
+        24
+      ]
+    ],
+    [
+      "struct saved_stab",
+      {},
+      "",
+      [
+        421,
+        6
+      ],
+      [
+        421,
+        23
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"bucomm.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"debug.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"budbg.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

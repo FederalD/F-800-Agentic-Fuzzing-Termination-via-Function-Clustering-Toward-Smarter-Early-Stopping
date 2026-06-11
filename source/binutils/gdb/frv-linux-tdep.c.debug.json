@@ -1,0 +1,998 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nfrv_linux_pc_in_sigtramp (struct gdbarch *gdbarch, CORE_ADDR pc,\n\t\t\t  const char *name)\n{\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  gdb_byte buf[frv_instr_size];\n  LONGEST instr;\n  int retval = 0;\n\n  if (target_read_memory (pc, buf, sizeof buf) != 0)\n    return 0;\n\n  instr = extract_unsigned_integer (buf, sizeof buf, byte_order);\n\n  if (instr == 0x8efc0077)\t/* setlos #__NR_sigreturn, gr7 */\n    retval = NORMAL_SIGTRAMP;\n  else if (instr == 0x8efc00ad)\t/* setlos #__NR_rt_sigreturn, gr7 */\n    retval = RT_SIGTRAMP;\n  else\n    return 0;\n\n  if (target_read_memory (pc + frv_instr_size, buf, sizeof buf) != 0)\n    return 0;\n  instr = extract_unsigned_integer (buf, sizeof buf, byte_order);\n  if (instr != 0xc0700000)\t/* tira\tgr0, 0 */\n    return 0;\n\n  /* If we get this far, we'll return a non-zero value, either\n     NORMAL_SIGTRAMP (1) or RT_SIGTRAMP (2).  */\n  return retval;\n}",
+      "fn_code_pos": [
+        [
+          42,
+          0
+        ],
+        [
+          72,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_pc_in_sigtramp",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "pc": "CORE_ADDR",
+          "name": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nfrv_linux_sigcontext_reg_addr (struct frame_info *this_frame, int regno,\n                               CORE_ADDR *sc_addr_cache_ptr)\n{\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  CORE_ADDR sc_addr;\n\n  if (sc_addr_cache_ptr && *sc_addr_cache_ptr)\n    {\n      sc_addr = *sc_addr_cache_ptr;\n    }\n  else\n    {\n      CORE_ADDR pc, sp;\n      gdb_byte buf[4];\n      int tramp_type;\n\n      pc = get_frame_pc (this_frame);\n      tramp_type = frv_linux_pc_in_sigtramp (gdbarch, pc, 0);\n\n      get_frame_register (this_frame, sp_regnum, buf);\n      sp = extract_unsigned_integer (buf, sizeof buf, byte_order);\n\n      if (tramp_type == NORMAL_SIGTRAMP)\n\t{\n\t  /* For a normal sigtramp frame, the sigcontext struct starts\n\t     at SP + 8.  */\n\t  sc_addr = sp + 8;\n\t}\n      else if (tramp_type == RT_SIGTRAMP)\n\t{\n\t  /* For a realtime sigtramp frame, SP + 12 contains a pointer\n \t     to a ucontext struct.  The ucontext struct contains a\n \t     sigcontext struct starting 24 bytes in.  (The offset of\n \t     uc_mcontext within struct ucontext is derived as follows: \n \t     stack_t is a 12-byte struct and struct sigcontext is\n \t     8-byte aligned.  This gives an offset of 8 + 12 + 4 (for\n \t     padding) = 24.)  */\n\t  if (target_read_memory (sp + 12, buf, sizeof buf) != 0)\n\t    {\n\t      warning (_(\"Can't read realtime sigtramp frame.\"));\n\t      return 0;\n\t    }\n\t  sc_addr = extract_unsigned_integer (buf, sizeof buf, byte_order);\n \t  sc_addr += 24;\n\t}\n      else\n\tinternal_error (__FILE__, __LINE__, _(\"not a signal trampoline\"));\n\n      if (sc_addr_cache_ptr)\n\t*sc_addr_cache_ptr = sc_addr;\n    }\n\n  switch (regno)\n    {\n    case psr_regnum :\n      return sc_addr + 0;\n    /* sc_addr + 4 has \"isr\", the Integer Status Register.  */\n    case ccr_regnum :\n      return sc_addr + 8;\n    case cccr_regnum :\n      return sc_addr + 12;\n    case lr_regnum :\n      return sc_addr + 16;\n    case lcr_regnum :\n      return sc_addr + 20;\n    case pc_regnum :\n      return sc_addr + 24;\n    /* sc_addr + 28 is __status, the exception status.\n       sc_addr + 32 is syscallno, the syscall number or -1.\n       sc_addr + 36 is orig_gr8, the original syscall arg #1.\n       sc_addr + 40 is gner[0].\n       sc_addr + 44 is gner[1].  */\n    case iacc0h_regnum :\n      return sc_addr + 48;\n    case iacc0l_regnum :\n      return sc_addr + 52;\n    default : \n      if (first_gpr_regnum <= regno && regno <= last_gpr_regnum)\n\treturn sc_addr + 56 + 4 * (regno - first_gpr_regnum);\n      else if (first_fpr_regnum <= regno && regno <= last_fpr_regnum)\n\treturn sc_addr + 312 + 4 * (regno - first_fpr_regnum);\n      else\n\treturn -1;  /* not saved.  */\n    }\n}",
+      "fn_code_pos": [
+        [
+          168,
+          0
+        ],
+        [
+          254,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_sigcontext_reg_addr",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "regno": "int",
+          "sc_addr_cache_ptr": "CORE_ADDR"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "static struct trad_frame_cache *\nfrv_linux_sigtramp_frame_cache (struct frame_info *this_frame,\n\t\t\t\tvoid **this_cache)\n{\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  struct trad_frame_cache *cache;\n  CORE_ADDR addr;\n  gdb_byte buf[4];\n  int regnum;\n  CORE_ADDR sc_addr_cache_val = 0;\n  struct frame_id this_id;\n\n  if (*this_cache)\n    return (struct trad_frame_cache *) *this_cache;\n\n  cache = trad_frame_cache_zalloc (this_frame);\n\n  /* FIXME: cagney/2004-05-01: This is is long standing broken code.\n     The frame ID's code address should be the start-address of the\n     signal trampoline and not the current PC within that\n     trampoline.  */\n  get_frame_register (this_frame, sp_regnum, buf);\n  addr = extract_unsigned_integer (buf, sizeof buf, byte_order);\n  this_id = frame_id_build (addr, get_frame_pc (this_frame));\n  trad_frame_set_id (cache, this_id);\n\n  for (regnum = 0; regnum < frv_num_regs; regnum++)\n    {\n      LONGEST reg_addr = frv_linux_sigcontext_reg_addr (this_frame, regnum,\n\t\t\t\t\t\t\t&sc_addr_cache_val);\n      if (reg_addr != -1)\n\ttrad_frame_set_reg_addr (cache, regnum, reg_addr);\n    }\n\n  *this_cache = cache;\n  return cache;\n}",
+      "fn_code_pos": [
+        [
+          258,
+          0
+        ],
+        [
+          295,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_sigtramp_frame_cache",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nfrv_linux_sigtramp_frame_this_id (struct frame_info *this_frame,\n\t\t\t\t  void **this_cache,\n\t\t\t\t  struct frame_id *this_id)\n{\n  struct trad_frame_cache *cache\n    = frv_linux_sigtramp_frame_cache (this_frame, this_cache);\n  trad_frame_get_id (cache, this_id);\n}",
+      "fn_code_pos": [
+        [
+          297,
+          0
+        ],
+        [
+          305,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_sigtramp_frame_this_id",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "this_id": "struct frame_id"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static struct value *\nfrv_linux_sigtramp_frame_prev_register (struct frame_info *this_frame,\n\t\t\t\t\tvoid **this_cache, int regnum)\n{\n  /* Make sure we've initialized the cache.  */\n  struct trad_frame_cache *cache\n    = frv_linux_sigtramp_frame_cache (this_frame, this_cache);\n  return trad_frame_get_register (cache, this_frame, regnum);\n}",
+      "fn_code_pos": [
+        [
+          307,
+          0
+        ],
+        [
+          315,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_sigtramp_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nfrv_linux_sigtramp_frame_sniffer (const struct frame_unwind *self,\n\t\t\t\t  struct frame_info *this_frame,\n\t\t\t\t  void **this_cache)\n{\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n  CORE_ADDR pc = get_frame_pc (this_frame);\n  const char *name;\n\n  find_pc_partial_function (pc, &name, NULL, NULL);\n  if (frv_linux_pc_in_sigtramp (gdbarch, pc, name))\n    return 1;\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          317,
+          0
+        ],
+        [
+          331,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_sigtramp_frame_sniffer",
+        "parameters": {
+          "self": "struct frame_unwind",
+          "this_frame": "struct frame_info",
+          "this_cache": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void \nfrv_linux_supply_gregset (const struct regset *regset,\n                          struct regcache *regcache,\n\t\t\t  int regnum, const void *gregs, size_t len)\n{\n  int regi;\n\n  /* gr0 always contains 0.  Also, the kernel passes the TBR value in\n     this slot.  */\n  regcache->raw_supply_zeroed (first_gpr_regnum);\n\n  /* Fill gr32, ..., gr63 with zeros. */\n  for (regi = first_gpr_regnum + 32; regi <= last_gpr_regnum; regi++)\n    regcache->raw_supply_zeroed (regi);\n\n  regcache_supply_regset (regset, regcache, regnum, gregs, len);\n}",
+      "fn_code_pos": [
+        [
+          409,
+          0
+        ],
+        [
+          425,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_supply_gregset",
+        "parameters": {
+          "regset": "struct regset",
+          "regcache": "struct regcache",
+          "regnum": "int",
+          "gregs": "void",
+          "len": "size_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfrv_linux_iterate_over_regset_sections (struct gdbarch *gdbarch,\n\t\t\t\t\titerate_over_regset_sections_cb *cb,\n\t\t\t\t\tvoid *cb_data,\n\t\t\t\t\tconst struct regcache *regcache)\n{\n  cb (\".reg\", sizeof (frv_elf_gregset_t), &frv_linux_gregset,\n      NULL, cb_data);\n  cb (\".reg2\", sizeof (frv_elf_fpregset_t), &frv_linux_fpregset,\n      NULL, cb_data);\n}",
+      "fn_code_pos": [
+        [
+          441,
+          0
+        ],
+        [
+          451,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_iterate_over_regset_sections",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "cb": "iterate_over_regset_sections_cb",
+          "cb_data": "void",
+          "regcache": "struct regcache"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfrv_linux_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)\n{\n  linux_init_abi (info, gdbarch);\n\n  /* Set the sigtramp frame sniffer.  */\n  frame_unwind_append_unwinder (gdbarch, &frv_linux_sigtramp_frame_unwind); \n\n  set_gdbarch_iterate_over_regset_sections\n    (gdbarch, frv_linux_iterate_over_regset_sections);\n}",
+      "fn_code_pos": [
+        [
+          454,
+          0
+        ],
+        [
+          464,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_init_abi",
+        "parameters": {
+          "info": "struct gdbarch_info",
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static enum gdb_osabi\nfrv_linux_elf_osabi_sniffer (bfd *abfd)\n{\n  int elf_flags;\n\n  elf_flags = elf_elfheader (abfd)->e_flags;\n\n  /* Assume GNU/Linux if using the FDPIC ABI.  If/when another OS shows\n     up that uses this ABI, we'll need to start using .note sections\n     or some such.  */\n  if (elf_flags & EF_FRV_FDPIC)\n    return GDB_OSABI_LINUX;\n  else\n    return GDB_OSABI_UNKNOWN;\n}",
+      "fn_code_pos": [
+        [
+          466,
+          0
+        ],
+        [
+          480,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_elf_osabi_sniffer",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_frv_linux_tdep (void)\n{\n  gdbarch_register_osabi (bfd_arch_frv, 0, GDB_OSABI_LINUX,\n\t\t\t  frv_linux_init_abi);\n  gdbarch_register_osabi_sniffer (bfd_arch_frv,\n\t\t\t\t  bfd_target_elf_flavour,\n\t\t\t\t  frv_linux_elf_osabi_sniffer);\n}",
+      "fn_code_pos": [
+        [
+          485,
+          0
+        ],
+        [
+          493,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_frv_linux_tdep",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "frv_linux_sigtramp_frame_cache (struct frame_info *this_frame,\n\t\t\t\tvoid **this_cache)",
+      "fn_dec_pos": [
+        [
+          259,
+          0
+        ],
+        [
+          260,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_sigtramp_frame_cache",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "frv_linux_sigtramp_frame_prev_register (struct frame_info *this_frame,\n\t\t\t\t\tvoid **this_cache, int regnum)",
+      "fn_dec_pos": [
+        [
+          308,
+          0
+        ],
+        [
+          309,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "frv_linux_sigtramp_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "_initialize_frv_linux_tdep (void)",
+      "fn_dec_pos": [
+        [
+          483,
+          5
+        ],
+        [
+          483,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_frv_linux_tdep",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct { frv_elf_greg_t reg[FRV_ELF_NGREG]; } frv_elf_gregset_t;",
+      {
+        "reg[FRV_ELF_NGREG]": "frv_elf_greg_t"
+      },
+      "frv_elf_gregset_t",
+      [
+        347,
+        0
+      ],
+      [
+        347,
+        72
+      ]
+    ],
+    [
+      "typedef struct\n{\n  frv_elf_fpreg_t fr[64];\n  frv_elf_fpreg_t fner[2];\n  frv_elf_fpreg_t msr[2];\n  frv_elf_fpreg_t acc[8];\n  unsigned char accg[8];\n  frv_elf_fpreg_t fsr[1];\n} frv_elf_fpregset_t;",
+      {
+        "fr[64]": "frv_elf_fpreg_t",
+        "fner[2]": "frv_elf_fpreg_t",
+        "msr[2]": "frv_elf_fpreg_t",
+        "acc[8]": "frv_elf_fpreg_t",
+        "accg[8]": "unsigned char",
+        "fsr[1]": "frv_elf_fpreg_t"
+      },
+      "frv_elf_fpregset_t",
+      [
+        350,
+        0
+      ],
+      [
+        358,
+        21
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        43,
+        26
+      ],
+      [
+        43,
+        40
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        169,
+        31
+      ],
+      [
+        169,
+        48
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        172,
+        2
+      ],
+      [
+        172,
+        16
+      ]
+    ],
+    [
+      "struct trad_frame_cache",
+      {},
+      "",
+      [
+        258,
+        7
+      ],
+      [
+        258,
+        30
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        259,
+        32
+      ],
+      [
+        259,
+        49
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        262,
+        2
+      ],
+      [
+        262,
+        16
+      ]
+    ],
+    [
+      "struct trad_frame_cache",
+      {},
+      "",
+      [
+        264,
+        2
+      ],
+      [
+        264,
+        25
+      ]
+    ],
+    [
+      "struct frame_id",
+      {},
+      "",
+      [
+        269,
+        2
+      ],
+      [
+        269,
+        17
+      ]
+    ],
+    [
+      "struct trad_frame_cache",
+      {},
+      "",
+      [
+        272,
+        12
+      ],
+      [
+        272,
+        35
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        298,
+        34
+      ],
+      [
+        298,
+        51
+      ]
+    ],
+    [
+      "struct frame_id",
+      {},
+      "",
+      [
+        300,
+        6
+      ],
+      [
+        300,
+        21
+      ]
+    ],
+    [
+      "struct trad_frame_cache",
+      {},
+      "",
+      [
+        302,
+        2
+      ],
+      [
+        302,
+        25
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        307,
+        7
+      ],
+      [
+        307,
+        19
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        308,
+        40
+      ],
+      [
+        308,
+        57
+      ]
+    ],
+    [
+      "struct trad_frame_cache",
+      {},
+      "",
+      [
+        312,
+        2
+      ],
+      [
+        312,
+        25
+      ]
+    ],
+    [
+      "struct frame_unwind",
+      {},
+      "",
+      [
+        318,
+        40
+      ],
+      [
+        318,
+        59
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        319,
+        6
+      ],
+      [
+        319,
+        23
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        322,
+        2
+      ],
+      [
+        322,
+        16
+      ]
+    ],
+    [
+      "struct frame_unwind",
+      {},
+      "",
+      [
+        333,
+        13
+      ],
+      [
+        333,
+        32
+      ]
+    ],
+    [
+      "typedef struct { frv_elf_greg_t reg[FRV_ELF_NGREG]; } frv_elf_gregset_t;",
+      {
+        "reg[FRV_ELF_NGREG]": "frv_elf_greg_t"
+      },
+      "frv_elf_gregset_t",
+      [
+        347,
+        0
+      ],
+      [
+        347,
+        72
+      ]
+    ],
+    [
+      "typedef struct\n{\n  frv_elf_fpreg_t fr[64];\n  frv_elf_fpreg_t fner[2];\n  frv_elf_fpreg_t msr[2];\n  frv_elf_fpreg_t acc[8];\n  unsigned char accg[8];\n  frv_elf_fpreg_t fsr[1];\n} frv_elf_fpregset_t;",
+      {
+        "fr[64]": "frv_elf_fpreg_t",
+        "fner[2]": "frv_elf_fpreg_t",
+        "msr[2]": "frv_elf_fpreg_t",
+        "acc[8]": "frv_elf_fpreg_t",
+        "accg[8]": "unsigned char",
+        "fsr[1]": "frv_elf_fpreg_t"
+      },
+      "frv_elf_fpregset_t",
+      [
+        350,
+        0
+      ],
+      [
+        358,
+        21
+      ]
+    ],
+    [
+      "struct regcache_map_entry",
+      {},
+      "",
+      [
+        362,
+        13
+      ],
+      [
+        362,
+        38
+      ]
+    ],
+    [
+      "struct regcache_map_entry",
+      {},
+      "",
+      [
+        393,
+        13
+      ],
+      [
+        393,
+        38
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        410,
+        32
+      ],
+      [
+        410,
+        45
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        411,
+        26
+      ],
+      [
+        411,
+        41
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        429,
+        13
+      ],
+      [
+        429,
+        26
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        435,
+        13
+      ],
+      [
+        435,
+        26
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        442,
+        40
+      ],
+      [
+        442,
+        54
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        445,
+        11
+      ],
+      [
+        445,
+        26
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        455,
+        20
+      ],
+      [
+        455,
+        39
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        455,
+        46
+      ],
+      [
+        455,
+        60
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"target.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"frame.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"osabi.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"elf-bfd.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"elf/frv.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"frv-tdep.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"trad-frame.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"frame-unwind.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"regset.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"linux-tdep.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum {\n  NORMAL_SIGTRAMP = 1,\n  RT_SIGTRAMP = 2\n}",
+      {
+        "NORMAL_SIGTRAMP": "",
+        "RT_SIGTRAMP": ""
+      },
+      "",
+      [
+        37,
+        0
+      ],
+      [
+        40,
+        1
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        46,
+        2
+      ],
+      [
+        46,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        173,
+        2
+      ],
+      [
+        173,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        263,
+        2
+      ],
+      [
+        263,
+        17
+      ]
+    ],
+    [
+      "enum gdb_osabi",
+      {},
+      "",
+      [
+        466,
+        7
+      ],
+      [
+        466,
+        21
+      ]
+    ]
+  ]
+}

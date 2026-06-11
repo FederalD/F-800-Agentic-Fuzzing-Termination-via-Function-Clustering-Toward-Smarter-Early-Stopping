@@ -1,0 +1,417 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "debug_agent_printf (const char *fmt, ...)\n{\n  va_list ap;\n\n  if (!debug_agent)\n    return;\n  va_start (ap, fmt);\n  debug_vprintf (fmt, ap);\n  va_end (ap);\n}",
+      "fn_code_pos": [
+        [
+          31,
+          0
+        ],
+        [
+          40,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "debug_agent_printf",
+        "parameters": {
+          "fmt": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "int\nagent_loaded_p (void)\n{\n  return all_agent_symbols_looked_up;\n}",
+      "fn_code_pos": [
+        [
+          75,
+          0
+        ],
+        [
+          79,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "agent_loaded_p",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nagent_look_up_symbols (void *arg)\n{\n  int i;\n\n  all_agent_symbols_looked_up = 0;\n\n  for (i = 0; i < sizeof (symbol_list) / sizeof (symbol_list[0]); i++)\n    {\n      CORE_ADDR *addrp =\n\t(CORE_ADDR *) ((char *) &ipa_sym_addrs + symbol_list[i].offset);\n      struct objfile *objfile = (struct objfile *) arg;\n\n      if (find_minimal_symbol_address (symbol_list[i].name, addrp,\n\t\t\t\t       objfile) != 0)\n\t{\n\t  DEBUG_AGENT (\"symbol `%s' not found\\n\", symbol_list[i].name);\n\t  return -1;\n\t}\n    }\n\n  all_agent_symbols_looked_up = 1;\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          84,
+          0
+        ],
+        [
+          107,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "agent_look_up_symbols",
+        "parameters": {
+          "arg": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static unsigned int\nagent_get_helper_thread_id (void)\n{\n  if  (helper_thread_id == 0)\n    {\n      if (target_read_uint32 (ipa_sym_addrs.addr_helper_thread_id,\n\t\t\t      &helper_thread_id))\n\twarning (_(\"Error reading helper thread's id in lib\"));\n    }\n\n  return helper_thread_id;\n}",
+      "fn_code_pos": [
+        [
+          109,
+          0
+        ],
+        [
+          120,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "agent_get_helper_thread_id",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\ngdb_connect_sync_socket (int pid)\n{\n#ifdef HAVE_SYS_UN_H\n  struct sockaddr_un addr;\n  int res, fd;\n  char path[UNIX_PATH_MAX];\n\n  res = xsnprintf (path, UNIX_PATH_MAX, \"%s/gdb_ust%d\", P_tmpdir, pid);\n  if (res >= UNIX_PATH_MAX)\n    return -1;\n\n  res = fd = gdb_socket_cloexec (PF_UNIX, SOCK_STREAM, 0);\n  if (res == -1)\n    {\n      warning (_(\"error opening sync socket: %s\"), strerror (errno));\n      return -1;\n    }\n\n  addr.sun_family = AF_UNIX;\n\n  res = xsnprintf (addr.sun_path, UNIX_PATH_MAX, \"%s\", path);\n  if (res >= UNIX_PATH_MAX)\n    {\n      warning (_(\"string overflow allocating socket name\"));\n      close (fd);\n      return -1;\n    }\n\n  res = connect (fd, (struct sockaddr *) &addr, sizeof (addr));\n  if (res == -1)\n    {\n      warning (_(\"error connecting sync socket (%s): %s. \"\n\t\t \"Make sure the directory exists and that it is writable.\"),\n\t\t path, strerror (errno));\n      close (fd);\n      return -1;\n    }\n\n  return fd;\n#else\n  return -1;\n#endif\n}",
+      "fn_code_pos": [
+        [
+          136,
+          0
+        ],
+        [
+          179,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdb_connect_sync_socket",
+        "parameters": {
+          "pid": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nagent_run_command (int pid, const char *cmd, int len)\n{\n  int fd;\n  int tid = agent_get_helper_thread_id ();\n  ptid_t ptid = ptid_build (pid, tid, 0);\n\n  int ret = target_write_memory (ipa_sym_addrs.addr_cmd_buf,\n\t\t\t\t (gdb_byte *) cmd, len);\n\n  if (ret != 0)\n    {\n      warning (_(\"unable to write\"));\n      return -1;\n    }\n\n  DEBUG_AGENT (\"agent: resumed helper thread\\n\");\n\n  /* Resume helper thread.  */\n  target_continue_no_signal (ptid);\n\n  fd = gdb_connect_sync_socket (pid);\n  if (fd >= 0)\n    {\n      char buf[1] = \"\";\n      int ret;\n\n      DEBUG_AGENT (\"agent: signalling helper thread\\n\");\n\n      do\n\t{\n\t  ret = write (fd, buf, 1);\n\t} while (ret == -1 && errno == EINTR);\n\n\tDEBUG_AGENT (\"agent: waiting for helper thread's response\\n\");\n\n      do\n\t{\n\t  ret = read (fd, buf, 1);\n\t} while (ret == -1 && errno == EINTR);\n\n      close (fd);\n\n      DEBUG_AGENT (\"agent: helper thread's response received\\n\");\n    }\n  else\n    return -1;\n\n  /* Need to read response with the inferior stopped.  */\n  if (!ptid_equal (ptid, null_ptid))\n    {\n      /* Stop thread PTID.  */\n      DEBUG_AGENT (\"agent: stop helper thread\\n\");\n      target_stop_and_wait (ptid);\n    }\n\n  if (fd >= 0)\n    {\n      if (target_read_memory (ipa_sym_addrs.addr_cmd_buf, (gdb_byte *) cmd,\n\t\t\t      IPA_CMD_BUF_SIZE))\n\t{\n\t  warning (_(\"Error reading command response\"));\n\t  return -1;\n\t}\n    }\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          187,
+          0
+        ],
+        [
+          254,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "agent_run_command",
+        "parameters": {
+          "pid": "int",
+          "cmd": "char",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nagent_capability_check (enum agent_capa agent_capa)\n{\n  if (agent_capability == 0)\n    {\n      if (target_read_uint32 (ipa_sym_addrs.addr_capability,\n\t\t\t      &agent_capability))\n\twarning (_(\"Error reading capability of agent\"));\n    }\n  return agent_capability & agent_capa;\n}",
+      "fn_code_pos": [
+        [
+          261,
+          0
+        ],
+        [
+          271,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "agent_capability_check",
+        "parameters": {
+          "agent_capa": "enum agent_capa"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nagent_capability_invalidate (void)\n{\n  agent_capability = 0;\n}",
+      "fn_code_pos": [
+        [
+          276,
+          0
+        ],
+        [
+          280,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "agent_capability_invalidate",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct ipa_sym_addresses\n{\n  CORE_ADDR addr_helper_thread_id;\n  CORE_ADDR addr_cmd_buf;\n  CORE_ADDR addr_capability;\n}",
+      {
+        "addr_helper_thread_id": "CORE_ADDR",
+        "addr_cmd_buf": "CORE_ADDR",
+        "addr_capability": "CORE_ADDR"
+      },
+      "ipa_sym_addresses",
+      [
+        50,
+        0
+      ],
+      [
+        55,
+        1
+      ]
+    ],
+    [
+      "struct\n{\n  const char *name;\n  int offset;\n}",
+      {
+        "char": "const",
+        "offset": "int"
+      },
+      "",
+      [
+        61,
+        7
+      ],
+      [
+        65,
+        1
+      ]
+    ],
+    [
+      "struct ipa_sym_addresses\n{\n  CORE_ADDR addr_helper_thread_id;\n  CORE_ADDR addr_cmd_buf;\n  CORE_ADDR addr_capability;\n}",
+      {
+        "addr_helper_thread_id": "CORE_ADDR",
+        "addr_cmd_buf": "CORE_ADDR",
+        "addr_capability": "CORE_ADDR"
+      },
+      "ipa_sym_addresses",
+      [
+        50,
+        0
+      ],
+      [
+        55,
+        1
+      ]
+    ],
+    [
+      "struct\n{\n  const char *name;\n  int offset;\n}",
+      {
+        "char": "const",
+        "offset": "int"
+      },
+      "",
+      [
+        61,
+        7
+      ],
+      [
+        65,
+        1
+      ]
+    ],
+    [
+      "struct ipa_sym_addresses",
+      {},
+      "",
+      [
+        71,
+        7
+      ],
+      [
+        71,
+        31
+      ]
+    ],
+    [
+      "struct objfile",
+      {},
+      "",
+      [
+        95,
+        6
+      ],
+      [
+        95,
+        20
+      ]
+    ],
+    [
+      "struct objfile",
+      {},
+      "",
+      [
+        95,
+        33
+      ],
+      [
+        95,
+        47
+      ]
+    ],
+    [
+      "struct sockaddr_un",
+      {},
+      "",
+      [
+        140,
+        2
+      ],
+      [
+        140,
+        20
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        165,
+        22
+      ],
+      [
+        165,
+        37
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"common-defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"target/target.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"common/symbol.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"agent.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"filestuff.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        123,
+        0
+      ],
+      [
+        124,
+        0
+      ]
+    ],
+    [
+      "#include <sys/un.h>\n",
+      [
+        124,
+        0
+      ],
+      [
+        125,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum agent_capa",
+      {},
+      "",
+      [
+        262,
+        24
+      ],
+      [
+        262,
+        39
+      ]
+    ]
+  ]
+}

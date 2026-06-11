@@ -1,0 +1,756 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\npcap_stats_nit(pcap_t *p, struct pcap_stat *ps)\n{\n\tstruct pcap_nit *pn = p->priv;\n\n\t/*\n\t * \"ps_recv\" counts packets handed to the filter, not packets\n\t * that passed the filter.  As filtering is done in userland,\n\t * this does not include packets dropped because we ran out\n\t * of buffer space.\n\t *\n\t * \"ps_drop\" presumably counts packets dropped by the socket\n\t * because of flow control requirements or resource exhaustion;\n\t * it doesn't count packets dropped by the interface driver.\n\t * As filtering is done in userland, it counts packets regardless\n\t * of whether they would've passed the filter.\n\t *\n\t * These statistics don't include packets not yet read from the\n\t * kernel by libpcap or packets not yet read from libpcap by the\n\t * application.\n\t */\n\t*ps = pn->stat;\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          76,
+          0
+        ],
+        [
+          99,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stats_nit",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_read_nit(pcap_t *p, int cnt, pcap_handler callback, u_char *user)\n{\n\tstruct pcap_nit *pn = p->priv;\n\tregister int cc, n;\n\tregister u_char *bp, *cp, *ep;\n\tregister struct nit_hdr *nh;\n\tregister int caplen;\n\n\tcc = p->cc;\n\tif (cc == 0) {\n\t\tcc = read(p->fd, (char *)p->buffer, p->bufsize);\n\t\tif (cc < 0) {\n\t\t\tif (errno == EWOULDBLOCK)\n\t\t\t\treturn (0);\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, sizeof(p->errbuf),\n\t\t\t    errno, \"pcap_read\");\n\t\t\treturn (-1);\n\t\t}\n\t\tbp = (u_char *)p->buffer;\n\t} else\n\t\tbp = p->bp;\n\n\t/*\n\t * Loop through each packet.  The increment expression\n\t * rounds up to the next int boundary past the end of\n\t * the previous packet.\n\t */\n\tn = 0;\n\tep = bp + cc;\n\twhile (bp < ep) {\n\t\t/*\n\t\t * Has \"pcap_breakloop()\" been called?\n\t\t * If so, return immediately - if we haven't read any\n\t\t * packets, clear the flag and return -2 to indicate\n\t\t * that we were told to break out of the loop, otherwise\n\t\t * leave the flag set, so that the *next* call will break\n\t\t * out of the loop without having read any packets, and\n\t\t * return the number of packets we've processed so far.\n\t\t */\n\t\tif (p->break_loop) {\n\t\t\tif (n == 0) {\n\t\t\t\tp->break_loop = 0;\n\t\t\t\treturn (-2);\n\t\t\t} else {\n\t\t\t\tp->cc = ep - bp;\n\t\t\t\tp->bp = bp;\n\t\t\t\treturn (n);\n\t\t\t}\n\t\t}\n\n\t\tnh = (struct nit_hdr *)bp;\n\t\tcp = bp + sizeof(*nh);\n\n\t\tswitch (nh->nh_state) {\n\n\t\tcase NIT_CATCH:\n\t\t\tbreak;\n\n\t\tcase NIT_NOMBUF:\n\t\tcase NIT_NOCLUSTER:\n\t\tcase NIT_NOSPACE:\n\t\t\tpn->stat.ps_drop = nh->nh_dropped;\n\t\t\tcontinue;\n\n\t\tcase NIT_SEQNO:\n\t\t\tcontinue;\n\n\t\tdefault:\n\t\t\tpcap_snprintf(p->errbuf, sizeof(p->errbuf),\n\t\t\t    \"bad nit state %d\", nh->nh_state);\n\t\t\treturn (-1);\n\t\t}\n\t\t++pn->stat.ps_recv;\n\t\tbp += ((sizeof(struct nit_hdr) + nh->nh_datalen +\n\t\t    sizeof(int) - 1) & ~(sizeof(int) - 1));\n\n\t\tcaplen = nh->nh_wirelen;\n\t\tif (caplen > p->snapshot)\n\t\t\tcaplen = p->snapshot;\n\t\tif (bpf_filter(p->fcode.bf_insns, cp, nh->nh_wirelen, caplen)) {\n\t\t\tstruct pcap_pkthdr h;\n\t\t\th.ts = nh->nh_timestamp;\n\t\t\th.len = nh->nh_wirelen;\n\t\t\th.caplen = caplen;\n\t\t\t(*callback)(user, &h, cp);\n\t\t\tif (++n >= cnt && !PACKET_COUNT_IS_UNLIMITED(cnt)) {\n\t\t\t\tp->cc = ep - bp;\n\t\t\t\tp->bp = bp;\n\t\t\t\treturn (n);\n\t\t\t}\n\t\t}\n\t}\n\tp->cc = 0;\n\treturn (n);\n}",
+      "fn_code_pos": [
+        [
+          101,
+          0
+        ],
+        [
+          196,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_read_nit",
+        "parameters": {
+          "p": "pcap_t",
+          "cnt": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_inject_nit(pcap_t *p, const void *buf, size_t size)\n{\n\tstruct sockaddr sa;\n\tint ret;\n\n\tmemset(&sa, 0, sizeof(sa));\n\tstrncpy(sa.sa_data, device, sizeof(sa.sa_data));\n\tret = sendto(p->fd, buf, size, 0, &sa, sizeof(sa));\n\tif (ret == -1) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"send\");\n\t\treturn (-1);\n\t}\n\treturn (ret);\n}",
+      "fn_code_pos": [
+        [
+          198,
+          0
+        ],
+        [
+          213,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_inject_nit",
+        "parameters": {
+          "p": "pcap_t",
+          "buf": "void",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnit_setflags(pcap_t *p)\n{\n\tstruct nit_ioc nioc;\n\n\tmemset(&nioc, 0, sizeof(nioc));\n\tnioc.nioc_typetomatch = NT_ALLTYPES;\n\tnioc.nioc_snaplen = p->snapshot;\n\tnioc.nioc_bufalign = sizeof(int);\n\tnioc.nioc_bufoffset = 0;\n\n\tif (p->opt.buffer_size != 0)\n\t\tnioc.nioc_bufspace = p->opt.buffer_size;\n\telse {\n\t\t/* Default buffer size */\n\t\tnioc.nioc_bufspace = BUFSPACE;\n\t}\n\n\tif (p->opt.immediate) {\n\t\t/*\n\t\t * XXX - will this cause packets to be delivered immediately?\n\t\t * XXX - given that this is for SunOS prior to 4.0, do\n\t\t * we care?\n\t\t */\n\t\tnioc.nioc_chunksize = 0;\n\t} else\n\t\tnioc.nioc_chunksize = CHUNKSIZE;\n\tif (p->opt.timeout != 0) {\n\t\tnioc.nioc_flags |= NF_TIMEOUT;\n\t\tnioc.nioc_timeout.tv_sec = p->opt.timeout / 1000;\n\t\tnioc.nioc_timeout.tv_usec = (p->opt.timeout * 1000) % 1000000;\n\t}\n\tif (p->opt.promisc)\n\t\tnioc.nioc_flags |= NF_PROMISC;\n\n\tif (ioctl(p->fd, SIOCSNIT, &nioc) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"SIOCSNIT\");\n\t\treturn (-1);\n\t}\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          215,
+          0
+        ],
+        [
+          256,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nit_setflags",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_activate_nit(pcap_t *p)\n{\n\tint fd;\n\tstruct sockaddr_nit snit;\n\n\tif (p->opt.rfmon) {\n\t\t/*\n\t\t * No monitor mode on SunOS 3.x or earlier (no\n\t\t * Wi-Fi *devices* for the hardware that supported\n\t\t * them!).\n\t\t */\n\t\treturn (PCAP_ERROR_RFMON_NOTSUP);\n\t}\n\n\t/*\n\t * Turn a negative snapshot value (invalid), a snapshot value of\n\t * 0 (unspecified), or a value bigger than the normal maximum\n\t * value, into the maximum allowed value.\n\t *\n\t * If some application really *needs* a bigger snapshot\n\t * length, we should just increase MAXIMUM_SNAPLEN.\n\t */\n\tif (p->snapshot <= 0 || p->snapshot > MAXIMUM_SNAPLEN)\n\t\tp->snapshot = MAXIMUM_SNAPLEN;\n\n\tif (p->snapshot < 96)\n\t\t/*\n\t\t * NIT requires a snapshot length of at least 96.\n\t\t */\n\t\tp->snapshot = 96;\n\n\tmemset(p, 0, sizeof(*p));\n\tp->fd = fd = socket(AF_NIT, SOCK_RAW, NITPROTO_RAW);\n\tif (fd < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"socket\");\n\t\tgoto bad;\n\t}\n\tsnit.snit_family = AF_NIT;\n\t(void)strncpy(snit.snit_ifname, p->opt.device, NITIFSIZ);\n\n\tif (bind(fd, (struct sockaddr *)&snit, sizeof(snit))) {\n\t\t/*\n\t\t * XXX - there's probably a particular bind error that\n\t\t * means \"there's no such device\" and a particular bind\n\t\t * error that means \"that device doesn't support NIT\";\n\t\t * they might be the same error, if they both end up\n\t\t * meaning \"NIT doesn't know about that device\".\n\t\t */\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"bind: %s\", snit.snit_ifname);\n\t\tgoto bad;\n\t}\n\tif (nit_setflags(p) < 0)\n\t\tgoto bad;\n\n\t/*\n\t * NIT supports only ethernets.\n\t */\n\tp->linktype = DLT_EN10MB;\n\n\tp->bufsize = BUFSPACE;\n\tp->buffer = malloc(p->bufsize);\n\tif (p->buffer == NULL) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"malloc\");\n\t\tgoto bad;\n\t}\n\n\t/*\n\t * \"p->fd\" is a socket, so \"select()\" should work on it.\n\t */\n\tp->selectable_fd = p->fd;\n\n\t/*\n\t * This is (presumably) a real Ethernet capture; give it a\n\t * link-layer-type list with DLT_EN10MB and DLT_DOCSIS, so\n\t * that an application can let you choose it, in case you're\n\t * capturing DOCSIS traffic that a Cisco Cable Modem\n\t * Termination System is putting out onto an Ethernet (it\n\t * doesn't put an Ethernet header onto the wire, it puts raw\n\t * DOCSIS frames out on the wire inside the low-level\n\t * Ethernet framing).\n\t */\n\tp->dlt_list = (u_int *) malloc(sizeof(u_int) * 2);\n\t/*\n\t * If that fails, just leave the list empty.\n\t */\n\tif (p->dlt_list != NULL) {\n\t\tp->dlt_list[0] = DLT_EN10MB;\n\t\tp->dlt_list[1] = DLT_DOCSIS;\n\t\tp->dlt_count = 2;\n\t}\n\n\tp->read_op = pcap_read_nit;\n\tp->inject_op = pcap_inject_nit;\n\tp->setfilter_op = install_bpf_program;\t/* no kernel filtering */\n\tp->setdirection_op = NULL;\t/* Not implemented. */\n\tp->set_datalink_op = NULL;\t/* can't change data link type */\n\tp->getnonblock_op = pcap_getnonblock_fd;\n\tp->setnonblock_op = pcap_setnonblock_fd;\n\tp->stats_op = pcap_stats_nit;\n\n\treturn (0);\n bad:\n\tpcap_cleanup_live_common(p);\n\treturn (PCAP_ERROR);\n}",
+      "fn_code_pos": [
+        [
+          258,
+          0
+        ],
+        [
+          366,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_activate_nit",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\npcap_create_interface(const char *device _U_, char *ebuf)\n{\n\tpcap_t *p;\n\n\tp = pcap_create_common(ebuf, sizeof (struct pcap_nit));\n\tif (p == NULL)\n\t\treturn (NULL);\n\n\tp->activate_op = pcap_activate_nit;\n\treturn (p);\n}",
+      "fn_code_pos": [
+        [
+          368,
+          0
+        ],
+        [
+          379,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "static int\ncan_be_bound(const char *name _U_)\n{\n\treturn (1);\n}",
+      "fn_code_pos": [
+        [
+          385,
+          0
+        ],
+        [
+          389,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "can_be_bound",
+        "parameters": {
+          "name": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_if_flags(const char *name _U_, bpf_u_int32 *flags _U_, char *errbuf _U_)\n{\n\t/*\n\t * Nothing we can do.\n\t * XXX - is there a way to find out whether an adapter has\n\t * something plugged into it?\n\t */\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          391,
+          0
+        ],
+        [
+          400,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_if_flags",
+        "parameters": {
+          "name": "char",
+          "flags": "bpf_u_int32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npcap_platform_finddevs(pcap_if_list_t *devlistp, char *errbuf)\n{\n\treturn (pcap_findalldevs_interfaces(devlistp, errbuf, can_be_bound,\n\t    get_if_flags));\n}",
+      "fn_code_pos": [
+        [
+          402,
+          0
+        ],
+        [
+          407,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_platform_finddevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "const char *\npcap_lib_version(void)\n{\n\treturn (PCAP_VERSION_STRING);\n}",
+      "fn_code_pos": [
+        [
+          412,
+          0
+        ],
+        [
+          416,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "nit_setflags(int, int, int, char *)",
+      "fn_dec_pos": [
+        [
+          67,
+          11
+        ],
+        [
+          67,
+          46
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nit_setflags",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_create_interface(const char *device _U_, char *ebuf)",
+      "fn_dec_pos": [
+        [
+          369,
+          0
+        ],
+        [
+          369,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_lib_version(void)",
+      "fn_dec_pos": [
+        [
+          413,
+          0
+        ],
+        [
+          413,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_nit {\n\tstruct pcap_stat stat;\n}",
+      {
+        "stat": "struct pcap_stat"
+      },
+      "pcap_nit",
+      [
+        72,
+        0
+      ],
+      [
+        74,
+        1
+      ]
+    ],
+    [
+      "struct pcap_nit {\n\tstruct pcap_stat stat;\n}",
+      {
+        "stat": "struct pcap_stat"
+      },
+      "pcap_nit",
+      [
+        72,
+        0
+      ],
+      [
+        74,
+        1
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        73,
+        1
+      ],
+      [
+        73,
+        17
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        77,
+        26
+      ],
+      [
+        77,
+        42
+      ]
+    ],
+    [
+      "struct pcap_nit",
+      {},
+      "",
+      [
+        79,
+        1
+      ],
+      [
+        79,
+        16
+      ]
+    ],
+    [
+      "struct pcap_nit",
+      {},
+      "",
+      [
+        104,
+        1
+      ],
+      [
+        104,
+        16
+      ]
+    ],
+    [
+      "struct nit_hdr",
+      {},
+      "",
+      [
+        107,
+        10
+      ],
+      [
+        107,
+        24
+      ]
+    ],
+    [
+      "struct nit_hdr",
+      {},
+      "",
+      [
+        152,
+        8
+      ],
+      [
+        152,
+        22
+      ]
+    ],
+    [
+      "struct nit_hdr",
+      {},
+      "",
+      [
+        175,
+        17
+      ],
+      [
+        175,
+        31
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        182,
+        3
+      ],
+      [
+        182,
+        21
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        201,
+        1
+      ],
+      [
+        201,
+        16
+      ]
+    ],
+    [
+      "struct nit_ioc",
+      {},
+      "",
+      [
+        218,
+        1
+      ],
+      [
+        218,
+        15
+      ]
+    ],
+    [
+      "struct sockaddr_nit",
+      {},
+      "",
+      [
+        262,
+        1
+      ],
+      [
+        262,
+        20
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        300,
+        15
+      ],
+      [
+        300,
+        30
+      ]
+    ],
+    [
+      "struct pcap_nit",
+      {},
+      "",
+      [
+        373,
+        38
+      ],
+      [
+        373,
+        53
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <sys/timeb.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <sys/file.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ioctl.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <net/if.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <net/nit.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in_systm.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/ip.h>\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/if_ether.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/ip_var.h>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/udp.h>\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/udp_var.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/tcp.h>\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/tcpip.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        46,
+        0
+      ],
+      [
+        47,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        49,
+        0
+      ],
+      [
+        50,
+        0
+      ]
+    ],
+    [
+      "#include \"os-proto.h\"\n",
+      [
+        52,
+        0
+      ],
+      [
+        53,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

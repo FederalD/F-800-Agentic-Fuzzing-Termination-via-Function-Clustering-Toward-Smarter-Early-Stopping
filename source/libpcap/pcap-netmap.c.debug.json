@@ -1,0 +1,642 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\npcap_netmap_stats(pcap_t *p, struct pcap_stat *ps)\n{\n\tstruct pcap_netmap *pn = p->priv;\n\n\tps->ps_recv = pn->rx_pkts;\n\tps->ps_drop = 0;\n\tps->ps_ifdrop = 0;\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          64,
+          0
+        ],
+        [
+          73,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_netmap_stats",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\npcap_netmap_filter(u_char *arg, struct pcap_pkthdr *h, const u_char *buf)\n{\n\tpcap_t *p = (pcap_t *)arg;\n\tstruct pcap_netmap *pn = p->priv;\n\tconst struct bpf_insn *pc = p->fcode.bf_insns;\n\n\t++pn->rx_pkts;\n\tif (pc == NULL || bpf_filter(pc, buf, h->len, h->caplen))\n\t\tpn->cb(pn->cb_arg, h, buf);\n}",
+      "fn_code_pos": [
+        [
+          76,
+          0
+        ],
+        [
+          86,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_netmap_filter",
+        "parameters": {
+          "arg": "u_char",
+          "h": "struct pcap_pkthdr",
+          "buf": "u_char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_netmap_dispatch(pcap_t *p, int cnt, pcap_handler cb, u_char *user)\n{\n\tint ret;\n\tstruct pcap_netmap *pn = p->priv;\n\tstruct nm_desc *d = pn->d;\n\tstruct pollfd pfd = { .fd = p->fd, .events = POLLIN, .revents = 0 };\n\n\tpn->cb = cb;\n\tpn->cb_arg = user;\n\n\tfor (;;) {\n\t\tif (p->break_loop) {\n\t\t\tp->break_loop = 0;\n\t\t\treturn PCAP_ERROR_BREAK;\n\t\t}\n\t\t/* nm_dispatch won't run forever */\n\n\t\tret = nm_dispatch((void *)d, cnt, (void *)pcap_netmap_filter, (void *)p);\n\t\tif (ret != 0)\n\t\t\tbreak;\n\t\terrno = 0;\n\t\tret = poll(&pfd, 1, p->opt.timeout);\n\t}\n\treturn ret;\n}",
+      "fn_code_pos": [
+        [
+          89,
+          0
+        ],
+        [
+          114,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_netmap_dispatch",
+        "parameters": {
+          "p": "pcap_t",
+          "cnt": "int",
+          "cb": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_netmap_inject(pcap_t *p, const void *buf, size_t size)\n{\n\tstruct pcap_netmap *pn = p->priv;\n\tstruct nm_desc *d = pn->d;\n\n\treturn nm_inject(d, buf, size);\n}",
+      "fn_code_pos": [
+        [
+          118,
+          0
+        ],
+        [
+          125,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_netmap_inject",
+        "parameters": {
+          "p": "pcap_t",
+          "buf": "void",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_netmap_ioctl(pcap_t *p, u_long what, uint32_t *if_flags)\n{\n\tstruct pcap_netmap *pn = p->priv;\n\tstruct nm_desc *d = pn->d;\n\tstruct ifreq ifr;\n\tint error, fd = d->fd;\n\n#ifdef linux\n\tfd = socket(AF_INET, SOCK_DGRAM, 0);\n\tif (fd < 0) {\n\t\tfprintf(stderr, \"Error: cannot get device control socket.\\n\");\n\t\treturn -1;\n\t}\n#endif /* linux */\n\tbzero(&ifr, sizeof(ifr));\n\tstrncpy(ifr.ifr_name, d->req.nr_name, sizeof(ifr.ifr_name));\n\tswitch (what) {\n\tcase SIOCSIFFLAGS:\n\t\t/*\n\t\t * The flags we pass in are 32-bit and unsigned.\n\t\t *\n\t\t * On most if not all UN*Xes, ifr_flags is 16-bit and\n\t\t * signed, and the result of assigning a longer\n\t\t * unsigned value to a shorter signed value is\n\t\t * implementation-defined (even if, in practice, it'll\n\t\t * do what's intended on all platforms we support\n\t\t * result of assigning a 32-bit unsigned value).\n\t\t * So we mask out the upper 16 bits.\n\t\t */\n\t\tifr.ifr_flags = *if_flags & 0xffff;\n#ifdef __FreeBSD__\n\t\t/*\n\t\t * In FreeBSD, we need to set the high-order flags,\n\t\t * as we're using IFF_PPROMISC, which is in those bits.\n\t\t *\n\t\t * XXX - DragonFly BSD?\n\t\t */\n\t\tifr.ifr_flagshigh = *if_flags >> 16;\n#endif /* __FreeBSD__ */\n\t\tbreak;\n\t}\n\terror = ioctl(fd, what, &ifr);\n\tif (!error) {\n\t\tswitch (what) {\n\t\tcase SIOCGIFFLAGS:\n\t\t\t/*\n\t\t\t * The flags we return are 32-bit.\n\t\t\t *\n\t\t\t * On most if not all UN*Xes, ifr_flags is\n\t\t\t * 16-bit and signed, and will get sign-\n\t\t\t * extended, so that the upper 16 bits of\n\t\t\t * those flags will be forced on.  So we\n\t\t\t * mask out the upper 16 bits of the\n\t\t\t * sign-extended value.\n\t\t\t */\n\t\t\t*if_flags = ifr.ifr_flags & 0xffff;\n#ifdef __FreeBSD__\n\t\t\t/*\n\t\t\t * In FreeBSD, we need to return the\n\t\t\t * high-order flags, as we're using\n\t\t\t * IFF_PPROMISC, which is in those bits.\n\t\t\t *\n\t\t\t * XXX - DragonFly BSD?\n\t\t\t */\n\t\t\t*if_flags |= (ifr.ifr_flagshigh << 16);\n#endif /* __FreeBSD__ */\n\t\t}\n\t}\n#ifdef linux\n\tclose(fd);\n#endif /* linux */\n\treturn error ? -1 : 0;\n}",
+      "fn_code_pos": [
+        [
+          128,
+          0
+        ],
+        [
+          201,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_netmap_ioctl",
+        "parameters": {
+          "p": "pcap_t",
+          "what": "u_long",
+          "if_flags": "uint32_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\npcap_netmap_close(pcap_t *p)\n{\n\tstruct pcap_netmap *pn = p->priv;\n\tstruct nm_desc *d = pn->d;\n\tuint32_t if_flags = 0;\n\n\tif (pn->must_clear_promisc) {\n\t\tpcap_netmap_ioctl(p, SIOCGIFFLAGS, &if_flags); /* fetch flags */\n\t\tif (if_flags & IFF_PPROMISC) {\n\t\t\tif_flags &= ~IFF_PPROMISC;\n\t\t\tpcap_netmap_ioctl(p, SIOCSIFFLAGS, &if_flags);\n\t\t}\n\t}\n\tnm_close(d);\n\tpcap_cleanup_live_common(p);\n}",
+      "fn_code_pos": [
+        [
+          204,
+          0
+        ],
+        [
+          220,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_netmap_close",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_netmap_activate(pcap_t *p)\n{\n\tstruct pcap_netmap *pn = p->priv;\n\tstruct nm_desc *d;\n\tuint32_t if_flags = 0;\n\n\td = nm_open(p->opt.device, NULL, 0, NULL);\n\tif (d == NULL) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"netmap open: cannot access %s\",\n\t\t    p->opt.device);\n\t\tpcap_cleanup_live_common(p);\n\t\treturn (PCAP_ERROR);\n\t}\n#if 0\n\tfprintf(stderr, \"%s device %s priv %p fd %d ports %d..%d\\n\",\n\t    __FUNCTION__, p->opt.device, d, d->fd,\n\t    d->first_rx_ring, d->last_rx_ring);\n#endif\n\tpn->d = d;\n\tp->fd = d->fd;\n\n\t/*\n\t * Turn a negative snapshot value (invalid), a snapshot value of\n\t * 0 (unspecified), or a value bigger than the normal maximum\n\t * value, into the maximum allowed value.\n\t *\n\t * If some application really *needs* a bigger snapshot\n\t * length, we should just increase MAXIMUM_SNAPLEN.\n\t */\n\tif (p->snapshot <= 0 || p->snapshot > MAXIMUM_SNAPLEN)\n\t\tp->snapshot = MAXIMUM_SNAPLEN;\n\n\tif (p->opt.promisc && !(d->req.nr_ringid & NETMAP_SW_RING)) {\n\t\tpcap_netmap_ioctl(p, SIOCGIFFLAGS, &if_flags); /* fetch flags */\n\t\tif (!(if_flags & IFF_PPROMISC)) {\n\t\t\tpn->must_clear_promisc = 1;\n\t\t\tif_flags |= IFF_PPROMISC;\n\t\t\tpcap_netmap_ioctl(p, SIOCSIFFLAGS, &if_flags);\n\t\t}\n\t}\n\tp->linktype = DLT_EN10MB;\n\tp->selectable_fd = p->fd;\n\tp->read_op = pcap_netmap_dispatch;\n\tp->inject_op = pcap_netmap_inject;\n\tp->setfilter_op = install_bpf_program;\n\tp->setdirection_op = NULL;\n\tp->set_datalink_op = NULL;\n\tp->getnonblock_op = pcap_getnonblock_fd;\n\tp->setnonblock_op = pcap_setnonblock_fd;\n\tp->stats_op = pcap_netmap_stats;\n\tp->cleanup_op = pcap_netmap_close;\n\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          223,
+          0
+        ],
+        [
+          278,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_netmap_activate",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\npcap_netmap_create(const char *device, char *ebuf, int *is_ours)\n{\n\tpcap_t *p;\n\n\t*is_ours = (!strncmp(device, \"netmap:\", 7) || !strncmp(device, \"vale\", 4));\n\tif (! *is_ours)\n\t\treturn NULL;\n\tp = pcap_create_common(ebuf, sizeof (struct pcap_netmap));\n\tif (p == NULL)\n\t\treturn (NULL);\n\tp->activate_op = pcap_netmap_activate;\n\treturn (p);\n}",
+      "fn_code_pos": [
+        [
+          281,
+          0
+        ],
+        [
+          294,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_netmap_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": "pcap_t"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "pcap_netmap_create(const char *device, char *ebuf, int *is_ours)",
+      "fn_dec_pos": [
+        [
+          282,
+          0
+        ],
+        [
+          282,
+          64
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_netmap_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_netmap {\n\tstruct nm_desc *d;\t/* pointer returned by nm_open() */\n\tpcap_handler cb;\t/* callback and argument */\n\tu_char *cb_arg;\n\tint must_clear_promisc;\t/* flag */\n\tuint64_t rx_pkts;\t/* # of pkts received before the filter */\n}",
+      {
+        "*d": "struct nm_desc",
+        "cb": "pcap_handler",
+        "*cb_arg": "u_char",
+        "must_clear_promisc": "int",
+        "rx_pkts": "uint64_t"
+      },
+      "pcap_netmap",
+      [
+        55,
+        0
+      ],
+      [
+        61,
+        1
+      ]
+    ],
+    [
+      "struct pcap_netmap {\n\tstruct nm_desc *d;\t/* pointer returned by nm_open() */\n\tpcap_handler cb;\t/* callback and argument */\n\tu_char *cb_arg;\n\tint must_clear_promisc;\t/* flag */\n\tuint64_t rx_pkts;\t/* # of pkts received before the filter */\n}",
+      {
+        "*d": "struct nm_desc",
+        "cb": "pcap_handler",
+        "*cb_arg": "u_char",
+        "must_clear_promisc": "int",
+        "rx_pkts": "uint64_t"
+      },
+      "pcap_netmap",
+      [
+        55,
+        0
+      ],
+      [
+        61,
+        1
+      ]
+    ],
+    [
+      "struct nm_desc",
+      {},
+      "",
+      [
+        56,
+        1
+      ],
+      [
+        56,
+        15
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        65,
+        29
+      ],
+      [
+        65,
+        45
+      ]
+    ],
+    [
+      "struct pcap_netmap",
+      {},
+      "",
+      [
+        67,
+        1
+      ],
+      [
+        67,
+        19
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        77,
+        32
+      ],
+      [
+        77,
+        50
+      ]
+    ],
+    [
+      "struct pcap_netmap",
+      {},
+      "",
+      [
+        80,
+        1
+      ],
+      [
+        80,
+        19
+      ]
+    ],
+    [
+      "struct bpf_insn",
+      {},
+      "",
+      [
+        81,
+        7
+      ],
+      [
+        81,
+        22
+      ]
+    ],
+    [
+      "struct pcap_netmap",
+      {},
+      "",
+      [
+        93,
+        1
+      ],
+      [
+        93,
+        19
+      ]
+    ],
+    [
+      "struct nm_desc",
+      {},
+      "",
+      [
+        94,
+        1
+      ],
+      [
+        94,
+        15
+      ]
+    ],
+    [
+      "struct pollfd",
+      {},
+      "",
+      [
+        95,
+        1
+      ],
+      [
+        95,
+        14
+      ]
+    ],
+    [
+      "struct pcap_netmap",
+      {},
+      "",
+      [
+        121,
+        1
+      ],
+      [
+        121,
+        19
+      ]
+    ],
+    [
+      "struct nm_desc",
+      {},
+      "",
+      [
+        122,
+        1
+      ],
+      [
+        122,
+        15
+      ]
+    ],
+    [
+      "struct pcap_netmap",
+      {},
+      "",
+      [
+        131,
+        1
+      ],
+      [
+        131,
+        19
+      ]
+    ],
+    [
+      "struct nm_desc",
+      {},
+      "",
+      [
+        132,
+        1
+      ],
+      [
+        132,
+        15
+      ]
+    ],
+    [
+      "struct ifreq",
+      {},
+      "",
+      [
+        133,
+        1
+      ],
+      [
+        133,
+        13
+      ]
+    ],
+    [
+      "struct pcap_netmap",
+      {},
+      "",
+      [
+        207,
+        1
+      ],
+      [
+        207,
+        19
+      ]
+    ],
+    [
+      "struct nm_desc",
+      {},
+      "",
+      [
+        208,
+        1
+      ],
+      [
+        208,
+        15
+      ]
+    ],
+    [
+      "struct pcap_netmap",
+      {},
+      "",
+      [
+        226,
+        1
+      ],
+      [
+        226,
+        19
+      ]
+    ],
+    [
+      "struct nm_desc",
+      {},
+      "",
+      [
+        227,
+        1
+      ],
+      [
+        227,
+        15
+      ]
+    ],
+    [
+      "struct pcap_netmap",
+      {},
+      "",
+      [
+        289,
+        38
+      ],
+      [
+        289,
+        56
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <poll.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <netdb.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <net/netmap_user.h>\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-netmap.h\"\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

@@ -1,0 +1,3041 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nprint_bits (unsigned64 x,\n\t    int msbit,\n\t    int digits,\n\t    sim_fpu_print_func print,\n\t    void *arg)\n{\n  unsigned64 bit = LSBIT64 (msbit);\n  int i = 4;\n  while (bit && digits)\n    {\n      if (i == 0)\n\tprint (arg, \",\");\n\n      if ((x & bit))\n\tprint (arg, \"1\");\n      else\n\tprint (arg, \"0\");\n      bit >>= 1;\n\n      if (digits > 0)\n\tdigits--;\n      i = (i + 1) % 4;\n    }\n}",
+      "fn_code_pos": [
+        [
+          47,
+          0
+        ],
+        [
+          71,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_bits",
+        "parameters": {
+          "x": "unsigned64",
+          "msbit": "int",
+          "digits": "int",
+          "print": "sim_fpu_print_func",
+          "arg": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pack_fpu (const sim_fpu *src,\n\t  int is_double)\n{\n  int sign;\n  unsigned64 exp;\n  unsigned64 fraction;\n  unsigned64 packed;\n\n  switch (src->class)\n    {\n      /* Create a NaN.  */\n    case sim_fpu_class_qnan:\n      sign = src->sign;\n      exp = EXPMAX;\n      /* Force fraction to correct class.  */\n      fraction = src->fraction;\n      fraction >>= NR_GUARDS;\n#ifdef SIM_QUIET_NAN_NEGATED\n      fraction |= QUIET_NAN - 1;\n#else\n      fraction |= QUIET_NAN;\n#endif\n      break;\n    case sim_fpu_class_snan:\n      sign = src->sign;\n      exp = EXPMAX;\n      /* Force fraction to correct class.  */\n      fraction = src->fraction;\n      fraction >>= NR_GUARDS;\n#ifdef SIM_QUIET_NAN_NEGATED\n      fraction |= QUIET_NAN;\n#else\n      fraction &= ~QUIET_NAN;\n#endif\n      break;\n    case sim_fpu_class_infinity:\n      sign = src->sign;\n      exp = EXPMAX;\n      fraction = 0;\n      break;\n    case sim_fpu_class_zero:\n      sign = src->sign;\n      exp = 0;\n      fraction = 0;\n      break;\n    case sim_fpu_class_number:\n    case sim_fpu_class_denorm:\n      ASSERT (src->fraction >= IMPLICIT_1);\n      ASSERT (src->fraction < IMPLICIT_2);\n      if (src->normal_exp < NORMAL_EXPMIN)\n\t{\n\t  /* This number's exponent is too low to fit into the bits\n\t     available in the number We'll denormalize the number by\n\t     storing zero in the exponent and shift the fraction to\n\t     the right to make up for it. */\n\t  int nr_shift = NORMAL_EXPMIN - src->normal_exp;\n\t  if (nr_shift > NR_FRACBITS)\n\t    {\n\t      /* Underflow, just make the number zero.  */\n\t      sign = src->sign;\n\t      exp = 0;\n\t      fraction = 0;\n\t    }\n\t  else\n\t    {\n\t      sign = src->sign;\n\t      exp = 0;\n\t      /* Shift by the value.  */\n\t      fraction = src->fraction;\n\t      fraction >>= NR_GUARDS;\n\t      fraction >>= nr_shift;\n\t    }\n\t}\n      else if (src->normal_exp > NORMAL_EXPMAX)\n\t{\n\t  /* Infinity */\n\t  sign = src->sign;\n\t  exp = EXPMAX;\n\t  fraction = 0;\n\t}\n      else\n\t{\n\t  exp = (src->normal_exp + EXPBIAS);\n\t  sign = src->sign;\n\t  fraction = src->fraction;\n\t  /* FIXME: Need to round according to WITH_SIM_FPU_ROUNDING\n             or some such.  */\n\t  /* Round to nearest: If the guard bits are the all zero, but\n\t     the first, then we're half way between two numbers,\n\t     choose the one which makes the lsb of the answer 0.  */\n\t  if ((fraction & GUARDMASK) == GUARDMSB)\n\t    {\n\t      if ((fraction & (GUARDMSB << 1)))\n\t\tfraction += (GUARDMSB << 1);\n\t    }\n\t  else\n\t    {\n\t      /* Add a one to the guards to force round to nearest.  */\n\t      fraction += GUARDROUND;\n\t    }\n\t  if ((fraction & IMPLICIT_2)) /* Rounding resulted in carry.  */\n\t    {\n\t      exp += 1;\n\t      fraction >>= 1;\n\t    }\n\t  fraction >>= NR_GUARDS;\n\t  /* When exp == EXPMAX (overflow from carry) fraction must\n\t     have been made zero.  */\n\t  ASSERT ((exp == EXPMAX) <= ((fraction & ~IMPLICIT_1) == 0));\n\t}\n      break;\n    default:\n      abort ();\n    }\n\n  packed = ((sign ? SIGNBIT : 0)\n\t     | (exp << NR_FRACBITS)\n\t     | LSMASKED64 (fraction, NR_FRACBITS - 1, 0));\n\n  /* Trace operation.  */\n#if 0\n  if (is_double)\n    {\n    }\n  else\n    {\n      printf (\"pack_fpu: \");\n      printf (\"-> %c%0lX.%06lX\\n\",\n\t      LSMASKED32 (packed, 31, 31) ? '8' : '0',\n\t      (long) LSEXTRACTED32 (packed, 30, 23),\n\t      (long) LSEXTRACTED32 (packed, 23 - 1, 0));\n    }\n#endif\n\n  return packed;\n}",
+      "fn_code_pos": [
+        [
+          179,
+          0
+        ],
+        [
+          314,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pack_fpu",
+        "parameters": {
+          "src": "sim_fpu",
+          "is_double": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (void)\nunpack_fpu (sim_fpu *dst, unsigned64 packed, int is_double)\n{\n  unsigned64 fraction = LSMASKED64 (packed, NR_FRACBITS - 1, 0);\n  unsigned exp = LSEXTRACTED64 (packed, NR_EXPBITS + NR_FRACBITS - 1, NR_FRACBITS);\n  int sign = (packed & SIGNBIT) != 0;\n\n  if (exp == 0)\n    {\n      /* Hmm.  Looks like 0 */\n      if (fraction == 0)\n\t{\n\t  /* Tastes like zero.  */\n\t  dst->class = sim_fpu_class_zero;\n\t  dst->sign = sign;\n\t  dst->normal_exp = 0;\n\t}\n      else\n\t{\n\t  /* Zero exponent with non zero fraction - it's denormalized,\n\t     so there isn't a leading implicit one - we'll shift it so\n\t     it gets one.  */\n\t  dst->normal_exp = exp - EXPBIAS + 1;\n\t  dst->class = sim_fpu_class_denorm;\n\t  dst->sign = sign;\n\t  fraction <<= NR_GUARDS;\n\t  while (fraction < IMPLICIT_1)\n\t    {\n\t      fraction <<= 1;\n\t      dst->normal_exp--;\n\t    }\n\t  dst->fraction = fraction;\n\t}\n    }\n  else if (exp == EXPMAX)\n    {\n      /* Huge exponent*/\n      if (fraction == 0)\n\t{\n\t  /* Attached to a zero fraction - means infinity.  */\n\t  dst->class = sim_fpu_class_infinity;\n\t  dst->sign = sign;\n\t  /* dst->normal_exp = EXPBIAS; */\n\t  /* dst->fraction = 0; */\n\t}\n      else\n\t{\n\t  int qnan;\n\n\t  /* Non zero fraction, means NaN.  */\n\t  dst->sign = sign;\n\t  dst->fraction = (fraction << NR_GUARDS);\n#ifdef SIM_QUIET_NAN_NEGATED\n\t  qnan = (fraction & QUIET_NAN) == 0;\n#else\n\t  qnan = fraction >= QUIET_NAN;\n#endif\n\t  if (qnan)\n\t    dst->class = sim_fpu_class_qnan;\n\t  else\n\t    dst->class = sim_fpu_class_snan;\n\t}\n    }\n  else\n    {\n      /* Nothing strange about this number.  */\n      dst->class = sim_fpu_class_number;\n      dst->sign = sign;\n      dst->fraction = ((fraction << NR_GUARDS) | IMPLICIT_1);\n      dst->normal_exp = exp - EXPBIAS;\n    }\n\n  /* Trace operation.  */\n#if 0\n  if (is_double)\n    {\n    }\n  else\n    {\n      printf (\"unpack_fpu: %c%02lX.%06lX ->\\n\",\n\t      LSMASKED32 (packed, 31, 31) ? '8' : '0',\n\t      (long) LSEXTRACTED32 (packed, 30, 23),\n\t      (long) LSEXTRACTED32 (packed, 23 - 1, 0));\n    }\n#endif\n\n  /* sanity checks */\n  {\n    sim_fpu_map val;\n    val.i = pack_fpu (dst, 1);\n    if (is_double)\n      {\n\tASSERT (val.i == packed);\n      }\n    else\n      {\n\tunsigned32 val = pack_fpu (dst, 0);\n\tunsigned32 org = packed;\n\tASSERT (val == org);\n      }\n  }\n}",
+      "fn_code_pos": [
+        [
+          318,
+          0
+        ],
+        [
+          419,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "dst": "sim_fpu",
+          "packed": "unsigned64",
+          "is_double": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)\nfpu2i (signed64 *i,\n       const sim_fpu *s,\n       int is_64bit,\n       sim_fpu_round round)\n{\n  unsigned64 tmp;\n  int shift;\n  int status = 0;\n  if (sim_fpu_is_zero (s))\n    {\n      *i = 0;\n      return 0;\n    }\n  if (sim_fpu_is_snan (s))\n    {\n      *i = MIN_INT; /* FIXME */\n      return sim_fpu_status_invalid_cvi;\n    }\n  if (sim_fpu_is_qnan (s))\n    {\n      *i = MIN_INT; /* FIXME */\n      return sim_fpu_status_invalid_cvi;\n    }\n  /* Map infinity onto MAX_INT...  */\n  if (sim_fpu_is_infinity (s))\n    {\n      *i = s->sign ? MIN_INT : MAX_INT;\n      return sim_fpu_status_invalid_cvi;\n    }\n  /* It is a number, but a small one.  */\n  if (s->normal_exp < 0)\n    {\n      *i = 0;\n      return sim_fpu_status_inexact;\n    }\n  /* Is the floating point MIN_INT or just close? */\n  if (s->sign && s->normal_exp == (NR_INTBITS - 1))\n    {\n      *i = MIN_INT;\n      ASSERT (s->fraction >= IMPLICIT_1);\n      if (s->fraction == IMPLICIT_1)\n\treturn 0; /* exact */\n      if (is_64bit) /* can't round */\n\treturn sim_fpu_status_invalid_cvi; /* must be overflow */\n      /* For a 32bit with MAX_INT, rounding is possible.  */\n      switch (round)\n\t{\n\tcase sim_fpu_round_default:\n\t  abort ();\n\tcase sim_fpu_round_zero:\n\t  if ((s->fraction & FRAC32MASK) != IMPLICIT_1)\n\t    return sim_fpu_status_invalid_cvi;\n\t  else\n\t    return sim_fpu_status_inexact;\n\t  break;\n\tcase sim_fpu_round_near:\n\t  {\n\t    if ((s->fraction & FRAC32MASK) != IMPLICIT_1)\n\t      return sim_fpu_status_invalid_cvi;\n\t    else if ((s->fraction & !FRAC32MASK) >= (~FRAC32MASK >> 1))\n\t      return sim_fpu_status_invalid_cvi;\n\t    else\n\t      return sim_fpu_status_inexact;\n\t  }\n\tcase sim_fpu_round_up:\n\t  if ((s->fraction & FRAC32MASK) == IMPLICIT_1)\n\t    return sim_fpu_status_inexact;\n\t  else\n\t    return sim_fpu_status_invalid_cvi;\n\tcase sim_fpu_round_down:\n\t  return sim_fpu_status_invalid_cvi;\n\t}\n    }\n  /* Would right shifting result in the FRAC being shifted into\n     (through) the integer's sign bit? */\n  if (s->normal_exp > (NR_INTBITS - 2))\n    {\n      *i = s->sign ? MIN_INT : MAX_INT;\n      return sim_fpu_status_invalid_cvi;\n    }\n  /* Normal number, shift it into place.  */\n  tmp = s->fraction;\n  shift = (s->normal_exp - (NR_FRAC_GUARD));\n  if (shift > 0)\n    {\n      tmp <<= shift;\n    }\n  else\n    {\n      shift = -shift;\n      if (tmp & ((SIGNED64 (1) << shift) - 1))\n\tstatus |= sim_fpu_status_inexact;\n      tmp >>= shift;\n    }\n  *i = s->sign ? (-tmp) : (tmp);\n  return status;\n}",
+      "fn_code_pos": [
+        [
+          423,
+          0
+        ],
+        [
+          520,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "i": "signed64",
+          "s": "sim_fpu",
+          "is_64bit": "int",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)\ni2fpu (sim_fpu *f, signed64 i, int is_64bit)\n{\n  int status = 0;\n  if (i == 0)\n    {\n      f->class = sim_fpu_class_zero;\n      f->sign = 0;\n      f->normal_exp = 0;\n    }\n  else\n    {\n      f->class = sim_fpu_class_number;\n      f->sign = (i < 0);\n      f->normal_exp = NR_FRAC_GUARD;\n\n      if (f->sign)\n\t{\n\t  /* Special case for minint, since there is no corresponding\n\t     +ve integer representation for it.  */\n\t  if (i == MIN_INT)\n\t    {\n\t      f->fraction = IMPLICIT_1;\n\t      f->normal_exp = NR_INTBITS - 1;\n\t    }\n\t  else\n\t    f->fraction = (-i);\n\t}\n      else\n\tf->fraction = i;\n\n      if (f->fraction >= IMPLICIT_2)\n\t{\n\t  do\n\t    {\n\t      f->fraction = (f->fraction >> 1) | (f->fraction & 1);\n\t      f->normal_exp += 1;\n\t    }\n\t  while (f->fraction >= IMPLICIT_2);\n\t}\n      else if (f->fraction < IMPLICIT_1)\n\t{\n\t  do\n\t    {\n\t      f->fraction <<= 1;\n\t      f->normal_exp -= 1;\n\t    }\n\t  while (f->fraction < IMPLICIT_1);\n\t}\n    }\n\n  /* trace operation */\n#if 0\n  {\n    printf (\"i2fpu: 0x%08lX ->\\n\", (long) i);\n  }\n#endif\n\n  /* sanity check */\n  {\n    signed64 val;\n    fpu2i (&val, f, is_64bit, sim_fpu_round_zero);\n    if (i >= MIN_INT32 && i <= MAX_INT32)\n      {\n\tASSERT (val == i);\n      }\n  }\n\n  return status;\n}",
+      "fn_code_pos": [
+        [
+          523,
+          0
+        ],
+        [
+          592,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "i": "signed64",
+          "is_64bit": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)\nfpu2u (unsigned64 *u, const sim_fpu *s, int is_64bit)\n{\n  const int is_double = 1;\n  unsigned64 tmp;\n  int shift;\n  if (sim_fpu_is_zero (s))\n    {\n      *u = 0;\n      return 0;\n    }\n  if (sim_fpu_is_nan (s))\n    {\n      *u = 0;\n      return 0;\n    }\n  /* It is a negative number.  */\n  if (s->sign)\n    {\n      *u = 0;\n      return 0;\n    }\n  /* Get reasonable MAX_USI_INT...  */\n  if (sim_fpu_is_infinity (s))\n    {\n      *u = MAX_UINT;\n      return 0;\n    }\n  /* It is a number, but a small one.  */\n  if (s->normal_exp < 0)\n    {\n      *u = 0;\n      return 0;\n    }\n  /* overflow */\n  if (s->normal_exp > (NR_INTBITS - 1))\n    {\n      *u = MAX_UINT;\n      return 0;\n    }\n  /* normal number */\n  tmp = (s->fraction & ~PADMASK);\n  shift = (s->normal_exp - (NR_FRACBITS + NR_GUARDS));\n  if (shift > 0)\n    {\n      tmp <<= shift;\n    }\n  else\n    {\n      shift = -shift;\n      tmp >>= shift;\n    }\n  *u = tmp;\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          596,
+          0
+        ],
+        [
+          650,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "u": "unsigned64",
+          "s": "sim_fpu",
+          "is_64bit": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)\nu2fpu (sim_fpu *f, unsigned64 u, int is_64bit)\n{\n  if (u == 0)\n    {\n      f->class = sim_fpu_class_zero;\n      f->sign = 0;\n      f->normal_exp = 0;\n    }\n  else\n    {\n      f->class = sim_fpu_class_number;\n      f->sign = 0;\n      f->normal_exp = NR_FRAC_GUARD;\n      f->fraction = u;\n\n      while (f->fraction < IMPLICIT_1)\n\t{\n\t  f->fraction <<= 1;\n\t  f->normal_exp -= 1;\n\t}\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          653,
+          0
+        ],
+        [
+          676,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "u": "unsigned64",
+          "is_64bit": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_32to (sim_fpu *f, unsigned32 s)\n{\n  unpack_fpu (f, s, 0);\n}",
+      "fn_code_pos": [
+        [
+          681,
+          0
+        ],
+        [
+          685,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "s": "unsigned32"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_232to (sim_fpu *f, unsigned32 h, unsigned32 l)\n{\n  unsigned64 s = h;\n  s = (s << 32) | l;\n  unpack_fpu (f, s, 1);\n}",
+      "fn_code_pos": [
+        [
+          688,
+          0
+        ],
+        [
+          694,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "h": "unsigned32",
+          "l": "unsigned32"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_64to (sim_fpu *f, unsigned64 s)\n{\n  unpack_fpu (f, s, 1);\n}",
+      "fn_code_pos": [
+        [
+          697,
+          0
+        ],
+        [
+          701,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "s": "unsigned64"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_to32 (unsigned32 *s,\n\t      const sim_fpu *f)\n{\n  *s = pack_fpu (f, 0);\n}",
+      "fn_code_pos": [
+        [
+          704,
+          0
+        ],
+        [
+          709,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "s": "unsigned32",
+          "f": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_to232 (unsigned32 *h, unsigned32 *l,\n\t       const sim_fpu *f)\n{\n  unsigned64 s = pack_fpu (f, 1);\n  *l = s;\n  *h = (s >> 32);\n}",
+      "fn_code_pos": [
+        [
+          712,
+          0
+        ],
+        [
+          719,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "h": "unsigned32",
+          "l": "unsigned32",
+          "f": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_to64 (unsigned64 *u,\n\t      const sim_fpu *f)\n{\n  *u = pack_fpu (f, 1);\n}",
+      "fn_code_pos": [
+        [
+          722,
+          0
+        ],
+        [
+          727,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "u": "unsigned64",
+          "f": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_fractionto (sim_fpu *f,\n\t\t    int sign,\n\t\t    int normal_exp,\n\t\t    unsigned64 fraction,\n\t\t    int precision)\n{\n  int shift = (NR_FRAC_GUARD - precision);\n  f->class = sim_fpu_class_number;\n  f->sign = sign;\n  f->normal_exp = normal_exp;\n  /* Shift the fraction to where sim-fpu expects it.  */\n  if (shift >= 0)\n    f->fraction = (fraction << shift);\n  else\n    f->fraction = (fraction >> -shift);\n  f->fraction |= IMPLICIT_1;\n}",
+      "fn_code_pos": [
+        [
+          730,
+          0
+        ],
+        [
+          747,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "sign": "int",
+          "normal_exp": "int",
+          "fraction": "unsigned64",
+          "precision": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "sim_fpu_tofraction (const sim_fpu *d,\n\t\t    int precision)\n{\n  /* We have NR_FRAC_GUARD bits, we want only PRECISION bits.  */\n  int shift = (NR_FRAC_GUARD - precision);\n  unsigned64 fraction = (d->fraction & ~IMPLICIT_1);\n  if (shift >= 0)\n    return fraction >> shift;\n  else\n    return fraction << -shift;\n}",
+      "fn_code_pos": [
+        [
+          751,
+          0
+        ],
+        [
+          761,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_fpu_tofraction",
+        "parameters": {
+          "d": "sim_fpu",
+          "precision": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)\ndo_normal_overflow (sim_fpu *f,\n\t\t    int is_double,\n\t\t    sim_fpu_round round)\n{\n  switch (round)\n    {\n    case sim_fpu_round_default:\n      return 0;\n    case sim_fpu_round_near:\n      f->class = sim_fpu_class_infinity;\n      break;\n    case sim_fpu_round_up:\n      if (!f->sign)\n\tf->class = sim_fpu_class_infinity;\n      break;\n    case sim_fpu_round_down:\n      if (f->sign)\n\tf->class = sim_fpu_class_infinity;\n      break;\n    case sim_fpu_round_zero:\n      break;\n    }\n  f->normal_exp = NORMAL_EXPMAX;\n  f->fraction = LSMASK64 (NR_FRAC_GUARD, NR_GUARDS);\n  return (sim_fpu_status_overflow | sim_fpu_status_inexact);\n}",
+      "fn_code_pos": [
+        [
+          766,
+          0
+        ],
+        [
+          792,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "is_double": "int",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)\ndo_normal_underflow (sim_fpu *f,\n\t\t     int is_double,\n\t\t     sim_fpu_round round)\n{\n  switch (round)\n    {\n    case sim_fpu_round_default:\n      return 0;\n    case sim_fpu_round_near:\n      f->class = sim_fpu_class_zero;\n      break;\n    case sim_fpu_round_up:\n      if (f->sign)\n\tf->class = sim_fpu_class_zero;\n      break;\n    case sim_fpu_round_down:\n      if (!f->sign)\n\tf->class = sim_fpu_class_zero;\n      break;\n    case sim_fpu_round_zero:\n      f->class = sim_fpu_class_zero;\n      break;\n    }\n  f->normal_exp = NORMAL_EXPMIN - NR_FRACBITS;\n  f->fraction = IMPLICIT_1;\n  return (sim_fpu_status_inexact | sim_fpu_status_underflow);\n}",
+      "fn_code_pos": [
+        [
+          794,
+          0
+        ],
+        [
+          821,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "is_double": "int",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)\ndo_normal_round (sim_fpu *f,\n\t\t int nr_guards,\n\t\t sim_fpu_round round)\n{\n  unsigned64 guardmask = LSMASK64 (nr_guards - 1, 0);\n  unsigned64 guardmsb = LSBIT64 (nr_guards - 1);\n  unsigned64 fraclsb = guardmsb << 1;\n  if ((f->fraction & guardmask))\n    {\n      int status = sim_fpu_status_inexact;\n      switch (round)\n\t{\n\tcase sim_fpu_round_default:\n\t  return 0;\n\tcase sim_fpu_round_near:\n\t  if ((f->fraction & guardmsb))\n\t    {\n\t      if ((f->fraction & fraclsb))\n\t\t{\n\t\t  status |= sim_fpu_status_rounded;\n\t\t}\n\t      else if ((f->fraction & (guardmask >> 1)))\n\t\t{\n\t\t  status |= sim_fpu_status_rounded;\n\t\t}\n\t    }\n\t  break;\n\tcase sim_fpu_round_up:\n\t  if (!f->sign)\n\t    status |= sim_fpu_status_rounded;\n\t  break;\n\tcase sim_fpu_round_down:\n\t  if (f->sign)\n\t    status |= sim_fpu_status_rounded;\n\t  break;\n\tcase sim_fpu_round_zero:\n\t  break;\n\t}\n      f->fraction &= ~guardmask;\n      /* Round if needed, handle resulting overflow.  */\n      if ((status & sim_fpu_status_rounded))\n\t{\n\t  f->fraction += fraclsb;\n\t  if ((f->fraction & IMPLICIT_2))\n\t    {\n\t      f->fraction >>= 1;\n\t      f->normal_exp += 1;\n\t    }\n\t}\n      return status;\n    }\n  else\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          828,
+          0
+        ],
+        [
+          882,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "nr_guards": "int",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)\ndo_round (sim_fpu *f,\n\t  int is_double,\n\t  sim_fpu_round round,\n\t  sim_fpu_denorm denorm)\n{\n  switch (f->class)\n    {\n    case sim_fpu_class_qnan:\n    case sim_fpu_class_zero:\n    case sim_fpu_class_infinity:\n      return 0;\n      break;\n    case sim_fpu_class_snan:\n      /* Quieten a SignalingNaN.  */\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n      break;\n    case sim_fpu_class_number:\n    case sim_fpu_class_denorm:\n      {\n\tint status;\n\tASSERT (f->fraction < IMPLICIT_2);\n\tASSERT (f->fraction >= IMPLICIT_1);\n\tif (f->normal_exp < NORMAL_EXPMIN)\n\t  {\n\t    /* This number's exponent is too low to fit into the bits\n\t       available in the number.  Round off any bits that will be\n\t       discarded as a result of denormalization.  Edge case is\n\t       the implicit bit shifted to GUARD0 and then rounded\n\t       up. */\n\t    int shift = NORMAL_EXPMIN - f->normal_exp;\n\t    if (shift + NR_GUARDS <= NR_FRAC_GUARD + 1\n\t\t&& !(denorm & sim_fpu_denorm_zero))\n\t      {\n\t\tstatus = do_normal_round (f, shift + NR_GUARDS, round);\n\t\tif (f->fraction == 0) /* Rounding underflowed.  */\n\t\t  {\n\t\t    status |= do_normal_underflow (f, is_double, round);\n\t\t  }\n\t\telse if (f->normal_exp < NORMAL_EXPMIN) /* still underflow? */\n\t\t  {\n\t\t    status |= sim_fpu_status_denorm;\n\t\t    /* Any loss of precision when denormalizing is\n\t\t       underflow. Some processors check for underflow\n\t\t       before rounding, some after! */\n\t\t    if (status & sim_fpu_status_inexact)\n\t\t      status |= sim_fpu_status_underflow;\n\t\t    /* Flag that resultant value has been denormalized.  */\n\t\t    f->class = sim_fpu_class_denorm;\n\t\t  }\n\t\telse if ((denorm & sim_fpu_denorm_underflow_inexact))\n\t\t  {\n\t\t    if ((status & sim_fpu_status_inexact))\n\t\t      status |= sim_fpu_status_underflow;\n\t\t  }\n\t      }\n\t    else\n\t      {\n\t\tstatus = do_normal_underflow (f, is_double, round);\n\t      }\n\t  }\n\telse if (f->normal_exp > NORMAL_EXPMAX)\n\t  {\n\t    /* Infinity */\n\t    status = do_normal_overflow (f, is_double, round);\n\t  }\n\telse\n\t  {\n\t    status = do_normal_round (f, NR_GUARDS, round);\n\t    if (f->fraction == 0)\n\t      /* f->class = sim_fpu_class_zero; */\n\t      status |= do_normal_underflow (f, is_double, round);\n\t    else if (f->normal_exp > NORMAL_EXPMAX)\n\t      /* Oops! rounding caused overflow.  */\n\t      status |= do_normal_overflow (f, is_double, round);\n\t  }\n\tASSERT ((f->class == sim_fpu_class_number\n\t\t || f->class == sim_fpu_class_denorm)\n\t\t<= (f->fraction < IMPLICIT_2 && f->fraction >= IMPLICIT_1));\n\treturn status;\n      }\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          885,
+          0
+        ],
+        [
+          969,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "is_double": "int",
+          "round": "sim_fpu_round",
+          "denorm": "sim_fpu_denorm"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_round_32 (sim_fpu *f,\n\t\t  sim_fpu_round round,\n\t\t  sim_fpu_denorm denorm)\n{\n  return do_round (f, 0, round, denorm);\n}",
+      "fn_code_pos": [
+        [
+          971,
+          0
+        ],
+        [
+          977,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "round": "sim_fpu_round",
+          "denorm": "sim_fpu_denorm"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_round_64 (sim_fpu *f,\n\t\t  sim_fpu_round round,\n\t\t  sim_fpu_denorm denorm)\n{\n  return do_round (f, 1, round, denorm);\n}",
+      "fn_code_pos": [
+        [
+          979,
+          0
+        ],
+        [
+          985,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "round": "sim_fpu_round",
+          "denorm": "sim_fpu_denorm"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_add (sim_fpu *f,\n\t     const sim_fpu *l,\n\t     const sim_fpu *r)\n{\n  if (sim_fpu_is_snan (l))\n    {\n      *f = *l;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_snan (r))\n    {\n      *f = *r;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_qnan (l))\n    {\n      *f = *l;\n      return 0;\n    }\n  if (sim_fpu_is_qnan (r))\n    {\n      *f = *r;\n      return 0;\n    }\n  if (sim_fpu_is_infinity (l))\n    {\n      if (sim_fpu_is_infinity (r)\n\t  && l->sign != r->sign)\n\t{\n\t  *f = sim_fpu_qnan;\n\t  return sim_fpu_status_invalid_isi;\n\t}\n      *f = *l;\n      return 0;\n    }\n  if (sim_fpu_is_infinity (r))\n    {\n      *f = *r;\n      return 0;\n    }\n  if (sim_fpu_is_zero (l))\n    {\n      if (sim_fpu_is_zero (r))\n\t{\n\t  *f = sim_fpu_zero;\n\t  f->sign = l->sign & r->sign;\n\t}\n      else\n\t*f = *r;\n      return 0;\n    }\n  if (sim_fpu_is_zero (r))\n    {\n      *f = *l;\n      return 0;\n    }\n  {\n    int status = 0;\n    int shift = l->normal_exp - r->normal_exp;\n    unsigned64 lfraction;\n    unsigned64 rfraction;\n    /* use exp of larger */\n    if (shift >= NR_FRAC_GUARD)\n      {\n\t/* left has much bigger magnitude */\n\t*f = *l;\n\treturn sim_fpu_status_inexact;\n      }\n    if (shift <= - NR_FRAC_GUARD)\n      {\n\t/* right has much bigger magnitude */\n\t*f = *r;\n\treturn sim_fpu_status_inexact;\n      }\n    lfraction = l->fraction;\n    rfraction = r->fraction;\n    if (shift > 0)\n      {\n\tf->normal_exp = l->normal_exp;\n\tif (rfraction & LSMASK64 (shift - 1, 0))\n\t  {\n\t    status |= sim_fpu_status_inexact;\n\t    rfraction |= LSBIT64 (shift); /* Stick LSBit.  */\n\t  }\n\trfraction >>= shift;\n      }\n    else if (shift < 0)\n      {\n\tf->normal_exp = r->normal_exp;\n\tif (lfraction & LSMASK64 (- shift - 1, 0))\n\t  {\n\t    status |= sim_fpu_status_inexact;\n\t    lfraction |= LSBIT64 (- shift); /* Stick LSBit.  */\n\t  }\n\tlfraction >>= -shift;\n      }\n    else\n      {\n\tf->normal_exp = r->normal_exp;\n      }\n\n    /* Perform the addition.  */\n    if (l->sign)\n      lfraction = - lfraction;\n    if (r->sign)\n      rfraction = - rfraction;\n    f->fraction = lfraction + rfraction;\n\n    /* zero? */\n    if (f->fraction == 0)\n      {\n\t*f = sim_fpu_zero;\n\treturn 0;\n      }\n\n    /* sign? */\n    f->class = sim_fpu_class_number;\n    if (((signed64) f->fraction) >= 0)\n      f->sign = 0;\n    else\n      {\n\tf->sign = 1;\n\tf->fraction = - f->fraction;\n      }\n\n    /* Normalize it.  */\n    if ((f->fraction & IMPLICIT_2))\n      {\n\tf->fraction = (f->fraction >> 1) | (f->fraction & 1);\n\tf->normal_exp ++;\n      }\n    else if (f->fraction < IMPLICIT_1)\n      {\n\tdo\n\t  {\n\t    f->fraction <<= 1;\n\t    f->normal_exp --;\n\t  }\n\twhile (f->fraction < IMPLICIT_1);\n      }\n    ASSERT (f->fraction >= IMPLICIT_1 && f->fraction < IMPLICIT_2);\n    return status;\n  }\n}",
+      "fn_code_pos": [
+        [
+          991,
+          0
+        ],
+        [
+          1137,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_sub (sim_fpu *f,\n\t     const sim_fpu *l,\n\t     const sim_fpu *r)\n{\n  if (sim_fpu_is_snan (l))\n    {\n      *f = *l;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_snan (r))\n    {\n      *f = *r;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_qnan (l))\n    {\n      *f = *l;\n      return 0;\n    }\n  if (sim_fpu_is_qnan (r))\n    {\n      *f = *r;\n      return 0;\n    }\n  if (sim_fpu_is_infinity (l))\n    {\n      if (sim_fpu_is_infinity (r)\n\t  && l->sign == r->sign)\n\t{\n\t  *f = sim_fpu_qnan;\n\t  return sim_fpu_status_invalid_isi;\n\t}\n      *f = *l;\n      return 0;\n    }\n  if (sim_fpu_is_infinity (r))\n    {\n      *f = *r;\n      f->sign = !r->sign;\n      return 0;\n    }\n  if (sim_fpu_is_zero (l))\n    {\n      if (sim_fpu_is_zero (r))\n\t{\n\t  *f = sim_fpu_zero;\n\t  f->sign = l->sign & !r->sign;\n\t}\n      else\n\t{\n\t  *f = *r;\n\t  f->sign = !r->sign;\n\t}\n      return 0;\n    }\n  if (sim_fpu_is_zero (r))\n    {\n      *f = *l;\n      return 0;\n    }\n  {\n    int status = 0;\n    int shift = l->normal_exp - r->normal_exp;\n    unsigned64 lfraction;\n    unsigned64 rfraction;\n    /* use exp of larger */\n    if (shift >= NR_FRAC_GUARD)\n      {\n\t/* left has much bigger magnitude */\n\t*f = *l;\n\treturn sim_fpu_status_inexact;\n      }\n    if (shift <= - NR_FRAC_GUARD)\n      {\n\t/* right has much bigger magnitude */\n\t*f = *r;\n\tf->sign = !r->sign;\n\treturn sim_fpu_status_inexact;\n      }\n    lfraction = l->fraction;\n    rfraction = r->fraction;\n    if (shift > 0)\n      {\n\tf->normal_exp = l->normal_exp;\n\tif (rfraction & LSMASK64 (shift - 1, 0))\n\t  {\n\t    status |= sim_fpu_status_inexact;\n\t    rfraction |= LSBIT64 (shift); /* Stick LSBit.  */\n\t  }\n\trfraction >>= shift;\n      }\n    else if (shift < 0)\n      {\n\tf->normal_exp = r->normal_exp;\n\tif (lfraction & LSMASK64 (- shift - 1, 0))\n\t  {\n\t    status |= sim_fpu_status_inexact;\n\t    lfraction |= LSBIT64 (- shift); /* Stick LSBit.  */\n\t  }\n\tlfraction >>= -shift;\n      }\n    else\n      {\n\tf->normal_exp = r->normal_exp;\n      }\n\n    /* Perform the subtraction.  */\n    if (l->sign)\n      lfraction = - lfraction;\n    if (!r->sign)\n      rfraction = - rfraction;\n    f->fraction = lfraction + rfraction;\n\n    /* zero? */\n    if (f->fraction == 0)\n      {\n\t*f = sim_fpu_zero;\n\treturn 0;\n      }\n\n    /* sign? */\n    f->class = sim_fpu_class_number;\n    if (((signed64) f->fraction) >= 0)\n      f->sign = 0;\n    else\n      {\n\tf->sign = 1;\n\tf->fraction = - f->fraction;\n      }\n\n    /* Normalize it.  */\n    if ((f->fraction & IMPLICIT_2))\n      {\n\tf->fraction = (f->fraction >> 1) | (f->fraction & 1);\n\tf->normal_exp ++;\n      }\n    else if (f->fraction < IMPLICIT_1)\n      {\n\tdo\n\t  {\n\t    f->fraction <<= 1;\n\t    f->normal_exp --;\n\t  }\n\twhile (f->fraction < IMPLICIT_1);\n      }\n    ASSERT (f->fraction >= IMPLICIT_1 && f->fraction < IMPLICIT_2);\n    return status;\n  }\n}",
+      "fn_code_pos": [
+        [
+          1140,
+          0
+        ],
+        [
+          1291,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_mul (sim_fpu *f,\n\t     const sim_fpu *l,\n\t     const sim_fpu *r)\n{\n  if (sim_fpu_is_snan (l))\n    {\n      *f = *l;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_snan (r))\n    {\n      *f = *r;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_qnan (l))\n    {\n      *f = *l;\n      return 0;\n    }\n  if (sim_fpu_is_qnan (r))\n    {\n      *f = *r;\n      return 0;\n    }\n  if (sim_fpu_is_infinity (l))\n    {\n      if (sim_fpu_is_zero (r))\n\t{\n\t  *f = sim_fpu_qnan;\n\t  return sim_fpu_status_invalid_imz;\n\t}\n      *f = *l;\n      f->sign = l->sign ^ r->sign;\n      return 0;\n    }\n  if (sim_fpu_is_infinity (r))\n    {\n      if (sim_fpu_is_zero (l))\n\t{\n\t  *f = sim_fpu_qnan;\n\t  return sim_fpu_status_invalid_imz;\n\t}\n      *f = *r;\n      f->sign = l->sign ^ r->sign;\n      return 0;\n    }\n  if (sim_fpu_is_zero (l) || sim_fpu_is_zero (r))\n    {\n      *f = sim_fpu_zero;\n      f->sign = l->sign ^ r->sign;\n      return 0;\n    }\n  /* Calculate the mantissa by multiplying both 64bit numbers to get a\n     128 bit number.  */\n  {\n    unsigned64 low;\n    unsigned64 high;\n    unsigned64 nl = l->fraction & 0xffffffff;\n    unsigned64 nh = l->fraction >> 32;\n    unsigned64 ml = r->fraction & 0xffffffff;\n    unsigned64 mh = r->fraction >>32;\n    unsigned64 pp_ll = ml * nl;\n    unsigned64 pp_hl = mh * nl;\n    unsigned64 pp_lh = ml * nh;\n    unsigned64 pp_hh = mh * nh;\n    unsigned64 res2 = 0;\n    unsigned64 res0 = 0;\n    unsigned64 ps_hh__ = pp_hl + pp_lh;\n    if (ps_hh__ < pp_hl)\n      res2 += UNSIGNED64 (0x100000000);\n    pp_hl = (ps_hh__ << 32) & UNSIGNED64 (0xffffffff00000000);\n    res0 = pp_ll + pp_hl;\n    if (res0 < pp_ll)\n      res2++;\n    res2 += ((ps_hh__ >> 32) & 0xffffffff) + pp_hh;\n    high = res2;\n    low = res0;\n\n    f->normal_exp = l->normal_exp + r->normal_exp;\n    f->sign = l->sign ^ r->sign;\n    f->class = sim_fpu_class_number;\n\n    /* Input is bounded by [1,2)   ;   [2^60,2^61)\n       Output is bounded by [1,4)  ;   [2^120,2^122) */\n\n    /* Adjust the exponent according to where the decimal point ended\n       up in the high 64 bit word.  In the source the decimal point\n       was at NR_FRAC_GUARD. */\n    f->normal_exp += NR_FRAC_GUARD + 64 - (NR_FRAC_GUARD * 2);\n\n    /* The high word is bounded according to the above.  Consequently\n       it has never overflowed into IMPLICIT_2. */\n    ASSERT (high < LSBIT64 (((NR_FRAC_GUARD + 1) * 2) - 64));\n    ASSERT (high >= LSBIT64 ((NR_FRAC_GUARD * 2) - 64));\n    ASSERT (LSBIT64 (((NR_FRAC_GUARD + 1) * 2) - 64) < IMPLICIT_1);\n\n    /* Normalize.  */\n    do\n      {\n\tf->normal_exp--;\n\thigh <<= 1;\n\tif (low & LSBIT64 (63))\n\t  high |= 1;\n\tlow <<= 1;\n      }\n    while (high < IMPLICIT_1);\n\n    ASSERT (high >= IMPLICIT_1 && high < IMPLICIT_2);\n    if (low != 0)\n      {\n\tf->fraction = (high | 1); /* sticky */\n\treturn sim_fpu_status_inexact;\n      }\n    else\n      {\n\tf->fraction = high;\n\treturn 0;\n      }\n    return 0;\n  }\n}",
+      "fn_code_pos": [
+        [
+          1294,
+          0
+        ],
+        [
+          1417,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_div (sim_fpu *f,\n\t     const sim_fpu *l,\n\t     const sim_fpu *r)\n{\n  if (sim_fpu_is_snan (l))\n    {\n      *f = *l;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_snan (r))\n    {\n      *f = *r;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_qnan (l))\n    {\n      *f = *l;\n      f->class = sim_fpu_class_qnan;\n      return 0;\n    }\n  if (sim_fpu_is_qnan (r))\n    {\n      *f = *r;\n      f->class = sim_fpu_class_qnan;\n      return 0;\n    }\n  if (sim_fpu_is_infinity (l))\n    {\n      if (sim_fpu_is_infinity (r))\n\t{\n\t  *f = sim_fpu_qnan;\n\t  return sim_fpu_status_invalid_idi;\n\t}\n      else\n\t{\n\t  *f = *l;\n\t  f->sign = l->sign ^ r->sign;\n\t  return 0;\n\t}\n    }\n  if (sim_fpu_is_zero (l))\n    {\n      if (sim_fpu_is_zero (r))\n\t{\n\t  *f = sim_fpu_qnan;\n\t  return sim_fpu_status_invalid_zdz;\n\t}\n      else\n\t{\n\t  *f = *l;\n\t  f->sign = l->sign ^ r->sign;\n\t  return 0;\n\t}\n    }\n  if (sim_fpu_is_infinity (r))\n    {\n      *f = sim_fpu_zero;\n      f->sign = l->sign ^ r->sign;\n      return 0;\n    }\n  if (sim_fpu_is_zero (r))\n    {\n      f->class = sim_fpu_class_infinity;\n      f->sign = l->sign ^ r->sign;\n      return sim_fpu_status_invalid_div0;\n    }\n\n  /* Calculate the mantissa by multiplying both 64bit numbers to get a\n     128 bit number.  */\n  {\n    /* quotient =  ( ( numerator / denominator)\n                      x 2^(numerator exponent -  denominator exponent)\n     */\n    unsigned64 numerator;\n    unsigned64 denominator;\n    unsigned64 quotient;\n    unsigned64 bit;\n\n    f->class = sim_fpu_class_number;\n    f->sign = l->sign ^ r->sign;\n    f->normal_exp = l->normal_exp - r->normal_exp;\n\n    numerator = l->fraction;\n    denominator = r->fraction;\n\n    /* Fraction will be less than 1.0 */\n    if (numerator < denominator)\n      {\n\tnumerator <<= 1;\n\tf->normal_exp--;\n      }\n    ASSERT (numerator >= denominator);\n\n    /* Gain extra precision, already used one spare bit.  */\n    numerator <<=    NR_SPARE;\n    denominator <<=  NR_SPARE;\n\n    /* Does divide one bit at a time.  Optimize???  */\n    quotient = 0;\n    bit = (IMPLICIT_1 << NR_SPARE);\n    while (bit)\n      {\n\tif (numerator >= denominator)\n\t  {\n\t    quotient |= bit;\n\t    numerator -= denominator;\n\t  }\n\tbit >>= 1;\n\tnumerator <<= 1;\n      }\n\n    /* Discard (but save) the extra bits.  */\n    if ((quotient & LSMASK64 (NR_SPARE -1, 0)))\n      quotient = (quotient >> NR_SPARE) | 1;\n    else\n      quotient = (quotient >> NR_SPARE);\n\n    f->fraction = quotient;\n    ASSERT (f->fraction >= IMPLICIT_1 && f->fraction < IMPLICIT_2);\n    if (numerator != 0)\n      {\n\tf->fraction |= 1; /* Stick remaining bits.  */\n\treturn sim_fpu_status_inexact;\n      }\n    else\n      return 0;\n  }\n}",
+      "fn_code_pos": [
+        [
+          1419,
+          0
+        ],
+        [
+          1549,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_max (sim_fpu *f,\n\t     const sim_fpu *l,\n\t     const sim_fpu *r)\n{\n  if (sim_fpu_is_snan (l))\n    {\n      *f = *l;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_snan (r))\n    {\n      *f = *r;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_qnan (l))\n    {\n      *f = *l;\n      return 0;\n    }\n  if (sim_fpu_is_qnan (r))\n    {\n      *f = *r;\n      return 0;\n    }\n  if (sim_fpu_is_infinity (l))\n    {\n      if (sim_fpu_is_infinity (r)\n\t  && l->sign == r->sign)\n\t{\n\t  *f = sim_fpu_qnan;\n\t  return sim_fpu_status_invalid_isi;\n\t}\n      if (l->sign)\n\t*f = *r; /* -inf < anything */\n      else\n\t*f = *l; /* +inf > anything */\n      return 0;\n    }\n  if (sim_fpu_is_infinity (r))\n    {\n      if (r->sign)\n\t*f = *l; /* anything > -inf */\n      else\n\t*f = *r; /* anything < +inf */\n      return 0;\n    }\n  if (l->sign > r->sign)\n    {\n      *f = *r; /* -ve < +ve */\n      return 0;\n    }\n  if (l->sign < r->sign)\n    {\n      *f = *l; /* +ve > -ve */\n      return 0;\n    }\n  ASSERT (l->sign == r->sign);\n  if (l->normal_exp > r->normal_exp\n      || (l->normal_exp == r->normal_exp\n\t  && l->fraction > r->fraction))\n    {\n      /* |l| > |r| */\n      if (l->sign)\n\t*f = *r; /* -ve < -ve */\n      else\n\t*f = *l; /* +ve > +ve */\n      return 0;\n    }\n  else\n    {\n      /* |l| <= |r| */\n      if (l->sign)\n\t*f = *l; /* -ve > -ve */\n      else\n\t*f = *r; /* +ve < +ve */\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1552,
+          0
+        ],
+        [
+          1632,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_min (sim_fpu *f,\n\t     const sim_fpu *l,\n\t     const sim_fpu *r)\n{\n  if (sim_fpu_is_snan (l))\n    {\n      *f = *l;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_snan (r))\n    {\n      *f = *r;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_qnan (l))\n    {\n      *f = *l;\n      return 0;\n    }\n  if (sim_fpu_is_qnan (r))\n    {\n      *f = *r;\n      return 0;\n    }\n  if (sim_fpu_is_infinity (l))\n    {\n      if (sim_fpu_is_infinity (r)\n\t  && l->sign == r->sign)\n\t{\n\t  *f = sim_fpu_qnan;\n\t  return sim_fpu_status_invalid_isi;\n\t}\n      if (l->sign)\n\t*f = *l; /* -inf < anything */\n      else\n\t*f = *r; /* +inf > anthing */\n      return 0;\n    }\n  if (sim_fpu_is_infinity (r))\n    {\n      if (r->sign)\n\t*f = *r; /* anything > -inf */\n      else\n\t*f = *l; /* anything < +inf */\n      return 0;\n    }\n  if (l->sign > r->sign)\n    {\n      *f = *l; /* -ve < +ve */\n      return 0;\n    }\n  if (l->sign < r->sign)\n    {\n      *f = *r; /* +ve > -ve */\n      return 0;\n    }\n  ASSERT (l->sign == r->sign);\n  if (l->normal_exp > r->normal_exp\n      || (l->normal_exp == r->normal_exp\n\t  && l->fraction > r->fraction))\n    {\n      /* |l| > |r| */\n      if (l->sign)\n\t*f = *l; /* -ve < -ve */\n      else\n\t*f = *r; /* +ve > +ve */\n      return 0;\n    }\n  else\n    {\n      /* |l| <= |r| */\n      if (l->sign)\n\t*f = *r; /* -ve > -ve */\n      else\n\t*f = *l; /* +ve < +ve */\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1635,
+          0
+        ],
+        [
+          1715,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_neg (sim_fpu *f,\n\t     const sim_fpu *r)\n{\n  if (sim_fpu_is_snan (r))\n    {\n      *f = *r;\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_qnan (r))\n    {\n      *f = *r;\n      return 0;\n    }\n  *f = *r;\n  f->sign = !r->sign;\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1718,
+          0
+        ],
+        [
+          1736,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_abs (sim_fpu *f,\n\t     const sim_fpu *r)\n{\n  *f = *r;\n  f->sign = 0;\n  if (sim_fpu_is_snan (r))\n    {\n      f->class = sim_fpu_class_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1739,
+          0
+        ],
+        [
+          1751,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_inv (sim_fpu *f,\n\t     const sim_fpu *r)\n{\n  return sim_fpu_div (f, &sim_fpu_one, r);\n}",
+      "fn_code_pos": [
+        [
+          1754,
+          0
+        ],
+        [
+          1759,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_sqrt (sim_fpu *f,\n\t      const sim_fpu *r)\n{\n  if (sim_fpu_is_snan (r))\n    {\n      *f = sim_fpu_qnan;\n      return sim_fpu_status_invalid_snan;\n    }\n  if (sim_fpu_is_qnan (r))\n    {\n      *f = sim_fpu_qnan;\n      return 0;\n    }\n  if (sim_fpu_is_zero (r))\n    {\n      f->class = sim_fpu_class_zero;\n      f->sign = r->sign;\n      f->normal_exp = 0;\n      return 0;\n    }\n  if (sim_fpu_is_infinity (r))\n    {\n      if (r->sign)\n\t{\n\t  *f = sim_fpu_qnan;\n\t  return sim_fpu_status_invalid_sqrt;\n\t}\n      else\n\t{\n\t  f->class = sim_fpu_class_infinity;\n\t  f->sign = 0;\n\t  f->sign = 0;\n\t  return 0;\n\t}\n    }\n  if (r->sign)\n    {\n      *f = sim_fpu_qnan;\n      return sim_fpu_status_invalid_sqrt;\n    }\n\n  /* @(#)e_sqrt.c 5.1 93/09/24 */\n  /*\n   * ====================================================\n   * Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved.\n   *\n   * Developed at SunPro, a Sun Microsystems, Inc. business.\n   * Permission to use, copy, modify, and distribute this\n   * software is freely granted, provided that this notice\n   * is preserved.\n   * ====================================================\n   */\n\n  /* __ieee754_sqrt(x)\n   * Return correctly rounded sqrt.\n   *           ------------------------------------------\n   *           |  Use the hardware sqrt if you have one |\n   *           ------------------------------------------\n   * Method:\n   *   Bit by bit method using integer arithmetic. (Slow, but portable)\n   *   1. Normalization\n   *\tScale x to y in [1,4) with even powers of 2:\n   *\tfind an integer k such that  1 <= (y=x*2^(2k)) < 4, then\n   *\t\tsqrt(x) = 2^k * sqrt(y)\n   -\n   - Since:\n   -   sqrt ( x*2^(2m) )     = sqrt(x).2^m    ; m even\n   -   sqrt ( x*2^(2m + 1) ) = sqrt(2.x).2^m  ; m odd\n   - Define:\n   -   y = ((m even) ? x : 2.x)\n   - Then:\n   -   y in [1, 4)                            ; [IMPLICIT_1,IMPLICIT_4)\n   - And:\n   -   sqrt (y) in [1, 2)                     ; [IMPLICIT_1,IMPLICIT_2)\n   -\n   *   2. Bit by bit computation\n   *\tLet q  = sqrt(y) truncated to i bit after binary point (q = 1),\n   *\t     i\t\t\t\t\t\t\t 0\n   *                                     i+1         2\n   *\t    s  = 2*q , and\ty  =  2   * ( y - q  ).\t\t(1)\n   *\t     i      i            i                 i\n   *\n   *\tTo compute q    from q , one checks whether\n   *\t\t    i+1       i\n   *\n   *\t\t\t      -(i+1) 2\n   *\t\t\t(q + 2      ) <= y.\t\t\t(2)\n   *     \t\t\t  i\n   *\t\t\t\t\t\t\t      -(i+1)\n   *\tIf (2) is false, then q   = q ; otherwise q   = q  + 2      .\n   *\t\t \t       i+1   i             i+1   i\n   *\n   *\tWith some algebraic manipulation, it is not difficult to see\n   *\tthat (2) is equivalent to\n   *                             -(i+1)\n   *\t\t\ts  +  2       <= y\t\t\t(3)\n   *\t\t\t i                i\n   *\n   *\tThe advantage of (3) is that s  and y  can be computed by\n   *\t\t\t\t      i      i\n   *\tthe following recurrence formula:\n   *\t    if (3) is false\n   *\n   *\t    s     =  s  ,\ty    = y   ;\t\t\t(4)\n   *\t     i+1      i\t\t i+1    i\n   *\n   -\n   -                      NOTE: y    = 2*y\n   -                             i+1      i\n   -\n   *\t    otherwise,\n   *                       -i                      -(i+1)\n   *\t    s\t  =  s  + 2  ,  y    = y  -  s  - 2  \t\t(5)\n   *         i+1      i          i+1    i     i\n   *\n   -\n   -                                                   -(i+1)\n   -                      NOTE: y    = 2 (y  -  s  -  2      )\n   -                             i+1       i     i\n   -\n   *\tOne may easily use induction to prove (4) and (5).\n   *\tNote. Since the left hand side of (3) contain only i+2 bits,\n   *\t      it does not necessary to do a full (53-bit) comparison\n   *\t      in (3).\n   *   3. Final rounding\n   *\tAfter generating the 53 bits result, we compute one more bit.\n   *\tTogether with the remainder, we can decide whether the\n   *\tresult is exact, bigger than 1/2ulp, or less than 1/2ulp\n   *\t(it will never equal to 1/2ulp).\n   *\tThe rounding mode can be detected by checking whether\n   *\thuge + tiny is equal to huge, and whether huge - tiny is\n   *\tequal to huge for some floating point number \"huge\" and \"tiny\".\n   *\n   * Special cases:\n   *\tsqrt(+-0) = +-0 \t... exact\n   *\tsqrt(inf) = inf\n   *\tsqrt(-ve) = NaN\t\t... with invalid signal\n   *\tsqrt(NaN) = NaN\t\t... with invalid signal for signalling NaN\n   *\n   * Other methods : see the appended file at the end of the program below.\n   *---------------\n   */\n\n  {\n    /* Generate sqrt(x) bit by bit.  */\n    unsigned64 y;\n    unsigned64 q;\n    unsigned64 s;\n    unsigned64 b;\n\n    f->class = sim_fpu_class_number;\n    f->sign = 0;\n    y = r->fraction;\n    f->normal_exp = (r->normal_exp >> 1);\t/* exp = [exp/2] */\n\n    /* Odd exp, double x to make it even.  */\n    ASSERT (y >= IMPLICIT_1 && y < IMPLICIT_4);\n    if ((r->normal_exp & 1))\n      {\n\ty += y;\n      }\n    ASSERT (y >= IMPLICIT_1 && y < (IMPLICIT_2 << 1));\n\n    /* Let loop determine first value of s (either 1 or 2) */\n    b = IMPLICIT_1;\n    q = 0;\n    s = 0;\n\n    while (b)\n      {\n\tunsigned64 t = s + b;\n\tif (t <= y)\n\t  {\n\t    s |= (b << 1);\n\t    y -= t;\n\t    q |= b;\n\t  }\n\ty <<= 1;\n\tb >>= 1;\n      }\n\n    ASSERT (q >= IMPLICIT_1 && q < IMPLICIT_2);\n    f->fraction = q;\n    if (y != 0)\n      {\n\tf->fraction |= 1; /* Stick remaining bits.  */\n\treturn sim_fpu_status_inexact;\n      }\n    else\n      return 0;\n  }\n}",
+      "fn_code_pos": [
+        [
+          1762,
+          0
+        ],
+        [
+          1954,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_i32to (sim_fpu *f,\n\t       signed32 i,\n\t       sim_fpu_round round)\n{\n  i2fpu (f, i, 0);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1959,
+          0
+        ],
+        [
+          1966,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "i": "signed32",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_u32to (sim_fpu *f,\n\t       unsigned32 u,\n\t       sim_fpu_round round)\n{\n  u2fpu (f, u, 0);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1968,
+          0
+        ],
+        [
+          1975,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "u": "unsigned32",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_i64to (sim_fpu *f,\n\t       signed64 i,\n\t       sim_fpu_round round)\n{\n  i2fpu (f, i, 1);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1977,
+          0
+        ],
+        [
+          1984,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "i": "signed64",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_u64to (sim_fpu *f,\n\t       unsigned64 u,\n\t       sim_fpu_round round)\n{\n  u2fpu (f, u, 1);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1986,
+          0
+        ],
+        [
+          1993,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "u": "unsigned64",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_to32i (signed32 *i,\n\t       const sim_fpu *f,\n\t       sim_fpu_round round)\n{\n  signed64 i64;\n  int status = fpu2i (&i64, f, 0, round);\n  *i = i64;\n  return status;\n}",
+      "fn_code_pos": [
+        [
+          1996,
+          0
+        ],
+        [
+          2005,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "i": "signed32",
+          "f": "sim_fpu",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_to32u (unsigned32 *u,\n\t       const sim_fpu *f,\n\t       sim_fpu_round round)\n{\n  unsigned64 u64;\n  int status = fpu2u (&u64, f, 0);\n  *u = u64;\n  return status;\n}",
+      "fn_code_pos": [
+        [
+          2007,
+          0
+        ],
+        [
+          2016,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "u": "unsigned32",
+          "f": "sim_fpu",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_to64i (signed64 *i,\n\t       const sim_fpu *f,\n\t       sim_fpu_round round)\n{\n  return fpu2i (i, f, 1, round);\n}",
+      "fn_code_pos": [
+        [
+          2018,
+          0
+        ],
+        [
+          2024,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "i": "signed64",
+          "f": "sim_fpu",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_to64u (unsigned64 *u,\n\t       const sim_fpu *f,\n\t       sim_fpu_round round)\n{\n  return fpu2u (u, f, 1);\n}",
+      "fn_code_pos": [
+        [
+          2027,
+          0
+        ],
+        [
+          2033,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "u": "unsigned64",
+          "f": "sim_fpu",
+          "round": "sim_fpu_round"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (float)\nsim_fpu_2f (const sim_fpu *f)\n{\n  return fval.d;\n}",
+      "fn_code_pos": [
+        [
+          2040,
+          0
+        ],
+        [
+          2044,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (double)\nsim_fpu_2d (const sim_fpu *s)\n{\n  sim_fpu_map val;\n  if (sim_fpu_is_snan (s))\n    {\n      /* gag SNaN's */\n      sim_fpu n = *s;\n      n.class = sim_fpu_class_qnan;\n      val.i = pack_fpu (&n, 1);\n    }\n  else\n    {\n      val.i = pack_fpu (s, 1);\n    }\n  return val.d;\n}",
+      "fn_code_pos": [
+        [
+          2048,
+          0
+        ],
+        [
+          2064,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "s": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_f2 (sim_fpu *f,\n\t    float s)\n{\n  sim_fpu_map val;\n  val.d = s;\n  unpack_fpu (f, val.i, 1);\n}",
+      "fn_code_pos": [
+        [
+          2068,
+          0
+        ],
+        [
+          2075,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "s": "float"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_d2 (sim_fpu *f,\n\t    double d)\n{\n  sim_fpu_map val;\n  val.d = d;\n  unpack_fpu (f, val.i, 1);\n}",
+      "fn_code_pos": [
+        [
+          2079,
+          0
+        ],
+        [
+          2086,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "d": "double"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_nan (const sim_fpu *d)\n{\n  switch (d->class)\n    {\n    case sim_fpu_class_qnan:\n    case sim_fpu_class_snan:\n      return 1;\n    default:\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2091,
+          0
+        ],
+        [
+          2102,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "d": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_qnan (const sim_fpu *d)\n{\n  switch (d->class)\n    {\n    case sim_fpu_class_qnan:\n      return 1;\n    default:\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2104,
+          0
+        ],
+        [
+          2114,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "d": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_snan (const sim_fpu *d)\n{\n  switch (d->class)\n    {\n    case sim_fpu_class_snan:\n      return 1;\n    default:\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2116,
+          0
+        ],
+        [
+          2126,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "d": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_zero (const sim_fpu *d)\n{\n  switch (d->class)\n    {\n    case sim_fpu_class_zero:\n      return 1;\n    default:\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2128,
+          0
+        ],
+        [
+          2138,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "d": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_infinity (const sim_fpu *d)\n{\n  switch (d->class)\n    {\n    case sim_fpu_class_infinity:\n      return 1;\n    default:\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2140,
+          0
+        ],
+        [
+          2150,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "d": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_number (const sim_fpu *d)\n{\n  switch (d->class)\n    {\n    case sim_fpu_class_denorm:\n    case sim_fpu_class_number:\n      return 1;\n    default:\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2152,
+          0
+        ],
+        [
+          2163,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "d": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_denorm (const sim_fpu *d)\n{\n  switch (d->class)\n    {\n    case sim_fpu_class_denorm:\n      return 1;\n    default:\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2165,
+          0
+        ],
+        [
+          2175,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "d": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_sign (const sim_fpu *d)\n{\n  return d->sign;\n}",
+      "fn_code_pos": [
+        [
+          2178,
+          0
+        ],
+        [
+          2182,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "d": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_exp (const sim_fpu *d)\n{\n  return d->normal_exp;\n}",
+      "fn_code_pos": [
+        [
+          2185,
+          0
+        ],
+        [
+          2189,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "d": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "sim_fpu_fraction (const sim_fpu *d)\n{\n  return d->fraction;\n}",
+      "fn_code_pos": [
+        [
+          2193,
+          0
+        ],
+        [
+          2196,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_fpu_fraction",
+        "parameters": {
+          "d": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "sim_fpu_guard (const sim_fpu *d, int is_double)\n{\n  unsigned64 rv;\n  unsigned64 guardmask = LSMASK64 (NR_GUARDS - 1, 0);\n  rv = (d->fraction & guardmask) >> NR_PAD;\n  return rv;\n}",
+      "fn_code_pos": [
+        [
+          2200,
+          0
+        ],
+        [
+          2206,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_fpu_guard",
+        "parameters": {
+          "d": "sim_fpu",
+          "is_double": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is (const sim_fpu *d)\n{\n  switch (d->class)\n    {\n    case sim_fpu_class_qnan:\n      return SIM_FPU_IS_QNAN;\n    case sim_fpu_class_snan:\n      return SIM_FPU_IS_SNAN;\n    case sim_fpu_class_infinity:\n      if (d->sign)\n\treturn SIM_FPU_IS_NINF;\n      else\n\treturn SIM_FPU_IS_PINF;\n    case sim_fpu_class_number:\n      if (d->sign)\n\treturn SIM_FPU_IS_NNUMBER;\n      else\n\treturn SIM_FPU_IS_PNUMBER;\n    case sim_fpu_class_denorm:\n      if (d->sign)\n\treturn SIM_FPU_IS_NDENORM;\n      else\n\treturn SIM_FPU_IS_PDENORM;\n    case sim_fpu_class_zero:\n      if (d->sign)\n\treturn SIM_FPU_IS_NZERO;\n      else\n\treturn SIM_FPU_IS_PZERO;\n    default:\n      return -1;\n      abort ();\n    }\n}",
+      "fn_code_pos": [
+        [
+          2209,
+          0
+        ],
+        [
+          2242,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "d": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_cmp (const sim_fpu *l, const sim_fpu *r)\n{\n  sim_fpu res;\n  sim_fpu_sub (&res, l, r);\n  return sim_fpu_is (&res);\n}",
+      "fn_code_pos": [
+        [
+          2244,
+          0
+        ],
+        [
+          2250,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_lt (const sim_fpu *l, const sim_fpu *r)\n{\n  int status;\n  sim_fpu_lt (&status, l, r);\n  return status;\n}",
+      "fn_code_pos": [
+        [
+          2252,
+          0
+        ],
+        [
+          2258,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_le (const sim_fpu *l, const sim_fpu *r)\n{\n  int is;\n  sim_fpu_le (&is, l, r);\n  return is;\n}",
+      "fn_code_pos": [
+        [
+          2260,
+          0
+        ],
+        [
+          2266,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_eq (const sim_fpu *l, const sim_fpu *r)\n{\n  int is;\n  sim_fpu_eq (&is, l, r);\n  return is;\n}",
+      "fn_code_pos": [
+        [
+          2268,
+          0
+        ],
+        [
+          2274,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_ne (const sim_fpu *l, const sim_fpu *r)\n{\n  int is;\n  sim_fpu_ne (&is, l, r);\n  return is;\n}",
+      "fn_code_pos": [
+        [
+          2276,
+          0
+        ],
+        [
+          2282,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_ge (const sim_fpu *l, const sim_fpu *r)\n{\n  int is;\n  sim_fpu_ge (&is, l, r);\n  return is;\n}",
+      "fn_code_pos": [
+        [
+          2284,
+          0
+        ],
+        [
+          2290,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_is_gt (const sim_fpu *l, const sim_fpu *r)\n{\n  int is;\n  sim_fpu_gt (&is, l, r);\n  return is;\n}",
+      "fn_code_pos": [
+        [
+          2292,
+          0
+        ],
+        [
+          2298,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_lt (int *is,\n\t    const sim_fpu *l,\n\t    const sim_fpu *r)\n{\n  if (!sim_fpu_is_nan (l) && !sim_fpu_is_nan (r))\n    {\n      sim_fpu_map lval;\n      sim_fpu_map rval;\n      lval.i = pack_fpu (l, 1);\n      rval.i = pack_fpu (r, 1);\n      (*is) = (lval.d < rval.d);\n      return 0;\n    }\n  else if (sim_fpu_is_snan (l) || sim_fpu_is_snan (r))\n    {\n      *is = 0;\n      return sim_fpu_status_invalid_snan;\n    }\n  else\n    {\n      *is = 0;\n      return sim_fpu_status_invalid_qnan;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2303,
+          0
+        ],
+        [
+          2327,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "is": "int",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_le (int *is,\n\t    const sim_fpu *l,\n\t    const sim_fpu *r)\n{\n  if (!sim_fpu_is_nan (l) && !sim_fpu_is_nan (r))\n    {\n      sim_fpu_map lval;\n      sim_fpu_map rval;\n      lval.i = pack_fpu (l, 1);\n      rval.i = pack_fpu (r, 1);\n      *is = (lval.d <= rval.d);\n      return 0;\n    }\n  else if (sim_fpu_is_snan (l) || sim_fpu_is_snan (r))\n    {\n      *is = 0;\n      return sim_fpu_status_invalid_snan;\n    }\n  else\n    {\n      *is = 0;\n      return sim_fpu_status_invalid_qnan;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2329,
+          0
+        ],
+        [
+          2353,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "is": "int",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_eq (int *is,\n\t    const sim_fpu *l,\n\t    const sim_fpu *r)\n{\n  if (!sim_fpu_is_nan (l) && !sim_fpu_is_nan (r))\n    {\n      sim_fpu_map lval;\n      sim_fpu_map rval;\n      lval.i = pack_fpu (l, 1);\n      rval.i = pack_fpu (r, 1);\n      (*is) = (lval.d == rval.d);\n      return 0;\n    }\n  else if (sim_fpu_is_snan (l) || sim_fpu_is_snan (r))\n    {\n      *is = 0;\n      return sim_fpu_status_invalid_snan;\n    }\n  else\n    {\n      *is = 0;\n      return sim_fpu_status_invalid_qnan;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2355,
+          0
+        ],
+        [
+          2379,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "is": "int",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_ne (int *is,\n\t    const sim_fpu *l,\n\t    const sim_fpu *r)\n{\n  if (!sim_fpu_is_nan (l) && !sim_fpu_is_nan (r))\n    {\n      sim_fpu_map lval;\n      sim_fpu_map rval;\n      lval.i = pack_fpu (l, 1);\n      rval.i = pack_fpu (r, 1);\n      (*is) = (lval.d != rval.d);\n      return 0;\n    }\n  else if (sim_fpu_is_snan (l) || sim_fpu_is_snan (r))\n    {\n      *is = 0;\n      return sim_fpu_status_invalid_snan;\n    }\n  else\n    {\n      *is = 0;\n      return sim_fpu_status_invalid_qnan;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2381,
+          0
+        ],
+        [
+          2405,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "is": "int",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_ge (int *is,\n\t    const sim_fpu *l,\n\t    const sim_fpu *r)\n{\n  return sim_fpu_le (is, r, l);\n}",
+      "fn_code_pos": [
+        [
+          2407,
+          0
+        ],
+        [
+          2413,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "is": "int",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)\nsim_fpu_gt (int *is,\n\t    const sim_fpu *l,\n\t    const sim_fpu *r)\n{\n  return sim_fpu_lt (is, r, l);\n}",
+      "fn_code_pos": [
+        [
+          2415,
+          0
+        ],
+        [
+          2421,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "is": "int",
+          "l": "sim_fpu",
+          "r": "sim_fpu"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_print_fpu (const sim_fpu *f,\n\t\t   sim_fpu_print_func *print,\n\t\t   void *arg)\n{\n  sim_fpu_printn_fpu (f, print, -1, arg);\n}",
+      "fn_code_pos": [
+        [
+          2450,
+          0
+        ],
+        [
+          2456,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "print": "sim_fpu_print_func",
+          "arg": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_printn_fpu (const sim_fpu *f,\n\t\t   sim_fpu_print_func *print,\n\t\t   int digits,\n\t\t   void *arg)\n{\n  print (arg, \"%s\", f->sign ? \"-\" : \"+\");\n  switch (f->class)\n    {\n    case sim_fpu_class_qnan:\n      print (arg, \"0.\");\n      print_bits (f->fraction, NR_FRAC_GUARD - 1, digits, print, arg);\n      print (arg, \"*QuietNaN\");\n      break;\n    case sim_fpu_class_snan:\n      print (arg, \"0.\");\n      print_bits (f->fraction, NR_FRAC_GUARD - 1, digits, print, arg);\n      print (arg, \"*SignalNaN\");\n      break;\n    case sim_fpu_class_zero:\n      print (arg, \"0.0\");\n      break;\n    case sim_fpu_class_infinity:\n      print (arg, \"INF\");\n      break;\n    case sim_fpu_class_number:\n    case sim_fpu_class_denorm:\n      print (arg, \"1.\");\n      print_bits (f->fraction, NR_FRAC_GUARD - 1, digits, print, arg);\n      print (arg, \"*2^%+d\", f->normal_exp);\n      ASSERT (f->fraction >= IMPLICIT_1);\n      ASSERT (f->fraction < IMPLICIT_2);\n    }\n}",
+      "fn_code_pos": [
+        [
+          2458,
+          0
+        ],
+        [
+          2491,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "f": "sim_fpu",
+          "print": "sim_fpu_print_func",
+          "digits": "int",
+          "arg": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)\nsim_fpu_print_status (int status,\n\t\t      sim_fpu_print_func *print,\n\t\t      void *arg)\n{\n  int i = 1;\n  const char *prefix = \"\";\n  while (status >= i)\n    {\n      switch ((sim_fpu_status) (status & i))\n\t{\n\tcase sim_fpu_status_denorm:\n\t  print (arg, \"%sD\", prefix);\n\t  break;\n\tcase sim_fpu_status_invalid_snan:\n\t  print (arg, \"%sSNaN\", prefix);\n\t  break;\n\tcase sim_fpu_status_invalid_qnan:\n\t  print (arg, \"%sQNaN\", prefix);\n\t  break;\n\tcase sim_fpu_status_invalid_isi:\n\t  print (arg, \"%sISI\", prefix);\n\t  break;\n\tcase sim_fpu_status_invalid_idi:\n\t  print (arg, \"%sIDI\", prefix);\n\t  break;\n\tcase sim_fpu_status_invalid_zdz:\n\t  print (arg, \"%sZDZ\", prefix);\n\t  break;\n\tcase sim_fpu_status_invalid_imz:\n\t  print (arg, \"%sIMZ\", prefix);\n\t  break;\n\tcase sim_fpu_status_invalid_cvi:\n\t  print (arg, \"%sCVI\", prefix);\n\t  break;\n\tcase sim_fpu_status_invalid_cmp:\n\t  print (arg, \"%sCMP\", prefix);\n\t  break;\n\tcase sim_fpu_status_invalid_sqrt:\n\t  print (arg, \"%sSQRT\", prefix);\n\t  break;\n\tcase sim_fpu_status_inexact:\n\t  print (arg, \"%sX\", prefix);\n\t  break;\n\tcase sim_fpu_status_overflow:\n\t  print (arg, \"%sO\", prefix);\n\t  break;\n\tcase sim_fpu_status_underflow:\n\t  print (arg, \"%sU\", prefix);\n\t  break;\n\tcase sim_fpu_status_invalid_div0:\n\t  print (arg, \"%s/\", prefix);\n\t  break;\n\tcase sim_fpu_status_rounded:\n\t  print (arg, \"%sR\", prefix);\n\t  break;\n\t}\n      i <<= 1;\n      prefix = \",\";\n    }\n}",
+      "fn_code_pos": [
+        [
+          2494,
+          0
+        ],
+        [
+          2554,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "status": "int",
+          "print": "sim_fpu_print_func",
+          "arg": "void"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          318,
+          0
+        ],
+        [
+          318,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          423,
+          0
+        ],
+        [
+          423,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          523,
+          0
+        ],
+        [
+          523,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          596,
+          0
+        ],
+        [
+          596,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          653,
+          0
+        ],
+        [
+          653,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          681,
+          0
+        ],
+        [
+          681,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          688,
+          0
+        ],
+        [
+          688,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          697,
+          0
+        ],
+        [
+          697,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          704,
+          0
+        ],
+        [
+          704,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          712,
+          0
+        ],
+        [
+          712,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          722,
+          0
+        ],
+        [
+          722,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          730,
+          0
+        ],
+        [
+          730,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          766,
+          0
+        ],
+        [
+          766,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          794,
+          0
+        ],
+        [
+          794,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          828,
+          0
+        ],
+        [
+          828,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "STATIC_INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          885,
+          0
+        ],
+        [
+          885,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "STATIC_INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          971,
+          0
+        ],
+        [
+          971,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          979,
+          0
+        ],
+        [
+          979,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          991,
+          0
+        ],
+        [
+          991,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1140,
+          0
+        ],
+        [
+          1140,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1294,
+          0
+        ],
+        [
+          1294,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1419,
+          0
+        ],
+        [
+          1419,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1552,
+          0
+        ],
+        [
+          1552,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1635,
+          0
+        ],
+        [
+          1635,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1718,
+          0
+        ],
+        [
+          1718,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1739,
+          0
+        ],
+        [
+          1739,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1754,
+          0
+        ],
+        [
+          1754,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1762,
+          0
+        ],
+        [
+          1762,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1959,
+          0
+        ],
+        [
+          1959,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1968,
+          0
+        ],
+        [
+          1968,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1977,
+          0
+        ],
+        [
+          1977,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1986,
+          0
+        ],
+        [
+          1986,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          1996,
+          0
+        ],
+        [
+          1996,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2007,
+          0
+        ],
+        [
+          2007,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2018,
+          0
+        ],
+        [
+          2018,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2027,
+          0
+        ],
+        [
+          2027,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (float)",
+      "fn_dec_pos": [
+        [
+          2040,
+          0
+        ],
+        [
+          2040,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (double)",
+      "fn_dec_pos": [
+        [
+          2048,
+          0
+        ],
+        [
+          2048,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          2068,
+          0
+        ],
+        [
+          2068,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          2079,
+          0
+        ],
+        [
+          2079,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2091,
+          0
+        ],
+        [
+          2091,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2104,
+          0
+        ],
+        [
+          2104,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2116,
+          0
+        ],
+        [
+          2116,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2128,
+          0
+        ],
+        [
+          2128,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2140,
+          0
+        ],
+        [
+          2140,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2152,
+          0
+        ],
+        [
+          2152,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2165,
+          0
+        ],
+        [
+          2165,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2178,
+          0
+        ],
+        [
+          2178,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2185,
+          0
+        ],
+        [
+          2185,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2209,
+          0
+        ],
+        [
+          2209,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2244,
+          0
+        ],
+        [
+          2244,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2252,
+          0
+        ],
+        [
+          2252,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2260,
+          0
+        ],
+        [
+          2260,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2268,
+          0
+        ],
+        [
+          2268,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2276,
+          0
+        ],
+        [
+          2276,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2284,
+          0
+        ],
+        [
+          2284,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2292,
+          0
+        ],
+        [
+          2292,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2303,
+          0
+        ],
+        [
+          2303,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2329,
+          0
+        ],
+        [
+          2329,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2355,
+          0
+        ],
+        [
+          2355,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2381,
+          0
+        ],
+        [
+          2381,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2407,
+          0
+        ],
+        [
+          2407,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (int)",
+      "fn_dec_pos": [
+        [
+          2415,
+          0
+        ],
+        [
+          2415,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          2450,
+          0
+        ],
+        [
+          2450,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          2458,
+          0
+        ],
+        [
+          2458,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "INLINE_SIM_FPU (void)",
+      "fn_dec_pos": [
+        [
+          2494,
+          0
+        ],
+        [
+          2494,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "INLINE_SIM_FPU",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"sim-basics.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-fpu.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-io.h\"\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-assert.h\"\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

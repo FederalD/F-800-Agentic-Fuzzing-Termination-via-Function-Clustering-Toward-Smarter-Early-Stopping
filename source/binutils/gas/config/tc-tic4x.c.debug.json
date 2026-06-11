@@ -1,0 +1,1677 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\ntic4x_gen_to_words (FLONUM_TYPE flonum, LITTLENUM_TYPE *words, int precision)\n{\n  int return_value = 0;\n  LITTLENUM_TYPE *p;\t\t/* Littlenum pointer.  */\n  int mantissa_bits;\t\t/* Bits in mantissa field.  */\n  int exponent_bits;\t\t/* Bits in exponent field.  */\n  int exponent;\n  unsigned int sone;\t\t/* Scaled one.  */\n  unsigned int sfract;\t\t/* Scaled fraction.  */\n  unsigned int smant;\t\t/* Scaled mantissa.  */\n  unsigned int tmp;\n  unsigned int mover;           /* Mantissa overflow bits */\n  unsigned int rbit;            /* Round bit. */\n  int shift;\t\t\t/* Shift count.  */\n\n  /* NOTE: Svein Seldal <Svein@dev.seldal.com>\n     The code in this function is altered slightly to support floats\n     with 31-bits mantissas, thus the documentation below may be a\n     little bit inaccurate.\n\n     By Michael P. Hayes <m.hayes@elec.canterbury.ac.nz>\n     Here is how a generic floating point number is stored using\n     flonums (an extension of bignums) where p is a pointer to an\n     array of LITTLENUMs.\n\n     For example 2e-3 is stored with exp = -4 and\n     bits[0] = 0x0000\n     bits[1] = 0x0000\n     bits[2] = 0x4fde\n     bits[3] = 0x978d\n     bits[4] = 0x126e\n     bits[5] = 0x0083\n     with low = &bits[2], high = &bits[5], and leader = &bits[5].\n\n     This number can be written as\n     0x0083126e978d4fde.00000000 * 65536**-4  or\n     0x0.0083126e978d4fde        * 65536**0   or\n     0x0.83126e978d4fde          * 2**-8   = 2e-3\n\n     Note that low points to the 65536**0 littlenum (bits[2]) and\n     leader points to the most significant non-zero littlenum\n     (bits[5]).\n\n     TMS320C3X floating point numbers are a bit of a strange beast.\n     The 32-bit flavour has the 8 MSBs representing the exponent in\n     twos complement format (-128 to +127).  There is then a sign bit\n     followed by 23 bits of mantissa.  The mantissa is expressed in\n     twos complement format with the binary point after the most\n     significant non sign bit.  The bit after the binary point is\n     suppressed since it is the complement of the sign bit.  The\n     effective mantissa is thus 24 bits.  Zero is represented by an\n     exponent of -128.\n\n     The 16-bit flavour has the 4 MSBs representing the exponent in\n     twos complement format (-8 to +7).  There is then a sign bit\n     followed by 11 bits of mantissa.  The mantissa is expressed in\n     twos complement format with the binary point after the most\n     significant non sign bit.  The bit after the binary point is\n     suppressed since it is the complement of the sign bit.  The\n     effective mantissa is thus 12 bits.  Zero is represented by an\n     exponent of -8.  For example,\n\n     number       norm mant m  x  e  s  i    fraction f\n     +0.500 =>  1.00000000000 -1 -1  0  1  .00000000000   (1 + 0) * 2^(-1)\n     +0.999 =>  1.11111111111 -1 -1  0  1  .11111111111   (1 + 0.99) * 2^(-1)\n     +1.000 =>  1.00000000000  0  0  0  1  .00000000000   (1 + 0) * 2^(0)\n     +1.500 =>  1.10000000000  0  0  0  1  .10000000000   (1 + 0.5) * 2^(0)\n     +1.999 =>  1.11111111111  0  0  0  1  .11111111111   (1 + 0.9) * 2^(0)\n     +2.000 =>  1.00000000000  1  1  0  1  .00000000000   (1 + 0) * 2^(1)\n     +4.000 =>  1.00000000000  2  2  0  1  .00000000000   (1 + 0) * 2^(2)\n     -0.500 =>  1.00000000000 -1 -1  1  0  .10000000000   (-2 + 0) * 2^(-2)\n     -1.000 =>  1.00000000000  0 -1  1  0  .00000000000   (-2 + 0) * 2^(-1)\n     -1.500 =>  1.10000000000  0  0  1  0  .10000000000   (-2 + 0.5) * 2^(0)\n     -1.999 =>  1.11111111111  0  0  1  0  .00000000001   (-2 + 0.11) * 2^(0)\n     -2.000 =>  1.00000000000  1  1  1  0  .00000000000   (-2 + 0) * 2^(0)\n     -4.000 =>  1.00000000000  2  1  1  0  .00000000000   (-2 + 0) * 2^(1)\n\n     where e is the exponent, s is the sign bit, i is the implied bit,\n     and f is the fraction stored in the mantissa field.\n\n     num = (1 + f) * 2^x   =  m * 2^e if s = 0\n     num = (-2 + f) * 2^x  = -m * 2^e if s = 1\n     where 0 <= f < 1.0  and 1.0 <= m < 2.0\n\n     The fraction (f) and exponent (e) fields for the TMS320C3X format\n     can be derived from the normalised mantissa (m) and exponent (x) using:\n\n     f = m - 1, e = x       if s = 0\n     f = 2 - m, e = x       if s = 1 and m != 1.0\n     f = 0,     e = x - 1   if s = 1 and m = 1.0\n     f = 0,     e = -8      if m = 0\n\n\n     OK, the other issue we have to consider is rounding since the\n     mantissa has a much higher potential precision than what we can\n     represent.  To do this we add half the smallest storable fraction.\n     We then have to renormalise the number to allow for overflow.\n\n     To convert a generic flonum into a TMS320C3X floating point\n     number, here's what we try to do....\n\n     The first thing is to generate a normalised mantissa (m) where\n     1.0 <= m < 2 and to convert the exponent from base 16 to base 2.\n     We desire the binary point to be placed after the most significant\n     non zero bit.  This process is done in two steps: firstly, the\n     littlenum with the most significant non zero bit is located (this\n     is done for us since leader points to this littlenum) and the\n     binary point (which is currently after the LSB of the littlenum\n     pointed to by low) is moved to before the MSB of the littlenum\n     pointed to by leader.  This requires the exponent to be adjusted\n     by leader - low + 1.  In the earlier example, the new exponent is\n     thus -4 + (5 - 2 + 1) = 0 (base 65536).  We now need to convert\n     the exponent to base 2 by multiplying the exponent by 16 (log2\n     65536).  The exponent base 2 is thus also zero.\n\n     The second step is to hunt for the most significant non zero bit\n     in the leader littlenum.  We do this by left shifting a copy of\n     the leader littlenum until bit 16 is set (0x10000) and counting\n     the number of shifts, S, required.  The number of shifts then has to\n     be added to correct the exponent (base 2).  For our example, this\n     will require 9 shifts and thus our normalised exponent (base 2) is\n     0 + 9 = 9.  Note that the worst case scenario is when the leader\n     littlenum is 1, thus requiring 16 shifts.\n\n     We now have to left shift the other littlenums by the same amount,\n     propagating the shifted bits into the more significant littlenums.\n     To save a lot of unnecessary shifting we only have to consider\n     two or three littlenums, since the greatest number of mantissa\n     bits required is 24 + 1 rounding bit.  While two littlenums\n     provide 32 bits of precision, the most significant littlenum\n     may only contain a single significant bit  and thus an extra\n     littlenum is required.\n\n     Denoting the number of bits in the fraction field as F, we require\n     G = F + 2 bits (one extra bit is for rounding, the other gets\n     suppressed).  Say we required S shifts to find the most\n     significant bit in the leader littlenum, the number of left shifts\n     required to move this bit into bit position G - 1 is L = G + S - 17.\n     Note that this shift count may be negative for the short floating\n     point flavour (where F = 11 and thus G = 13 and potentially S < 3).\n     If L > 0 we have to shunt the next littlenum into position.  Bit\n     15 (the MSB) of the next littlenum needs to get moved into position\n     L - 1 (If L > 15 we need all the bits of this littlenum and\n     some more from the next one.).  We subtract 16 from L and use this\n     as the left shift count;  the resultant value we or with the\n     previous result.  If L > 0, we repeat this operation.   */\n\n  if (precision != S_PRECISION)\n    words[1] = 0x0000;\n  if (precision == E_PRECISION)\n    words[2] = words[3] = 0x0000;\n\n  /* 0.0e0 or NaN seen.  */\n  if (flonum.low > flonum.leader  /* = 0.0e0 */\n      || flonum.sign == 0) /* = NaN */\n    {\n      if(flonum.sign == 0)\n        as_bad (_(\"Nan, using zero.\"));\n      words[0] = 0x8000;\n      return return_value;\n    }\n\n  if (flonum.sign == 'P')\n    {\n      /* +INF:  Replace with maximum float.  */\n      if (precision == S_PRECISION)\n\twords[0] = 0x77ff;\n      else\n\t{\n\t  words[0] = 0x7f7f;\n\t  words[1] = 0xffff;\n\t}\n      if (precision == E_PRECISION)\n        {\n          words[2] = 0x7fff;\n          words[3] = 0xffff;\n        }\n      return return_value;\n    }\n  else if (flonum.sign == 'N')\n    {\n      /* -INF:  Replace with maximum float.  */\n      if (precision == S_PRECISION)\n\twords[0] = 0x7800;\n      else\n        words[0] = 0x7f80;\n      if (precision == E_PRECISION)\n        words[2] = 0x8000;\n      return return_value;\n    }\n\n  exponent = (flonum.exponent + flonum.leader - flonum.low + 1) * 16;\n\n  if (!(tmp = *flonum.leader))\n    abort ();\t\t\t/* Hmmm.  */\n  shift = 0;\t\t\t/* Find position of first sig. bit.  */\n  while (tmp >>= 1)\n    shift++;\n  exponent -= (16 - shift);\t/* Adjust exponent.  */\n\n  if (precision == S_PRECISION)\t/* Allow 1 rounding bit.  */\n    {\n      exponent_bits = 4;\n      mantissa_bits = 11;\n    }\n  else if(precision == F_PRECISION)\n    {\n      exponent_bits = 8;\n      mantissa_bits = 23;\n    }\n  else /* E_PRECISION */\n    {\n      exponent_bits = 8;\n      mantissa_bits = 31;\n    }\n\n  shift = mantissa_bits - shift;\n\n  smant = 0;\n  mover = 0;\n  rbit = 0;\n  /* Store the mantissa data into smant and the roundbit into rbit */\n  for (p = flonum.leader; p >= flonum.low && shift > -16; p--)\n    {\n      tmp = shift >= 0 ? *p << shift : *p >> -shift;\n      rbit = shift < 0 ? ((*p >> (-shift-1)) & 0x1) : 0;\n      smant |= tmp;\n      shift -= 16;\n    }\n\n  /* OK, we've got our scaled mantissa so let's round it up */\n  if(rbit)\n    {\n      /* If the mantissa is going to overflow when added, lets store\n         the extra bit in mover. -- A special case exists when\n         mantissa_bits is 31 (E_PRECISION). Then the first test cannot\n         be trusted, as result is host-dependent, thus the second\n         test. */\n      if( smant == ((unsigned)(1<<(mantissa_bits+1))-1)\n          || smant == (unsigned)-1 )  /* This is to catch E_PRECISION cases */\n        mover=1;\n      smant++;\n    }\n\n  /* Get the scaled one value */\n  sone = (1 << (mantissa_bits));\n\n  /* The number may be unnormalised so renormalise it...  */\n  if(mover)\n    {\n      smant >>= 1;\n      smant |= sone; /* Insert the bit from mover into smant */\n      exponent++;\n    }\n\n  /* The binary point is now between bit positions 11 and 10 or 23 and 22,\n     i.e., between mantissa_bits - 1 and mantissa_bits - 2 and the\n     bit at mantissa_bits - 1 should be set.  */\n  if (!(sone&smant))\n    abort ();                   /* Ooops.  */\n\n  if (flonum.sign == '+')\n    sfract = smant - sone;\t/* smant - 1.0.  */\n  else\n    {\n      /* This seems to work.  */\n      if (smant == sone)\n\t{\n\t  exponent--;\n\t  sfract = 0;\n\t}\n      else\n        {\n          sfract = -smant & (sone-1);   /* 2.0 - smant.  */\n        }\n      sfract |= sone;\t\t/* Insert sign bit.  */\n    }\n\n  if (abs (exponent) >= (1 << (exponent_bits - 1)))\n    as_bad (_(\"Cannot represent exponent in %d bits\"), exponent_bits);\n\n  /* Force exponent to fit in desired field width.  */\n  exponent &= (1 << (exponent_bits)) - 1;\n\n  if (precision == E_PRECISION)\n    {\n      /* Map the float part first (100% equal format as F_PRECISION) */\n      words[0]  = exponent << (mantissa_bits+1-24);\n      words[0] |= sfract >> 24;\n      words[1]  = sfract >> 8;\n\n      /* Map the mantissa in the next */\n      words[2]  = sfract >> 16;\n      words[3]  = sfract & 0xffff;\n    }\n  else\n    {\n      /* Insert the exponent data into the word */\n      sfract |= exponent << (mantissa_bits+1);\n\n      if (precision == S_PRECISION)\n        words[0] = sfract;\n      else\n        {\n          words[0] = sfract >> 16;\n          words[1] = sfract & 0xffff;\n        }\n    }\n\n  return return_value;\n}",
+      "fn_code_pos": [
+        [
+          233,
+          0
+        ],
+        [
+          544,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_gen_to_words",
+        "parameters": {
+          "flonum": "FLONUM_TYPE",
+          "words": "LITTLENUM_TYPE",
+          "precision": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static char *\ntic4x_atof (char *str, char what_kind, LITTLENUM_TYPE *words)\n{\n  /* Extra bits for zeroed low-order bits.  The 1st MAX_PRECISION are\n     zeroed, the last contain flonum bits.  */\n  static LITTLENUM_TYPE bits[MAX_PRECISION + MAX_PRECISION + GUARD];\n  char *return_value;\n  /* Number of 16-bit words in the format.  */\n  int precision;\n  FLONUM_TYPE save_gen_flonum;\n\n  /* We have to save the generic_floating_point_number because it\n     contains storage allocation about the array of LITTLENUMs where\n     the value is actually stored.  We will allocate our own array of\n     littlenums below, but have to restore the global one on exit.  */\n  save_gen_flonum = generic_floating_point_number;\n\n  return_value = str;\n  generic_floating_point_number.low = bits + MAX_PRECISION;\n  generic_floating_point_number.high = NULL;\n  generic_floating_point_number.leader = NULL;\n  generic_floating_point_number.exponent = 0;\n  generic_floating_point_number.sign = '\\0';\n\n  /* Use more LittleNums than seems necessary: the highest flonum may\n     have 15 leading 0 bits, so could be useless.  */\n\n  memset (bits, '\\0', sizeof (LITTLENUM_TYPE) * MAX_PRECISION);\n\n  switch (what_kind)\n    {\n    case 's':\n    case 'S':\n      precision = S_PRECISION;\n      break;\n\n    case 'd':\n    case 'D':\n    case 'f':\n    case 'F':\n      precision = F_PRECISION;\n      break;\n\n    case 'E':\n    case 'e':\n      precision = E_PRECISION;\n      break;\n\n    default:\n      as_bad (_(\"Invalid floating point number\"));\n      return (NULL);\n    }\n\n  generic_floating_point_number.high\n    = generic_floating_point_number.low + precision - 1 + GUARD;\n\n  if (atof_generic (&return_value, \".\", EXP_CHARS,\n\t\t    &generic_floating_point_number))\n    {\n      as_bad (_(\"Invalid floating point number\"));\n      return (NULL);\n    }\n\n  tic4x_gen_to_words (generic_floating_point_number,\n\t\t    words, precision);\n\n  /* Restore the generic_floating_point_number's storage alloc (and\n     everything else).  */\n  generic_floating_point_number = save_gen_flonum;\n\n  return return_value;\n}",
+      "fn_code_pos": [
+        [
+          547,
+          0
+        ],
+        [
+          618,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_atof",
+        "parameters": {
+          "str": "char",
+          "what_kind": "char",
+          "words": "LITTLENUM_TYPE"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_insert_reg (const char *regname, int regnum)\n{\n  char buf[32];\n  int i;\n\n  symbol_table_insert (symbol_new (regname, reg_section, (valueT) regnum,\n\t\t\t\t   &zero_address_frag));\n  for (i = 0; regname[i]; i++)\n    buf[i] = ISLOWER (regname[i]) ? TOUPPER (regname[i]) : regname[i];\n  buf[i] = '\\0';\n\n  symbol_table_insert (symbol_new (buf, reg_section, (valueT) regnum,\n\t\t\t\t   &zero_address_frag));\n}",
+      "fn_code_pos": [
+        [
+          620,
+          0
+        ],
+        [
+          634,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_insert_reg",
+        "parameters": {
+          "regname": "char",
+          "regnum": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_insert_sym (const char *symname, int value)\n{\n  symbolS *symbolP;\n\n  symbolP = symbol_new (symname, absolute_section,\n\t\t\t(valueT) value, &zero_address_frag);\n  SF_SET_LOCAL (symbolP);\n  symbol_table_insert (symbolP);\n}",
+      "fn_code_pos": [
+        [
+          636,
+          0
+        ],
+        [
+          645,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_insert_sym",
+        "parameters": {
+          "symname": "char",
+          "value": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\ntic4x_expression (char *str, expressionS *exp)\n{\n  char *s;\n  char *t;\n\n  t = input_line_pointer;\t/* Save line pointer.  */\n  input_line_pointer = str;\n  expression (exp);\n  s = input_line_pointer;\n  input_line_pointer = t;\t/* Restore line pointer.  */\n  return s;\t\t\t/* Return pointer to where parsing stopped.  */\n}",
+      "fn_code_pos": [
+        [
+          647,
+          0
+        ],
+        [
+          659,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_expression",
+        "parameters": {
+          "str": "char",
+          "exp": "expressionS"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static char *\ntic4x_expression_abs (char *str, offsetT *value)\n{\n  char *s;\n  char *t;\n\n  t = input_line_pointer;\t/* Save line pointer.  */\n  input_line_pointer = str;\n  *value = get_absolute_expression ();\n  s = input_line_pointer;\n  input_line_pointer = t;\t/* Restore line pointer.  */\n  return s;\n}",
+      "fn_code_pos": [
+        [
+          661,
+          0
+        ],
+        [
+          673,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_expression_abs",
+        "parameters": {
+          "str": "char",
+          "value": "offsetT"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_emit_char (char c, int b)\n{\n  expressionS exp;\n\n  exp.X_op = O_constant;\n  exp.X_add_number = c;\n  emit_expr (&exp, b);\n}",
+      "fn_code_pos": [
+        [
+          675,
+          0
+        ],
+        [
+          683,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_emit_char",
+        "parameters": {
+          "c": "char",
+          "b": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_seg_alloc (char *name ATTRIBUTE_UNUSED,\n\t\t segT seg ATTRIBUTE_UNUSED,\n\t\t int size,\n\t\t symbolS *symbolP)\n{\n  /* Note that the size is in words\n     so we multiply it by 4 to get the number of bytes to allocate.  */\n\n  /* If we have symbol:  .usect  \".fred\", size etc.,\n     the symbol needs to point to the first location reserved\n     by the pseudo op.  */\n\n  if (size)\n    {\n      char *p;\n\n      p = frag_var (rs_fill, 1, 1, (relax_substateT) 0,\n\t\t    (symbolS *) symbolP,\n\t\t    size * OCTETS_PER_BYTE, (char *) 0);\n      *p = 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          685,
+          0
+        ],
+        [
+          707,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_seg_alloc",
+        "parameters": {
+          "name": "char",
+          "seg": "segT",
+          "size": "int",
+          "symbolP": "symbolS"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_asg (int x ATTRIBUTE_UNUSED)\n{\n  char c;\n  char *name;\n  char *str;\n\n  SKIP_WHITESPACE ();\n  str = input_line_pointer;\n\n  /* Skip string expression.  */\n  while (*input_line_pointer != ',' && *input_line_pointer)\n    input_line_pointer++;\n  if (*input_line_pointer != ',')\n    {\n      as_bad (_(\"Comma expected\\n\"));\n      return;\n    }\n  *input_line_pointer++ = '\\0';\n  c = get_symbol_name (&name);\t/* Get terminator.  */\n  str = xstrdup (str);\n  name = xstrdup (name);\n  if (hash_find (tic4x_asg_hash, name))\n    hash_replace (tic4x_asg_hash, name, (void *) str);\n  else\n    hash_insert (tic4x_asg_hash, name, (void *) str);\n  (void) restore_line_pointer (c);\n  demand_empty_rest_of_line ();\n}",
+      "fn_code_pos": [
+        [
+          710,
+          0
+        ],
+        [
+          738,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_asg",
+        "parameters": {
+          "x": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_bss (int x ATTRIBUTE_UNUSED)\n{\n  char c;\n  char *name;\n  char *p;\n  offsetT size;\n  segT current_seg;\n  subsegT current_subseg;\n  symbolS *symbolP;\n\n  current_seg = now_seg;\t/* Save current seg.  */\n  current_subseg = now_subseg;\t/* Save current subseg.  */\n\n  SKIP_WHITESPACE ();\n  c = get_symbol_name (&name);\t/* Get terminator.  */\n  if (c == '\"')\n    c = * ++ input_line_pointer;\n  if (c != ',')\n    {\n      as_bad (_(\".bss size argument missing\\n\"));\n      return;\n    }\n\n  input_line_pointer =\n    tic4x_expression_abs (++input_line_pointer, &size);\n  if (size < 0)\n    {\n      as_bad (_(\".bss size %ld < 0!\"), (long) size);\n      return;\n    }\n  subseg_set (bss_section, 0);\n  symbolP = symbol_find_or_make (name);\n\n  if (S_GET_SEGMENT (symbolP) == bss_section)\n    symbol_get_frag (symbolP)->fr_symbol = 0;\n\n  symbol_set_frag (symbolP, frag_now);\n\n  p = frag_var (rs_org, 1, 1, (relax_substateT) 0, symbolP,\n\t\tsize * OCTETS_PER_BYTE, (char *) 0);\n  *p = 0;\t\t\t/* Fill char.  */\n\n  S_SET_SEGMENT (symbolP, bss_section);\n\n  /* The symbol may already have been created with a preceding\n     \".globl\" directive -- be careful not to step on storage class\n     in that case.  Otherwise, set it to static.  */\n  if (S_GET_STORAGE_CLASS (symbolP) != C_EXT)\n    S_SET_STORAGE_CLASS (symbolP, C_STAT);\n\n  subseg_set (current_seg, current_subseg); /* Restore current seg.  */\n  demand_empty_rest_of_line ();\n}",
+      "fn_code_pos": [
+        [
+          741,
+          0
+        ],
+        [
+          794,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_bss",
+        "parameters": {
+          "x": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_globl (int ignore ATTRIBUTE_UNUSED)\n{\n  char *name;\n  int c;\n  symbolS *symbolP;\n\n  do\n    {\n      c = get_symbol_name (&name);\n      symbolP = symbol_find_or_make (name);\n      *input_line_pointer = c;\n      SKIP_WHITESPACE_AFTER_NAME ();\n      S_SET_STORAGE_CLASS (symbolP, C_EXT);\n      S_SET_EXTERNAL (symbolP);\n      if (c == ',')\n\t{\n\t  input_line_pointer++;\n\t  SKIP_WHITESPACE ();\n\t  if (*input_line_pointer == '\\n')\n\t    c = '\\n';\n\t}\n    }\n  while (c == ',');\n\n  demand_empty_rest_of_line ();\n}",
+      "fn_code_pos": [
+        [
+          796,
+          0
+        ],
+        [
+          822,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_globl",
+        "parameters": {
+          "ignore": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_cons (int bytes)\n{\n  unsigned int c;\n  do\n    {\n      SKIP_WHITESPACE ();\n      if (*input_line_pointer == '\"')\n\t{\n\t  input_line_pointer++;\n\t  while (is_a_char (c = next_char_of_string ()))\n\t    tic4x_emit_char (c, 4);\n\t  know (input_line_pointer[-1] == '\\\"');\n\t}\n      else\n\t{\n\t  expressionS exp;\n\n\t  input_line_pointer = tic4x_expression (input_line_pointer, &exp);\n\t  if (exp.X_op == O_constant)\n\t    {\n\t      switch (bytes)\n\t\t{\n\t\tcase 1:\n\t\t  exp.X_add_number &= 255;\n\t\t  break;\n\t\tcase 2:\n\t\t  exp.X_add_number &= 65535;\n\t\t  break;\n\t\t}\n\t    }\n\t  /* Perhaps we should disallow .byte and .hword with\n\t     a non constant expression that will require relocation.  */\n\t  emit_expr (&exp, 4);\n\t}\n    }\n  while (*input_line_pointer++ == ',');\n\n  input_line_pointer--;\t\t/* Put terminator back into stream.  */\n  demand_empty_rest_of_line ();\n}",
+      "fn_code_pos": [
+        [
+          825,
+          0
+        ],
+        [
+          865,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_cons",
+        "parameters": {
+          "bytes": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_stringer (int append_zero)\n{\n  int bytes;\n  unsigned int c;\n\n  bytes = 0;\n  do\n    {\n      SKIP_WHITESPACE ();\n      if (*input_line_pointer == '\"')\n\t{\n\t  input_line_pointer++;\n\t  while (is_a_char (c = next_char_of_string ()))\n            {\n              tic4x_emit_char (c, 1);\n              bytes++;\n            }\n\n          if (append_zero)\n            {\n              tic4x_emit_char (c, 1);\n              bytes++;\n            }\n\n\t  know (input_line_pointer[-1] == '\\\"');\n\t}\n      else\n\t{\n\t  expressionS exp;\n\n\t  input_line_pointer = tic4x_expression (input_line_pointer, &exp);\n\t  if (exp.X_op != O_constant)\n            {\n              as_bad (_(\"Non-constant symbols not allowed\\n\"));\n              return;\n            }\n          exp.X_add_number &= 255; /* Limit number to 8-bit */\n\t  emit_expr (&exp, 1);\n          bytes++;\n\t}\n    }\n  while (*input_line_pointer++ == ',');\n\n  /* Fill out the rest of the expression with 0's to fill up a full word */\n  if ( bytes&0x3 )\n    tic4x_emit_char (0, 4-(bytes&0x3));\n\n  input_line_pointer--;\t\t/* Put terminator back into stream.  */\n  demand_empty_rest_of_line ();\n}",
+      "fn_code_pos": [
+        [
+          868,
+          0
+        ],
+        [
+          918,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_stringer",
+        "parameters": {
+          "append_zero": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_eval (int x ATTRIBUTE_UNUSED)\n{\n  char c;\n  offsetT value;\n  char *name;\n\n  SKIP_WHITESPACE ();\n  input_line_pointer =\n    tic4x_expression_abs (input_line_pointer, &value);\n  if (*input_line_pointer++ != ',')\n    {\n      as_bad (_(\"Symbol missing\\n\"));\n      return;\n    }\n  c = get_symbol_name (&name);\t/* Get terminator.  */\n  tic4x_insert_sym (name, value);\n  (void) restore_line_pointer (c);\n  demand_empty_rest_of_line ();\n}",
+      "fn_code_pos": [
+        [
+          921,
+          0
+        ],
+        [
+          940,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_eval",
+        "parameters": {
+          "x": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_newblock (int x ATTRIBUTE_UNUSED)\n{\n  dollar_label_clear ();\n}",
+      "fn_code_pos": [
+        [
+          943,
+          0
+        ],
+        [
+          947,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_newblock",
+        "parameters": {
+          "x": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_sect (int x ATTRIBUTE_UNUSED)\n{\n  char c;\n  char *section_name;\n  char *name;\n  segT seg;\n  offsetT num;\n\n  SKIP_WHITESPACE ();\n  if (*input_line_pointer == '\"')\n    input_line_pointer++;\n  c = get_symbol_name (&section_name);\t/* Get terminator.  */\n  if (c == '\"')\n    c = * ++ input_line_pointer;\n  input_line_pointer++;\t\t/* Skip null symbol terminator.  */\n  name = xstrdup (section_name);\n\n  /* TI C from version 5.0 allows a section name to contain a\n     subsection name as well. The subsection name is separated by a\n     ':' from the section name.  Currently we scan the subsection\n     name and discard it.\n     Volker Kuhlmann  <v.kuhlmann@elec.canterbury.ac.nz>.  */\n  if (c == ':')\n    {\n      char *subname;\n      c = get_symbol_name (&subname);\t/* Get terminator.  */\n      if (c == '\"')\n\tc = * ++ input_line_pointer;\n      input_line_pointer++;\t/* Skip null symbol terminator.  */\n      as_warn (_(\".sect: subsection name ignored\"));\n    }\n\n  /* We might still have a '\"' to discard, but the character after a\n     symbol name will be overwritten with a \\0 by get_symbol_name()\n     [VK].  */\n\n  if (c == ',')\n    input_line_pointer =\n      tic4x_expression_abs (input_line_pointer, &num);\n  else if (*input_line_pointer == ',')\n    {\n      input_line_pointer =\n\ttic4x_expression_abs (++input_line_pointer, &num);\n    }\n  else\n    num = 0;\n\n  seg = subseg_new (name, num);\n  if (line_label != NULL)\n    {\n      S_SET_SEGMENT (line_label, seg);\n      symbol_set_frag (line_label, frag_now);\n    }\n\n  if (bfd_get_section_flags (stdoutput, seg) == SEC_NO_FLAGS)\n    {\n      if (!bfd_set_section_flags (stdoutput, seg, SEC_DATA))\n\tas_warn (_(\"Error setting flags for \\\"%s\\\": %s\"), name,\n\t\t bfd_errmsg (bfd_get_error ()));\n    }\n\n  /* If the last character overwritten by get_symbol_name() was an\n     end-of-line, we must restore it or the end of the line will not be\n     recognised and scanning extends into the next line, stopping with\n     an error (blame Volker Kuhlmann <v.kuhlmann@elec.canterbury.ac.nz>\n     if this is not true).  */\n  if (is_end_of_line[(unsigned char) c])\n    *(--input_line_pointer) = c;\n\n  demand_empty_rest_of_line ();\n}",
+      "fn_code_pos": [
+        [
+          951,
+          0
+        ],
+        [
+          1022,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_sect",
+        "parameters": {
+          "x": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_set (int x ATTRIBUTE_UNUSED)\n{\n  symbolS *symbolP;\n\n  SKIP_WHITESPACE ();\n  if ((symbolP = line_label) == NULL)\n    {\n      char c;\n      char *name;\n\n      c = get_symbol_name (&name);\t/* Get terminator.  */\n      if (c == '\"')\n\tc = * ++ input_line_pointer;\n      if (c != ',')\n\t{\n\t  as_bad (_(\".set syntax invalid\\n\"));\n\t  ignore_rest_of_line ();\n\t  return;\n\t}\n      ++input_line_pointer;\n      symbolP = symbol_find_or_make (name);\n    }\n  else\n    symbol_table_insert (symbolP);\n\n  pseudo_set (symbolP);\n  demand_empty_rest_of_line ();\n}",
+      "fn_code_pos": [
+        [
+          1025,
+          0
+        ],
+        [
+          1053,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_set",
+        "parameters": {
+          "x": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_usect (int x ATTRIBUTE_UNUSED)\n{\n  char c;\n  char *name;\n  char *section_name;\n  segT seg;\n  offsetT size, alignment_flag;\n  segT current_seg;\n  subsegT current_subseg;\n\n  current_seg = now_seg;\t/* save current seg.  */\n  current_subseg = now_subseg;\t/* save current subseg.  */\n\n  SKIP_WHITESPACE ();\n  if (*input_line_pointer == '\"')\n    input_line_pointer++;\n  c = get_symbol_name (&section_name);\t/* Get terminator.  */\n  if (c == '\"')\n    c = * ++ input_line_pointer;\n  input_line_pointer++;\t\t/* Skip null symbol terminator.  */\n  name = xstrdup (section_name);\n\n  if (c == ',')\n    input_line_pointer =\n      tic4x_expression_abs (input_line_pointer, &size);\n  else if (*input_line_pointer == ',')\n    {\n      input_line_pointer =\n\ttic4x_expression_abs (++input_line_pointer, &size);\n    }\n  else\n    size = 0;\n\n  /* Read a possibly present third argument (alignment flag) [VK].  */\n  if (*input_line_pointer == ',')\n    {\n      input_line_pointer =\n\ttic4x_expression_abs (++input_line_pointer, &alignment_flag);\n    }\n  else\n    alignment_flag = 0;\n  if (alignment_flag)\n    as_warn (_(\".usect: non-zero alignment flag ignored\"));\n\n  seg = subseg_new (name, 0);\n  if (line_label != NULL)\n    {\n      S_SET_SEGMENT (line_label, seg);\n      symbol_set_frag (line_label, frag_now);\n      S_SET_VALUE (line_label, frag_now_fix ());\n    }\n  seg_info (seg)->bss = 1;\t/* Uninitialised data.  */\n  if (!bfd_set_section_flags (stdoutput, seg, SEC_ALLOC))\n    as_warn (_(\"Error setting flags for \\\"%s\\\": %s\"), name,\n\t     bfd_errmsg (bfd_get_error ()));\n  tic4x_seg_alloc (name, seg, size, line_label);\n\n  if (S_GET_STORAGE_CLASS (line_label) != C_EXT)\n    S_SET_STORAGE_CLASS (line_label, C_STAT);\n\n  subseg_set (current_seg, current_subseg);\t/* Restore current seg.  */\n  demand_empty_rest_of_line ();\n}",
+      "fn_code_pos": [
+        [
+          1056,
+          0
+        ],
+        [
+          1119,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_usect",
+        "parameters": {
+          "x": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_version (int x ATTRIBUTE_UNUSED)\n{\n  offsetT temp;\n\n  input_line_pointer =\n    tic4x_expression_abs (input_line_pointer, &temp);\n  if (!IS_CPU_TIC3X (temp) && !IS_CPU_TIC4X (temp))\n    as_bad (_(\"This assembler does not support processor generation %ld\"),\n\t    (long) temp);\n\n  if (tic4x_cpu && temp != (offsetT) tic4x_cpu)\n    as_warn (_(\"Changing processor generation on fly not supported...\"));\n  tic4x_cpu = temp;\n  demand_empty_rest_of_line ();\n}",
+      "fn_code_pos": [
+        [
+          1122,
+          0
+        ],
+        [
+          1137,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_version",
+        "parameters": {
+          "x": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_init_regtable (void)\n{\n  unsigned int i;\n\n  for (i = 0; i < tic3x_num_registers; i++)\n    tic4x_insert_reg (tic3x_registers[i].name,\n\t\t    tic3x_registers[i].regno);\n\n  if (IS_CPU_TIC4X (tic4x_cpu))\n    {\n      /* Add additional Tic4x registers, overriding some C3x ones.  */\n      for (i = 0; i < tic4x_num_registers; i++)\n\ttic4x_insert_reg (tic4x_registers[i].name,\n\t\t\ttic4x_registers[i].regno);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1139,
+          0
+        ],
+        [
+          1155,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_init_regtable",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_init_symbols (void)\n{\n  /* The TI tools accept case insensitive versions of these symbols,\n     we don't !\n\n     For TI C/Asm 5.0\n\n     .TMS320xx       30,31,32,40,or 44       set according to -v flag\n     .C3X or .C3x    1 or 0                  1 if -v30,-v31,or -v32\n     .C30            1 or 0                  1 if -v30\n     .C31            1 or 0                  1 if -v31\n     .C32            1 or 0                  1 if -v32\n     .C4X or .C4x    1 or 0                  1 if -v40, or -v44\n     .C40            1 or 0                  1 if -v40\n     .C44            1 or 0                  1 if -v44\n\n     .REGPARM 1 or 0                  1 if -mr option used\n     .BIGMODEL        1 or 0                  1 if -mb option used\n\n     These symbols are currently supported but will be removed in a\n     later version:\n     .TMS320C30      1 or 0                  1 if -v30,-v31,or -v32\n     .TMS320C31      1 or 0                  1 if -v31\n     .TMS320C32      1 or 0                  1 if -v32\n     .TMS320C40      1 or 0                  1 if -v40, or -v44\n     .TMS320C44      1 or 0                  1 if -v44\n\n     Source: TI: TMS320C3x/C4x Assembly Language Tools User's Guide,\n     1997, SPRU035C, p. 3-17/3-18.  */\n  tic4x_insert_sym (\".REGPARM\", tic4x_reg_args);\n  tic4x_insert_sym (\".MEMPARM\", !tic4x_reg_args);\n  tic4x_insert_sym (\".BIGMODEL\", tic4x_big_model);\n  tic4x_insert_sym (\".C30INTERRUPT\", 0);\n  tic4x_insert_sym (\".TMS320xx\", tic4x_cpu == 0 ? 40 : tic4x_cpu);\n  tic4x_insert_sym (\".C3X\", tic4x_cpu == 30 || tic4x_cpu == 31 || tic4x_cpu == 32 || tic4x_cpu == 33);\n  tic4x_insert_sym (\".C3x\", tic4x_cpu == 30 || tic4x_cpu == 31 || tic4x_cpu == 32 || tic4x_cpu == 33);\n  tic4x_insert_sym (\".C4X\", tic4x_cpu == 0 || tic4x_cpu == 40 || tic4x_cpu == 44);\n  tic4x_insert_sym (\".C4x\", tic4x_cpu == 0 || tic4x_cpu == 40 || tic4x_cpu == 44);\n  /* Do we need to have the following symbols also in lower case?  */\n  tic4x_insert_sym (\".TMS320C30\", tic4x_cpu == 30 || tic4x_cpu == 31 || tic4x_cpu == 32 || tic4x_cpu == 33);\n  tic4x_insert_sym (\".tms320C30\", tic4x_cpu == 30 || tic4x_cpu == 31 || tic4x_cpu == 32 || tic4x_cpu == 33);\n  tic4x_insert_sym (\".TMS320C31\", tic4x_cpu == 31);\n  tic4x_insert_sym (\".tms320C31\", tic4x_cpu == 31);\n  tic4x_insert_sym (\".TMS320C32\", tic4x_cpu == 32);\n  tic4x_insert_sym (\".tms320C32\", tic4x_cpu == 32);\n  tic4x_insert_sym (\".TMS320C33\", tic4x_cpu == 33);\n  tic4x_insert_sym (\".tms320C33\", tic4x_cpu == 33);\n  tic4x_insert_sym (\".TMS320C40\", tic4x_cpu == 40 || tic4x_cpu == 44 || tic4x_cpu == 0);\n  tic4x_insert_sym (\".tms320C40\", tic4x_cpu == 40 || tic4x_cpu == 44 || tic4x_cpu == 0);\n  tic4x_insert_sym (\".TMS320C44\", tic4x_cpu == 44);\n  tic4x_insert_sym (\".tms320C44\", tic4x_cpu == 44);\n  tic4x_insert_sym (\".TMX320C40\", 0);\t/* C40 first pass silicon ?  */\n  tic4x_insert_sym (\".tmx320C40\", 0);\n}",
+      "fn_code_pos": [
+        [
+          1157,
+          0
+        ],
+        [
+          1211,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_init_symbols",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ntic4x_inst_insert (const tic4x_inst_t *inst)\n{\n  static char prev_name[16];\n  const char *retval = NULL;\n\n  /* Only insert the first name if have several similar entries.  */\n  if (!strcmp (inst->name, prev_name) || inst->name[0] == '\\0')\n    return 1;\n\n  retval = hash_insert (tic4x_op_hash, inst->name, (void *) inst);\n  if (retval != NULL)\n    fprintf (stderr, \"internal error: can't hash `%s': %s\\n\",\n\t     inst->name, retval);\n  else\n    strcpy (prev_name, inst->name);\n  return retval == NULL;\n}",
+      "fn_code_pos": [
+        [
+          1214,
+          0
+        ],
+        [
+          1231,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_inst_insert",
+        "parameters": {
+          "inst": "tic4x_inst_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static tic4x_inst_t *\ntic4x_inst_make (const char *name, unsigned long opcode, const char *args)\n{\n  static tic4x_inst_t *insts = NULL;\n  static char *names = NULL;\n  static int iindex = 0;\n\n  if (insts == NULL)\n    {\n      /* Allocate memory to store name strings.  */\n      names = XNEWVEC (char, 8192);\n      /* Allocate memory for additional insts.  */\n      insts = XNEWVEC (tic4x_inst_t, 1024);\n    }\n  insts[iindex].name = names;\n  insts[iindex].opcode = opcode;\n  insts[iindex].opmask = 0xffffffff;\n  insts[iindex].args = args;\n  iindex++;\n\n  do\n    *names++ = *name++;\n  while (*name);\n  *names++ = '\\0';\n\n  return &insts[iindex - 1];\n}",
+      "fn_code_pos": [
+        [
+          1234,
+          0
+        ],
+        [
+          1260,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_inst_make",
+        "parameters": {
+          "name": "char",
+          "opcode": "unsigned long",
+          "args": "char"
+        },
+        "return_type": "tic4x_inst_t"
+      }
+    },
+    {
+      "fn_code": "static int\ntic4x_inst_add (const tic4x_inst_t *insts)\n{\n  const char *s = insts->name;\n  char *d;\n  unsigned int i;\n  int ok = 1;\n  char name[16];\n\n  d = name;\n\n  /* We do not care about INSNs that is not a part of our\n     oplevel setting.  */\n  if ((insts->oplevel & tic4x_oplevel) == 0)\n    return ok;\n\n  while (1)\n    {\n      switch (*s)\n\t{\n\tcase 'B':\n\tcase 'C':\n\t  /* Dynamically create all the conditional insts.  */\n\t  for (i = 0; i < tic4x_num_conds; i++)\n\t    {\n\t      tic4x_inst_t *inst;\n\t      int k = 0;\n\t      const char *c = tic4x_conds[i].name;\n\t      char *e = d;\n\n\t      while (*c)\n\t\t*e++ = *c++;\n\t      c = s + 1;\n\t      while (*c)\n\t\t*e++ = *c++;\n\t      *e = '\\0';\n\n\t      /* If instruction found then have already processed it.  */\n\t      if (hash_find (tic4x_op_hash, name))\n\t\treturn 1;\n\n\t      do\n\t\t{\n\t\t  inst = tic4x_inst_make (name, insts[k].opcode +\n\t\t\t\t\t(tic4x_conds[i].cond <<\n\t\t\t\t\t (*s == 'B' ? 16 : 23)),\n\t\t\t\t\tinsts[k].args);\n\t\t  if (k == 0)\t/* Save strcmp() with following func.  */\n\t\t    ok &= tic4x_inst_insert (inst);\n\t\t  k++;\n\t\t}\n\t      while (!strcmp (insts->name,\n\t\t\t      insts[k].name));\n\t    }\n\t  return ok;\n\t  break;\n\n\tcase '\\0':\n\t  return tic4x_inst_insert (insts);\n\t  break;\n\n\tdefault:\n\t  *d++ = *s++;\n\t  break;\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          1263,
+          0
+        ],
+        [
+          1329,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_inst_add",
+        "parameters": {
+          "insts": "tic4x_inst_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nmd_begin (void)\n{\n  int ok = 1;\n  unsigned int i;\n\n  /* Setup the proper opcode level according to the\n     commandline parameters */\n  tic4x_oplevel = OP_C3X;\n\n  if ( IS_CPU_TIC4X(tic4x_cpu) )\n    tic4x_oplevel |= OP_C4X;\n\n  if ( (   tic4x_cpu == 31 && tic4x_revision >= 6)\n       || (tic4x_cpu == 32 && tic4x_revision >= 2)\n       || (tic4x_cpu == 33)\n       || tic4x_enhanced )\n    tic4x_oplevel |= OP_ENH;\n\n  if ( (   tic4x_cpu == 30 && tic4x_revision >= 7)\n       || (tic4x_cpu == 31 && tic4x_revision >= 5)\n       || (tic4x_cpu == 32)\n       || tic4x_lowpower )\n    tic4x_oplevel |= OP_LPWR;\n\n  if ( (   tic4x_cpu == 30 && tic4x_revision >= 7)\n       || (tic4x_cpu == 31 && tic4x_revision >= 5)\n       || (tic4x_cpu == 32)\n       || (tic4x_cpu == 33)\n       || (tic4x_cpu == 40 && tic4x_revision >= 5)\n       || (tic4x_cpu == 44)\n       || tic4x_idle2 )\n    tic4x_oplevel |= OP_IDLE2;\n\n  /* Create hash table for mnemonics.  */\n  tic4x_op_hash = hash_new ();\n\n  /* Create hash table for asg pseudo.  */\n  tic4x_asg_hash = hash_new ();\n\n  /* Add mnemonics to hash table, expanding conditional mnemonics on fly.  */\n  for (i = 0; i < tic4x_num_insts; i++)\n    ok &= tic4x_inst_add (tic4x_insts + i);\n\n  /* Create dummy inst to avoid errors accessing end of table.  */\n  tic4x_inst_make (\"\", 0, \"\");\n\n  if (!ok)\n    as_fatal (\"Broken assembler.  No assembly attempted.\");\n\n  /* Add registers to symbol table.  */\n  tic4x_init_regtable ();\n\n  /* Add predefined symbols to symbol table.  */\n  tic4x_init_symbols ();\n}",
+      "fn_code_pos": [
+        [
+          1334,
+          0
+        ],
+        [
+          1389,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_begin",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\ntic4x_end (void)\n{\n  bfd_set_arch_mach (stdoutput, bfd_arch_tic4x,\n\t\t     IS_CPU_TIC4X (tic4x_cpu) ? bfd_mach_tic4x : bfd_mach_tic3x);\n}",
+      "fn_code_pos": [
+        [
+          1391,
+          0
+        ],
+        [
+          1396,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_end",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ntic4x_indirect_parse (tic4x_operand_t *operand,\n\t\t      const tic4x_indirect_t *indirect)\n{\n  const char *n = indirect->name;\n  char *s = input_line_pointer;\n  char *b;\n  symbolS *symbolP;\n  char name[32];\n\n  operand->disp = 0;\n  for (; *n; n++)\n    {\n      switch (*n)\n\t{\n\tcase 'a':\t\t/* Need to match aux register.  */\n\t  b = name;\n#ifdef TIC4X_ALT_SYNTAX\n\t  if (*s == '%')\n\t    s++;\n#endif\n\t  while (ISALNUM (*s))\n\t    *b++ = *s++;\n\t  *b++ = '\\0';\n\t  if (!(symbolP = symbol_find (name)))\n\t    return 0;\n\n\t  if (S_GET_SEGMENT (symbolP) != reg_section)\n\t    return 0;\n\n\t  operand->aregno = S_GET_VALUE (symbolP);\n\t  if (operand->aregno >= REG_AR0 && operand->aregno <= REG_AR7)\n\t    break;\n\n\t  as_bad (_(\"Auxiliary register AR0--AR7 required for indirect\"));\n\t  return -1;\n\n\tcase 'd':\t\t/* Need to match constant for disp.  */\n#ifdef TIC4X_ALT_SYNTAX\n\t  if (*s == '%')\t/* expr() will die if we don't skip this.  */\n\t    s++;\n#endif\n\t  s = tic4x_expression (s, &operand->expr);\n\t  if (operand->expr.X_op != O_constant)\n\t    return 0;\n\t  operand->disp = operand->expr.X_add_number;\n\t  if (operand->disp < 0 || operand->disp > 255)\n\t    {\n\t      as_bad (_(\"Bad displacement %d (require 0--255)\\n\"),\n\t\t      operand->disp);\n\t      return -1;\n\t    }\n\t  break;\n\n\tcase 'y':\t\t/* Need to match IR0.  */\n\tcase 'z':\t\t/* Need to match IR1.  */\n#ifdef TIC4X_ALT_SYNTAX\n\t  if (*s == '%')\n\t    s++;\n#endif\n\t  s = tic4x_expression (s, &operand->expr);\n\t  if (operand->expr.X_op != O_register)\n\t    return 0;\n\t  if (operand->expr.X_add_number != REG_IR0\n\t      && operand->expr.X_add_number != REG_IR1)\n\t    {\n\t      as_bad (_(\"Index register IR0,IR1 required for displacement\"));\n\t      return -1;\n\t    }\n\n\t  if (*n == 'y' && operand->expr.X_add_number == REG_IR0)\n\t    break;\n\t  if (*n == 'z' && operand->expr.X_add_number == REG_IR1)\n\t    break;\n\t  return 0;\n\n\tcase '(':\n\t  if (*s != '(')\t/* No displacement, assume to be 1.  */\n\t    {\n\t      operand->disp = 1;\n\t      while (*n != ')')\n\t\tn++;\n\t    }\n\t  else\n\t    s++;\n\t  break;\n\n\tdefault:\n\t  if (TOLOWER (*s) != *n)\n\t    return 0;\n\t  s++;\n\t}\n    }\n  if (*s != ' ' && *s != ',' && *s != '\\0')\n    return 0;\n  input_line_pointer = s;\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          1398,
+          0
+        ],
+        [
+          1495,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_indirect_parse",
+        "parameters": {
+          "operand": "tic4x_operand_t",
+          "indirect": "tic4x_indirect_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static char *\ntic4x_operand_parse (char *s, tic4x_operand_t *operand)\n{\n  unsigned int i;\n  char c;\n  int ret;\n  expressionS *exp = &operand->expr;\n  char *save = input_line_pointer;\n  char *str;\n  char *new_pointer;\n  struct hash_entry *entry = NULL;\n\n  input_line_pointer = s;\n  SKIP_WHITESPACE ();\n\n  c = get_symbol_name (&str);\t/* Get terminator.  */\n  new_pointer = input_line_pointer;\n  if (strlen (str) && (entry = hash_find (tic4x_asg_hash, str)) != NULL)\n    {\n      (void) restore_line_pointer (c);\n      input_line_pointer = (char *) entry;\n    }\n  else\n    {\n      (void) restore_line_pointer (c);\n      input_line_pointer = str;\n    }\n\n  operand->mode = M_UNKNOWN;\n  switch (*input_line_pointer)\n    {\n#ifdef TIC4X_ALT_SYNTAX\n    case '%':\n      input_line_pointer = tic4x_expression (++input_line_pointer, exp);\n      if (exp->X_op != O_register)\n\tas_bad (_(\"Expecting a register name\"));\n      operand->mode = M_REGISTER;\n      break;\n\n    case '^':\n      /* Denotes high 16 bits.  */\n      input_line_pointer = tic4x_expression (++input_line_pointer, exp);\n      if (exp->X_op == O_constant)\n\toperand->mode = M_IMMED;\n      else if (exp->X_op == O_big)\n\t{\n\t  if (exp->X_add_number)\n\t    as_bad (_(\"Number too large\"));\t/* bignum required */\n\t  else\n\t    {\n\t      tic4x_gen_to_words (generic_floating_point_number,\n\t\t\t\toperand->fwords, S_PRECISION);\n\t      operand->mode = M_IMMED_F;\n\t    }\n\t}\n      /* Allow ori ^foo, ar0 to be equivalent to ldi .hi.foo, ar0  */\n      /* WARNING : The TI C40 assembler cannot do this.  */\n      else if (exp->X_op == O_symbol)\n\toperand->mode = M_HI;\n      else\n\tas_bad (_(\"Expecting a constant value\"));\n      break;\n\n    case '#':\n      input_line_pointer = tic4x_expression (++input_line_pointer, exp);\n      if (exp->X_op == O_constant)\n\toperand->mode = M_IMMED;\n      else if (exp->X_op == O_big)\n\t{\n\t  if (exp->X_add_number > 0)\n\t    as_bad (_(\"Number too large\"));\t/* bignum required.  */\n\t  else\n\t    {\n\t      tic4x_gen_to_words (generic_floating_point_number,\n\t\t\t\toperand->fwords, S_PRECISION);\n\t      operand->mode = M_IMMED_F;\n\t    }\n\t}\n      /* Allow ori foo, ar0 to be equivalent to ldi .lo.foo, ar0  */\n      /* WARNING : The TI C40 assembler cannot do this.  */\n      else if (exp->X_op == O_symbol)\n\toperand->mode = M_IMMED;\n      else\n\tas_bad (_(\"Expecting a constant value\"));\n      break;\n\n    case '\\\\':\n#endif\n    case '@':\n      input_line_pointer = tic4x_expression (++input_line_pointer, exp);\n      if (exp->X_op != O_constant && exp->X_op != O_symbol)\n\tas_bad (_(\"Bad direct addressing construct %s\"), s);\n      if (exp->X_op == O_constant)\n\t{\n\t  if (exp->X_add_number < 0)\n\t    as_bad (_(\"Direct value of %ld is not suitable\"),\n\t\t    (long) exp->X_add_number);\n\t}\n      operand->mode = M_DIRECT;\n      break;\n\n    case '*':\n      ret = -1;\n      for (i = 0; i < tic4x_num_indirects; i++)\n\tif ((ret = tic4x_indirect_parse (operand, &tic4x_indirects[i])))\n\t  break;\n      if (ret < 0)\n\tbreak;\n      if (i < tic4x_num_indirects)\n\t{\n\t  operand->mode = M_INDIRECT;\n\t  /* Indirect addressing mode number.  */\n\t  operand->expr.X_add_number = tic4x_indirects[i].modn;\n\t  /* Convert *+ARn(0) to *ARn etc.  Maybe we should\n\t     squeal about silly ones?  */\n\t  if (operand->expr.X_add_number < 0x08 && !operand->disp)\n\t    operand->expr.X_add_number = 0x18;\n\t}\n      else\n\tas_bad (_(\"Unknown indirect addressing mode\"));\n      break;\n\n    default:\n      operand->mode = M_IMMED;\t/* Assume immediate.  */\n      str = input_line_pointer;\n      input_line_pointer = tic4x_expression (input_line_pointer, exp);\n      if (exp->X_op == O_register)\n\t{\n\t  know (exp->X_add_symbol == 0);\n\t  know (exp->X_op_symbol == 0);\n\t  operand->mode = M_REGISTER;\n\t  break;\n\t}\n      else if (exp->X_op == O_big)\n\t{\n\t  if (exp->X_add_number > 0)\n\t    as_bad (_(\"Number too large\"));\t/* bignum required.  */\n\t  else\n\t    {\n\t      tic4x_gen_to_words (generic_floating_point_number,\n\t\t\t\toperand->fwords, S_PRECISION);\n\t      operand->mode = M_IMMED_F;\n\t    }\n\t  break;\n\t}\n#ifdef TIC4X_ALT_SYNTAX\n      /* Allow ldi foo, ar0 to be equivalent to ldi @foo, ar0.  */\n      else if (exp->X_op == O_symbol)\n\t{\n\t  operand->mode = M_DIRECT;\n\t  break;\n\t}\n#endif\n    }\n  if (entry == NULL)\n    new_pointer = input_line_pointer;\n  input_line_pointer = save;\n  return new_pointer;\n}",
+      "fn_code_pos": [
+        [
+          1497,
+          0
+        ],
+        [
+          1655,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_operand_parse",
+        "parameters": {
+          "s": "char",
+          "operand": "tic4x_operand_t"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static int\ntic4x_operands_match (tic4x_inst_t *inst, tic4x_insn_t *tinsn, int check)\n{\n  const char *args = inst->args;\n  unsigned long opcode = inst->opcode;\n  int num_operands = tinsn->num_operands;\n  tic4x_operand_t *operand = tinsn->operands;\n  expressionS *exp = &operand->expr;\n  int ret = 1;\n  int reg;\n\n  /* Build the opcode, checking as we go to make sure that the\n     operands match.\n\n     If an operand matches, we modify insn or opcode appropriately,\n     and do a \"continue\".  If an operand fails to match, we \"break\".  */\n\n  tinsn->nchars = 4;\t\t/* Instructions always 4 bytes.  */\n  tinsn->reloc = NO_RELOC;\n  tinsn->pcrel = 0;\n\n  if (*args == '\\0')\n    {\n      tinsn->opcode = opcode;\n      return num_operands == 0;\n    }\n\n  for (;; ++args)\n    {\n      switch (*args)\n\t{\n\n\tcase '\\0':\t\t/* End of args.  */\n\t  if (num_operands == 1)\n\t    {\n\t      tinsn->opcode = opcode;\n\t      return ret;\n\t    }\n\t  break;\t\t/* Too many operands.  */\n\n\tcase '#':\t\t/* This is only used for ldp.  */\n\t  if (operand->mode != M_DIRECT && operand->mode != M_IMMED)\n\t    break;\n\t  /* While this looks like a direct addressing mode, we actually\n\t     use an immediate mode form of ldiu or ldpk instruction.  */\n\t  if (exp->X_op == O_constant)\n\t    {\n              if( ( IS_CPU_TIC4X (tic4x_cpu) && exp->X_add_number <= 65535 )\n                  || ( IS_CPU_TIC3X (tic4x_cpu) && exp->X_add_number <= 255 ) )\n                {\n                  INSERTS (opcode, exp->X_add_number, 15, 0);\n                  continue;\n                }\n              else\n                {\n\t\t  if (!check)\n                    as_bad (_(\"Immediate value of %ld is too large for ldf\"),\n                            (long) exp->X_add_number);\n\t\t  ret = -1;\n\t\t  continue;\n                }\n\t    }\n\t  else if (exp->X_op == O_symbol)\n\t    {\n\t      tinsn->reloc = BFD_RELOC_HI16;\n\t      tinsn->exp = *exp;\n\t      continue;\n\t    }\n\t  break;\t\t/* Not direct (dp) addressing.  */\n\n\tcase '@':\t\t/* direct.  */\n\t  if (operand->mode != M_DIRECT)\n\t    break;\n\t  if (exp->X_op == O_constant)\n            {\n              /* Store only the 16 LSBs of the number.  */\n              INSERTS (opcode, exp->X_add_number, 15, 0);\n              continue;\n\t    }\n\t  else if (exp->X_op == O_symbol)\n\t    {\n\t      tinsn->reloc = BFD_RELOC_LO16;\n\t      tinsn->exp = *exp;\n\t      continue;\n\t    }\n\t  break;\t\t/* Not direct addressing.  */\n\n\tcase 'A':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if (reg >= REG_AR0 && reg <= REG_AR7)\n\t    INSERTU (opcode, reg - REG_AR0, 24, 22);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Destination register must be ARn\"));\n\t      ret = -1;\n\t    }\n\t  continue;\n\n\tcase 'B':\t\t/* Unsigned integer immediate.  */\n\t  /* Allow br label or br @label.  */\n\t  if (operand->mode != M_IMMED && operand->mode != M_DIRECT)\n\t    break;\n\t  if (exp->X_op == O_constant)\n\t    {\n\t      if (exp->X_add_number < (1 << 24))\n\t\t{\n\t\t  INSERTU (opcode, exp->X_add_number, 23, 0);\n\t\t  continue;\n\t\t}\n\t      else\n\t\t{\n\t\t  if (!check)\n                    as_bad (_(\"Immediate value of %ld is too large\"),\n                            (long) exp->X_add_number);\n\t\t  ret = -1;\n\t\t  continue;\n\t\t}\n\t    }\n\t  if (IS_CPU_TIC4X (tic4x_cpu))\n\t    {\n\t      tinsn->reloc = BFD_RELOC_24_PCREL;\n\t      tinsn->pcrel = 1;\n\t    }\n\t  else\n\t    {\n\t      tinsn->reloc = BFD_RELOC_24;\n\t      tinsn->pcrel = 0;\n\t    }\n\t  tinsn->exp = *exp;\n\t  continue;\n\n\tcase 'C':\n\t  if (!IS_CPU_TIC4X (tic4x_cpu))\n\t    break;\n\t  if (operand->mode != M_INDIRECT)\n\t    break;\n\t  /* Require either *+ARn(disp) or *ARn.  */\n\t  if (operand->expr.X_add_number != 0\n\t      && operand->expr.X_add_number != 0x18)\n\t    {\n              if (!check)\n                as_bad (_(\"Invalid indirect addressing mode\"));\n              ret = -1;\n\t      continue;\n\t    }\n\t  INSERTU (opcode, operand->aregno - REG_AR0, 2, 0);\n\t  INSERTU (opcode, operand->disp, 7, 3);\n\t  continue;\n\n\tcase 'E':\n\t  if (!(operand->mode == M_REGISTER))\n\t    break;\n\t  INSERTU (opcode, exp->X_add_number, 7, 0);\n\t  continue;\n\n        case 'e':\n          if (!(operand->mode == M_REGISTER))\n            break;\n\t  reg = exp->X_add_number;\n\t  if ( (reg >= REG_R0 && reg <= REG_R7)\n               || (IS_CPU_TIC4X (tic4x_cpu) && reg >= REG_R8 && reg <= REG_R11) )\n\t    INSERTU (opcode, reg, 7, 0);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Register must be Rn\"));\n\t      ret = -1;\n\t    }\n          continue;\n\n\tcase 'F':\n\t  if (operand->mode != M_IMMED_F\n\t      && !(operand->mode == M_IMMED && exp->X_op == O_constant))\n\t    break;\n\n\t  if (operand->mode != M_IMMED_F)\n\t    {\n\t      /* OK, we 've got something like cmpf 0, r0\n\t         Why can't they stick in a bloody decimal point ?!  */\n\t      char string[16];\n\n\t      /* Create floating point number string.  */\n\t      sprintf (string, \"%d.0\", (int) exp->X_add_number);\n\t      tic4x_atof (string, 's', operand->fwords);\n\t    }\n\n\t  INSERTU (opcode, operand->fwords[0], 15, 0);\n\t  continue;\n\n\tcase 'G':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  INSERTU (opcode, exp->X_add_number, 15, 8);\n\t  continue;\n\n        case 'g':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if ( (reg >= REG_R0 && reg <= REG_R7)\n               || (IS_CPU_TIC4X (tic4x_cpu) && reg >= REG_R8 && reg <= REG_R11) )\n\t    INSERTU (opcode, reg, 15, 8);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Register must be Rn\"));\n\t      ret = -1;\n\t    }\n          continue;\n\n\tcase 'H':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if (reg >= REG_R0 && reg <= REG_R7)\n\t    INSERTU (opcode, reg - REG_R0, 18, 16);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Register must be R0--R7\"));\n\t      ret = -1;\n\t    }\n\t  continue;\n\n        case 'i':\n          if ( operand->mode == M_REGISTER\n               && tic4x_oplevel & OP_ENH )\n            {\n              reg = exp->X_add_number;\n              INSERTU (opcode, reg, 4, 0);\n              INSERTU (opcode, 7, 7, 5);\n              continue;\n            }\n          /* Fallthrough */\n\n\tcase 'I':\n\t  if (operand->mode != M_INDIRECT)\n\t    break;\n\t  if (operand->disp != 0 && operand->disp != 1)\n\t    {\n\t      if (IS_CPU_TIC4X (tic4x_cpu))\n\t\tbreak;\n              if (!check)\n                as_bad (_(\"Invalid indirect addressing mode displacement %d\"),\n                        operand->disp);\n\t      ret = -1;\n\t      continue;\n\t    }\n\t  INSERTU (opcode, operand->aregno - REG_AR0, 2, 0);\n\t  INSERTU (opcode, operand->expr.X_add_number, 7, 3);\n\t  continue;\n\n        case 'j':\n          if ( operand->mode == M_REGISTER\n               && tic4x_oplevel & OP_ENH )\n            {\n              reg = exp->X_add_number;\n              INSERTU (opcode, reg, 12, 8);\n              INSERTU (opcode, 7, 15, 13);\n              continue;\n            }\n          /* Fallthrough */\n\n\tcase 'J':\n\t  if (operand->mode != M_INDIRECT)\n\t    break;\n\t  if (operand->disp != 0 && operand->disp != 1)\n\t    {\n\t      if (IS_CPU_TIC4X (tic4x_cpu))\n\t\tbreak;\n              if (!check)\n                as_bad (_(\"Invalid indirect addressing mode displacement %d\"),\n                        operand->disp);\n\t      ret = -1;\n\t      continue;\n\t    }\n\t  INSERTU (opcode, operand->aregno - REG_AR0, 10, 8);\n\t  INSERTU (opcode, operand->expr.X_add_number, 15, 11);\n\t  continue;\n\n\tcase 'K':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if (reg >= REG_R0 && reg <= REG_R7)\n\t    INSERTU (opcode, reg - REG_R0, 21, 19);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Register must be R0--R7\"));\n\t      ret = -1;\n\t    }\n\t  continue;\n\n\tcase 'L':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if (reg >= REG_R0 && reg <= REG_R7)\n\t    INSERTU (opcode, reg - REG_R0, 24, 22);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Register must be R0--R7\"));\n\t      ret = -1;\n\t    }\n\t  continue;\n\n\tcase 'M':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if (reg == REG_R2 || reg == REG_R3)\n\t    INSERTU (opcode, reg - REG_R2, 22, 22);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Destination register must be R2 or R3\"));\n\t      ret = -1;\n\t    }\n\t  continue;\n\n\tcase 'N':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if (reg == REG_R0 || reg == REG_R1)\n\t    INSERTU (opcode, reg - REG_R0, 23, 23);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Destination register must be R0 or R1\"));\n\t      ret = -1;\n\t    }\n\t  continue;\n\n\tcase 'O':\n\t  if (!IS_CPU_TIC4X (tic4x_cpu))\n\t    break;\n\t  if (operand->mode != M_INDIRECT)\n\t    break;\n\t  /* Require either *+ARn(disp) or *ARn.  */\n\t  if (operand->expr.X_add_number != 0\n\t      && operand->expr.X_add_number != 0x18)\n\t    {\n              if (!check)\n                as_bad (_(\"Invalid indirect addressing mode\"));\n\t      ret = -1;\n\t      continue;\n\t    }\n\t  INSERTU (opcode, operand->aregno - REG_AR0, 10, 8);\n\t  INSERTU (opcode, operand->disp, 15, 11);\n\t  continue;\n\n\tcase 'P':\t\t/* PC relative displacement.  */\n\t  /* Allow br label or br @label.  */\n\t  if (operand->mode != M_IMMED && operand->mode != M_DIRECT)\n\t    break;\n\t  if (exp->X_op == O_constant)\n\t    {\n\t      if (exp->X_add_number >= -32768 && exp->X_add_number <= 32767)\n\t\t{\n\t\t  INSERTS (opcode, exp->X_add_number, 15, 0);\n\t\t  continue;\n\t\t}\n\t      else\n\t\t{\n                  if (!check)\n                    as_bad (_(\"Displacement value of %ld is too large\"),\n                            (long) exp->X_add_number);\n\t\t  ret = -1;\n\t\t  continue;\n\t\t}\n\t    }\n\t  tinsn->reloc = BFD_RELOC_16_PCREL;\n\t  tinsn->pcrel = 1;\n\t  tinsn->exp = *exp;\n\t  continue;\n\n\tcase 'Q':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  INSERTU (opcode, reg, 15, 0);\n\t  continue;\n\n        case 'q':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if ( (reg >= REG_R0 && reg <= REG_R7)\n               || (IS_CPU_TIC4X (tic4x_cpu) && reg >= REG_R8 && reg <= REG_R11) )\n\t    INSERTU (opcode, reg, 15, 0);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Register must be Rn\"));\n\t      ret = -1;\n\t    }\n          continue;\n\n\tcase 'R':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  INSERTU (opcode, reg, 20, 16);\n\t  continue;\n\n        case 'r':\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if ( (reg >= REG_R0 && reg <= REG_R7)\n               || (IS_CPU_TIC4X (tic4x_cpu) && reg >= REG_R8 && reg <= REG_R11) )\n\t    INSERTU (opcode, reg, 20, 16);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Register must be Rn\"));\n\t      ret = -1;\n\t    }\n          continue;\n\n\tcase 'S':\t\t/* Short immediate int.  */\n\t  if (operand->mode != M_IMMED && operand->mode != M_HI)\n\t    break;\n\t  if (exp->X_op == O_big)\n\t    {\n              if (!check)\n                as_bad (_(\"Floating point number not valid in expression\"));\n\t      ret = -1;\n\t      continue;\n\t    }\n\t  if (exp->X_op == O_constant)\n\t    {\n\t      if (exp->X_add_number >= -32768 && exp->X_add_number <= 65535)\n\t\t{\n\t\t  INSERTS (opcode, exp->X_add_number, 15, 0);\n\t\t  continue;\n\t\t}\n\t      else\n\t\t{\n\t\t  if (!check)\n                    as_bad (_(\"Signed immediate value %ld too large\"),\n                            (long) exp->X_add_number);\n\t\t  ret = -1;\n\t\t  continue;\n\t\t}\n\t    }\n\t  else if (exp->X_op == O_symbol)\n\t    {\n\t      if (operand->mode == M_HI)\n\t\t{\n\t\t  tinsn->reloc = BFD_RELOC_HI16;\n\t\t}\n\t      else\n\t\t{\n\t\t  tinsn->reloc = BFD_RELOC_LO16;\n\t\t}\n\t      tinsn->exp = *exp;\n\t      continue;\n\t    }\n\t  /* Handle cases like ldi foo - $, ar0  where foo\n\t     is a forward reference.  Perhaps we should check\n\t     for X_op == O_symbol and disallow things like\n\t     ldi foo, ar0.  */\n\t  tinsn->reloc = BFD_RELOC_16;\n\t  tinsn->exp = *exp;\n\t  continue;\n\n\tcase 'T':\t\t/* 5-bit immediate value for tic4x stik.  */\n\t  if (!IS_CPU_TIC4X (tic4x_cpu))\n\t    break;\n\t  if (operand->mode != M_IMMED)\n\t    break;\n\t  if (exp->X_op == O_constant)\n\t    {\n\t      if (exp->X_add_number < 16 && exp->X_add_number >= -16)\n\t\t{\n\t\t  INSERTS (opcode, exp->X_add_number, 20, 16);\n\t\t  continue;\n\t\t}\n\t      else\n\t\t{\n                  if (!check)\n                    as_bad (_(\"Immediate value of %ld is too large\"),\n                            (long) exp->X_add_number);\n\t\t  ret = -1;\n\t\t  continue;\n\t\t}\n\t    }\n\t  break;\t\t/* No relocations allowed.  */\n\n\tcase 'U':\t\t/* Unsigned integer immediate.  */\n\t  if (operand->mode != M_IMMED && operand->mode != M_HI)\n\t    break;\n\t  if (exp->X_op == O_constant)\n\t    {\n\t      if (exp->X_add_number < (1 << 16) && exp->X_add_number >= 0)\n\t\t{\n\t\t  INSERTU (opcode, exp->X_add_number, 15, 0);\n\t\t  continue;\n\t\t}\n\t      else\n\t\t{\n                  if (!check)\n                    as_bad (_(\"Unsigned immediate value %ld too large\"),\n                            (long) exp->X_add_number);\n\t\t  ret = -1;\n\t\t  continue;\n\t\t}\n\t    }\n\t  else if (exp->X_op == O_symbol)\n\t    {\n\t      if (operand->mode == M_HI)\n\t\ttinsn->reloc = BFD_RELOC_HI16;\n\t      else\n\t\ttinsn->reloc = BFD_RELOC_LO16;\n\n\t      tinsn->exp = *exp;\n\t      continue;\n\t    }\n\t  tinsn->reloc = BFD_RELOC_16;\n\t  tinsn->exp = *exp;\n\t  continue;\n\n\tcase 'V':\t\t/* Trap numbers (immediate field).  */\n\t  if (operand->mode != M_IMMED)\n\t    break;\n\t  if (exp->X_op == O_constant)\n\t    {\n\t      if (exp->X_add_number < 512 && IS_CPU_TIC4X (tic4x_cpu))\n\t\t{\n\t\t  INSERTU (opcode, exp->X_add_number, 8, 0);\n\t\t  continue;\n\t\t}\n\t      else if (exp->X_add_number < 32 && IS_CPU_TIC3X (tic4x_cpu))\n\t\t{\n\t\t  INSERTU (opcode, exp->X_add_number | 0x20, 4, 0);\n\t\t  continue;\n\t\t}\n\t      else\n\t\t{\n                  if (!check)\n                    as_bad (_(\"Immediate value of %ld is too large\"),\n                            (long) exp->X_add_number);\n\t\t  ret = -1;\n\t\t  continue;\n\t\t}\n\t    }\n\t  break;\t\t/* No relocations allowed.  */\n\n\tcase 'W':\t\t/* Short immediate int (0--7).  */\n\t  if (!IS_CPU_TIC4X (tic4x_cpu))\n\t    break;\n\t  if (operand->mode != M_IMMED)\n\t    break;\n\t  if (exp->X_op == O_big)\n\t    {\n              if (!check)\n                as_bad (_(\"Floating point number not valid in expression\"));\n\t      ret = -1;\n\t      continue;\n\t    }\n\t  if (exp->X_op == O_constant)\n\t    {\n\t      if (exp->X_add_number >= -256 && exp->X_add_number <= 127)\n\t\t{\n\t\t  INSERTS (opcode, exp->X_add_number, 7, 0);\n\t\t  continue;\n\t\t}\n\t      else\n\t\t{\n                  if (!check)\n                    as_bad (_(\"Immediate value %ld too large\"),\n                            (long) exp->X_add_number);\n\t\t  ret = -1;\n\t\t  continue;\n\t\t}\n\t    }\n\t  tinsn->reloc = BFD_RELOC_16;\n\t  tinsn->exp = *exp;\n\t  continue;\n\n\tcase 'X':\t\t/* Expansion register for tic4x.  */\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if (reg >= REG_IVTP && reg <= REG_TVTP)\n\t    INSERTU (opcode, reg - REG_IVTP, 4, 0);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Register must be ivtp or tvtp\"));\n\t      ret = -1;\n\t    }\n\t  continue;\n\n\tcase 'Y':\t\t/* Address register for tic4x lda.  */\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if (reg >= REG_AR0 && reg <= REG_SP)\n\t    INSERTU (opcode, reg, 20, 16);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Register must be address register\"));\n\t      ret = -1;\n\t    }\n\t  continue;\n\n\tcase 'Z':\t\t/* Expansion register for tic4x.  */\n\t  if (operand->mode != M_REGISTER)\n\t    break;\n\t  reg = exp->X_add_number;\n\t  if (reg >= REG_IVTP && reg <= REG_TVTP)\n\t    INSERTU (opcode, reg - REG_IVTP, 20, 16);\n\t  else\n\t    {\n              if (!check)\n                as_bad (_(\"Register must be ivtp or tvtp\"));\n\t      ret = -1;\n\t    }\n\t  continue;\n\n\tcase '*':\n\t  if (operand->mode != M_INDIRECT)\n\t    break;\n\t  INSERTS (opcode, operand->disp, 7, 0);\n\t  INSERTU (opcode, operand->aregno - REG_AR0, 10, 8);\n\t  INSERTU (opcode, operand->expr.X_add_number, 15, 11);\n\t  continue;\n\n\tcase '|':\t\t/* treat as `,' if have ldi_ldi form.  */\n\t  if (tinsn->parallel)\n\t    {\n\t      if (--num_operands < 0)\n\t\tbreak;\t\t/* Too few operands.  */\n\t      operand++;\n\t      if (operand->mode != M_PARALLEL)\n\t\tbreak;\n\t    }\n\t  /* Fall through.  */\n\n\tcase ',':\t\t/* Another operand.  */\n\t  if (--num_operands < 0)\n\t    break;\t\t/* Too few operands.  */\n\t  operand++;\n\t  exp = &operand->expr;\n\t  continue;\n\n\tcase ';':\t\t/* Another optional operand.  */\n\t  if (num_operands == 1 || operand[1].mode == M_PARALLEL)\n\t    continue;\n\t  if (--num_operands < 0)\n\t    break;\t\t/* Too few operands.  */\n\t  operand++;\n\t  exp = &operand->expr;\n\t  continue;\n\n\tdefault:\n\t  BAD_CASE (*args);\n\t}\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1657,
+          0
+        ],
+        [
+          2326,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_operands_match",
+        "parameters": {
+          "inst": "tic4x_inst_t",
+          "tinsn": "tic4x_insn_t",
+          "check": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_insn_check (tic4x_insn_t *tinsn)\n{\n\n  if (!strcmp (tinsn->name, \"lda\"))\n    {\n      if (tinsn->num_operands < 2 || tinsn->num_operands > 2)\n        as_fatal (\"Illegal internal LDA insn definition\");\n\n      if (tinsn->operands[0].mode == M_REGISTER\n\t  && tinsn->operands[1].mode == M_REGISTER\n\t  && tinsn->operands[0].expr.X_add_number == tinsn->operands[1].expr.X_add_number )\n        as_bad (_(\"Source and destination register should not be equal\"));\n    }\n  else if (!strcmp (tinsn->name, \"ldi_ldi\")\n           || !strcmp (tinsn->name, \"ldi1_ldi2\")\n           || !strcmp (tinsn->name, \"ldi2_ldi1\")\n           || !strcmp (tinsn->name, \"ldf_ldf\")\n           || !strcmp (tinsn->name, \"ldf1_ldf2\")\n           || !strcmp (tinsn->name, \"ldf2_ldf1\") )\n    {\n      if (tinsn->num_operands < 4 || tinsn->num_operands > 5)\n        as_fatal (\"Illegal internal %s insn definition\", tinsn->name);\n\n      if (tinsn->operands[1].mode == M_REGISTER\n\t  && tinsn->operands[tinsn->num_operands-1].mode == M_REGISTER\n\t  && tinsn->operands[1].expr.X_add_number == tinsn->operands[tinsn->num_operands-1].expr.X_add_number )\n        as_warn (_(\"Equal parallell destination registers, one result will be discarded\"));\n    }\n}",
+      "fn_code_pos": [
+        [
+          2328,
+          0
+        ],
+        [
+          2357,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_insn_check",
+        "parameters": {
+          "tinsn": "tic4x_insn_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ntic4x_insn_output (tic4x_insn_t *tinsn)\n{\n  char *dst;\n\n  /* Grab another fragment for opcode.  */\n  dst = frag_more (tinsn->nchars);\n\n  /* Put out opcode word as a series of bytes in little endian order.  */\n  md_number_to_chars (dst, tinsn->opcode, tinsn->nchars);\n\n  /* Put out the symbol-dependent stuff.  */\n  if (tinsn->reloc != NO_RELOC)\n    {\n      /* Where is the offset into the fragment for this instruction.  */\n      fix_new_exp (frag_now,\n\t\t   dst - frag_now->fr_literal,\t/* where */\n\t\t   tinsn->nchars,\t/* size */\n\t\t   &tinsn->exp,\n\t\t   tinsn->pcrel,\n\t\t   tinsn->reloc);\n    }\n}",
+      "fn_code_pos": [
+        [
+          2359,
+          0
+        ],
+        [
+          2381,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_insn_output",
+        "parameters": {
+          "tinsn": "tic4x_insn_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ntic4x_operands_parse (char *s, tic4x_operand_t *operands, int num_operands)\n{\n  if (!*s)\n    return num_operands;\n\n  do\n    s = tic4x_operand_parse (s, &operands[num_operands++]);\n  while (num_operands < TIC4X_OPERANDS_MAX && *s++ == ',');\n\n  if (num_operands > TIC4X_OPERANDS_MAX)\n    {\n      as_bad (_(\"Too many operands scanned\"));\n      return -1;\n    }\n  return num_operands;\n}",
+      "fn_code_pos": [
+        [
+          2384,
+          0
+        ],
+        [
+          2400,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_operands_parse",
+        "parameters": {
+          "s": "char",
+          "operands": "tic4x_operand_t",
+          "num_operands": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nmd_assemble (char *str)\n{\n  int ok = 0;\n  char *s;\n  int i;\n  int parsed = 0;\n  size_t len;\n  tic4x_inst_t *inst;\t\t/* Instruction template.  */\n  tic4x_inst_t *first_inst;\n\n  /* Scan for parallel operators */\n  if (str)\n    {\n      s = str;\n      while (*s && *s != '|')\n        s++;\n\n      if (*s && s[1]=='|')\n        {\n          if(insn->parallel)\n            {\n              as_bad (_(\"Parallel opcode cannot contain more than two instructions\"));\n              insn->parallel = 0;\n              insn->in_use = 0;\n              return;\n            }\n\n          /* Lets take care of the first part of the parallel insn */\n          *s++ = 0;\n          md_assemble(str);\n          insn->parallel = 1;\n          str = ++s;\n          /* .. and let the second run though here */\n        }\n    }\n\n  if (str && insn->parallel)\n    {\n      /* Find mnemonic (second part of parallel instruction).  */\n      s = str;\n      /* Skip past instruction mnemonic.  */\n      while (*s && *s != ' ')\n\ts++;\n      if (*s)\t\t\t/* Null terminate for hash_find.  */\n\t*s++ = '\\0';\t\t/* and skip past null.  */\n      len = strlen (insn->name);\n      snprintf (insn->name + len, TIC4X_NAME_MAX - len, \"_%s\", str);\n\n      insn->operands[insn->num_operands++].mode = M_PARALLEL;\n\n      if ((i = tic4x_operands_parse\n\t   (s, insn->operands, insn->num_operands)) < 0)\n\t{\n\t  insn->parallel = 0;\n\t  insn->in_use = 0;\n\t  return;\n\t}\n      insn->num_operands = i;\n      parsed = 1;\n    }\n\n  if (insn->in_use)\n    {\n      if ((insn->inst = (struct tic4x_inst *)\n\t   hash_find (tic4x_op_hash, insn->name)) == NULL)\n\t{\n\t  as_bad (_(\"Unknown opcode `%s'.\"), insn->name);\n\t  insn->parallel = 0;\n\t  insn->in_use = 0;\n\t  return;\n\t}\n\n      inst = insn->inst;\n      first_inst = NULL;\n      do\n        {\n          ok = tic4x_operands_match (inst, insn, 1);\n          if (ok < 0)\n            {\n              if (!first_inst)\n                first_inst = inst;\n              ok = 0;\n            }\n      } while (!ok && !strcmp (inst->name, inst[1].name) && inst++);\n\n      if (ok > 0)\n        {\n          tic4x_insn_check (insn);\n          tic4x_insn_output (insn);\n        }\n      else if (!ok)\n        {\n          if (first_inst)\n            tic4x_operands_match (first_inst, insn, 0);\n          as_bad (_(\"Invalid operands for %s\"), insn->name);\n        }\n      else\n\tas_bad (_(\"Invalid instruction %s\"), insn->name);\n    }\n\n  if (str && !parsed)\n    {\n      /* Find mnemonic.  */\n      s = str;\n      while (*s && *s != ' ')\t/* Skip past instruction mnemonic.  */\n\ts++;\n      if (*s)\t\t\t/* Null terminate for hash_find.  */\n\t*s++ = '\\0';\t\t/* and skip past null.  */\n      strncpy (insn->name, str, TIC4X_NAME_MAX - 1);\n      insn->name[TIC4X_NAME_MAX - 1] = '\\0';\n\n      if ((i = tic4x_operands_parse (s, insn->operands, 0)) < 0)\n\t{\n\t  insn->inst = NULL;\t/* Flag that error occurred.  */\n\t  insn->parallel = 0;\n\t  insn->in_use = 0;\n\t  return;\n\t}\n      insn->num_operands = i;\n      insn->in_use = 1;\n    }\n  else\n    insn->in_use = 0;\n  insn->parallel = 0;\n}",
+      "fn_code_pos": [
+        [
+          2405,
+          0
+        ],
+        [
+          2530,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_assemble",
+        "parameters": {
+          "str": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\ntic4x_cleanup (void)\n{\n  if (insn->in_use)\n    md_assemble (NULL);\n}",
+      "fn_code_pos": [
+        [
+          2532,
+          0
+        ],
+        [
+          2537,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_cleanup",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "const char *\nmd_atof (int type, char *litP, int *sizeP)\n{\n  int prec;\n  int ieee;\n  LITTLENUM_TYPE words[MAX_LITTLENUMS];\n  LITTLENUM_TYPE *wordP;\n  char *t;\n\n  switch (type)\n    {\n    case 's':\t\t/* .single  */\n    case 'S':\n      ieee = 0;\n      prec = 1;\n      break;\n\n    case 'd':\t\t/* .double  */\n    case 'D':\n    case 'f':\t\t/* .float  */\n    case 'F':\n      ieee = 0;\n      prec = 2;\t\t/* 1 32-bit word */\n      break;\n\n    case 'i':\t\t/* .ieee */\n    case 'I':\n      prec = 2;\n      ieee = 1;\n      type = 'f';  /* Rewrite type to be usable by atof_ieee().  */\n      break;\n\n    case 'e':\t\t/* .ldouble */\n    case 'E':\n      prec = 4;\t\t/* 2 32-bit words */\n      ieee = 0;\n      break;\n\n    default:\n      *sizeP = 0;\n      return _(\"Unrecognized or unsupported floating point constant\");\n    }\n\n  if (ieee)\n    t = atof_ieee (input_line_pointer, type, words);\n  else\n    t = tic4x_atof (input_line_pointer, type, words);\n  if (t)\n    input_line_pointer = t;\n  *sizeP = prec * sizeof (LITTLENUM_TYPE);\n\n  /* This loops outputs the LITTLENUMs in REVERSE order; in accord with\n     little endian byte order.  */\n  /* SES: However it is required to put the words (32-bits) out in the\n     correct order, hence we write 2 and 2 littlenums in little endian\n     order, while we keep the original order on successive words.  */\n  for (wordP = words; wordP<(words+prec) ; wordP+=2)\n    {\n      if (wordP < (words + prec - 1)) /* Dump wordP[1] (if we have one).  */\n        {\n          md_number_to_chars (litP, (valueT) (wordP[1]),\n                              sizeof (LITTLENUM_TYPE));\n          litP += sizeof (LITTLENUM_TYPE);\n        }\n\n      /* Dump wordP[0] */\n      md_number_to_chars (litP, (valueT) (wordP[0]),\n                          sizeof (LITTLENUM_TYPE));\n      litP += sizeof (LITTLENUM_TYPE);\n    }\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          2544,
+          0
+        ],
+        [
+          2615,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_atof",
+        "parameters": {
+          "type": "int",
+          "litP": "char",
+          "sizeP": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "void\nmd_apply_fix (fixS *fixP, valueT *value, segT seg ATTRIBUTE_UNUSED)\n{\n  char *buf = fixP->fx_where + fixP->fx_frag->fr_literal;\n  valueT val = *value;\n\n  switch (fixP->fx_r_type)\n    {\n    case BFD_RELOC_HI16:\n      val >>= 16;\n      break;\n\n    case BFD_RELOC_LO16:\n      val &= 0xffff;\n      break;\n    default:\n      break;\n    }\n\n  switch (fixP->fx_r_type)\n    {\n    case BFD_RELOC_32:\n      buf[3] = val >> 24;\n      /* Fall through.  */\n    case BFD_RELOC_24:\n    case BFD_RELOC_24_PCREL:\n      buf[2] = val >> 16;\n      /* Fall through.  */\n    case BFD_RELOC_16:\n    case BFD_RELOC_16_PCREL:\n    case BFD_RELOC_LO16:\n    case BFD_RELOC_HI16:\n      buf[1] = val >> 8;\n      buf[0] = val;\n      break;\n\n    case NO_RELOC:\n    default:\n      as_bad (_(\"Bad relocation type: 0x%02x\"), fixP->fx_r_type);\n      break;\n    }\n\n  if (fixP->fx_addsy == NULL && fixP->fx_pcrel == 0) fixP->fx_done = 1;\n}",
+      "fn_code_pos": [
+        [
+          2617,
+          0
+        ],
+        [
+          2660,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_apply_fix",
+        "parameters": {
+          "fixP": "fixS",
+          "value": "valueT",
+          "seg": "segT"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nmd_create_short_jump (char *ptr ATTRIBUTE_UNUSED,\n\t\t      addressT from_addr ATTRIBUTE_UNUSED,\n\t\t      addressT to_addr ATTRIBUTE_UNUSED,\n\t\t      fragS *frag ATTRIBUTE_UNUSED,\n\t\t      symbolS *to_symbol ATTRIBUTE_UNUSED)\n{\n  as_fatal (\"md_create_short_jmp\\n\");\n}",
+      "fn_code_pos": [
+        [
+          2672,
+          0
+        ],
+        [
+          2680,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_create_short_jump",
+        "parameters": {
+          "ptr": "char",
+          "from_addr": "addressT",
+          "to_addr": "addressT",
+          "frag": "fragS",
+          "to_symbol": "symbolS"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nmd_create_long_jump (char *ptr ATTRIBUTE_UNUSED,\n\t\t     addressT from_addr ATTRIBUTE_UNUSED,\n\t\t     addressT to_addr ATTRIBUTE_UNUSED,\n\t\t     fragS *frag ATTRIBUTE_UNUSED,\n\t\t     symbolS *to_symbol ATTRIBUTE_UNUSED)\n{\n  as_fatal (\"md_create_long_jump\\n\");\n}",
+      "fn_code_pos": [
+        [
+          2683,
+          0
+        ],
+        [
+          2691,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_create_long_jump",
+        "parameters": {
+          "ptr": "char",
+          "from_addr": "addressT",
+          "to_addr": "addressT",
+          "frag": "fragS",
+          "to_symbol": "symbolS"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\nmd_parse_option (int c, const char *arg)\n{\n  switch (c)\n    {\n    case OPTION_CPU:             /* cpu brand */\n      if (TOLOWER (*arg) == 'c')\n\targ++;\n      tic4x_cpu = atoi (arg);\n      if (!IS_CPU_TIC3X (tic4x_cpu) && !IS_CPU_TIC4X (tic4x_cpu))\n\tas_warn (_(\"Unsupported processor generation %d\"), tic4x_cpu);\n      break;\n\n    case OPTION_REV:             /* cpu revision */\n      tic4x_revision = atoi (arg);\n      break;\n\n    case 'b':\n      as_warn (_(\"Option -b is depreciated, please use -mbig\"));\n      /* Fall through.  */\n    case OPTION_BIG:             /* big model */\n      tic4x_big_model = 1;\n      break;\n\n    case 'p':\n      as_warn (_(\"Option -p is depreciated, please use -mmemparm\"));\n      /* Fall through.  */\n    case OPTION_MEMPARM:         /* push args */\n      tic4x_reg_args = 0;\n      break;\n\n    case 'r':\n      as_warn (_(\"Option -r is depreciated, please use -mregparm\"));\n      /* Fall through.  */\n    case OPTION_REGPARM:        /* register args */\n      tic4x_reg_args = 1;\n      break;\n\n    case 's':\n      as_warn (_(\"Option -s is depreciated, please use -msmall\"));\n      /* Fall through.  */\n    case OPTION_SMALL:\t\t/* small model */\n      tic4x_big_model = 0;\n      break;\n\n    case OPTION_IDLE2:\n      tic4x_idle2 = 1;\n      break;\n\n    case OPTION_LOWPOWER:\n      tic4x_lowpower = 1;\n      break;\n\n    case OPTION_ENHANCED:\n      tic4x_enhanced = 1;\n      break;\n\n    default:\n      return 0;\n    }\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          2703,
+          0
+        ],
+        [
+          2765,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_parse_option",
+        "parameters": {
+          "c": "int",
+          "arg": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nmd_show_usage (FILE *stream)\n{\n  fprintf (stream,\n      _(\"\\nTIC4X options:\\n\"\n\t\"  -mcpu=CPU  -mCPU        select architecture variant. CPU can be:\\n\"\n\t\"                            30 - TMS320C30\\n\"\n\t\"                            31 - TMS320C31, TMS320LC31\\n\"\n\t\"                            32 - TMS320C32\\n\"\n        \"                            33 - TMS320VC33\\n\"\n\t\"                            40 - TMS320C40\\n\"\n\t\"                            44 - TMS320C44\\n\"\n        \"  -mrev=REV               set cpu hardware revision (integer numbers).\\n\"\n        \"                          Combinations of -mcpu and -mrev will enable/disable\\n\"\n        \"                          the appropriate options (-midle2, -mlowpower and\\n\"\n        \"                          -menhanced) according to the selected type\\n\"\n        \"  -mbig                   select big memory model\\n\"\n        \"  -msmall                 select small memory model (default)\\n\"\n        \"  -mregparm               select register parameters (default)\\n\"\n        \"  -mmemparm               select memory parameters\\n\"\n        \"  -midle2                 enable IDLE2 support\\n\"\n        \"  -mlowpower              enable LOPOWER and MAXSPEED support\\n\"\n        \"  -menhanced              enable enhanced opcode support\\n\"));\n}",
+      "fn_code_pos": [
+        [
+          2767,
+          0
+        ],
+        [
+          2790,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_show_usage",
+        "parameters": {
+          "stream": "FILE"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\ntic4x_unrecognized_line (int c)\n{\n  int lab;\n  char *s;\n\n  if (c != '$' || ! ISDIGIT (input_line_pointer[0]))\n    return 0;\n\n  s = input_line_pointer;\n\n  /* Let's allow multiple digit local labels.  */\n  lab = 0;\n  while (ISDIGIT (*s))\n    {\n      lab = lab * 10 + *s - '0';\n      s++;\n    }\n\n  if (dollar_label_defined (lab))\n    {\n      as_bad (_(\"Label \\\"$%d\\\" redefined\"), lab);\n      return 0;\n    }\n\n  define_dollar_label (lab);\n  colon (dollar_label_name (lab, 0));\n  input_line_pointer = s + 1;\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          2795,
+          0
+        ],
+        [
+          2825,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_unrecognized_line",
+        "parameters": {
+          "c": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "symbolS *\nmd_undefined_symbol (char *name)\n{\n  /* Look for local labels of the form $n.  */\n  if (name[0] == '$' && ISDIGIT (name[1]))\n    {\n      symbolS *symbolP;\n      char *s = name + 1;\n      int lab = 0;\n\n      while (ISDIGIT ((unsigned char) *s))\n\t{\n\t  lab = lab * 10 + *s - '0';\n\t  s++;\n\t}\n      if (dollar_label_defined (lab))\n\t{\n\t  name = dollar_label_name (lab, 0);\n\t  symbolP = symbol_find (name);\n\t}\n      else\n\t{\n\t  name = dollar_label_name (lab, 1);\n\t  symbolP = symbol_find_or_make (name);\n\t}\n\n      return symbolP;\n    }\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          2828,
+          0
+        ],
+        [
+          2857,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_undefined_symbol",
+        "parameters": {
+          "name": "char"
+        },
+        "return_type": "symbolS"
+      }
+    },
+    {
+      "fn_code": "valueT\nmd_section_align (segT segment ATTRIBUTE_UNUSED, valueT size)\n{\n  return size;\t\t\t/* Byte (i.e., 32-bit) alignment is fine?  */\n}",
+      "fn_code_pos": [
+        [
+          2866,
+          0
+        ],
+        [
+          2870,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_section_align",
+        "parameters": {
+          "segment": "segT",
+          "size": "valueT"
+        },
+        "return_type": "valueT"
+      }
+    },
+    {
+      "fn_code": "static int\ntic4x_pc_offset (unsigned int op)\n{\n  /* Determine the PC offset for a C[34]x instruction.\n     This could be simplified using some boolean algebra\n     but at the expense of readability.  */\n  switch (op >> 24)\n    {\n    case 0x60:\t\t\t/* br */\n    case 0x62:\t\t\t/* call  (C4x) */\n    case 0x64:\t\t\t/* rptb  (C4x) */\n      return 1;\n    case 0x61:\t\t\t/* brd */\n    case 0x63:\t\t\t/* laj */\n    case 0x65:\t\t\t/* rptbd (C4x) */\n      return 3;\n    case 0x66:\t\t\t/* swi */\n    case 0x67:\n      return 0;\n    default:\n      break;\n    }\n\n  switch ((op & 0xffe00000) >> 20)\n    {\n    case 0x6a0:\t\t/* bB */\n    case 0x720:\t\t/* callB */\n    case 0x740:\t\t/* trapB */\n      return 1;\n\n    case 0x6a2:\t\t/* bBd */\n    case 0x6a6:\t\t/* bBat */\n    case 0x6aa:\t\t/* bBaf */\n    case 0x722:\t\t/* lajB */\n    case 0x748:\t\t/* latB */\n    case 0x798:\t\t/* rptbd */\n      return 3;\n\n    default:\n      break;\n    }\n\n  switch ((op & 0xfe200000) >> 20)\n    {\n    case 0x6e0:\t\t/* dbB */\n      return 1;\n\n    case 0x6e2:\t\t/* dbBd */\n      return 3;\n\n    default:\n      break;\n    }\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          2872,
+          0
+        ],
+        [
+          2927,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_pc_offset",
+        "parameters": {
+          "op": "unsigned int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "long\nmd_pcrel_from (fixS *fixP)\n{\n  unsigned char *buf;\n  unsigned int op;\n\n  buf = (unsigned char *) fixP->fx_frag->fr_literal + fixP->fx_where;\n  op = (buf[3] << 24) | (buf[2] << 16) | (buf[1] << 8) | buf[0];\n\n  return ((fixP->fx_where + fixP->fx_frag->fr_address) >> 2) +\n    tic4x_pc_offset (op);\n}",
+      "fn_code_pos": [
+        [
+          2934,
+          0
+        ],
+        [
+          2945,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_pcrel_from",
+        "parameters": {
+          "fixP": "fixS"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "int\ntic4x_do_align (int alignment,\n\t\tconst char *fill,\n\t\tint len,\n\t\tint max)\n{\n  /* Because we are talking lwords, not bytes, adjust alignment to do words */\n  alignment += 2;\n\n  if (alignment != 0 && !need_pass_2)\n    {\n      if (fill == NULL)\n        {\n          if (subseg_text_p (now_seg))\n\t    {\n\t      char nop[4];\n\n\t      md_number_to_chars (nop, TIC_NOP_OPCODE, 4);\n\t      frag_align_pattern (alignment, nop, sizeof (nop), max);\n\t    }\n          else\n            frag_align (alignment, 0, max);\n\t}\n      else if (len <= 1)\n\tfrag_align (alignment, *fill, max);\n      else\n\tfrag_align_pattern (alignment, fill, len, max);\n    }\n\n  /* Return 1 to skip the default alignment function */\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          2949,
+          0
+        ],
+        [
+          2980,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_do_align",
+        "parameters": {
+          "alignment": "int",
+          "fill": "char",
+          "len": "int",
+          "max": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\ntic4x_start_line (void)\n{\n  char *s = input_line_pointer;\n\n  SKIP_WHITESPACE ();\n\n  /* If parallel instruction prefix found at start of line, skip it.  */\n  if (*input_line_pointer == '|' && input_line_pointer[1] == '|')\n    {\n      if (insn->in_use)\n\t{\n\t  insn->parallel = 1;\n\t  input_line_pointer ++;\n          *input_line_pointer = ' ';\n\t  /* So line counters get bumped.  */\n\t  input_line_pointer[-1] = '\\n';\n\t}\n    }\n  else\n    {\n      /* Write out the previous insn here */\n      if (insn->in_use)\n\tmd_assemble (NULL);\n      input_line_pointer = s;\n    }\n}",
+      "fn_code_pos": [
+        [
+          2983,
+          0
+        ],
+        [
+          3009,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_start_line",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "tic4x_asg (int)",
+      "fn_dec_pos": [
+        [
+          139,
+          12
+        ],
+        [
+          139,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_asg",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tic4x_bss (int)",
+      "fn_dec_pos": [
+        [
+          140,
+          12
+        ],
+        [
+          140,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_bss",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tic4x_globl (int)",
+      "fn_dec_pos": [
+        [
+          141,
+          12
+        ],
+        [
+          141,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_globl",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tic4x_cons (int)",
+      "fn_dec_pos": [
+        [
+          142,
+          12
+        ],
+        [
+          142,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_cons",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tic4x_stringer (int)",
+      "fn_dec_pos": [
+        [
+          143,
+          12
+        ],
+        [
+          143,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_stringer",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tic4x_eval (int)",
+      "fn_dec_pos": [
+        [
+          144,
+          12
+        ],
+        [
+          144,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_eval",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tic4x_newblock (int)",
+      "fn_dec_pos": [
+        [
+          145,
+          12
+        ],
+        [
+          145,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_newblock",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tic4x_sect (int)",
+      "fn_dec_pos": [
+        [
+          146,
+          12
+        ],
+        [
+          146,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_sect",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tic4x_set (int)",
+      "fn_dec_pos": [
+        [
+          147,
+          12
+        ],
+        [
+          147,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_set",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tic4x_usect (int)",
+      "fn_dec_pos": [
+        [
+          148,
+          12
+        ],
+        [
+          148,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_usect",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tic4x_version (int)",
+      "fn_dec_pos": [
+        [
+          149,
+          12
+        ],
+        [
+          149,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_version",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "tic4x_atof (char *str, char what_kind, LITTLENUM_TYPE *words)",
+      "fn_dec_pos": [
+        [
+          548,
+          0
+        ],
+        [
+          548,
+          61
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_atof",
+        "parameters": {
+          "str": "char",
+          "what_kind": "char",
+          "words": "LITTLENUM_TYPE"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "tic4x_expression (char *str, expressionS *exp)",
+      "fn_dec_pos": [
+        [
+          648,
+          0
+        ],
+        [
+          648,
+          46
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_expression",
+        "parameters": {
+          "str": "char",
+          "exp": "expressionS"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "tic4x_expression_abs (char *str, offsetT *value)",
+      "fn_dec_pos": [
+        [
+          662,
+          0
+        ],
+        [
+          662,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_expression_abs",
+        "parameters": {
+          "str": "char",
+          "value": "offsetT"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "tic4x_inst_make (const char *name, unsigned long opcode, const char *args)",
+      "fn_dec_pos": [
+        [
+          1235,
+          0
+        ],
+        [
+          1235,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_inst_make",
+        "parameters": {
+          "name": "char",
+          "opcode": "unsigned long",
+          "args": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "tic4x_operand_parse (char *s, tic4x_operand_t *operand)",
+      "fn_dec_pos": [
+        [
+          1498,
+          0
+        ],
+        [
+          1498,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "tic4x_operand_parse",
+        "parameters": {
+          "s": "char",
+          "operand": "tic4x_operand_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "md_atof (int type, char *litP, int *sizeP)",
+      "fn_dec_pos": [
+        [
+          2545,
+          0
+        ],
+        [
+          2545,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_atof",
+        "parameters": {
+          "type": "int",
+          "litP": "char",
+          "sizeP": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "md_undefined_symbol (char *name)",
+      "fn_dec_pos": [
+        [
+          2829,
+          0
+        ],
+        [
+          2829,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "md_undefined_symbol",
+        "parameters": {
+          "name": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct tic4x_operand\n  {\n    tic4x_addr_mode_t mode;\t/* Addressing mode.  */\n    expressionS expr;\t\t/* Expression.  */\n    int disp;\t\t\t/* Displacement for indirect addressing.  */\n    int aregno;\t\t\t/* Aux. register number.  */\n    LITTLENUM_TYPE fwords[MAX_LITTLENUMS];\t/* Float immed. number.  */\n  }\ntic4x_operand_t;",
+      {
+        "mode": "tic4x_addr_mode_t",
+        "expr": "expressionS",
+        "disp": "int",
+        "aregno": "int",
+        "fwords[MAX_LITTLENUMS]": "LITTLENUM_TYPE"
+      },
+      "tic4x_operand_t",
+      [
+        108,
+        0
+      ],
+      [
+        116,
+        16
+      ]
+    ],
+    [
+      "typedef struct tic4x_insn\n  {\n    char name[TIC4X_NAME_MAX];\t/* Mnemonic of instruction.  */\n    unsigned int in_use;\t/* True if in_use.  */\n    unsigned int parallel;\t/* True if parallel instruction.  */\n    unsigned int nchars;\t/* This is always 4 for the C30.  */\n    unsigned long opcode;\t/* Opcode number.  */\n    expressionS exp;\t\t/* Expression required for relocation.  */\n    /* Relocation type required.  */\n    bfd_reloc_code_real_type reloc;\n    int pcrel;\t\t\t/* True if relocation PC relative.  */\n    char *pname;\t\t/* Name of instruction in parallel.  */\n    unsigned int num_operands;\t/* Number of operands in total.  */\n    tic4x_inst_t *inst;\t\t/* Pointer to first template.  */\n    tic4x_operand_t operands[TIC4X_OPERANDS_MAX];\n  }\ntic4x_insn_t;",
+      {
+        "name[TIC4X_NAME_MAX]": "char",
+        "in_use": "unsigned int",
+        "parallel": "unsigned int",
+        "nchars": "unsigned int",
+        "opcode": "unsigned long",
+        "exp": "expressionS",
+        "reloc": "bfd_reloc_code_real_type",
+        "pcrel": "int",
+        "*pname": "char",
+        "num_operands": "unsigned int",
+        "*inst": "tic4x_inst_t",
+        "operands[TIC4X_OPERANDS_MAX]": "tic4x_operand_t"
+      },
+      "tic4x_insn_t",
+      [
+        118,
+        0
+      ],
+      [
+        134,
+        13
+      ]
+    ],
+    [
+      "struct hash_control",
+      {},
+      "",
+      [
+        58,
+        7
+      ],
+      [
+        58,
+        26
+      ]
+    ],
+    [
+      "struct hash_control",
+      {},
+      "",
+      [
+        61,
+        7
+      ],
+      [
+        61,
+        26
+      ]
+    ],
+    [
+      "struct option",
+      {},
+      "",
+      [
+        83,
+        0
+      ],
+      [
+        83,
+        13
+      ]
+    ],
+    [
+      "typedef struct tic4x_operand\n  {\n    tic4x_addr_mode_t mode;\t/* Addressing mode.  */\n    expressionS expr;\t\t/* Expression.  */\n    int disp;\t\t\t/* Displacement for indirect addressing.  */\n    int aregno;\t\t\t/* Aux. register number.  */\n    LITTLENUM_TYPE fwords[MAX_LITTLENUMS];\t/* Float immed. number.  */\n  }\ntic4x_operand_t;",
+      {
+        "mode": "tic4x_addr_mode_t",
+        "expr": "expressionS",
+        "disp": "int",
+        "aregno": "int",
+        "fwords[MAX_LITTLENUMS]": "LITTLENUM_TYPE"
+      },
+      "tic4x_operand_t",
+      [
+        108,
+        0
+      ],
+      [
+        116,
+        16
+      ]
+    ],
+    [
+      "typedef struct tic4x_insn\n  {\n    char name[TIC4X_NAME_MAX];\t/* Mnemonic of instruction.  */\n    unsigned int in_use;\t/* True if in_use.  */\n    unsigned int parallel;\t/* True if parallel instruction.  */\n    unsigned int nchars;\t/* This is always 4 for the C30.  */\n    unsigned long opcode;\t/* Opcode number.  */\n    expressionS exp;\t\t/* Expression required for relocation.  */\n    /* Relocation type required.  */\n    bfd_reloc_code_real_type reloc;\n    int pcrel;\t\t\t/* True if relocation PC relative.  */\n    char *pname;\t\t/* Name of instruction in parallel.  */\n    unsigned int num_operands;\t/* Number of operands in total.  */\n    tic4x_inst_t *inst;\t\t/* Pointer to first template.  */\n    tic4x_operand_t operands[TIC4X_OPERANDS_MAX];\n  }\ntic4x_insn_t;",
+      {
+        "name[TIC4X_NAME_MAX]": "char",
+        "in_use": "unsigned int",
+        "parallel": "unsigned int",
+        "nchars": "unsigned int",
+        "opcode": "unsigned long",
+        "exp": "expressionS",
+        "reloc": "bfd_reloc_code_real_type",
+        "pcrel": "int",
+        "*pname": "char",
+        "num_operands": "unsigned int",
+        "*inst": "tic4x_inst_t",
+        "operands[TIC4X_OPERANDS_MAX]": "tic4x_operand_t"
+      },
+      "tic4x_insn_t",
+      [
+        118,
+        0
+      ],
+      [
+        134,
+        13
+      ]
+    ],
+    [
+      "struct hash_entry",
+      {},
+      "",
+      [
+        1507,
+        2
+      ],
+      [
+        1507,
+        19
+      ]
+    ],
+    [
+      "struct tic4x_inst",
+      {},
+      "",
+      [
+        2469,
+        25
+      ],
+      [
+        2469,
+        42
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"as.h\"\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include \"safe-ctype.h\"\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include \"opcode/tic4x.h\"\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include \"subsegs.h\"\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "typedef enum\n  {\n    M_UNKNOWN, M_IMMED, M_DIRECT, M_REGISTER, M_INDIRECT,\n    M_IMMED_F, M_PARALLEL, M_HI\n  }\ntic4x_addr_mode_t;",
+      {
+        "M_UNKNOWN": "",
+        "M_IMMED": "",
+        "M_DIRECT": "",
+        "M_REGISTER": "",
+        "M_INDIRECT": "",
+        "M_IMMED_F": "",
+        "M_PARALLEL": "",
+        "M_HI": ""
+      },
+      "tic4x_addr_mode_t",
+      [
+        101,
+        0
+      ],
+      [
+        106,
+        18
+      ]
+    ]
+  ]
+}

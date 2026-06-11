@@ -1,0 +1,761 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static boolean_t\nlist_interfaces(const char *linkname, void *arg)\n{\n\tlinkwalk_t\t*lwp = arg;\n\tlinknamelist_t\t*entry;\n\n\tif ((entry = calloc(1, sizeof(linknamelist_t))) == NULL) {\n\t\tlwp->lw_err = ENOMEM;\n\t\treturn (B_TRUE);\n\t}\n\t(void) strlcpy(entry->linkname, linkname, DLPI_LINKNAME_MAX);\n\n\tif (lwp->lw_list == NULL) {\n\t\tlwp->lw_list = entry;\n\t} else {\n\t\tentry->lnl_next = lwp->lw_list;\n\t\tlwp->lw_list = entry;\n\t}\n\n\treturn (B_FALSE);\n}",
+      "fn_code_pos": [
+        [
+          72,
+          0
+        ],
+        [
+          92,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "list_interfaces",
+        "parameters": {
+          "linkname": "char",
+          "arg": "void"
+        },
+        "return_type": "boolean_t"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_activate_libdlpi(pcap_t *p)\n{\n\tstruct pcap_dlpi *pd = p->priv;\n\tint status = 0;\n\tint retv;\n\tdlpi_handle_t dh;\n\tdlpi_info_t dlinfo;\n\n\t/*\n\t * Enable Solaris raw and passive DLPI extensions;\n\t * dlpi_open() will not fail if the underlying link does not support\n\t * passive mode. See dlpi(7P) for details.\n\t */\n\tretv = dlpi_open(p->opt.device, &dh, DLPI_RAW|DLPI_PASSIVE);\n\tif (retv != DLPI_SUCCESS) {\n\t\tif (retv == DLPI_ELINKNAMEINVAL || retv == DLPI_ENOLINK)\n\t\t\tstatus = PCAP_ERROR_NO_SUCH_DEVICE;\n\t\telse if (retv == DL_SYSERR &&\n\t\t    (errno == EPERM || errno == EACCES))\n\t\t\tstatus = PCAP_ERROR_PERM_DENIED;\n\t\telse\n\t\t\tstatus = PCAP_ERROR;\n\t\tpcap_libdlpi_err(p->opt.device, \"dlpi_open\", retv,\n\t\t    p->errbuf);\n\t\treturn (status);\n\t}\n\tpd->dlpi_hd = dh;\n\n\tif (p->opt.rfmon) {\n\t\t/*\n\t\t * This device exists, but we don't support monitor mode\n\t\t * any platforms that support DLPI.\n\t\t */\n\t\tstatus = PCAP_ERROR_RFMON_NOTSUP;\n\t\tgoto bad;\n\t}\n\n\t/* Bind with DLPI_ANY_SAP. */\n\tif ((retv = dlpi_bind(pd->dlpi_hd, DLPI_ANY_SAP, 0)) != DLPI_SUCCESS) {\n\t\tstatus = PCAP_ERROR;\n\t\tpcap_libdlpi_err(p->opt.device, \"dlpi_bind\", retv, p->errbuf);\n\t\tgoto bad;\n\t}\n\n\t/*\n\t * Turn a negative snapshot value (invalid), a snapshot value of\n\t * 0 (unspecified), or a value bigger than the normal maximum\n\t * value, into the maximum allowed value.\n\t *\n\t * If some application really *needs* a bigger snapshot\n\t * length, we should just increase MAXIMUM_SNAPLEN.\n\t */\n\tif (p->snapshot <= 0 || p->snapshot > MAXIMUM_SNAPLEN)\n\t\tp->snapshot = MAXIMUM_SNAPLEN;\n\n\t/* Enable promiscuous mode. */\n\tif (p->opt.promisc) {\n\t\tretv = dlpromiscon(p, DL_PROMISC_PHYS);\n\t\tif (retv < 0) {\n\t\t\t/*\n\t\t\t * \"You don't have permission to capture on\n\t\t\t * this device\" and \"you don't have permission\n\t\t\t * to capture in promiscuous mode on this\n\t\t\t * device\" are different; let the user know,\n\t\t\t * so if they can't get permission to\n\t\t\t * capture in promiscuous mode, they can at\n\t\t\t * least try to capture in non-promiscuous\n\t\t\t * mode.\n\t\t\t *\n\t\t\t * XXX - you might have to capture in\n\t\t\t * promiscuous mode to see outgoing packets.\n\t\t\t */\n\t\t\tif (retv == PCAP_ERROR_PERM_DENIED)\n\t\t\t\tstatus = PCAP_ERROR_PROMISC_PERM_DENIED;\n\t\t\telse\n\t\t\t\tstatus = retv;\n\t\t\tgoto bad;\n\t\t}\n\t} else {\n\t\t/* Try to enable multicast. */\n\t\tretv = dlpromiscon(p, DL_PROMISC_MULTI);\n\t\tif (retv < 0) {\n\t\t\tstatus = retv;\n\t\t\tgoto bad;\n\t\t}\n\t}\n\n\t/* Try to enable SAP promiscuity. */\n\tretv = dlpromiscon(p, DL_PROMISC_SAP);\n\tif (retv < 0) {\n\t\t/*\n\t\t * Not fatal, since the DL_PROMISC_PHYS mode worked.\n\t\t * Report it as a warning, however.\n\t\t */\n\t\tif (p->opt.promisc)\n\t\t\tstatus = PCAP_WARNING;\n\t\telse {\n\t\t\tstatus = retv;\n\t\t\tgoto bad;\n\t\t}\n\t}\n\n\t/* Determine link type.  */\n\tif ((retv = dlpi_info(pd->dlpi_hd, &dlinfo, 0)) != DLPI_SUCCESS) {\n\t\tstatus = PCAP_ERROR;\n\t\tpcap_libdlpi_err(p->opt.device, \"dlpi_info\", retv, p->errbuf);\n\t\tgoto bad;\n\t}\n\n\tif (pcap_process_mactype(p, dlinfo.di_mactype) != 0) {\n\t\tstatus = PCAP_ERROR;\n\t\tgoto bad;\n\t}\n\n\tp->fd = dlpi_fd(pd->dlpi_hd);\n\n\t/* Push and configure bufmod. */\n\tif (pcap_conf_bufmod(p, p->snapshot) != 0) {\n\t\tstatus = PCAP_ERROR;\n\t\tgoto bad;\n\t}\n\n\t/*\n\t * Flush the read side.\n\t */\n\tif (ioctl(p->fd, I_FLUSH, FLUSHR) != 0) {\n\t\tstatus = PCAP_ERROR;\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"FLUSHR\");\n\t\tgoto bad;\n\t}\n\n\t/* Allocate data buffer. */\n\tif (pcap_alloc_databuf(p) != 0) {\n\t\tstatus = PCAP_ERROR;\n\t\tgoto bad;\n\t}\n\n\t/*\n\t * \"p->fd\" is a FD for a STREAMS device, so \"select()\" and\n\t * \"poll()\" should work on it.\n\t */\n\tp->selectable_fd = p->fd;\n\n\tp->read_op = pcap_read_libdlpi;\n\tp->inject_op = pcap_inject_libdlpi;\n\tp->setfilter_op = install_bpf_program;\t/* No kernel filtering */\n\tp->setdirection_op = NULL;\t/* Not implemented */\n\tp->set_datalink_op = NULL;\t/* Can't change data link type */\n\tp->getnonblock_op = pcap_getnonblock_fd;\n\tp->setnonblock_op = pcap_setnonblock_fd;\n\tp->stats_op = pcap_stats_dlpi;\n\tp->cleanup_op = pcap_cleanup_libdlpi;\n\n\treturn (status);\nbad:\n\tpcap_cleanup_libdlpi(p);\n\treturn (status);\n}",
+      "fn_code_pos": [
+        [
+          94,
+          0
+        ],
+        [
+          253,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_activate_libdlpi",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ndlpromiscon(pcap_t *p, bpf_u_int32 level)\n{\n\tstruct pcap_dlpi *pd = p->priv;\n\tint retv;\n\tint err;\n\n\tretv = dlpi_promiscon(pd->dlpi_hd, level);\n\tif (retv != DLPI_SUCCESS) {\n\t\tif (retv == DL_SYSERR &&\n\t\t    (errno == EPERM || errno == EACCES))\n\t\t\terr = PCAP_ERROR_PERM_DENIED;\n\t\telse\n\t\t\terr = PCAP_ERROR;\n\t\tpcap_libdlpi_err(p->opt.device, \"dlpi_promiscon\" STRINGIFY(level),\n\t\t    retv, p->errbuf);\n\t\treturn (err);\n\t}\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          257,
+          0
+        ],
+        [
+          276,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dlpromiscon",
+        "parameters": {
+          "p": "pcap_t",
+          "level": "bpf_u_int32"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nis_dlpi_interface(const char *name _U_)\n{\n\treturn (1);\n}",
+      "fn_code_pos": [
+        [
+          283,
+          0
+        ],
+        [
+          287,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "is_dlpi_interface",
+        "parameters": {
+          "name": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_if_flags(const char *name _U_, bpf_u_int32 *flags _U_, char *errbuf _U_)\n{\n\t/*\n\t * Nothing we can do other than mark loopback devices as \"the\n\t * connected/disconnected status doesn't apply\".\n\t *\n\t * XXX - on Solaris, can we do what the dladm command does,\n\t * i.e. get a connected/disconnected indication from a kstat?\n\t * (Note that you can also get the link speed, and possibly\n\t * other information, from a kstat as well.)\n\t */\n\tif (*flags & PCAP_IF_LOOPBACK) {\n\t\t/*\n\t\t * Loopback devices aren't wireless, and \"connected\"/\n\t\t * \"disconnected\" doesn't apply to them.\n\t\t */\n\t\t*flags |= PCAP_IF_CONNECTION_STATUS_NOT_APPLICABLE;\n\t\treturn (0);\n\t}\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          289,
+          0
+        ],
+        [
+          310,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_if_flags",
+        "parameters": {
+          "name": "char",
+          "flags": "bpf_u_int32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npcap_platform_finddevs(pcap_if_list_t *devlistp, char *errbuf)\n{\n\tint retv = 0;\n\n\tlinknamelist_t\t*entry, *next;\n\tlinkwalk_t\tlw = {NULL, 0};\n\tint \t\tsave_errno;\n\n\t/*\n\t * Get the list of regular interfaces first.\n\t */\n\tif (pcap_findalldevs_interfaces(devlistp, errbuf,\n\t    is_dlpi_interface, get_if_flags) == -1)\n\t\treturn (-1);\t/* failure */\n\n\t/* dlpi_walk() for loopback will be added here. */\n\n\t/*\n\t * Find all DLPI devices in the current zone.\n\t *\n\t * XXX - will pcap_findalldevs_interfaces() find any devices\n\t * outside the current zone?  If not, the only reason to call\n\t * it would be to get the interface addresses.\n\t */\n\tdlpi_walk(list_interfaces, &lw, 0);\n\n\tif (lw.lw_err != 0) {\n\t\tpcap_fmt_errmsg_for_errno(errbuf, PCAP_ERRBUF_SIZE,\n\t\t    lw.lw_err, \"dlpi_walk\");\n\t\tretv = -1;\n\t\tgoto done;\n\t}\n\n\t/* Add linkname if it does not exist on the list. */\n\tfor (entry = lw.lw_list; entry != NULL; entry = entry->lnl_next) {\n\t\t/*\n\t\t * If it isn't already in the list of devices, try to\n\t\t * add it.\n\t\t */\n\t\tif (find_or_add_dev(devlistp, entry->linkname, 0, get_if_flags,\n\t\t    NULL, errbuf) == NULL)\n\t\t\tretv = -1;\n\t}\ndone:\n\tsave_errno = errno;\n\tfor (entry = lw.lw_list; entry != NULL; entry = next) {\n\t\tnext = entry->lnl_next;\n\t\tfree(entry);\n\t}\n\terrno = save_errno;\n\n\treturn (retv);\n}",
+      "fn_code_pos": [
+        [
+          317,
+          0
+        ],
+        [
+          370,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_platform_finddevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_read_libdlpi(pcap_t *p, int count, pcap_handler callback, u_char *user)\n{\n\tstruct pcap_dlpi *pd = p->priv;\n\tint len;\n\tu_char *bufp;\n\tsize_t msglen;\n\tint retv;\n\n\tlen = p->cc;\n\tif (len != 0) {\n\t\tbufp = p->bp;\n\t\tgoto process_pkts;\n\t}\n\tdo {\n\t\t/* Has \"pcap_breakloop()\" been called? */\n\t\tif (p->break_loop) {\n\t\t\t/*\n\t\t\t * Yes - clear the flag that indicates that it has,\n\t\t\t * and return -2 to indicate that we were told to\n\t\t\t * break out of the loop.\n\t\t\t */\n\t\t\tp->break_loop = 0;\n\t\t\treturn (-2);\n\t\t}\n\n\t\tmsglen = p->bufsize;\n\t\tbufp = (u_char *)p->buffer + p->offset;\n\n\t\tretv = dlpi_recv(pd->dlpi_hd, NULL, NULL, bufp,\n\t\t    &msglen, -1, NULL);\n\t\tif (retv != DLPI_SUCCESS) {\n\t\t\t/*\n\t\t\t * This is most likely a call to terminate out of the\n\t\t\t * loop. So, do not return an error message, instead\n\t\t\t * check if \"pcap_breakloop()\" has been called above.\n\t\t\t */\n\t\t\tif (retv == DL_SYSERR && errno == EINTR) {\n\t\t\t\tlen = 0;\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tpcap_libdlpi_err(dlpi_linkname(pd->dlpi_hd),\n\t\t\t    \"dlpi_recv\", retv, p->errbuf);\n\t\t\treturn (-1);\n\t\t}\n\t\tlen = msglen;\n\t} while (len == 0);\n\nprocess_pkts:\n\treturn (pcap_process_pkts(p, callback, user, count, bufp, len));\n}",
+      "fn_code_pos": [
+        [
+          376,
+          0
+        ],
+        [
+          426,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_read_libdlpi",
+        "parameters": {
+          "p": "pcap_t",
+          "count": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_inject_libdlpi(pcap_t *p, const void *buf, size_t size)\n{\n\tstruct pcap_dlpi *pd = p->priv;\n\tint retv;\n\n\tretv = dlpi_send(pd->dlpi_hd, NULL, 0, buf, size, NULL);\n\tif (retv != DLPI_SUCCESS) {\n\t\tpcap_libdlpi_err(dlpi_linkname(pd->dlpi_hd), \"dlpi_send\", retv,\n\t\t    p->errbuf);\n\t\treturn (-1);\n\t}\n\t/*\n\t * dlpi_send(3DLPI) does not provide a way to return the number of\n\t * bytes sent on the wire. Based on the fact that DLPI_SUCCESS was\n\t * returned we are assuming 'size' bytes were sent.\n\t */\n\treturn (size);\n}",
+      "fn_code_pos": [
+        [
+          428,
+          0
+        ],
+        [
+          446,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_inject_libdlpi",
+        "parameters": {
+          "p": "pcap_t",
+          "buf": "void",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\npcap_cleanup_libdlpi(pcap_t *p)\n{\n\tstruct pcap_dlpi *pd = p->priv;\n\n\tif (pd->dlpi_hd != NULL) {\n\t\tdlpi_close(pd->dlpi_hd);\n\t\tpd->dlpi_hd = NULL;\n\t\tp->fd = -1;\n\t}\n\tpcap_cleanup_live_common(p);\n}",
+      "fn_code_pos": [
+        [
+          451,
+          0
+        ],
+        [
+          462,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_cleanup_libdlpi",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\npcap_libdlpi_err(const char *linkname, const char *func, int err, char *errbuf)\n{\n\tpcap_snprintf(errbuf, PCAP_ERRBUF_SIZE, \"libpcap: %s failed on %s: %s\",\n\t    func, linkname, dlpi_strerror(err));\n}",
+      "fn_code_pos": [
+        [
+          467,
+          0
+        ],
+        [
+          472,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_libdlpi_err",
+        "parameters": {
+          "linkname": "char",
+          "func": "char",
+          "err": "int",
+          "errbuf": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\npcap_create_interface(const char *device _U_, char *ebuf)\n{\n\tpcap_t *p;\n\n\tp = pcap_create_common(ebuf, sizeof (struct pcap_dlpi));\n\tif (p == NULL)\n\t\treturn (NULL);\n\n\tp->activate_op = pcap_activate_libdlpi;\n\treturn (p);\n}",
+      "fn_code_pos": [
+        [
+          474,
+          0
+        ],
+        [
+          485,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "const char *\npcap_lib_version(void)\n{\n\treturn (PCAP_VERSION_STRING);\n}",
+      "fn_code_pos": [
+        [
+          490,
+          0
+        ],
+        [
+          494,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "dlpromiscon(pcap_t *, bpf_u_int32)",
+      "fn_dec_pos": [
+        [
+          46,
+          11
+        ],
+        [
+          46,
+          45
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dlpromiscon",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_read_libdlpi(pcap_t *, int, pcap_handler, u_char *)",
+      "fn_dec_pos": [
+        [
+          47,
+          11
+        ],
+        [
+          47,
+          67
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_read_libdlpi",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_inject_libdlpi(pcap_t *, const void *, size_t)",
+      "fn_dec_pos": [
+        [
+          48,
+          11
+        ],
+        [
+          48,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_inject_libdlpi",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_libdlpi_err(const char *, const char *, int, char *)",
+      "fn_dec_pos": [
+        [
+          49,
+          12
+        ],
+        [
+          49,
+          69
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_libdlpi_err",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pcap_cleanup_libdlpi(pcap_t *)",
+      "fn_dec_pos": [
+        [
+          50,
+          12
+        ],
+        [
+          50,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_cleanup_libdlpi",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "list_interfaces(const char *, void *)",
+      "fn_dec_pos": [
+        [
+          56,
+          17
+        ],
+        [
+          56,
+          54
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "list_interfaces",
+        "parameters": {},
+        "return_type": "boolean_t"
+      }
+    },
+    {
+      "fn_code": "pcap_create_interface(const char *device _U_, char *ebuf)",
+      "fn_dec_pos": [
+        [
+          475,
+          0
+        ],
+        [
+          475,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_lib_version(void)",
+      "fn_dec_pos": [
+        [
+          491,
+          0
+        ],
+        [
+          491,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct linknamelist {\n\tchar\tlinkname[DLPI_LINKNAME_MAX];\n\tstruct linknamelist *lnl_next;\n} linknamelist_t;",
+      {
+        "linkname[DLPI_LINKNAME_MAX]": "char",
+        "*lnl_next": "struct linknamelist"
+      },
+      "linknamelist_t",
+      [
+        58,
+        0
+      ],
+      [
+        61,
+        17
+      ]
+    ],
+    [
+      "typedef struct linkwalk {\n\tlinknamelist_t\t*lw_list;\n\tint\t\tlw_err;\n} linkwalk_t;",
+      {
+        "*lw_list": "linknamelist_t",
+        "lw_err": "int"
+      },
+      "linkwalk_t",
+      [
+        63,
+        0
+      ],
+      [
+        66,
+        13
+      ]
+    ],
+    [
+      "typedef struct linknamelist {\n\tchar\tlinkname[DLPI_LINKNAME_MAX];\n\tstruct linknamelist *lnl_next;\n} linknamelist_t;",
+      {
+        "linkname[DLPI_LINKNAME_MAX]": "char",
+        "*lnl_next": "struct linknamelist"
+      },
+      "linknamelist_t",
+      [
+        58,
+        0
+      ],
+      [
+        61,
+        17
+      ]
+    ],
+    [
+      "struct linknamelist",
+      {},
+      "",
+      [
+        60,
+        1
+      ],
+      [
+        60,
+        20
+      ]
+    ],
+    [
+      "typedef struct linkwalk {\n\tlinknamelist_t\t*lw_list;\n\tint\t\tlw_err;\n} linkwalk_t;",
+      {
+        "*lw_list": "linknamelist_t",
+        "lw_err": "int"
+      },
+      "linkwalk_t",
+      [
+        63,
+        0
+      ],
+      [
+        66,
+        13
+      ]
+    ],
+    [
+      "struct pcap_dlpi",
+      {},
+      "",
+      [
+        97,
+        1
+      ],
+      [
+        97,
+        17
+      ]
+    ],
+    [
+      "struct pcap_dlpi",
+      {},
+      "",
+      [
+        260,
+        1
+      ],
+      [
+        260,
+        17
+      ]
+    ],
+    [
+      "struct pcap_dlpi",
+      {},
+      "",
+      [
+        379,
+        1
+      ],
+      [
+        379,
+        17
+      ]
+    ],
+    [
+      "struct pcap_dlpi",
+      {},
+      "",
+      [
+        431,
+        1
+      ],
+      [
+        431,
+        17
+      ]
+    ],
+    [
+      "struct pcap_dlpi",
+      {},
+      "",
+      [
+        454,
+        1
+      ],
+      [
+        454,
+        17
+      ]
+    ],
+    [
+      "struct pcap_dlpi",
+      {},
+      "",
+      [
+        479,
+        38
+      ],
+      [
+        479,
+        54
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <sys/bufmod.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <sys/stream.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <libdlpi.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <memory.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <stropts.h>\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include \"dlpisubs.h\"\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

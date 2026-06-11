@@ -1,0 +1,1236 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static const char *\nthread_db_err_str (td_err_e err)\n{\n  static char buf[64];\n\n  switch (err)\n    {\n    case TD_OK:\n      return \"generic 'call succeeded'\";\n    case TD_ERR:\n      return \"generic error\";\n    case TD_NOTHR:\n      return \"no thread to satisfy query\";\n    case TD_NOSV:\n      return \"no sync handle to satisfy query\";\n    case TD_NOLWP:\n      return \"no LWP to satisfy query\";\n    case TD_BADPH:\n      return \"invalid process handle\";\n    case TD_BADTH:\n      return \"invalid thread handle\";\n    case TD_BADSH:\n      return \"invalid synchronization handle\";\n    case TD_BADTA:\n      return \"invalid thread agent\";\n    case TD_BADKEY:\n      return \"invalid key\";\n    case TD_NOMSG:\n      return \"no event message for getmsg\";\n    case TD_NOFPREGS:\n      return \"FPU register set not available\";\n    case TD_NOLIBTHREAD:\n      return \"application not linked with libthread\";\n    case TD_NOEVENT:\n      return \"requested event is not supported\";\n    case TD_NOCAPAB:\n      return \"capability not available\";\n    case TD_DBERR:\n      return \"debugger service failed\";\n    case TD_NOAPLIC:\n      return \"operation not applicable to\";\n    case TD_NOTSD:\n      return \"no thread-specific data for this thread\";\n    case TD_MALLOC:\n      return \"malloc failed\";\n    case TD_PARTIALREG:\n      return \"only part of register set was written/read\";\n    case TD_NOXREGS:\n      return \"X register set not available for this thread\";\n#ifdef HAVE_TD_VERSION\n    case TD_VERSION:\n      return \"version mismatch between libthread_db and libpthread\";\n#endif\n    default:\n      xsnprintf (buf, sizeof (buf), \"unknown thread_db error '%d'\", err);\n      return buf;\n    }\n}",
+      "fn_code_pos": [
+        [
+          71,
+          0
+        ],
+        [
+          128,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_err_str",
+        "parameters": {
+          "err": "td_err_e"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static char *\nthread_db_state_str (td_thr_state_e state)\n{\n  static char buf[64];\n\n  switch (state)\n    {\n    case TD_THR_STOPPED:\n      return \"stopped by debugger\";\n    case TD_THR_RUN:\n      return \"runnable\";\n    case TD_THR_ACTIVE:\n      return \"active\";\n    case TD_THR_ZOMBIE:\n      return \"zombie\";\n    case TD_THR_SLEEP:\n      return \"sleeping\";\n    case TD_THR_STOPPED_ASLEEP:\n      return \"stopped by debugger AND blocked\";\n    default:\n      xsnprintf (buf, sizeof (buf), \"unknown thread_db state %d\", state);\n      return buf;\n    }\n}",
+      "fn_code_pos": [
+        [
+          131,
+          0
+        ],
+        [
+          154,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_state_str",
+        "parameters": {
+          "state": "td_thr_state_e"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static int\nfind_one_thread (ptid_t ptid)\n{\n  td_thrhandle_t th;\n  td_thrinfo_t ti;\n  td_err_e err;\n  struct thread_info *inferior;\n  struct lwp_info *lwp;\n  struct thread_db *thread_db = current_process ()->priv->thread_db;\n  int lwpid = ptid_get_lwp (ptid);\n\n  inferior = (struct thread_info *) find_inferior_id (&all_threads, ptid);\n  lwp = get_thread_lwp (inferior);\n  if (lwp->thread_known)\n    return 1;\n\n  /* Get information about this thread.  */\n  err = thread_db->td_ta_map_lwp2thr_p (thread_db->thread_agent, lwpid, &th);\n  if (err != TD_OK)\n    error (\"Cannot get thread handle for LWP %d: %s\",\n\t   lwpid, thread_db_err_str (err));\n\n  err = thread_db->td_thr_get_info_p (&th, &ti);\n  if (err != TD_OK)\n    error (\"Cannot get thread info for LWP %d: %s\",\n\t   lwpid, thread_db_err_str (err));\n\n  if (debug_threads)\n    debug_printf (\"Found thread %ld (LWP %d)\\n\",\n\t\t  (unsigned long) ti.ti_tid, ti.ti_lid);\n\n  if (lwpid != ti.ti_lid)\n    {\n      warning (\"PID mismatch!  Expected %ld, got %ld\",\n\t       (long) lwpid, (long) ti.ti_lid);\n      return 0;\n    }\n\n  /* If the new thread ID is zero, a final thread ID will be available\n     later.  Do not enable thread debugging yet.  */\n  if (ti.ti_tid == 0)\n    return 0;\n\n  lwp->thread_known = 1;\n  lwp->th = th;\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          157,
+          0
+        ],
+        [
+          204,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_one_thread",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nattach_thread (const td_thrhandle_t *th_p, td_thrinfo_t *ti_p)\n{\n  struct process_info *proc = current_process ();\n  int pid = pid_of (proc);\n  ptid_t ptid = ptid_build (pid, ti_p->ti_lid, 0);\n  struct lwp_info *lwp;\n  int err;\n\n  if (debug_threads)\n    debug_printf (\"Attaching to thread %ld (LWP %d)\\n\",\n\t\t  (unsigned long) ti_p->ti_tid, ti_p->ti_lid);\n  err = linux_attach_lwp (ptid);\n  if (err != 0)\n    {\n      warning (\"Could not attach to thread %ld (LWP %d): %s\\n\",\n\t       (unsigned long) ti_p->ti_tid, ti_p->ti_lid,\n\t       linux_ptrace_attach_fail_reason_string (ptid, err));\n      return 0;\n    }\n\n  lwp = find_lwp_pid (ptid);\n  gdb_assert (lwp != NULL);\n  lwp->thread_known = 1;\n  lwp->th = *th_p;\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          208,
+          0
+        ],
+        [
+          235,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_thread",
+        "parameters": {
+          "th_p": "td_thrhandle_t",
+          "ti_p": "td_thrinfo_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nmaybe_attach_thread (const td_thrhandle_t *th_p, td_thrinfo_t *ti_p,\n\t\t     int *counter)\n{\n  struct lwp_info *lwp;\n\n  lwp = find_lwp_pid (pid_to_ptid (ti_p->ti_lid));\n  if (lwp != NULL)\n    return 1;\n\n  if (!attach_thread (th_p, ti_p))\n    return 0;\n\n  if (counter != NULL)\n    *counter += 1;\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          241,
+          0
+        ],
+        [
+          258,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "maybe_attach_thread",
+        "parameters": {
+          "th_p": "td_thrhandle_t",
+          "ti_p": "td_thrinfo_t",
+          "counter": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nfind_new_threads_callback (const td_thrhandle_t *th_p, void *data)\n{\n  td_thrinfo_t ti;\n  td_err_e err;\n  struct thread_db *thread_db = current_process ()->priv->thread_db;\n\n  err = thread_db->td_thr_get_info_p (th_p, &ti);\n  if (err != TD_OK)\n    error (\"Cannot get thread info: %s\", thread_db_err_str (err));\n\n  if (ti.ti_lid == -1)\n    {\n      /* A thread with kernel thread ID -1 is either a thread that\n\t exited and was joined, or a thread that is being created but\n\t hasn't started yet, and that is reusing the tcb/stack of a\n\t thread that previously exited and was joined.  (glibc marks\n\t terminated and joined threads with kernel thread ID -1.  See\n\t glibc PR17707.  */\n      if (debug_threads)\n\tdebug_printf (\"thread_db: skipping exited and \"\n\t\t      \"joined thread (0x%lx)\\n\",\n\t\t      (unsigned long) ti.ti_tid);\n      return 0;\n    }\n\n  /* Check for zombies.  */\n  if (ti.ti_state == TD_THR_UNKNOWN || ti.ti_state == TD_THR_ZOMBIE)\n    return 0;\n\n  if (!maybe_attach_thread (th_p, &ti, (int *) data))\n    {\n      /* Terminate iteration early: we might be looking at stale data in\n\t the inferior.  The thread_db_find_new_threads will retry.  */\n      return 1;\n    }\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          260,
+          0
+        ],
+        [
+          298,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_new_threads_callback",
+        "parameters": {
+          "th_p": "td_thrhandle_t",
+          "data": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nthread_db_find_new_threads (void)\n{\n  td_err_e err;\n  ptid_t ptid = current_ptid;\n  struct thread_db *thread_db = current_process ()->priv->thread_db;\n  int loop, iteration;\n\n  /* This function is only called when we first initialize thread_db.\n     First locate the initial thread.  If it is not ready for\n     debugging yet, then stop.  */\n  if (find_one_thread (ptid) == 0)\n    return;\n\n  /* Require 4 successive iterations which do not find any new threads.\n     The 4 is a heuristic: there is an inherent race here, and I have\n     seen that 2 iterations in a row are not always sufficient to\n     \"capture\" all threads.  */\n  for (loop = 0, iteration = 0; loop < 4; ++loop, ++iteration)\n    {\n      int new_thread_count = 0;\n\n      /* Iterate over all user-space threads to discover new threads.  */\n      err = thread_db->td_ta_thr_iter_p (thread_db->thread_agent,\n\t\t\t\t\t find_new_threads_callback,\n\t\t\t\t\t &new_thread_count,\n\t\t\t\t\t TD_THR_ANY_STATE,\n\t\t\t\t\t TD_THR_LOWEST_PRIORITY,\n\t\t\t\t\t TD_SIGNO_MASK, TD_THR_ANY_USER_FLAGS);\n      if (debug_threads)\n\tdebug_printf (\"Found %d threads in iteration %d.\\n\",\n\t\t      new_thread_count, iteration);\n\n      if (new_thread_count != 0)\n\t{\n\t  /* Found new threads.  Restart iteration from beginning.  */\n\t  loop = -1;\n\t}\n    }\n  if (err != TD_OK)\n    error (\"Cannot find new threads: %s\", thread_db_err_str (err));\n}",
+      "fn_code_pos": [
+        [
+          300,
+          0
+        ],
+        [
+          341,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_find_new_threads",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nthread_db_look_up_symbols (void)\n{\n  struct thread_db *thread_db = current_process ()->priv->thread_db;\n  const char **sym_list;\n  CORE_ADDR unused;\n\n  for (sym_list = thread_db->td_symbol_list_p (); *sym_list; sym_list++)\n    look_up_one_symbol (*sym_list, &unused, 1);\n\n  /* We're not interested in any other libraries loaded after this\n     point, only in symbols in libpthread.so.  */\n  thread_db->all_symbols_looked_up = 1;\n}",
+      "fn_code_pos": [
+        [
+          348,
+          0
+        ],
+        [
+          361,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_look_up_symbols",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\nthread_db_look_up_one_symbol (const char *name, CORE_ADDR *addrp)\n{\n  struct thread_db *thread_db = current_process ()->priv->thread_db;\n  int may_ask_gdb = !thread_db->all_symbols_looked_up;\n\n  /* If we've passed the call to thread_db_look_up_symbols, then\n     anything not in the cache must not exist; we're not interested\n     in any libraries loaded after that point, only in symbols in\n     libpthread.so.  It might not be an appropriate time to look\n     up a symbol, e.g. while we're trying to fetch registers.  */\n  return look_up_one_symbol (name, addrp, may_ask_gdb);\n}",
+      "fn_code_pos": [
+        [
+          363,
+          0
+        ],
+        [
+          375,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_look_up_one_symbol",
+        "parameters": {
+          "name": "char",
+          "addrp": "CORE_ADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nthread_db_get_tls_address (struct thread_info *thread, CORE_ADDR offset,\n\t\t\t   CORE_ADDR load_module, CORE_ADDR *address)\n{\n  psaddr_t addr;\n  td_err_e err;\n  struct lwp_info *lwp;\n  struct thread_info *saved_thread;\n  struct process_info *proc;\n  struct thread_db *thread_db;\n\n  proc = get_thread_process (thread);\n  thread_db = proc->priv->thread_db;\n\n  /* If the thread layer is not (yet) initialized, fail.  */\n  if (thread_db == NULL || !thread_db->all_symbols_looked_up)\n    return TD_ERR;\n\n  /* If td_thr_tls_get_addr is missing rather do not expect td_thr_tlsbase\n     could work.  */\n  if (thread_db->td_thr_tls_get_addr_p == NULL\n      || (load_module == 0 && thread_db->td_thr_tlsbase_p == NULL))\n    return -1;\n\n  lwp = get_thread_lwp (thread);\n  if (!lwp->thread_known)\n    find_one_thread (thread->entry.id);\n  if (!lwp->thread_known)\n    return TD_NOTHR;\n\n  saved_thread = current_thread;\n  current_thread = thread;\n\n  if (load_module != 0)\n    {\n      /* Note the cast through uintptr_t: this interface only works if\n\t a target address fits in a psaddr_t, which is a host pointer.\n\t So a 32-bit debugger can not access 64-bit TLS through this.  */\n      err = thread_db->td_thr_tls_get_addr_p (&lwp->th,\n\t\t\t\t\t     (psaddr_t) (uintptr_t) load_module,\n\t\t\t\t\t      offset, &addr);\n    }\n  else\n    {\n      /* This code path handles the case of -static -pthread executables:\n\t https://sourceware.org/ml/libc-help/2014-03/msg00024.html\n\t For older GNU libc r_debug.r_map is NULL.  For GNU libc after\n\t PR libc/16831 due to GDB PR threads/16954 LOAD_MODULE is also NULL.\n\t The constant number 1 depends on GNU __libc_setup_tls\n\t initialization of l_tls_modid to 1.  */\n      err = thread_db->td_thr_tlsbase_p (&lwp->th, 1, &addr);\n      addr = (char *) addr + offset;\n    }\n\n  current_thread = saved_thread;\n  if (err == TD_OK)\n    {\n      *address = (CORE_ADDR) (uintptr_t) addr;\n      return 0;\n    }\n  else\n    return err;\n}",
+      "fn_code_pos": [
+        [
+          377,
+          0
+        ],
+        [
+          439,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_get_tls_address",
+        "parameters": {
+          "thread": "struct thread_info",
+          "offset": "CORE_ADDR",
+          "load_module": "CORE_ADDR",
+          "address": "CORE_ADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nthread_db_load_search (void)\n{\n  td_err_e err;\n  struct thread_db *tdb;\n  struct process_info *proc = current_process ();\n\n  gdb_assert (proc->priv->thread_db == NULL);\n\n  tdb = XCNEW (struct thread_db);\n  proc->priv->thread_db = tdb;\n\n  tdb->td_ta_new_p = &td_ta_new;\n\n  /* Attempt to open a connection to the thread library.  */\n  err = tdb->td_ta_new_p (&tdb->proc_handle, &tdb->thread_agent);\n  if (err != TD_OK)\n    {\n      if (debug_threads)\n\tdebug_printf (\"td_ta_new(): %s\\n\", thread_db_err_str (err));\n      free (tdb);\n      proc->priv->thread_db = NULL;\n      return 0;\n    }\n\n  tdb->td_ta_map_lwp2thr_p = &td_ta_map_lwp2thr;\n  tdb->td_thr_get_info_p = &td_thr_get_info;\n  tdb->td_ta_thr_iter_p = &td_ta_thr_iter;\n  tdb->td_symbol_list_p = &td_symbol_list;\n\n  /* These are not essential.  */\n  tdb->td_thr_tls_get_addr_p = &td_thr_tls_get_addr;\n  tdb->td_thr_tlsbase_p = &td_thr_tlsbase;\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          443,
+          0
+        ],
+        [
+          478,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_load_search",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ntry_thread_db_load_1 (void *handle)\n{\n  td_err_e err;\n  struct thread_db *tdb;\n  struct process_info *proc = current_process ();\n\n  gdb_assert (proc->priv->thread_db == NULL);\n\n  tdb = XCNEW (struct thread_db);\n  proc->priv->thread_db = tdb;\n\n  tdb->handle = handle;\n\n  /* Initialize pointers to the dynamic library functions we will use.\n     Essential functions first.  */\n\n#define CHK(required, a)\t\t\t\t\t\\\n  do\t\t\t\t\t\t\t\t\\\n    {\t\t\t\t\t\t\t\t\\\n      if ((a) == NULL)\t\t\t\t\t\t\\\n\t{\t\t\t\t\t\t\t\\\n\t  if (debug_threads)\t\t\t\t\t\\\n\t    debug_printf (\"dlsym: %s\\n\", dlerror ());\t\t\\\n\t  if (required)\t\t\t\t\t\t\\\n\t    {\t\t\t\t\t\t\t\\\n\t      free (tdb);\t\t\t\t\t\\\n\t      proc->priv->thread_db = NULL;\t\t\t\\\n\t      return 0;\t\t\t\t\t\t\\\n\t    }\t\t\t\t\t\t\t\\\n\t}\t\t\t\t\t\t\t\\\n    }\t\t\t\t\t\t\t\t\\\n  while (0)\n\n#define TDB_DLSYM(tdb, func) \\\n  tdb->func ## _p = (func ## _ftype *) dlsym (tdb->handle, #func)\n\n  CHK (1, TDB_DLSYM (tdb, td_ta_new));\n\n  /* Attempt to open a connection to the thread library.  */\n  err = tdb->td_ta_new_p (&tdb->proc_handle, &tdb->thread_agent);\n  if (err != TD_OK)\n    {\n      if (debug_threads)\n\tdebug_printf (\"td_ta_new(): %s\\n\", thread_db_err_str (err));\n      free (tdb);\n      proc->priv->thread_db = NULL;\n      return 0;\n    }\n\n  CHK (1, TDB_DLSYM (tdb, td_ta_map_lwp2thr));\n  CHK (1, TDB_DLSYM (tdb, td_thr_get_info));\n  CHK (1, TDB_DLSYM (tdb, td_ta_thr_iter));\n  CHK (1, TDB_DLSYM (tdb, td_symbol_list));\n\n  /* These are not essential.  */\n  CHK (0, TDB_DLSYM (tdb, td_thr_tls_get_addr));\n  CHK (0, TDB_DLSYM (tdb, td_thr_tlsbase));\n\n#undef CHK\n#undef TDB_DLSYM\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          482,
+          0
+        ],
+        [
+          545,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "try_thread_db_load_1",
+        "parameters": {
+          "handle": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static const char *\ndladdr_to_soname (const void *addr)\n{\n  Dl_info info;\n\n  if (dladdr (addr, &info) != 0)\n    return info.dli_fname;\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          553,
+          0
+        ],
+        [
+          561,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dladdr_to_soname",
+        "parameters": {
+          "addr": "void"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static int\ntry_thread_db_load (const char *library)\n{\n  void *handle;\n\n  if (debug_threads)\n    debug_printf (\"Trying host libthread_db library: %s.\\n\",\n\t\t  library);\n  handle = dlopen (library, RTLD_NOW);\n  if (handle == NULL)\n    {\n      if (debug_threads)\n\tdebug_printf (\"dlopen failed: %s.\\n\", dlerror ());\n      return 0;\n    }\n\n#ifdef HAVE_DLADDR\n  if (debug_threads && strchr (library, '/') == NULL)\n    {\n      void *td_init;\n\n      td_init = dlsym (handle, \"td_init\");\n      if (td_init != NULL)\n\t{\n\t  const char *const libpath = dladdr_to_soname (td_init);\n\n\t  if (libpath != NULL)\n\t    debug_printf (\"Host %s resolved to: %s.\\n\", library, libpath);\n\t}\n    }\n#endif\n\n  if (try_thread_db_load_1 (handle))\n    return 1;\n\n  /* This library \"refused\" to work on current inferior.  */\n  dlclose (handle);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          565,
+          0
+        ],
+        [
+          603,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "try_thread_db_load",
+        "parameters": {
+          "library": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ntry_thread_db_load_from_sdir (void)\n{\n  return try_thread_db_load (LIBTHREAD_DB_SO);\n}",
+      "fn_code_pos": [
+        [
+          610,
+          0
+        ],
+        [
+          614,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "try_thread_db_load_from_sdir",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ntry_thread_db_load_from_dir (const char *dir, size_t dir_len)\n{\n  char path[PATH_MAX];\n\n  if (dir_len + 1 + strlen (LIBTHREAD_DB_SO) + 1 > sizeof (path))\n    {\n      char *cp = (char *) xmalloc (dir_len + 1);\n\n      memcpy (cp, dir, dir_len);\n      cp[dir_len] = '\\0';\n      warning (_(\"libthread-db-search-path component too long,\"\n\t\t \" ignored: %s.\"), cp);\n      free (cp);\n      return 0;\n    }\n\n  memcpy (path, dir, dir_len);\n  path[dir_len] = '/';\n  strcpy (path + dir_len + 1, LIBTHREAD_DB_SO);\n  return try_thread_db_load (path);\n}",
+      "fn_code_pos": [
+        [
+          619,
+          0
+        ],
+        [
+          640,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "try_thread_db_load_from_dir",
+        "parameters": {
+          "dir": "char",
+          "dir_len": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nthread_db_load_search (void)\n{\n  VEC (char_ptr) *dir_vec;\n  char *this_dir;\n  int i, rc = 0;\n\n  if (libthread_db_search_path == NULL)\n    libthread_db_search_path = xstrdup (LIBTHREAD_DB_SEARCH_PATH);\n\n  dir_vec = dirnames_to_char_ptr_vec (libthread_db_search_path);\n\n  for (i = 0; VEC_iterate (char_ptr, dir_vec, i, this_dir); ++i)\n    {\n      const int pdir_len = sizeof (\"$pdir\") - 1;\n      size_t this_dir_len;\n\n      this_dir_len = strlen (this_dir);\n\n      if (strncmp (this_dir, \"$pdir\", pdir_len) == 0\n\t  && (this_dir[pdir_len] == '\\0'\n\t      || this_dir[pdir_len] == '/'))\n\t{\n\t  /* We don't maintain a list of loaded libraries so we don't know\n\t     where libpthread lives.  We *could* fetch the info, but we don't\n\t     do that yet.  Ignore it.  */\n\t}\n      else if (strcmp (this_dir, \"$sdir\") == 0)\n\t{\n\t  if (try_thread_db_load_from_sdir ())\n\t    {\n\t      rc = 1;\n\t      break;\n\t    }\n\t}\n      else\n\t{\n\t  if (try_thread_db_load_from_dir (this_dir, this_dir_len))\n\t    {\n\t      rc = 1;\n\t      break;\n\t    }\n\t}\n    }\n\n  free_char_ptr_vec (dir_vec);\n  if (debug_threads)\n    debug_printf (\"thread_db_load_search returning %d\\n\", rc);\n  return rc;\n}",
+      "fn_code_pos": [
+        [
+          646,
+          0
+        ],
+        [
+          695,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_load_search",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nthread_db_init (void)\n{\n  struct process_info *proc = current_process ();\n\n  /* FIXME drow/2004-10-16: This is the \"overall process ID\", which\n     GNU/Linux calls tgid, \"thread group ID\".  When we support\n     attaching to threads, the original thread may not be the correct\n     thread.  We would have to get the process ID from /proc for NPTL.\n\n     This isn't the only place in gdbserver that assumes that the first\n     process in the list is the thread group leader.  */\n\n  if (thread_db_load_search ())\n    {\n      /* It's best to avoid td_ta_thr_iter if possible.  That walks\n\t data structures in the inferior's address space that may be\n\t corrupted, or, if the target is running, the list may change\n\t while we walk it.  In the latter case, it's possible that a\n\t thread exits just at the exact time that causes GDBserver to\n\t get stuck in an infinite loop.  As the kernel supports clone\n\t events and /proc/PID/task/ exists, then we already know about\n\t all threads in the process.  When we need info out of\n\t thread_db on a given thread (e.g., for TLS), we'll use\n\t find_one_thread then.  That uses thread_db entry points that\n\t do not walk libpthread's thread list, so should be safe, as\n\t well as more efficient.  */\n      if (!linux_proc_task_list_dir_exists (pid_of (proc)))\n\tthread_db_find_new_threads ();\n      thread_db_look_up_symbols ();\n      return 1;\n    }\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          699,
+          0
+        ],
+        [
+          733,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_init",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nany_thread_of (struct inferior_list_entry *entry, void *args)\n{\n  int *pid_p = (int *) args;\n\n  if (ptid_get_pid (entry->id) == *pid_p)\n    return 1;\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          735,
+          0
+        ],
+        [
+          744,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "any_thread_of",
+        "parameters": {
+          "entry": "struct inferior_list_entry",
+          "args": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nswitch_to_process (struct process_info *proc)\n{\n  int pid = pid_of (proc);\n\n  current_thread =\n    (struct thread_info *) find_inferior (&all_threads,\n\t\t\t\t\t  any_thread_of, &pid);\n}",
+      "fn_code_pos": [
+        [
+          746,
+          0
+        ],
+        [
+          754,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "switch_to_process",
+        "parameters": {
+          "proc": "struct process_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndisable_thread_event_reporting (struct process_info *proc)\n{\n  struct thread_db *thread_db = proc->priv->thread_db;\n  if (thread_db)\n    {\n      td_err_e (*td_ta_clear_event_p) (const td_thragent_t *ta,\n\t\t\t\t       td_thr_events_t *event);\n\n#ifndef USE_LIBTHREAD_DB_DIRECTLY\n      td_ta_clear_event_p\n\t= (td_ta_clear_event_ftype *) dlsym (thread_db->handle,\n\t\t\t\t\t     \"td_ta_clear_event\");\n#else\n      td_ta_clear_event_p = &td_ta_clear_event;\n#endif\n\n      if (td_ta_clear_event_p != NULL)\n\t{\n\t  struct thread_info *saved_thread = current_thread;\n\t  td_thr_events_t events;\n\n\t  switch_to_process (proc);\n\n\t  /* Set the process wide mask saying we aren't interested\n\t     in any events anymore.  */\n\t  td_event_fillset (&events);\n\t  (*td_ta_clear_event_p) (thread_db->thread_agent, &events);\n\n\t  current_thread = saved_thread;\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          758,
+          0
+        ],
+        [
+          790,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "disable_thread_event_reporting",
+        "parameters": {
+          "proc": "struct process_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nthread_db_detach (struct process_info *proc)\n{\n  struct thread_db *thread_db = proc->priv->thread_db;\n\n  if (thread_db)\n    {\n      disable_thread_event_reporting (proc);\n    }\n}",
+      "fn_code_pos": [
+        [
+          792,
+          0
+        ],
+        [
+          801,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_detach",
+        "parameters": {
+          "proc": "struct process_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nthread_db_mourn (struct process_info *proc)\n{\n  struct thread_db *thread_db = proc->priv->thread_db;\n  if (thread_db)\n    {\n      td_ta_delete_ftype *td_ta_delete_p;\n\n#ifndef USE_LIBTHREAD_DB_DIRECTLY\n      td_ta_delete_p = (td_ta_delete_ftype *) dlsym (thread_db->handle, \"td_ta_delete\");\n#else\n      td_ta_delete_p = &td_ta_delete;\n#endif\n\n      if (td_ta_delete_p != NULL)\n\t(*td_ta_delete_p) (thread_db->thread_agent);\n\n#ifndef USE_LIBTHREAD_DB_DIRECTLY\n      dlclose (thread_db->handle);\n#endif  /* USE_LIBTHREAD_DB_DIRECTLY  */\n\n      free (thread_db);\n      proc->priv->thread_db = NULL;\n    }\n}",
+      "fn_code_pos": [
+        [
+          805,
+          0
+        ],
+        [
+          829,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_mourn",
+        "parameters": {
+          "proc": "struct process_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\nthread_db_handle_monitor_command (char *mon)\n{\n  const char *cmd = \"set libthread-db-search-path\";\n  size_t cmd_len = strlen (cmd);\n\n  if (strncmp (mon, cmd, cmd_len) == 0\n      && (mon[cmd_len] == '\\0'\n\t  || mon[cmd_len] == ' '))\n    {\n      const char *cp = mon + cmd_len;\n\n      if (libthread_db_search_path != NULL)\n\tfree (libthread_db_search_path);\n\n      /* Skip leading space (if any).  */\n      while (isspace (*cp))\n\t++cp;\n\n      if (*cp == '\\0')\n\tcp = LIBTHREAD_DB_SEARCH_PATH;\n      libthread_db_search_path = xstrdup (cp);\n\n      monitor_output (\"libthread-db-search-path set to `\");\n      monitor_output (libthread_db_search_path);\n      monitor_output (\"'\\n\");\n      return 1;\n    }\n\n  /* Tell server.c to perform default processing.  */\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          834,
+          0
+        ],
+        [
+          865,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_handle_monitor_command",
+        "parameters": {
+          "mon": "char"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "find_one_thread (ptid_t)",
+      "fn_dec_pos": [
+        [
+          68,
+          11
+        ],
+        [
+          68,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_one_thread",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "find_new_threads_callback (const td_thrhandle_t *th_p, void *data)",
+      "fn_dec_pos": [
+        [
+          69,
+          11
+        ],
+        [
+          69,
+          77
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_new_threads_callback",
+        "parameters": {
+          "th_p": "td_thrhandle_t",
+          "data": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "thread_db_err_str (td_err_e err)",
+      "fn_dec_pos": [
+        [
+          72,
+          0
+        ],
+        [
+          72,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_err_str",
+        "parameters": {
+          "err": "td_err_e"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "thread_db_state_str (td_thr_state_e state)",
+      "fn_dec_pos": [
+        [
+          132,
+          0
+        ],
+        [
+          132,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "thread_db_state_str",
+        "parameters": {
+          "state": "td_thr_state_e"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "dladdr_to_soname (const void *addr)",
+      "fn_dec_pos": [
+        [
+          554,
+          0
+        ],
+        [
+          554,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dladdr_to_soname",
+        "parameters": {
+          "addr": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*td_ta_clear_event_p) (const td_thragent_t *ta,\n\t\t\t\t       td_thr_events_t *event)",
+      "fn_dec_pos": [
+        [
+          764,
+          15
+        ],
+        [
+          765,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "ta": "td_thragent_t",
+          "event": "td_thr_events_t"
+        },
+        "return_type": "td_err_e"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct thread_db\n{\n  /* Structure that identifies the child process for the\n     <proc_service.h> interface.  */\n  struct ps_prochandle proc_handle;\n\n  /* Connection to the libthread_db library.  */\n  td_thragent_t *thread_agent;\n\n  /* If this flag has been set, we've already asked GDB for all\n     symbols we might need; assume symbol cache misses are\n     failures.  */\n  int all_symbols_looked_up;\n\n#ifndef USE_LIBTHREAD_DB_DIRECTLY\n  /* Handle of the libthread_db from dlopen.  */\n  void *handle;\n#endif\n\n  /* Addresses of libthread_db functions.  */\n  td_ta_new_ftype *td_ta_new_p;\n  td_ta_map_lwp2thr_ftype *td_ta_map_lwp2thr_p;\n  td_thr_get_info_ftype *td_thr_get_info_p;\n  td_ta_thr_iter_ftype *td_ta_thr_iter_p;\n  td_thr_tls_get_addr_ftype *td_thr_tls_get_addr_p;\n  td_thr_tlsbase_ftype *td_thr_tlsbase_p;\n  td_symbol_list_ftype *td_symbol_list_p;\n}",
+      {
+        "proc_handle": "struct ps_prochandle",
+        "*thread_agent": "td_thragent_t",
+        "all_symbols_looked_up": "int",
+        "*handle": "void",
+        "*td_ta_new_p": "td_ta_new_ftype",
+        "*td_ta_map_lwp2thr_p": "td_ta_map_lwp2thr_ftype",
+        "*td_thr_get_info_p": "td_thr_get_info_ftype",
+        "*td_ta_thr_iter_p": "td_ta_thr_iter_ftype",
+        "*td_thr_tls_get_addr_p": "td_thr_tls_get_addr_ftype",
+        "*td_thr_tlsbase_p": "td_thr_tlsbase_ftype",
+        "*td_symbol_list_p": "td_symbol_list_ftype"
+      },
+      "thread_db",
+      [
+        37,
+        0
+      ],
+      [
+        64,
+        1
+      ]
+    ],
+    [
+      "struct thread_db\n{\n  /* Structure that identifies the child process for the\n     <proc_service.h> interface.  */\n  struct ps_prochandle proc_handle;\n\n  /* Connection to the libthread_db library.  */\n  td_thragent_t *thread_agent;\n\n  /* If this flag has been set, we've already asked GDB for all\n     symbols we might need; assume symbol cache misses are\n     failures.  */\n  int all_symbols_looked_up;\n\n#ifndef USE_LIBTHREAD_DB_DIRECTLY\n  /* Handle of the libthread_db from dlopen.  */\n  void *handle;\n#endif\n\n  /* Addresses of libthread_db functions.  */\n  td_ta_new_ftype *td_ta_new_p;\n  td_ta_map_lwp2thr_ftype *td_ta_map_lwp2thr_p;\n  td_thr_get_info_ftype *td_thr_get_info_p;\n  td_ta_thr_iter_ftype *td_ta_thr_iter_p;\n  td_thr_tls_get_addr_ftype *td_thr_tls_get_addr_p;\n  td_thr_tlsbase_ftype *td_thr_tlsbase_p;\n  td_symbol_list_ftype *td_symbol_list_p;\n}",
+      {
+        "proc_handle": "struct ps_prochandle",
+        "*thread_agent": "td_thragent_t",
+        "all_symbols_looked_up": "int",
+        "*handle": "void",
+        "*td_ta_new_p": "td_ta_new_ftype",
+        "*td_ta_map_lwp2thr_p": "td_ta_map_lwp2thr_ftype",
+        "*td_thr_get_info_p": "td_thr_get_info_ftype",
+        "*td_ta_thr_iter_p": "td_ta_thr_iter_ftype",
+        "*td_thr_tls_get_addr_p": "td_thr_tls_get_addr_ftype",
+        "*td_thr_tlsbase_p": "td_thr_tlsbase_ftype",
+        "*td_symbol_list_p": "td_symbol_list_ftype"
+      },
+      "thread_db",
+      [
+        37,
+        0
+      ],
+      [
+        64,
+        1
+      ]
+    ],
+    [
+      "struct ps_prochandle",
+      {},
+      "",
+      [
+        41,
+        2
+      ],
+      [
+        41,
+        22
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        163,
+        2
+      ],
+      [
+        163,
+        20
+      ]
+    ],
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        164,
+        2
+      ],
+      [
+        164,
+        17
+      ]
+    ],
+    [
+      "struct thread_db",
+      {},
+      "",
+      [
+        165,
+        2
+      ],
+      [
+        165,
+        18
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        168,
+        14
+      ],
+      [
+        168,
+        32
+      ]
+    ],
+    [
+      "struct process_info",
+      {},
+      "",
+      [
+        211,
+        2
+      ],
+      [
+        211,
+        21
+      ]
+    ],
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        214,
+        2
+      ],
+      [
+        214,
+        17
+      ]
+    ],
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        245,
+        2
+      ],
+      [
+        245,
+        17
+      ]
+    ],
+    [
+      "struct thread_db",
+      {},
+      "",
+      [
+        265,
+        2
+      ],
+      [
+        265,
+        18
+      ]
+    ],
+    [
+      "struct thread_db",
+      {},
+      "",
+      [
+        305,
+        2
+      ],
+      [
+        305,
+        18
+      ]
+    ],
+    [
+      "struct thread_db",
+      {},
+      "",
+      [
+        351,
+        2
+      ],
+      [
+        351,
+        18
+      ]
+    ],
+    [
+      "struct thread_db",
+      {},
+      "",
+      [
+        366,
+        2
+      ],
+      [
+        366,
+        18
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        378,
+        27
+      ],
+      [
+        378,
+        45
+      ]
+    ],
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        383,
+        2
+      ],
+      [
+        383,
+        17
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        384,
+        2
+      ],
+      [
+        384,
+        20
+      ]
+    ],
+    [
+      "struct process_info",
+      {},
+      "",
+      [
+        385,
+        2
+      ],
+      [
+        385,
+        21
+      ]
+    ],
+    [
+      "struct thread_db",
+      {},
+      "",
+      [
+        386,
+        2
+      ],
+      [
+        386,
+        18
+      ]
+    ],
+    [
+      "struct thread_db",
+      {},
+      "",
+      [
+        447,
+        2
+      ],
+      [
+        447,
+        18
+      ]
+    ],
+    [
+      "struct process_info",
+      {},
+      "",
+      [
+        448,
+        2
+      ],
+      [
+        448,
+        21
+      ]
+    ],
+    [
+      "struct thread_db",
+      {},
+      "",
+      [
+        486,
+        2
+      ],
+      [
+        486,
+        18
+      ]
+    ],
+    [
+      "struct process_info",
+      {},
+      "",
+      [
+        487,
+        2
+      ],
+      [
+        487,
+        21
+      ]
+    ],
+    [
+      "struct process_info",
+      {},
+      "",
+      [
+        702,
+        2
+      ],
+      [
+        702,
+        21
+      ]
+    ],
+    [
+      "struct inferior_list_entry",
+      {},
+      "",
+      [
+        736,
+        15
+      ],
+      [
+        736,
+        41
+      ]
+    ],
+    [
+      "struct process_info",
+      {},
+      "",
+      [
+        747,
+        19
+      ],
+      [
+        747,
+        38
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        752,
+        5
+      ],
+      [
+        752,
+        23
+      ]
+    ],
+    [
+      "struct process_info",
+      {},
+      "",
+      [
+        759,
+        32
+      ],
+      [
+        759,
+        51
+      ]
+    ],
+    [
+      "struct thread_db",
+      {},
+      "",
+      [
+        761,
+        2
+      ],
+      [
+        761,
+        18
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        777,
+        3
+      ],
+      [
+        777,
+        21
+      ]
+    ],
+    [
+      "struct process_info",
+      {},
+      "",
+      [
+        793,
+        18
+      ],
+      [
+        793,
+        37
+      ]
+    ],
+    [
+      "struct thread_db",
+      {},
+      "",
+      [
+        795,
+        2
+      ],
+      [
+        795,
+        18
+      ]
+    ],
+    [
+      "struct process_info",
+      {},
+      "",
+      [
+        806,
+        17
+      ],
+      [
+        806,
+        36
+      ]
+    ],
+    [
+      "struct thread_db",
+      {},
+      "",
+      [
+        808,
+        2
+      ],
+      [
+        808,
+        18
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"server.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"linux-low.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_proc_service.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"nat/gdb_thread_db.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_vecs.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"nat/linux-procfs.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <dlfcn.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <limits.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

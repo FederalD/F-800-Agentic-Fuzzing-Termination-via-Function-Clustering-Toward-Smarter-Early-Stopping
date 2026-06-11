@@ -1,0 +1,2753 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static ULONGEST\narc_insn_get_operand_value (const struct arc_instruction &insn,\n\t\t\t    unsigned int operand_num)\n{\n  switch (insn.operands[operand_num].kind)\n    {\n    case ARC_OPERAND_KIND_LIMM:\n      gdb_assert (insn.limm_p);\n      return insn.limm_value;\n    case ARC_OPERAND_KIND_SHIMM:\n      return insn.operands[operand_num].value;\n    default:\n      /* Value in instruction is a register number.  */\n      struct regcache *regcache = get_current_regcache ();\n      ULONGEST value;\n      regcache_cooked_read_unsigned (regcache,\n\t\t\t\t     insn.operands[operand_num].value,\n\t\t\t\t     &value);\n      return value;\n    }\n}",
+      "fn_code_pos": [
+        [
+          157,
+          0
+        ],
+        [
+          177,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_insn_get_operand_value",
+        "parameters": {
+          "insn": "struct arc_instruction",
+          "operand_num": "unsigned int"
+        },
+        "return_type": "ULONGEST"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\narc_insn_get_operand_value_signed (const struct arc_instruction &insn,\n\t\t\t\t   unsigned int operand_num)\n{\n  switch (insn.operands[operand_num].kind)\n    {\n    case ARC_OPERAND_KIND_LIMM:\n      gdb_assert (insn.limm_p);\n      /* Convert unsigned raw value to signed one.  This assumes 2's\n\t complement arithmetic, but so is the LONG_MIN value from generic\n\t defs.h and that assumption is true for ARC.  */\n      gdb_static_assert (sizeof (insn.limm_value) == sizeof (int));\n      return (((LONGEST) insn.limm_value) ^ INT_MIN) - INT_MIN;\n    case ARC_OPERAND_KIND_SHIMM:\n      /* Sign conversion has been done by binutils.  */\n      return insn.operands[operand_num].value;\n    default:\n      /* Value in instruction is a register number.  */\n      struct regcache *regcache = get_current_regcache ();\n      LONGEST value;\n      regcache_cooked_read_signed (regcache,\n\t\t\t\t   insn.operands[operand_num].value,\n\t\t\t\t   &value);\n      return value;\n    }\n}",
+      "fn_code_pos": [
+        [
+          181,
+          0
+        ],
+        [
+          206,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_insn_get_operand_value_signed",
+        "parameters": {
+          "insn": "struct arc_instruction",
+          "operand_num": "unsigned int"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "int\narc_insn_get_memory_base_reg (const struct arc_instruction &insn)\n{\n  /* POP_S and PUSH_S have SP as an implicit argument in a disassembler.  */\n  if (insn.insn_class == PUSH || insn.insn_class == POP)\n    return ARC_SP_REGNUM;\n\n  gdb_assert (insn.insn_class == LOAD || insn.insn_class == STORE);\n\n  /* Other instructions all have at least two operands: operand 0 is data,\n     operand 1 is address.  Operand 2 is offset from address.  However, see\n     comment to arc_instruction.operands - in some cases, third operand may be\n     missing, namely if it is 0.  */\n  gdb_assert (insn.operands_count >= 2);\n  return insn.operands[1].value;\n}",
+      "fn_code_pos": [
+        [
+          210,
+          0
+        ],
+        [
+          225,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_insn_get_memory_base_reg",
+        "parameters": {
+          "insn": "struct arc_instruction"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "CORE_ADDR\narc_insn_get_memory_offset (const struct arc_instruction &insn)\n{\n  /* POP_S and PUSH_S have offset as an implicit argument in a\n     disassembler.  */\n  if (insn.insn_class == POP)\n    return 4;\n  else if (insn.insn_class == PUSH)\n    return -4;\n\n  gdb_assert (insn.insn_class == LOAD || insn.insn_class == STORE);\n\n  /* Other instructions all have at least two operands: operand 0 is data,\n     operand 1 is address.  Operand 2 is offset from address.  However, see\n     comment to arc_instruction.operands - in some cases, third operand may be\n     missing, namely if it is 0.  */\n  if (insn.operands_count < 3)\n    return 0;\n\n  CORE_ADDR value = arc_insn_get_operand_value (insn, 2);\n  /* Handle scaling.  */\n  if (insn.writeback_mode == ARC_WRITEBACK_AS)\n    {\n      /* Byte data size is not valid for AS.  Halfword means shift by 1 bit.\n\t Word and double word means shift by 2 bits.  */\n      gdb_assert (insn.data_size_mode != ARC_SCALING_B);\n      if (insn.data_size_mode == ARC_SCALING_H)\n\tvalue <<= 1;\n      else\n\tvalue <<= 2;\n    }\n  return value;\n}",
+      "fn_code_pos": [
+        [
+          229,
+          0
+        ],
+        [
+          261,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_insn_get_memory_offset",
+        "parameters": {
+          "insn": "struct arc_instruction"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "CORE_ADDR\narc_insn_get_branch_target (const struct arc_instruction &insn)\n{\n  gdb_assert (insn.is_control_flow);\n\n  /* BI [c]: PC = nextPC + (c << 2).  */\n  if (insn.insn_class == BI)\n    {\n      ULONGEST reg_value = arc_insn_get_operand_value (insn, 0);\n      return arc_insn_get_linear_next_pc (insn) + (reg_value << 2);\n    }\n  /* BIH [c]: PC = nextPC + (c << 1).  */\n  else if (insn.insn_class == BIH)\n    {\n      ULONGEST reg_value = arc_insn_get_operand_value (insn, 0);\n      return arc_insn_get_linear_next_pc (insn) + (reg_value << 1);\n    }\n  /* JLI and EI.  */\n  /* JLI and EI depend on optional AUX registers.  Not supported right now.  */\n  else if (insn.insn_class == JLI)\n    {\n      fprintf_unfiltered (gdb_stderr,\n\t\t\t  \"JLI_S instruction is not supported by the GDB.\");\n      return 0;\n    }\n  else if (insn.insn_class == EI)\n    {\n      fprintf_unfiltered (gdb_stderr,\n\t\t\t  \"EI_S instruction is not supported by the GDB.\");\n      return 0;\n    }\n  /* LEAVE_S: PC = BLINK.  */\n  else if (insn.insn_class == LEAVE)\n    {\n      struct regcache *regcache = get_current_regcache ();\n      ULONGEST value;\n      regcache_cooked_read_unsigned (regcache, ARC_BLINK_REGNUM, &value);\n      return value;\n    }\n  /* BBIT0/1, BRcc: PC = currentPC + operand.  */\n  else if (insn.insn_class == BBIT0 || insn.insn_class == BBIT1\n\t   || insn.insn_class == BRCC)\n    {\n      /* Most instructions has branch target as their sole argument.  However\n\t conditional brcc/bbit has it as a third operand.  */\n      CORE_ADDR pcrel_addr = arc_insn_get_operand_value (insn, 2);\n\n      /* Offset is relative to the 4-byte aligned address of the current\n\t instruction, hence last two bits should be truncated.  */\n      return pcrel_addr + align_down (insn.address, 4);\n    }\n  /* B, Bcc, BL, BLcc, LP, LPcc: PC = currentPC + operand.  */\n  else if (insn.insn_class == BRANCH || insn.insn_class == LOOP)\n    {\n      CORE_ADDR pcrel_addr = arc_insn_get_operand_value (insn, 0);\n\n      /* Offset is relative to the 4-byte aligned address of the current\n\t instruction, hence last two bits should be truncated.  */\n      return pcrel_addr + align_down (insn.address, 4);\n    }\n  /* J, Jcc, JL, JLcc: PC = operand.  */\n  else if (insn.insn_class == JUMP)\n    {\n      /* All jumps are single-operand.  */\n      return arc_insn_get_operand_value (insn, 0);\n    }\n\n  /* This is some new and unknown instruction.  */\n  gdb_assert_not_reached (\"Unknown branch instruction.\");\n}",
+      "fn_code_pos": [
+        [
+          263,
+          0
+        ],
+        [
+          332,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_insn_get_branch_target",
+        "parameters": {
+          "insn": "struct arc_instruction"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "void\narc_insn_dump (const struct arc_instruction &insn)\n{\n  struct gdbarch *gdbarch = target_gdbarch ();\n\n  arc_print (\"Dumping arc_instruction at %s\\n\",\n\t     paddress (gdbarch, insn.address));\n  arc_print (\"\\tlength = %u\\n\", insn.length);\n\n  if (!insn.valid)\n    {\n      arc_print (\"\\tThis is not a valid ARC instruction.\\n\");\n      return;\n    }\n\n  arc_print (\"\\tlength_with_limm = %u\\n\", insn.length + (insn.limm_p ? 4 : 0));\n  arc_print (\"\\tcc = 0x%x\\n\", insn.condition_code);\n  arc_print (\"\\tinsn_class = %u\\n\", insn.insn_class);\n  arc_print (\"\\tis_control_flow = %i\\n\", insn.is_control_flow);\n  arc_print (\"\\thas_delay_slot = %i\\n\", insn.has_delay_slot);\n\n  CORE_ADDR next_pc = arc_insn_get_linear_next_pc (insn);\n  arc_print (\"\\tlinear_next_pc = %s\\n\", paddress (gdbarch, next_pc));\n\n  if (insn.is_control_flow)\n    {\n      CORE_ADDR t = arc_insn_get_branch_target (insn);\n      arc_print (\"\\tbranch_target = %s\\n\", paddress (gdbarch, t));\n    }\n\n  arc_print (\"\\tlimm_p = %i\\n\", insn.limm_p);\n  if (insn.limm_p)\n    arc_print (\"\\tlimm_value = 0x%08x\\n\", insn.limm_value);\n\n  if (insn.insn_class == STORE || insn.insn_class == LOAD\n      || insn.insn_class == PUSH || insn.insn_class == POP)\n    {\n      arc_print (\"\\twriteback_mode = %u\\n\", insn.writeback_mode);\n      arc_print (\"\\tdata_size_mode = %u\\n\", insn.data_size_mode);\n      arc_print (\"\\tmemory_base_register = %s\\n\",\n\t\t gdbarch_register_name (gdbarch,\n\t\t\t\t\tarc_insn_get_memory_base_reg (insn)));\n      /* get_memory_offset returns an unsigned CORE_ADDR, but treat it as a\n\t LONGEST for a nicer representation.  */\n      arc_print (\"\\taddr_offset = %s\\n\",\n\t\t plongest (arc_insn_get_memory_offset (insn)));\n    }\n\n  arc_print (\"\\toperands_count = %u\\n\", insn.operands_count);\n  for (unsigned int i = 0; i < insn.operands_count; ++i)\n    {\n      int is_reg = (insn.operands[i].kind == ARC_OPERAND_KIND_REG);\n\n      arc_print (\"\\toperand[%u] = {\\n\", i);\n      arc_print (\"\\t\\tis_reg = %i\\n\", is_reg);\n      if (is_reg)\n\tarc_print (\"\\t\\tregister = %s\\n\",\n\t\t   gdbarch_register_name (gdbarch, insn.operands[i].value));\n      /* Don't know if this value is signed or not, so print both\n\t representations.  This tends to look quite ugly, especially for big\n\t numbers.  */\n      arc_print (\"\\t\\tunsigned value = %s\\n\",\n\t\t pulongest (arc_insn_get_operand_value (insn, i)));\n      arc_print (\"\\t\\tsigned value = %s\\n\",\n\t\t plongest (arc_insn_get_operand_value_signed (insn, i)));\n      arc_print (\"\\t}\\n\");\n    }\n}",
+      "fn_code_pos": [
+        [
+          336,
+          0
+        ],
+        [
+          403,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_insn_dump",
+        "parameters": {
+          "insn": "struct arc_instruction"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "CORE_ADDR\narc_insn_get_linear_next_pc (const struct arc_instruction &insn)\n{\n  /* In ARC long immediate is always 4 bytes.  */\n  return (insn.address + insn.length + (insn.limm_p ? 4 : 0));\n}",
+      "fn_code_pos": [
+        [
+          405,
+          0
+        ],
+        [
+          410,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_insn_get_linear_next_pc",
+        "parameters": {
+          "insn": "struct arc_instruction"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static void\narc_write_pc (struct regcache *regcache, CORE_ADDR new_pc)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n\n  if (arc_debug)\n    debug_printf (\"arc: Writing PC, new value=%s\\n\",\n\t\t  paddress (gdbarch, new_pc));\n\n  regcache_cooked_write_unsigned (regcache, gdbarch_pc_regnum (gdbarch),\n\t\t\t\t  new_pc);\n\n  ULONGEST status32;\n  regcache_cooked_read_unsigned (regcache, gdbarch_ps_regnum (gdbarch),\n\t\t\t\t &status32);\n\n  /* Mask for DE bit is 0x40.  */\n  if (status32 & 0x40)\n    {\n      if (arc_debug)\n\t{\n\t  debug_printf (\"arc: Changing PC while in delay slot.  Will \"\n\t\t\t\"reset STATUS32.DE bit to zero.  Value of STATUS32 \"\n\t\t\t\"register is 0x%s\\n\",\n\t\t\tphex (status32, ARC_REGISTER_SIZE));\n\t}\n\n      /* Reset bit and write to the cache.  */\n      status32 &= ~0x40;\n      regcache_cooked_write_unsigned (regcache, gdbarch_ps_regnum (gdbarch),\n\t\t\t\t      status32);\n    }\n}",
+      "fn_code_pos": [
+        [
+          446,
+          0
+        ],
+        [
+          478,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_write_pc",
+        "parameters": {
+          "regcache": "struct regcache",
+          "new_pc": "CORE_ADDR"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\narc_virtual_frame_pointer (struct gdbarch *gdbarch, CORE_ADDR pc,\n\t\t\t   int *reg_ptr, LONGEST *offset_ptr)\n{\n  *reg_ptr = gdbarch_sp_regnum (gdbarch);\n  *offset_ptr = 0;\n}",
+      "fn_code_pos": [
+        [
+          503,
+          0
+        ],
+        [
+          509,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_virtual_frame_pointer",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "pc": "CORE_ADDR",
+          "reg_ptr": "int",
+          "offset_ptr": "LONGEST"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static struct frame_id\narc_dummy_id (struct gdbarch *gdbarch, struct frame_info *this_frame)\n{\n  return frame_id_build (get_frame_sp (this_frame),\n\t\t\t get_frame_pc (this_frame));\n}",
+      "fn_code_pos": [
+        [
+          517,
+          0
+        ],
+        [
+          522,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_dummy_id",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "this_frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\narc_push_dummy_call (struct gdbarch *gdbarch, struct value *function,\n\t\t     struct regcache *regcache, CORE_ADDR bp_addr, int nargs,\n\t\t     struct value **args, CORE_ADDR sp, int struct_return,\n\t\t     CORE_ADDR struct_addr)\n{\n  if (arc_debug)\n    debug_printf (\"arc: push_dummy_call (nargs = %d)\\n\", nargs);\n\n  int arg_reg = ARC_FIRST_ARG_REGNUM;\n\n  /* Push the return address.  */\n  regcache_cooked_write_unsigned (regcache, ARC_BLINK_REGNUM, bp_addr);\n\n  /* Are we returning a value using a structure return instead of a normal\n     value return?  If so, struct_addr is the address of the reserved space for\n     the return structure to be written on the stack, and that address is\n     passed to that function as a hidden first argument.  */\n  if (struct_return)\n    {\n      /* Pass the return address in the first argument register.  */\n      regcache_cooked_write_unsigned (regcache, arg_reg, struct_addr);\n\n      if (arc_debug)\n\tdebug_printf (\"arc: struct return address %s passed in R%d\",\n\t\t      print_core_address (gdbarch, struct_addr), arg_reg);\n\n      arg_reg++;\n    }\n\n  if (nargs > 0)\n    {\n      unsigned int total_space = 0;\n\n      /* How much space do the arguments occupy in total?  Must round each\n\t argument's size up to an integral number of words.  */\n      for (int i = 0; i < nargs; i++)\n\t{\n\t  unsigned int len = TYPE_LENGTH (value_type (args[i]));\n\t  unsigned int space = align_up (len, 4);\n\n\t  total_space += space;\n\n\t  if (arc_debug)\n\t    debug_printf (\"arc: arg %d: %u bytes -> %u\\n\", i, len, space);\n\t}\n\n      /* Allocate a buffer to hold a memory image of the arguments.  */\n      gdb_byte *memory_image = XCNEWVEC (gdb_byte, total_space);\n\n      /* Now copy all of the arguments into the buffer, correctly aligned.  */\n      gdb_byte *data = memory_image;\n      for (int i = 0; i < nargs; i++)\n\t{\n\t  unsigned int len = TYPE_LENGTH (value_type (args[i]));\n\t  unsigned int space = align_up (len, 4);\n\n\t  memcpy (data, value_contents (args[i]), (size_t) len);\n\t  if (arc_debug)\n\t    debug_printf (\"arc: copying arg %d, val 0x%08x, len %d to mem\\n\",\n\t\t\t  i, *((int *) value_contents (args[i])), len);\n\n\t  data += space;\n\t}\n\n      /* Now load as much as possible of the memory image into registers.  */\n      data = memory_image;\n      while (arg_reg <= ARC_LAST_ARG_REGNUM)\n\t{\n\t  if (arc_debug)\n\t    debug_printf (\"arc: passing 0x%02x%02x%02x%02x in register R%d\\n\",\n\t\t\t  data[0], data[1], data[2], data[3], arg_reg);\n\n\t  /* Note we don't use write_unsigned here, since that would convert\n\t     the byte order, but we are already in the correct byte order.  */\n\t  regcache_cooked_write (regcache, arg_reg, data);\n\n\t  data += ARC_REGISTER_SIZE;\n\t  total_space -= ARC_REGISTER_SIZE;\n\n\t  /* All the data is now in registers.  */\n\t  if (total_space == 0)\n\t    break;\n\n\t  arg_reg++;\n\t}\n\n      /* If there is any data left, push it onto the stack (in a single write\n\t operation).  */\n      if (total_space > 0)\n\t{\n\t  if (arc_debug)\n\t    debug_printf (\"arc: passing %d bytes on stack\\n\", total_space);\n\n\t  sp -= total_space;\n\t  write_memory (sp, data, (int) total_space);\n\t}\n\n      xfree (memory_image);\n    }\n\n  /* Finally, update the SP register.  */\n  regcache_cooked_write_unsigned (regcache, gdbarch_sp_regnum (gdbarch), sp);\n\n  return sp;\n}",
+      "fn_code_pos": [
+        [
+          591,
+          0
+        ],
+        [
+          696,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_push_dummy_call",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "function": "struct value",
+          "regcache": "struct regcache",
+          "bp_addr": "CORE_ADDR",
+          "nargs": "int",
+          "args": "struct value",
+          "sp": "CORE_ADDR",
+          "struct_return": "int",
+          "struct_addr": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\narc_push_dummy_code (struct gdbarch *gdbarch, CORE_ADDR sp, CORE_ADDR funaddr,\n\t\t     struct value **args, int nargs, struct type *value_type,\n\t\t     CORE_ADDR *real_pc, CORE_ADDR *bp_addr,\n\t\t     struct regcache *regcache)\n{\n  *real_pc = funaddr;\n  *bp_addr = entry_point_address ();\n  return sp;\n}",
+      "fn_code_pos": [
+        [
+          714,
+          0
+        ],
+        [
+          723,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_push_dummy_code",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "sp": "CORE_ADDR",
+          "funaddr": "CORE_ADDR",
+          "args": "struct value",
+          "nargs": "int",
+          "value_type": "struct type",
+          "real_pc": "CORE_ADDR",
+          "bp_addr": "CORE_ADDR",
+          "regcache": "struct regcache"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static int\narc_cannot_fetch_register (struct gdbarch *gdbarch, int regnum)\n{\n  /* Assume that register is readable if it is unknown.  LIMM and RESERVED are\n     not real registers, but specific register numbers.  They are available as\n     regnums to align architectural register numbers with GDB internal regnums,\n     but they shouldn't appear in target descriptions generated by\n     GDB-servers.  */\n  switch (regnum)\n    {\n    case ARC_RESERVED_REGNUM:\n    case ARC_LIMM_REGNUM:\n      return true;\n    default:\n      return false;\n    }\n}",
+      "fn_code_pos": [
+        [
+          727,
+          0
+        ],
+        [
+          743,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_cannot_fetch_register",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "regnum": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\narc_cannot_store_register (struct gdbarch *gdbarch, int regnum)\n{\n  /* Assume that register is writable if it is unknown.  See comment in\n     arc_cannot_fetch_register about LIMM and RESERVED.  */\n  switch (regnum)\n    {\n    case ARC_RESERVED_REGNUM:\n    case ARC_LIMM_REGNUM:\n    case ARC_PCL_REGNUM:\n      return true;\n    default:\n      return false;\n    }\n}",
+      "fn_code_pos": [
+        [
+          747,
+          0
+        ],
+        [
+          761,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_cannot_store_register",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "regnum": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\narc_extract_return_value (struct gdbarch *gdbarch, struct type *type,\n\t\t\t  struct regcache *regcache, gdb_byte *valbuf)\n{\n  unsigned int len = TYPE_LENGTH (type);\n\n  if (arc_debug)\n    debug_printf (\"arc: extract_return_value\\n\");\n\n  if (len <= ARC_REGISTER_SIZE)\n    {\n      ULONGEST val;\n\n      /* Get the return value from one register.  */\n      regcache_cooked_read_unsigned (regcache, ARC_R0_REGNUM, &val);\n      store_unsigned_integer (valbuf, (int) len,\n\t\t\t      gdbarch_byte_order (gdbarch), val);\n\n      if (arc_debug)\n\tdebug_printf (\"arc: returning 0x%s\\n\", phex (val, ARC_REGISTER_SIZE));\n    }\n  else if (len <= ARC_REGISTER_SIZE * 2)\n    {\n      ULONGEST low, high;\n\n      /* Get the return value from two registers.  */\n      regcache_cooked_read_unsigned (regcache, ARC_R0_REGNUM, &low);\n      regcache_cooked_read_unsigned (regcache, ARC_R1_REGNUM, &high);\n\n      store_unsigned_integer (valbuf, ARC_REGISTER_SIZE,\n\t\t\t      gdbarch_byte_order (gdbarch), low);\n      store_unsigned_integer (valbuf + ARC_REGISTER_SIZE,\n\t\t\t      (int) len - ARC_REGISTER_SIZE,\n\t\t\t      gdbarch_byte_order (gdbarch), high);\n\n      if (arc_debug)\n\tdebug_printf (\"arc: returning 0x%s%s\\n\",\n\t\t      phex (high, ARC_REGISTER_SIZE),\n\t\t      phex (low, ARC_REGISTER_SIZE));\n    }\n  else\n    error (_(\"arc: extract_return_value: type length %u too large\"), len);\n}",
+      "fn_code_pos": [
+        [
+          773,
+          0
+        ],
+        [
+          815,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_extract_return_value",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "type": "struct type",
+          "regcache": "struct regcache",
+          "valbuf": "gdb_byte"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\narc_store_return_value (struct gdbarch *gdbarch, struct type *type,\n\t\t\tstruct regcache *regcache, const gdb_byte *valbuf)\n{\n  unsigned int len = TYPE_LENGTH (type);\n\n  if (arc_debug)\n    debug_printf (\"arc: store_return_value\\n\");\n\n  if (len <= ARC_REGISTER_SIZE)\n    {\n      ULONGEST val;\n\n      /* Put the return value into one register.  */\n      val = extract_unsigned_integer (valbuf, (int) len,\n\t\t\t\t      gdbarch_byte_order (gdbarch));\n      regcache_cooked_write_unsigned (regcache, ARC_R0_REGNUM, val);\n\n      if (arc_debug)\n\tdebug_printf (\"arc: storing 0x%s\\n\", phex (val, ARC_REGISTER_SIZE));\n    }\n  else if (len <= ARC_REGISTER_SIZE * 2)\n    {\n      ULONGEST low, high;\n\n      /* Put the return value into  two registers.  */\n      low = extract_unsigned_integer (valbuf, ARC_REGISTER_SIZE,\n\t\t\t\t      gdbarch_byte_order (gdbarch));\n      high = extract_unsigned_integer (valbuf + ARC_REGISTER_SIZE,\n\t\t\t\t       (int) len - ARC_REGISTER_SIZE,\n\t\t\t\t       gdbarch_byte_order (gdbarch));\n\n      regcache_cooked_write_unsigned (regcache, ARC_R0_REGNUM, low);\n      regcache_cooked_write_unsigned (regcache, ARC_R1_REGNUM, high);\n\n      if (arc_debug)\n\tdebug_printf (\"arc: storing 0x%s%s\\n\",\n\t\t      phex (high, ARC_REGISTER_SIZE),\n\t\t      phex (low, ARC_REGISTER_SIZE));\n    }\n  else\n    error (_(\"arc_store_return_value: type length too large.\"));\n}",
+      "fn_code_pos": [
+        [
+          827,
+          0
+        ],
+        [
+          869,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_store_return_value",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "type": "struct type",
+          "regcache": "struct regcache",
+          "valbuf": "gdb_byte"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\narc_get_longjmp_target (struct frame_info *frame, CORE_ADDR *pc)\n{\n  if (arc_debug)\n    debug_printf (\"arc: get_longjmp_target\\n\");\n\n  struct gdbarch *gdbarch = get_frame_arch (frame);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int pc_offset = tdep->jb_pc * ARC_REGISTER_SIZE;\n  gdb_byte buf[ARC_REGISTER_SIZE];\n  CORE_ADDR jb_addr = get_frame_register_unsigned (frame, ARC_FIRST_ARG_REGNUM);\n\n  if (target_read_memory (jb_addr + pc_offset, buf, ARC_REGISTER_SIZE))\n    return 0; /* Failed to read from memory.  */\n\n  *pc = extract_unsigned_integer (buf, ARC_REGISTER_SIZE,\n\t\t\t\t  gdbarch_byte_order (gdbarch));\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          873,
+          0
+        ],
+        [
+          891,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_get_longjmp_target",
+        "parameters": {
+          "frame": "struct frame_info",
+          "pc": "CORE_ADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static enum return_value_convention\narc_return_value (struct gdbarch *gdbarch, struct value *function,\n\t\t  struct type *valtype, struct regcache *regcache,\n\t\t  gdb_byte *readbuf, const gdb_byte *writebuf)\n{\n  /* If the return type is a struct, or a union, or would occupy more than two\n     registers, the ABI uses the \"struct return convention\": the calling\n     function passes a hidden first parameter to the callee (in R0).  That\n     parameter is the address at which the value being returned should be\n     stored.  Otherwise, the result is returned in registers.  */\n  int is_struct_return = (TYPE_CODE (valtype) == TYPE_CODE_STRUCT\n\t\t\t  || TYPE_CODE (valtype) == TYPE_CODE_UNION\n\t\t\t  || TYPE_LENGTH (valtype) > 2 * ARC_REGISTER_SIZE);\n\n  if (arc_debug)\n    debug_printf (\"arc: return_value (readbuf = %s, writebuf = %s)\\n\",\n\t\t  host_address_to_string (readbuf),\n\t\t  host_address_to_string (writebuf));\n\n  if (writebuf != NULL)\n    {\n      /* Case 1.  GDB should not ask us to set a struct return value: it\n\t should know the struct return location and write the value there\n\t itself.  */\n      gdb_assert (!is_struct_return);\n      arc_store_return_value (gdbarch, valtype, regcache, writebuf);\n    }\n  else if (readbuf != NULL)\n    {\n      /* Case 2.  GDB should not ask us to get a struct return value: it\n\t should know the struct return location and read the value from there\n\t itself.  */\n      gdb_assert (!is_struct_return);\n      arc_extract_return_value (gdbarch, valtype, regcache, readbuf);\n    }\n\n  return (is_struct_return\n\t  ? RETURN_VALUE_STRUCT_CONVENTION\n\t  : RETURN_VALUE_REGISTER_CONVENTION);\n}",
+      "fn_code_pos": [
+        [
+          895,
+          0
+        ],
+        [
+          934,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_return_value",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "function": "struct value",
+          "valtype": "struct type",
+          "regcache": "struct regcache",
+          "readbuf": "gdb_byte",
+          "writebuf": "gdb_byte"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\narc_frame_base_address (struct frame_info *this_frame, void **prologue_cache)\n{\n  return (CORE_ADDR) get_frame_register_unsigned (this_frame, ARC_FP_REGNUM);\n}",
+      "fn_code_pos": [
+        [
+          939,
+          0
+        ],
+        [
+          943,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_frame_base_address",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "prologue_cache": "void"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static pv_t\narc_pv_get_operand (pv_t *regs, const struct arc_instruction &insn, int operand)\n{\n  if (insn.operands[operand].kind == ARC_OPERAND_KIND_REG)\n    return regs[insn.operands[operand].value];\n  else\n    return pv_constant (arc_insn_get_operand_value (insn, operand));\n}",
+      "fn_code_pos": [
+        [
+          948,
+          0
+        ],
+        [
+          955,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_pv_get_operand",
+        "parameters": {
+          "regs": "pv_t",
+          "insn": "struct arc_instruction",
+          "operand": "int"
+        },
+        "return_type": "pv_t"
+      }
+    },
+    {
+      "fn_code": "static bool\narc_is_in_prologue (struct gdbarch *gdbarch, const struct arc_instruction &insn,\n\t\t    pv_t *regs, struct pv_area *stack)\n{\n  /* It might be that currently analyzed address doesn't contain an\n     instruction, hence INSN is not valid.  It likely means that address points\n     to a data, non-initialized memory, or middle of a 32-bit instruction.  In\n     practice this may happen if GDB connects to a remote target that has\n     non-zeroed memory.  GDB would read PC value and would try to analyze\n     prologue, but there is no guarantee that memory contents at the address\n     specified in PC is address is a valid instruction.  There is not much that\n     that can be done about that.  */\n  if (!insn.valid)\n    return false;\n\n  /* Branch/jump or a predicated instruction.  */\n  if (insn.is_control_flow || insn.condition_code != ARC_CC_AL)\n    return false;\n\n  /* Store of some register.  May or may not update base address register.  */\n  if (insn.insn_class == STORE || insn.insn_class == PUSH)\n    {\n      /* There is definetely at least one operand - register/value being\n\t stored.  */\n      gdb_assert (insn.operands_count > 0);\n\n      /* Store at some constant address.  */\n      if (insn.operands_count > 1\n\t  && insn.operands[1].kind != ARC_OPERAND_KIND_REG)\n\treturn false;\n\n      /* Writeback modes:\n\t Mode\tAddress used\t\t    Writeback value\n\t --------------------------------------------------\n\t No\treg + offset\t\t    no\n\t A/AW\treg + offset\t\t    reg + offset\n\t AB\treg\t\t\t    reg + offset\n\t AS\treg + (offset << scaling)   no\n\n\t \"PUSH reg\" is an alias to \"ST.AW reg, [SP, -4]\" encoding.  However\n\t 16-bit PUSH_S is a distinct instruction encoding, where offset and\n\t base register are implied through opcode.  */\n\n      /* Register with base memory address.  */\n      int base_reg = arc_insn_get_memory_base_reg (insn);\n\n      /* Address where to write.  arc_insn_get_memory_offset returns scaled\n\t value for ARC_WRITEBACK_AS.  */\n      pv_t addr;\n      if (insn.writeback_mode == ARC_WRITEBACK_AB)\n\taddr = regs[base_reg];\n      else\n\taddr = pv_add_constant (regs[base_reg],\n\t\t\t\tarc_insn_get_memory_offset (insn));\n\n      if (pv_area_store_would_trash (stack, addr))\n\treturn false;\n\n      if (insn.data_size_mode != ARC_SCALING_D)\n\t{\n\t  /* Find the value being stored.  */\n\t  pv_t store_value = arc_pv_get_operand (regs, insn, 0);\n\n\t  /* What is the size of a the stored value?  */\n\t  CORE_ADDR size;\n\t  if (insn.data_size_mode == ARC_SCALING_B)\n\t    size = 1;\n\t  else if (insn.data_size_mode == ARC_SCALING_H)\n\t    size = 2;\n\t  else\n\t    size = ARC_REGISTER_SIZE;\n\n\t  pv_area_store (stack, addr, size, store_value);\n\t}\n      else\n\t{\n\t  if (insn.operands[0].kind == ARC_OPERAND_KIND_REG)\n\t    {\n\t      /* If this is a double store, than write N+1 register as well.  */\n\t      pv_t store_value1 = regs[insn.operands[0].value];\n\t      pv_t store_value2 = regs[insn.operands[0].value + 1];\n\t      pv_area_store (stack, addr, ARC_REGISTER_SIZE, store_value1);\n\t      pv_area_store (stack,\n\t\t\t     pv_add_constant (addr, ARC_REGISTER_SIZE),\n\t\t\t     ARC_REGISTER_SIZE, store_value2);\n\t    }\n\t  else\n\t    {\n\t      pv_t store_value\n\t\t= pv_constant (arc_insn_get_operand_value (insn, 0));\n\t      pv_area_store (stack, addr, ARC_REGISTER_SIZE * 2, store_value);\n\t    }\n\t}\n\n      /* Is base register updated?  */\n      if (insn.writeback_mode == ARC_WRITEBACK_A\n\t  || insn.writeback_mode == ARC_WRITEBACK_AB)\n\tregs[base_reg] = pv_add_constant (regs[base_reg],\n\t\t\t\t\t  arc_insn_get_memory_offset (insn));\n\n      return true;\n    }\n  else if (insn.insn_class == MOVE)\n    {\n      gdb_assert (insn.operands_count == 2);\n\n      /* Destination argument can be \"0\", so nothing will happen.  */\n      if (insn.operands[0].kind == ARC_OPERAND_KIND_REG)\n\t{\n\t  int dst_regnum = insn.operands[0].value;\n\t  regs[dst_regnum] = arc_pv_get_operand (regs, insn, 1);\n\t}\n      return true;\n    }\n  else if (insn.insn_class == SUB)\n    {\n      gdb_assert (insn.operands_count == 3);\n\n      /* SUB 0,b,c.  */\n      if (insn.operands[0].kind != ARC_OPERAND_KIND_REG)\n\treturn true;\n\n      int dst_regnum = insn.operands[0].value;\n      regs[dst_regnum] = pv_subtract (arc_pv_get_operand (regs, insn, 1),\n\t\t\t\t      arc_pv_get_operand (regs, insn, 2));\n      return true;\n    }\n  else if (insn.insn_class == ENTER)\n    {\n      /* ENTER_S is a prologue-in-instruction - it saves all callee-saved\n\t registers according to given arguments thus greatly reducing code\n\t size.  Which registers will be actually saved depends on arguments.\n\n\t ENTER_S {R13-...,FP,BLINK} stores registers in following order:\n\n\t new SP ->\n\t\t   BLINK\n\t\t   R13\n\t\t   R14\n\t\t   R15\n\t\t   ...\n\t\t   FP\n\t old SP ->\n\n\t There are up to three arguments for this opcode, as presented by ARC\n\t disassembler:\n\t 1) amount of general-purpose registers to be saved - this argument is\n\t    always present even when it is 0;\n\t 2) FP register number (27) if FP has to be stored, otherwise argument\n\t    is not present;\n\t 3) BLINK register number (31) if BLINK has to be stored, otherwise\n\t    argument is not present.  If both FP and BLINK are stored, then FP\n\t    is present before BLINK in argument list.  */\n      gdb_assert (insn.operands_count > 0);\n\n      int regs_saved = arc_insn_get_operand_value (insn, 0);\n\n      bool is_fp_saved;\n      if (insn.operands_count > 1)\n\tis_fp_saved = (insn.operands[1].value  == ARC_FP_REGNUM);\n      else\n\tis_fp_saved = false;\n\n      bool is_blink_saved;\n      if (insn.operands_count > 1)\n\tis_blink_saved = (insn.operands[insn.operands_count - 1].value\n\t\t\t  == ARC_BLINK_REGNUM);\n      else\n\tis_blink_saved = false;\n\n      /* Amount of bytes to be allocated to store specified registers.  */\n      CORE_ADDR st_size = ((regs_saved + is_fp_saved + is_blink_saved)\n\t\t\t   * ARC_REGISTER_SIZE);\n      pv_t new_sp = pv_add_constant (regs[ARC_SP_REGNUM], -st_size);\n\n      /* Assume that if the last register (closest to new SP) can be written,\n\t then it is possible to write all of them.  */\n      if (pv_area_store_would_trash (stack, new_sp))\n\treturn false;\n\n      /* Current store address.  */\n      pv_t addr = regs[ARC_SP_REGNUM];\n\n      if (is_fp_saved)\n\t{\n\t  addr = pv_add_constant (addr, -ARC_REGISTER_SIZE);\n\t  pv_area_store (stack, addr, ARC_REGISTER_SIZE, regs[ARC_FP_REGNUM]);\n\t}\n\n      /* Registers are stored in backward order: from GP (R26) to R13.  */\n      for (int i = ARC_R13_REGNUM + regs_saved - 1; i >= ARC_R13_REGNUM; i--)\n\t{\n\t  addr = pv_add_constant (addr, -ARC_REGISTER_SIZE);\n\t  pv_area_store (stack, addr, ARC_REGISTER_SIZE, regs[i]);\n\t}\n\n      if (is_blink_saved)\n\t{\n\t  addr = pv_add_constant (addr, -ARC_REGISTER_SIZE);\n\t  pv_area_store (stack, addr, ARC_REGISTER_SIZE,\n\t\t\t regs[ARC_BLINK_REGNUM]);\n\t}\n\n      gdb_assert (pv_is_identical (addr, new_sp));\n\n      regs[ARC_SP_REGNUM] = new_sp;\n\n      if (is_fp_saved)\n\tregs[ARC_FP_REGNUM] = regs[ARC_SP_REGNUM];\n\n      return true;\n    }\n\n  /* Some other architectures, like nds32 or arm, try to continue as far as\n     possible when building a prologue cache (as opposed to when skipping\n     prologue), so that cache will be as full as possible.  However current\n     code for ARC doesn't recognize some instructions that may modify SP, like\n     ADD, AND, OR, etc, hence there is no way to guarantee that SP wasn't\n     clobbered by the skipped instruction.  Potential existence of extension\n     instruction, which may do anything they want makes this even more complex,\n     so it is just better to halt on a first unrecognized instruction.  */\n\n  return false;\n}",
+      "fn_code_pos": [
+        [
+          961,
+          0
+        ],
+        [
+          1184,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_is_in_prologue",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "insn": "struct arc_instruction",
+          "regs": "pv_t",
+          "stack": "struct pv_area"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "arc_fprintf_disasm (void *stream, const char *format, ...)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1189,
+          0
+        ],
+        [
+          1192,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_fprintf_disasm",
+        "parameters": {
+          "stream": "void",
+          "format": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "struct disassemble_info\narc_disassemble_info (struct gdbarch *gdbarch)\n{\n  struct disassemble_info di;\n  init_disassemble_info (&di, &null_stream, arc_fprintf_disasm);\n  di.arch = gdbarch_bfd_arch_info (gdbarch)->arch;\n  di.mach = gdbarch_bfd_arch_info (gdbarch)->mach;\n  di.endian = gdbarch_byte_order (gdbarch);\n  di.read_memory_func = [](bfd_vma memaddr, gdb_byte *myaddr,\n\t\t\t   unsigned int len, struct disassemble_info *info)\n    {\n      return target_read_code (memaddr, myaddr, len);\n    };\n  return di;\n}",
+      "fn_code_pos": [
+        [
+          1194,
+          0
+        ],
+        [
+          1208,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_disassemble_info",
+        "parameters": {
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\narc_analyze_prologue (struct gdbarch *gdbarch, const CORE_ADDR entrypoint,\n\t\t      const CORE_ADDR limit_pc, struct arc_frame_cache *cache)\n{\n  if (arc_debug)\n    debug_printf (\"arc: analyze_prologue (entrypoint=%s, limit_pc=%s)\\n\",\n\t\t  paddress (gdbarch, entrypoint),\n\t\t  paddress (gdbarch, limit_pc));\n\n  /* Prologue values.  Only core registers can be stored.  */\n  pv_t regs[ARC_LAST_CORE_REGNUM + 1];\n  for (int i = 0; i <= ARC_LAST_CORE_REGNUM; i++)\n    regs[i] = pv_register (i, 0);\n  struct pv_area *stack = make_pv_area (ARC_SP_REGNUM,\n\t\t\t\t\tgdbarch_addr_bit (gdbarch));\n  struct cleanup *back_to = make_cleanup_free_pv_area (stack);\n\n  CORE_ADDR current_prologue_end = entrypoint;\n\n  /* Look at each instruction in the prologue.  */\n  while (current_prologue_end < limit_pc)\n    {\n      struct arc_instruction insn;\n      struct disassemble_info di = arc_disassemble_info (gdbarch);\n      arc_insn_decode (current_prologue_end, &di, arc_delayed_print_insn,\n\t\t       &insn);\n\n      if (arc_debug >= 2)\n\tarc_insn_dump (insn);\n\n      /* If this instruction is in the prologue, fields in the cache will be\n\t updated, and the saved registers mask may be updated.  */\n      if (!arc_is_in_prologue (gdbarch, insn, regs, stack))\n\t{\n\t  /* Found an instruction that is not in the prologue.  */\n\t  if (arc_debug)\n\t    debug_printf (\"arc: End of prologue reached at address %s\\n\",\n\t\t\t  paddress (gdbarch, insn.address));\n\t  break;\n\t}\n\n      current_prologue_end = arc_insn_get_linear_next_pc (insn);\n    }\n\n  if (cache != NULL)\n    {\n      /* Figure out if it is a frame pointer or just a stack pointer.  */\n      if (pv_is_register (regs[ARC_FP_REGNUM], ARC_SP_REGNUM))\n\t{\n\t  cache->frame_base_reg = ARC_FP_REGNUM;\n\t  cache->frame_base_offset = -regs[ARC_FP_REGNUM].k;\n\t}\n      else\n\t{\n\t  cache->frame_base_reg = ARC_SP_REGNUM;\n\t  cache->frame_base_offset = -regs[ARC_SP_REGNUM].k;\n\t}\n\n      /* Assign offset from old SP to all saved registers.  */\n      for (int i = 0; i <= ARC_LAST_CORE_REGNUM; i++)\n\t{\n\t  CORE_ADDR offset;\n\t  if (pv_area_find_reg (stack, gdbarch, i, &offset))\n\t    cache->saved_regs[i].addr = offset;\n\t}\n    }\n\n  do_cleanups (back_to);\n  return current_prologue_end;\n}",
+      "fn_code_pos": [
+        [
+          1260,
+          0
+        ],
+        [
+          1329,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_analyze_prologue",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "entrypoint": "CORE_ADDR",
+          "limit_pc": "CORE_ADDR",
+          "cache": "struct arc_frame_cache"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\narc_skip_prologue (struct gdbarch *gdbarch, CORE_ADDR pc)\n{\n  if (arc_debug)\n    debug_printf (\"arc: skip_prologue\\n\");\n\n  CORE_ADDR func_addr;\n  const char *func_name;\n\n  /* See what the symbol table says.  */\n  if (find_pc_partial_function (pc, &func_name, &func_addr, NULL))\n    {\n      /* Found a function.  */\n      CORE_ADDR postprologue_pc\n\t= skip_prologue_using_sal (gdbarch, func_addr);\n\n      if (postprologue_pc != 0)\n\treturn std::max (pc, postprologue_pc);\n    }\n\n  /* No prologue info in symbol table, have to analyze prologue.  */\n\n  /* Find an upper limit on the function prologue using the debug\n     information.  If there is no debug information about prologue end, then\n     skip_prologue_using_sal will return 0.  */\n  CORE_ADDR limit_pc = skip_prologue_using_sal (gdbarch, pc);\n\n  /* If there is no debug information at all, it is required to give some\n     semi-arbitrary hard limit on amount of bytes to scan during prologue\n     analysis.  */\n  if (limit_pc == 0)\n    limit_pc = pc + MAX_PROLOGUE_LENGTH;\n\n  /* Find the address of the first instruction after the prologue by scanning\n     through it - no other information is needed, so pass NULL as a cache.  */\n  return arc_analyze_prologue (gdbarch, pc, limit_pc, NULL);\n}",
+      "fn_code_pos": [
+        [
+          1356,
+          0
+        ],
+        [
+          1392,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_skip_prologue",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "pc": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "int\narc_delayed_print_insn (bfd_vma addr, struct disassemble_info *info)\n{\n  /* Standard BFD \"machine number\" field allows libocodes disassembler to\n     distinguish ARC 600, 700 and v2 cores, however v2 encompasses both ARC EM\n     and HS, which have some difference between.  There are two ways to specify\n     what is the target core:\n     1) via the disassemble_info->disassembler_options;\n     2) otherwise libopcodes will use private (architecture-specific) ELF\n     header.\n\n     Using disassembler_options is preferable, because it comes directly from\n     GDBserver which scanned an actual ARC core identification info.  However,\n     not all GDBservers report core architecture, so as a fallback GDB still\n     should support analysis of ELF header.  The libopcodes disassembly code\n     uses the section to find the BFD and the BFD to find the ELF header,\n     therefore this function should set disassemble_info->section properly.\n\n     disassembler_options was already set by non-target specific code with\n     proper options obtained via gdbarch_disassembler_options ().\n\n     This function might be called multiple times in a sequence, reusing same\n     disassemble_info.  */\n  if ((info->disassembler_options == NULL) && (info->section == NULL))\n    {\n      struct obj_section *s = find_pc_section (addr);\n      if (s != NULL)\n\tinfo->section = s->the_bfd_section;\n    }\n\n  return default_print_insn (addr, info);\n}",
+      "fn_code_pos": [
+        [
+          1406,
+          0
+        ],
+        [
+          1437,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_delayed_print_insn",
+        "parameters": {
+          "addr": "bfd_vma",
+          "info": "struct disassemble_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\narc_breakpoint_kind_from_pc (struct gdbarch *gdbarch, CORE_ADDR *pcptr)\n{\n  size_t length_with_limm = gdb_insn_length (gdbarch, *pcptr);\n\n  /* Replace 16-bit instruction with BRK_S, replace 32-bit instructions with\n     BRK.  LIMM is part of instruction length, so it can be either 4 or 8\n     bytes for 32-bit instructions.  */\n  if ((length_with_limm == 4 || length_with_limm == 8)\n      && !arc_mach_is_arc600 (gdbarch))\n    return sizeof (arc_brk_le);\n  else\n    return sizeof (arc_brk_s_le);\n}",
+      "fn_code_pos": [
+        [
+          1481,
+          0
+        ],
+        [
+          1494,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_breakpoint_kind_from_pc",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "pcptr": "CORE_ADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static const gdb_byte *\narc_sw_breakpoint_from_kind (struct gdbarch *gdbarch, int kind, int *size)\n{\n  *size = kind;\n\n  if (kind == sizeof (arc_brk_le))\n    {\n      return ((gdbarch_byte_order (gdbarch) == BFD_ENDIAN_BIG)\n\t      ? arc_brk_be\n\t      : arc_brk_le);\n    }\n  else\n    {\n      return ((gdbarch_byte_order (gdbarch) == BFD_ENDIAN_BIG)\n\t      ? arc_brk_s_be\n\t      : arc_brk_s_le);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1498,
+          0
+        ],
+        [
+          1515,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_sw_breakpoint_from_kind",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "kind": "int",
+          "size": "int"
+        },
+        "return_type": "gdb_byte"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\narc_unwind_pc (struct gdbarch *gdbarch, struct frame_info *next_frame)\n{\n  int pc_regnum = gdbarch_pc_regnum (gdbarch);\n  CORE_ADDR pc = frame_unwind_register_unsigned (next_frame, pc_regnum);\n\n  if (arc_debug)\n    debug_printf (\"arc: unwind PC: %s\\n\", paddress (gdbarch, pc));\n\n  return pc;\n}",
+      "fn_code_pos": [
+        [
+          1519,
+          0
+        ],
+        [
+          1529,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_unwind_pc",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "next_frame": "struct frame_info"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\narc_unwind_sp (struct gdbarch *gdbarch, struct frame_info *next_frame)\n{\n  int sp_regnum = gdbarch_sp_regnum (gdbarch);\n  CORE_ADDR sp = frame_unwind_register_unsigned (next_frame, sp_regnum);\n\n  if (arc_debug)\n    debug_printf (\"arc: unwind SP: %s\\n\", paddress (gdbarch, sp));\n\n  return sp;\n}",
+      "fn_code_pos": [
+        [
+          1533,
+          0
+        ],
+        [
+          1543,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_unwind_sp",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "next_frame": "struct frame_info"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\narc_frame_align (struct gdbarch *gdbarch, CORE_ADDR sp)\n{\n  return align_down (sp, 4);\n}",
+      "fn_code_pos": [
+        [
+          1547,
+          0
+        ],
+        [
+          1551,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_frame_align",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "sp": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static void\narc_print_frame_cache (struct gdbarch *gdbarch, const char *message,\n\t\t       struct arc_frame_cache *cache, int addresses_known)\n{\n  debug_printf (\"arc: frame_info %s\\n\", message);\n  debug_printf (\"arc: prev_sp = %s\\n\", paddress (gdbarch, cache->prev_sp));\n  debug_printf (\"arc: frame_base_reg = %i\\n\", cache->frame_base_reg);\n  debug_printf (\"arc: frame_base_offset = %s\\n\",\n\t\tplongest (cache->frame_base_offset));\n\n  for (int i = 0; i <= ARC_BLINK_REGNUM; i++)\n    {\n      if (trad_frame_addr_p (cache->saved_regs, i))\n\tdebug_printf (\"arc: saved register %s at %s %s\\n\",\n\t\t      gdbarch_register_name (gdbarch, i),\n\t\t      (addresses_known) ? \"address\" : \"offset\",\n\t\t      paddress (gdbarch, cache->saved_regs[i].addr));\n    }\n}",
+      "fn_code_pos": [
+        [
+          1555,
+          0
+        ],
+        [
+          1573,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_print_frame_cache",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "message": "char",
+          "cache": "struct arc_frame_cache",
+          "addresses_known": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static struct arc_frame_cache *\narc_make_frame_cache (struct frame_info *this_frame)\n{\n  if (arc_debug)\n    debug_printf (\"arc: frame_cache\\n\");\n\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n\n  CORE_ADDR block_addr = get_frame_address_in_block (this_frame);\n  CORE_ADDR entrypoint, prologue_end;\n  if (find_pc_partial_function (block_addr, NULL, &entrypoint, &prologue_end))\n    {\n      struct symtab_and_line sal = find_pc_line (entrypoint, 0);\n      CORE_ADDR prev_pc = get_frame_pc (this_frame);\n      if (sal.line == 0)\n\t/* No line info so use current PC.  */\n\tprologue_end = prev_pc;\n      else if (sal.end < prologue_end)\n\t/* The next line begins after the function end.  */\n\tprologue_end = sal.end;\n\n      prologue_end = std::min (prologue_end, prev_pc);\n    }\n  else\n    {\n      /* If find_pc_partial_function returned nothing then there is no symbol\n\t information at all for this PC.  Currently it is assumed in this case\n\t that current PC is entrypoint to function and try to construct the\n\t frame from that.  This is, probably, suboptimal, for example ARM\n\t assumes in this case that program is inside the normal frame (with\n\t frame pointer).  ARC, perhaps, should try to do the same.  */\n      entrypoint = get_frame_register_unsigned (this_frame,\n\t\t\t\t\t\tgdbarch_pc_regnum (gdbarch));\n      prologue_end = entrypoint + MAX_PROLOGUE_LENGTH;\n    }\n\n  /* Allocate new frame cache instance and space for saved register info.\n     FRAME_OBSTACK_ZALLOC will initialize fields to zeroes.  */\n  struct arc_frame_cache *cache\n    = FRAME_OBSTACK_ZALLOC (struct arc_frame_cache);\n  cache->saved_regs = trad_frame_alloc_saved_regs (this_frame);\n\n  arc_analyze_prologue (gdbarch, entrypoint, prologue_end, cache);\n\n  if (arc_debug)\n    arc_print_frame_cache (gdbarch, \"after prologue\", cache, false);\n\n  CORE_ADDR unwound_fb = get_frame_register_unsigned (this_frame,\n\t\t\t\t\t\t      cache->frame_base_reg);\n  if (unwound_fb == 0)\n    return cache;\n  cache->prev_sp = unwound_fb + cache->frame_base_offset;\n\n  for (int i = 0; i <= ARC_LAST_CORE_REGNUM; i++)\n    {\n      if (trad_frame_addr_p (cache->saved_regs, i))\n\tcache->saved_regs[i].addr += cache->prev_sp;\n    }\n\n  if (arc_debug)\n    arc_print_frame_cache (gdbarch, \"after previous SP found\", cache, true);\n\n  return cache;\n}",
+      "fn_code_pos": [
+        [
+          1577,
+          0
+        ],
+        [
+          1640,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_make_frame_cache",
+        "parameters": {
+          "this_frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\narc_frame_this_id (struct frame_info *this_frame, void **this_cache,\n\t\t   struct frame_id *this_id)\n{\n  if (arc_debug)\n    debug_printf (\"arc: frame_this_id\\n\");\n\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n\n  if (*this_cache == NULL)\n    *this_cache = arc_make_frame_cache (this_frame);\n  struct arc_frame_cache *cache = (struct arc_frame_cache *) (*this_cache);\n\n  CORE_ADDR stack_addr = cache->prev_sp;\n\n  /* There are 4 possible situation which decide how frame_id->code_addr is\n     evaluated:\n\n     1) Function is compiled with option -g.  Then frame_id will be created\n     in dwarf_* function and not in this function.  NB: even if target\n     binary is compiled with -g, some std functions like __start and _init\n     are not, so they still will follow one of the following choices.\n\n     2) Function is compiled without -g and binary hasn't been stripped in\n     any way.  In this case GDB still has enough information to evaluate\n     frame code_addr properly.  This case is covered by call to\n     get_frame_func ().\n\n     3) Binary has been striped with option -g (strip debug symbols).  In\n     this case there is still enough symbols for get_frame_func () to work\n     properly, so this case is also covered by it.\n\n     4) Binary has been striped with option -s (strip all symbols).  In this\n     case GDB cannot get function start address properly, so we return current\n     PC value instead.\n   */\n  CORE_ADDR code_addr = get_frame_func (this_frame);\n  if (code_addr == 0)\n    code_addr = get_frame_register_unsigned (this_frame,\n\t\t\t\t\t     gdbarch_pc_regnum (gdbarch));\n\n  *this_id = frame_id_build (stack_addr, code_addr);\n}",
+      "fn_code_pos": [
+        [
+          1644,
+          0
+        ],
+        [
+          1686,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_frame_this_id",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "this_id": "struct frame_id"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static struct value *\narc_frame_prev_register (struct frame_info *this_frame,\n\t\t\t void **this_cache, int regnum)\n{\n  if (*this_cache == NULL)\n    *this_cache = arc_make_frame_cache (this_frame);\n  struct arc_frame_cache *cache = (struct arc_frame_cache *) (*this_cache);\n\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n\n  /* If we are asked to unwind the PC, then we need to return BLINK instead:\n     the saved value of PC points into this frame's function's prologue, not\n     the next frame's function's resume location.  */\n  if (regnum == gdbarch_pc_regnum (gdbarch))\n    regnum = ARC_BLINK_REGNUM;\n\n  /* SP is a special case - we should return prev_sp, because\n     trad_frame_get_prev_register will return _current_ SP value.\n     Alternatively we could have stored cache->prev_sp in the cache->saved\n     regs, but here we follow the lead of AArch64, ARM and Xtensa and will\n     leave that logic in this function, instead of prologue analyzers.  That I\n     think is a bit more clear as `saved_regs` should contain saved regs, not\n     computable.\n\n     Because value has been computed, \"got_constant\" should be used, so that\n     returned value will be a \"not_lval\" - immutable.  */\n\n  if (regnum == gdbarch_sp_regnum (gdbarch))\n    return frame_unwind_got_constant (this_frame, regnum, cache->prev_sp);\n\n  return trad_frame_get_prev_register (this_frame, cache->saved_regs, regnum);\n}",
+      "fn_code_pos": [
+        [
+          1690,
+          0
+        ],
+        [
+          1721,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\narc_dwarf2_frame_init_reg (struct gdbarch *gdbarch, int regnum,\n\t\t\t   struct dwarf2_frame_state_reg *reg,\n\t\t\t   struct frame_info *info)\n{\n  if (regnum == gdbarch_pc_regnum (gdbarch))\n    /* The return address column.  */\n    reg->how = DWARF2_FRAME_REG_RA;\n  else if (regnum == gdbarch_sp_regnum (gdbarch))\n    /* The call frame address.  */\n    reg->how = DWARF2_FRAME_REG_CFA;\n}",
+      "fn_code_pos": [
+        [
+          1725,
+          0
+        ],
+        [
+          1736,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_dwarf2_frame_init_reg",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "regnum": "int",
+          "reg": "struct dwarf2_frame_state_reg",
+          "info": "struct frame_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\narc_tdesc_init (struct gdbarch_info info, const struct target_desc **tdesc,\n\t\tstruct tdesc_arch_data **tdesc_data)\n{\n  if (arc_debug)\n    debug_printf (\"arc: Target description initialization.\\n\");\n\n  const struct target_desc *tdesc_loc = info.target_desc;\n\n  /* Depending on whether this is ARCompact or ARCv2 we will assign\n     different default registers sets (which will differ in exactly two core\n     registers).  GDB will also refuse to accept register feature from invalid\n     ISA - v2 features can be used only with v2 ARChitecture.  We read\n     bfd_arch_info, which looks like to be a safe bet here, as it looks like it\n     is always initialized even when we don't pass any elf file to GDB at all\n     (it uses default arch in this case).  Also GDB will call this function\n     multiple times, and if XML target description file contains architecture\n     specifications, then GDB will set this architecture to info.bfd_arch_info,\n     overriding value from ELF file if they are different.  That means that,\n     where matters, this value is always our best guess on what CPU we are\n     debugging.  It has been noted that architecture specified in tdesc file\n     has higher precedence over ELF and even \"set architecture\" - that is,\n     using \"set architecture\" command will have no effect when tdesc has \"arch\"\n     tag.  */\n  /* Cannot use arc_mach_is_arcv2 (), because gdbarch is not created yet.  */\n  const int is_arcv2 = (info.bfd_arch_info->mach == bfd_mach_arc_arcv2);\n  int is_reduced_rf;\n  const char *const *core_regs;\n  const char *core_feature_name;\n\n  /* If target doesn't provide a description - use default one.  */\n  if (!tdesc_has_registers (tdesc_loc))\n    {\n      if (is_arcv2)\n\t{\n\t  tdesc_loc = tdesc_arc_v2;\n\t  if (arc_debug)\n\t    debug_printf (\"arc: Using default register set for ARC v2.\\n\");\n\t}\n      else\n\t{\n\t  tdesc_loc = tdesc_arc_arcompact;\n\t  if (arc_debug)\n\t    debug_printf (\"arc: Using default register set for ARCompact.\\n\");\n\t}\n    }\n  else\n    {\n      if (arc_debug)\n\tdebug_printf (\"arc: Using provided register set.\\n\");\n    }\n  gdb_assert (tdesc_loc != NULL);\n\n  /* Now we can search for base registers.  Core registers can be either full\n     or reduced.  Summary:\n\n     - core.v2 + aux-minimal\n     - core-reduced.v2 + aux-minimal\n     - core.arcompact + aux-minimal\n\n     NB: It is entirely feasible to have ARCompact with reduced core regs, but\n     we ignore that because GCC doesn't support that and at the same time\n     ARCompact is considered obsolete, so there is not much reason to support\n     that.  */\n  const struct tdesc_feature *feature\n    = tdesc_find_feature (tdesc_loc, core_v2_feature_name);\n  if (feature != NULL)\n    {\n      /* Confirm that register and architecture match, to prevent accidents in\n\t some situations.  This code will trigger an error if:\n\n\t 1. XML tdesc doesn't specify arch explicitly, registers are for arch\n\t X, but ELF specifies arch Y.\n\n\t 2. XML tdesc specifies arch X, but contains registers for arch Y.\n\n\t It will not protect from case where XML or ELF specify arch X,\n\t registers are for the same arch X, but the real target is arch Y.  To\n\t detect this case we need to check IDENTITY register.  */\n      if (!is_arcv2)\n\t{\n\t  arc_print (_(\"Error: ARC v2 target description supplied for \"\n\t\t       \"non-ARCv2 target.\\n\"));\n\t  return FALSE;\n\t}\n\n      is_reduced_rf = FALSE;\n      core_feature_name = core_v2_feature_name;\n      core_regs = core_v2_register_names;\n    }\n  else\n    {\n      feature = tdesc_find_feature (tdesc_loc, core_reduced_v2_feature_name);\n      if (feature != NULL)\n\t{\n\t  if (!is_arcv2)\n\t    {\n\t      arc_print (_(\"Error: ARC v2 target description supplied for \"\n\t\t\t   \"non-ARCv2 target.\\n\"));\n\t      return FALSE;\n\t    }\n\n\t  is_reduced_rf = TRUE;\n\t  core_feature_name = core_reduced_v2_feature_name;\n\t  core_regs = core_v2_register_names;\n\t}\n      else\n\t{\n\t  feature = tdesc_find_feature (tdesc_loc,\n\t\t\t\t\tcore_arcompact_feature_name);\n\t  if (feature != NULL)\n\t    {\n\t      if (is_arcv2)\n\t\t{\n\t\t  arc_print (_(\"Error: ARCompact target description supplied \"\n\t\t\t       \"for non-ARCompact target.\\n\"));\n\t\t  return FALSE;\n\t\t}\n\n\t      is_reduced_rf = FALSE;\n\t      core_feature_name = core_arcompact_feature_name;\n\t      core_regs = core_arcompact_register_names;\n\t    }\n\t  else\n\t    {\n\t      arc_print (_(\"Error: Couldn't find core register feature in \"\n\t\t\t   \"supplied target description.\"));\n\t      return FALSE;\n\t    }\n\t}\n    }\n\n  struct tdesc_arch_data *tdesc_data_loc = tdesc_data_alloc ();\n\n  gdb_assert (feature != NULL);\n  int valid_p = 1;\n\n  for (int i = 0; i <= ARC_LAST_CORE_REGNUM; i++)\n    {\n      /* If rf16, then skip extra registers.  */\n      if (is_reduced_rf && ((i >= ARC_R4_REGNUM && i <= ARC_R9_REGNUM)\n\t\t\t    || (i >= ARC_R16_REGNUM && i <= ARC_R25_REGNUM)))\n\tcontinue;\n\n      valid_p = tdesc_numbered_register (feature, tdesc_data_loc, i,\n\t\t\t\t\t core_regs[i]);\n\n      /* - Ignore errors in extension registers - they are optional.\n\t - Ignore missing ILINK because it doesn't make sense for Linux.\n\t - Ignore missing ILINK2 when architecture is ARCompact, because it\n\t doesn't make sense for Linux targets.\n\n\t In theory those optional registers should be in separate features, but\n\t that would create numerous but tiny features, which looks like an\n\t overengineering of a rather simple task.  */\n      if (!valid_p && (i <= ARC_SP_REGNUM || i == ARC_BLINK_REGNUM\n\t\t       || i == ARC_LP_COUNT_REGNUM || i == ARC_PCL_REGNUM\n\t\t       || (i == ARC_R30_REGNUM && is_arcv2)))\n\t{\n\t  arc_print (_(\"Error: Cannot find required register `%s' in \"\n\t\t       \"feature `%s'.\\n\"), core_regs[i], core_feature_name);\n\t  tdesc_data_cleanup (tdesc_data_loc);\n\t  return FALSE;\n\t}\n    }\n\n  /* Mandatory AUX registeres are intentionally few and are common between\n     ARCompact and ARC v2, so same code can be used for both.  */\n  feature = tdesc_find_feature (tdesc_loc, aux_minimal_feature_name);\n  if (feature == NULL)\n    {\n      arc_print (_(\"Error: Cannot find required feature `%s' in supplied \"\n\t\t   \"target description.\\n\"), aux_minimal_feature_name);\n      tdesc_data_cleanup (tdesc_data_loc);\n      return FALSE;\n    }\n\n  for (int i = ARC_FIRST_AUX_REGNUM; i <= ARC_LAST_AUX_REGNUM; i++)\n    {\n      const char *name = aux_minimal_register_names[i - ARC_FIRST_AUX_REGNUM];\n      valid_p = tdesc_numbered_register (feature, tdesc_data_loc, i, name);\n      if (!valid_p)\n\t{\n\t  arc_print (_(\"Error: Cannot find required register `%s' \"\n\t\t       \"in feature `%s'.\\n\"),\n\t\t     name, tdesc_feature_name (feature));\n\t  tdesc_data_cleanup (tdesc_data_loc);\n\t  return FALSE;\n\t}\n    }\n\n  *tdesc = tdesc_loc;\n  *tdesc_data = tdesc_data_loc;\n\n  return TRUE;\n}",
+      "fn_code_pos": [
+        [
+          1766,
+          0
+        ],
+        [
+          1961,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_tdesc_init",
+        "parameters": {
+          "info": "struct gdbarch_info",
+          "tdesc": "struct target_desc",
+          "tdesc_data": "struct tdesc_arch_data"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static struct gdbarch *\narc_gdbarch_init (struct gdbarch_info info, struct gdbarch_list *arches)\n{\n  const struct target_desc *tdesc;\n  struct tdesc_arch_data *tdesc_data;\n\n  if (arc_debug)\n    debug_printf (\"arc: Architecture initialization.\\n\");\n\n  if (!arc_tdesc_init (info, &tdesc, &tdesc_data))\n    return NULL;\n\n  /* Allocate the ARC-private target-dependent information structure, and the\n     GDB target-independent information structure.  */\n  struct gdbarch_tdep *tdep = XCNEW (struct gdbarch_tdep);\n  tdep->jb_pc = -1; /* No longjmp support by default.  */\n  struct gdbarch *gdbarch = gdbarch_alloc (&info, tdep);\n\n  /* Data types.  */\n  set_gdbarch_short_bit (gdbarch, 16);\n  set_gdbarch_int_bit (gdbarch, 32);\n  set_gdbarch_long_bit (gdbarch, 32);\n  set_gdbarch_long_long_bit (gdbarch, 64);\n  set_gdbarch_long_long_align_bit (gdbarch, 32);\n  set_gdbarch_float_bit (gdbarch, 32);\n  set_gdbarch_float_format (gdbarch, floatformats_ieee_single);\n  set_gdbarch_double_bit (gdbarch, 64);\n  set_gdbarch_double_format (gdbarch, floatformats_ieee_double);\n  set_gdbarch_ptr_bit (gdbarch, 32);\n  set_gdbarch_addr_bit (gdbarch, 32);\n  set_gdbarch_char_signed (gdbarch, 0);\n\n  set_gdbarch_write_pc (gdbarch, arc_write_pc);\n\n  set_gdbarch_virtual_frame_pointer (gdbarch, arc_virtual_frame_pointer);\n\n  /* tdesc_use_registers expects gdbarch_num_regs to return number of registers\n     parsed by gdbarch_init, and then it will add all of the remaining\n     registers and will increase number of registers.  */\n  set_gdbarch_num_regs (gdbarch, ARC_LAST_REGNUM + 1);\n  set_gdbarch_num_pseudo_regs (gdbarch, 0);\n  set_gdbarch_sp_regnum (gdbarch, ARC_SP_REGNUM);\n  set_gdbarch_pc_regnum (gdbarch, ARC_PC_REGNUM);\n  set_gdbarch_ps_regnum (gdbarch, ARC_STATUS32_REGNUM);\n  set_gdbarch_fp0_regnum (gdbarch, -1);\t/* No FPU registers.  */\n\n  set_gdbarch_dummy_id (gdbarch, arc_dummy_id);\n  set_gdbarch_push_dummy_call (gdbarch, arc_push_dummy_call);\n  set_gdbarch_push_dummy_code (gdbarch, arc_push_dummy_code);\n\n  set_gdbarch_cannot_fetch_register (gdbarch, arc_cannot_fetch_register);\n  set_gdbarch_cannot_store_register (gdbarch, arc_cannot_store_register);\n\n  set_gdbarch_believe_pcc_promotion (gdbarch, 1);\n\n  set_gdbarch_return_value (gdbarch, arc_return_value);\n\n  set_gdbarch_skip_prologue (gdbarch, arc_skip_prologue);\n  set_gdbarch_inner_than (gdbarch, core_addr_lessthan);\n\n  set_gdbarch_breakpoint_kind_from_pc (gdbarch, arc_breakpoint_kind_from_pc);\n  set_gdbarch_sw_breakpoint_from_kind (gdbarch, arc_sw_breakpoint_from_kind);\n\n  /* On ARC 600 BRK_S instruction advances PC, unlike other ARC cores.  */\n  if (!arc_mach_is_arc600 (gdbarch))\n    set_gdbarch_decr_pc_after_break (gdbarch, 0);\n  else\n    set_gdbarch_decr_pc_after_break (gdbarch, 2);\n\n  set_gdbarch_unwind_pc (gdbarch, arc_unwind_pc);\n  set_gdbarch_unwind_sp (gdbarch, arc_unwind_sp);\n\n  set_gdbarch_frame_align (gdbarch, arc_frame_align);\n\n  set_gdbarch_print_insn (gdbarch, arc_delayed_print_insn);\n\n  set_gdbarch_cannot_step_breakpoint (gdbarch, 1);\n\n  /* \"nonsteppable\" watchpoint means that watchpoint triggers before\n     instruction is committed, therefore it is required to remove watchpoint\n     to step though instruction that triggers it.  ARC watchpoints trigger\n     only after instruction is committed, thus there is no need to remove\n     them.  In fact on ARC watchpoint for memory writes may trigger with more\n     significant delay, like one or two instructions, depending on type of\n     memory where write is performed (CCM or external) and next instruction\n     after the memory write.  */\n  set_gdbarch_have_nonsteppable_watchpoint (gdbarch, 0);\n\n  /* This doesn't include possible long-immediate value.  */\n  set_gdbarch_max_insn_length (gdbarch, 4);\n\n  /* Frame unwinders and sniffers.  */\n  dwarf2_frame_set_init_reg (gdbarch, arc_dwarf2_frame_init_reg);\n  dwarf2_append_unwinders (gdbarch);\n  frame_unwind_append_unwinder (gdbarch, &arc_frame_unwind);\n  frame_base_set_default (gdbarch, &arc_normal_base);\n\n  /* Setup stuff specific to a particular environment (baremetal or Linux).\n     It can override functions set earlier.  */\n  gdbarch_init_osabi (info, gdbarch);\n\n  if (tdep->jb_pc >= 0)\n    set_gdbarch_get_longjmp_target (gdbarch, arc_get_longjmp_target);\n\n  /* Disassembler options.  Enforce CPU if it was specified in XML target\n     description, otherwise use default method of determining CPU (ELF private\n     header).  */\n  if (info.target_desc != NULL)\n    {\n      const struct bfd_arch_info *tdesc_arch\n\t= tdesc_architecture (info.target_desc);\n      if (tdesc_arch != NULL)\n\t{\n\t  xfree (arc_disassembler_options);\n\t  /* FIXME: It is not really good to change disassembler options\n\t     behind the scene, because that might override options\n\t     specified by the user.  However as of now ARC doesn't support\n\t     `set disassembler-options' hence this code is the only place\n\t     where options are changed.  It also changes options for all\n\t     existing gdbarches, which also can be problematic, if\n\t     arc_gdbarch_init will start reusing existing gdbarch\n\t     instances.  */\n\t  arc_disassembler_options = xstrprintf (\"cpu=%s\",\n\t\t\t\t\t\t tdesc_arch->printable_name);\n\t  set_gdbarch_disassembler_options (gdbarch,\n\t\t\t\t\t    &arc_disassembler_options);\n\t}\n    }\n\n  tdesc_use_registers (gdbarch, tdesc, tdesc_data);\n\n  return gdbarch;\n}",
+      "fn_code_pos": [
+        [
+          1965,
+          0
+        ],
+        [
+          2097,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_gdbarch_init",
+        "parameters": {
+          "info": "struct gdbarch_info",
+          "arches": "struct gdbarch_list"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\narc_dump_tdep (struct gdbarch *gdbarch, struct ui_file *file)\n{\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n\n  fprintf_unfiltered (file, \"arc_dump_tdep: jb_pc = %i\\n\", tdep->jb_pc);\n}",
+      "fn_code_pos": [
+        [
+          2101,
+          0
+        ],
+        [
+          2107,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_dump_tdep",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "file": "struct ui_file"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nmaintenance_print_arc_command (char *args, int from_tty)\n{\n  cmd_show_list (maintenance_print_arc_list, from_tty, \"\");\n}",
+      "fn_code_pos": [
+        [
+          2111,
+          0
+        ],
+        [
+          2115,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "maintenance_print_arc_command",
+        "parameters": {
+          "args": "char",
+          "from_tty": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndump_arc_instruction_command (char *args, int from_tty)\n{\n  struct value *val;\n  if (args != NULL && strlen (args) > 0)\n    val = evaluate_expression (parse_expression (args).get ());\n  else\n    val = access_value_history (0);\n  record_latest_value (val);\n\n  CORE_ADDR address = value_as_address (val);\n  struct arc_instruction insn;\n  struct disassemble_info di = arc_disassemble_info (target_gdbarch ());\n  arc_insn_decode (address, &di, arc_delayed_print_insn, &insn);\n  arc_insn_dump (insn);\n}",
+      "fn_code_pos": [
+        [
+          2120,
+          0
+        ],
+        [
+          2135,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dump_arc_instruction_command",
+        "parameters": {
+          "args": "char",
+          "from_tty": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_arc_tdep (void)\n{\n  gdbarch_register (bfd_arch_arc, arc_gdbarch_init, arc_dump_tdep);\n\n  initialize_tdesc_arc_v2 ();\n  initialize_tdesc_arc_arcompact ();\n\n  /* Register ARC-specific commands with gdb.  */\n\n  /* Add root prefix command for \"maintenance print arc\" commands.  */\n  add_prefix_cmd (\"arc\", class_maintenance, maintenance_print_arc_command,\n\t\t  _(\"ARC-specific maintenance commands for printing GDB \"\n\t\t    \"internal state.\"),\n\t\t  &maintenance_print_arc_list, \"maintenance print arc \", 0,\n\t\t  &maintenanceprintlist);\n\n  add_cmd (\"arc-instruction\", class_maintenance,\n\t   dump_arc_instruction_command,\n\t   _(\"Dump arc_instruction structure for specified address.\"),\n\t   &maintenance_print_arc_list);\n\n  /* Debug internals for ARC GDB.  */\n  add_setshow_zinteger_cmd (\"arc\", class_maintenance,\n\t\t\t    &arc_debug,\n\t\t\t    _(\"Set ARC specific debugging.\"),\n\t\t\t    _(\"Show ARC specific debugging.\"),\n\t\t\t    _(\"Non-zero enables ARC specific debugging.\"),\n\t\t\t    NULL, NULL, &setdebuglist, &showdebuglist);\n}",
+      "fn_code_pos": [
+        [
+          2140,
+          0
+        ],
+        [
+          2169,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_arc_tdep",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "arc_sw_breakpoint_from_kind (struct gdbarch *gdbarch, int kind, int *size)",
+      "fn_dec_pos": [
+        [
+          1499,
+          0
+        ],
+        [
+          1499,
+          74
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_sw_breakpoint_from_kind",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "kind": "int",
+          "size": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "arc_make_frame_cache (struct frame_info *this_frame)",
+      "fn_dec_pos": [
+        [
+          1578,
+          0
+        ],
+        [
+          1578,
+          52
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_make_frame_cache",
+        "parameters": {
+          "this_frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "arc_frame_prev_register (struct frame_info *this_frame,\n\t\t\t void **this_cache, int regnum)",
+      "fn_dec_pos": [
+        [
+          1691,
+          0
+        ],
+        [
+          1692,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "arc_gdbarch_init (struct gdbarch_info info, struct gdbarch_list *arches)",
+      "fn_dec_pos": [
+        [
+          1966,
+          0
+        ],
+        [
+          1966,
+          72
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "arc_gdbarch_init",
+        "parameters": {
+          "info": "struct gdbarch_info",
+          "arches": "struct gdbarch_list"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct arc_frame_cache\n{\n  /* The stack pointer at the time this frame was created; i.e. the caller's\n     stack pointer when this function was called.  It is used to identify this\n     frame.  */\n  CORE_ADDR prev_sp;\n\n  /* Register that is a base for this frame - FP for normal frame, SP for\n     non-FP frames.  */\n  int frame_base_reg;\n\n  /* Offset from the previous SP to the current frame base.  If GCC uses\n     `SUB SP,SP,offset` to allocate space for local variables, then it will be\n     done after setting up a frame pointer, but it still will be considered\n     part of prologue, therefore SP will be lesser than FP at the end of the\n     prologue analysis.  In this case that would be an offset from old SP to a\n     new FP.  But in case of non-FP frames, frame base is an SP and thus that\n     would be an offset from old SP to new SP.  What is important is that this\n     is an offset from old SP to a known register, so it can be used to find\n     old SP.\n\n     Using FP is preferable, when possible, because SP can change in function\n     body after prologue due to alloca, variadic arguments or other shenanigans.\n     If that is the case in the caller frame, then PREV_SP will point to SP at\n     the moment of function call, but it will be different from SP value at the\n     end of the caller prologue.  As a result it will not be possible to\n     reconstruct caller's frame and go past it in the backtrace.  Those things\n     are unlikely to happen to FP - FP value at the moment of function call (as\n     stored on stack in callee prologue) is also an FP value at the end of the\n     caller's prologue.  */\n\n  LONGEST frame_base_offset;\n\n  /* Store addresses for registers saved in prologue.  During prologue analysis\n     GDB stores offsets relatively to \"old SP\", then after old SP is evaluated,\n     offsets are replaced with absolute addresses.  */\n  struct trad_frame_saved_reg *saved_regs;\n}",
+      {
+        "prev_sp": "CORE_ADDR",
+        "frame_base_reg": "int",
+        "frame_base_offset": "LONGEST",
+        "*saved_regs": "struct trad_frame_saved_reg"
+      },
+      "arc_frame_cache",
+      [
+        47,
+        0
+      ],
+      [
+        84,
+        1
+      ]
+    ],
+    [
+      "struct arc_frame_cache\n{\n  /* The stack pointer at the time this frame was created; i.e. the caller's\n     stack pointer when this function was called.  It is used to identify this\n     frame.  */\n  CORE_ADDR prev_sp;\n\n  /* Register that is a base for this frame - FP for normal frame, SP for\n     non-FP frames.  */\n  int frame_base_reg;\n\n  /* Offset from the previous SP to the current frame base.  If GCC uses\n     `SUB SP,SP,offset` to allocate space for local variables, then it will be\n     done after setting up a frame pointer, but it still will be considered\n     part of prologue, therefore SP will be lesser than FP at the end of the\n     prologue analysis.  In this case that would be an offset from old SP to a\n     new FP.  But in case of non-FP frames, frame base is an SP and thus that\n     would be an offset from old SP to new SP.  What is important is that this\n     is an offset from old SP to a known register, so it can be used to find\n     old SP.\n\n     Using FP is preferable, when possible, because SP can change in function\n     body after prologue due to alloca, variadic arguments or other shenanigans.\n     If that is the case in the caller frame, then PREV_SP will point to SP at\n     the moment of function call, but it will be different from SP value at the\n     end of the caller prologue.  As a result it will not be possible to\n     reconstruct caller's frame and go past it in the backtrace.  Those things\n     are unlikely to happen to FP - FP value at the moment of function call (as\n     stored on stack in callee prologue) is also an FP value at the end of the\n     caller's prologue.  */\n\n  LONGEST frame_base_offset;\n\n  /* Store addresses for registers saved in prologue.  During prologue analysis\n     GDB stores offsets relatively to \"old SP\", then after old SP is evaluated,\n     offsets are replaced with absolute addresses.  */\n  struct trad_frame_saved_reg *saved_regs;\n}",
+      {
+        "prev_sp": "CORE_ADDR",
+        "frame_base_reg": "int",
+        "frame_base_offset": "LONGEST",
+        "*saved_regs": "struct trad_frame_saved_reg"
+      },
+      "arc_frame_cache",
+      [
+        47,
+        0
+      ],
+      [
+        84,
+        1
+      ]
+    ],
+    [
+      "struct trad_frame_saved_reg",
+      {},
+      "",
+      [
+        83,
+        2
+      ],
+      [
+        83,
+        29
+      ]
+    ],
+    [
+      "struct cmd_list_element",
+      {},
+      "",
+      [
+        92,
+        7
+      ],
+      [
+        92,
+        30
+      ]
+    ],
+    [
+      "struct arc_instruction",
+      {},
+      "",
+      [
+        158,
+        34
+      ],
+      [
+        158,
+        56
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        170,
+        6
+      ],
+      [
+        170,
+        21
+      ]
+    ],
+    [
+      "struct arc_instruction",
+      {},
+      "",
+      [
+        182,
+        41
+      ],
+      [
+        182,
+        63
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        199,
+        6
+      ],
+      [
+        199,
+        21
+      ]
+    ],
+    [
+      "struct arc_instruction",
+      {},
+      "",
+      [
+        211,
+        36
+      ],
+      [
+        211,
+        58
+      ]
+    ],
+    [
+      "struct arc_instruction",
+      {},
+      "",
+      [
+        230,
+        34
+      ],
+      [
+        230,
+        56
+      ]
+    ],
+    [
+      "struct arc_instruction",
+      {},
+      "",
+      [
+        264,
+        34
+      ],
+      [
+        264,
+        56
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        297,
+        6
+      ],
+      [
+        297,
+        21
+      ]
+    ],
+    [
+      "struct arc_instruction",
+      {},
+      "",
+      [
+        337,
+        21
+      ],
+      [
+        337,
+        43
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        339,
+        2
+      ],
+      [
+        339,
+        16
+      ]
+    ],
+    [
+      "struct arc_instruction",
+      {},
+      "",
+      [
+        406,
+        35
+      ],
+      [
+        406,
+        57
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        447,
+        14
+      ],
+      [
+        447,
+        29
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        449,
+        2
+      ],
+      [
+        449,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        504,
+        27
+      ],
+      [
+        504,
+        41
+      ]
+    ],
+    [
+      "struct frame_id",
+      {},
+      "",
+      [
+        517,
+        7
+      ],
+      [
+        517,
+        22
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        518,
+        14
+      ],
+      [
+        518,
+        28
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        518,
+        39
+      ],
+      [
+        518,
+        56
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        592,
+        21
+      ],
+      [
+        592,
+        35
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        592,
+        46
+      ],
+      [
+        592,
+        58
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        593,
+        7
+      ],
+      [
+        593,
+        22
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        594,
+        7
+      ],
+      [
+        594,
+        19
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        715,
+        21
+      ],
+      [
+        715,
+        35
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        716,
+        7
+      ],
+      [
+        716,
+        19
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        716,
+        39
+      ],
+      [
+        716,
+        50
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        718,
+        7
+      ],
+      [
+        718,
+        22
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        728,
+        27
+      ],
+      [
+        728,
+        41
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        748,
+        27
+      ],
+      [
+        748,
+        41
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        774,
+        26
+      ],
+      [
+        774,
+        40
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        774,
+        51
+      ],
+      [
+        774,
+        62
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        775,
+        5
+      ],
+      [
+        775,
+        20
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        828,
+        24
+      ],
+      [
+        828,
+        38
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        828,
+        49
+      ],
+      [
+        828,
+        60
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        829,
+        3
+      ],
+      [
+        829,
+        18
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        874,
+        24
+      ],
+      [
+        874,
+        41
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        879,
+        2
+      ],
+      [
+        879,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        880,
+        2
+      ],
+      [
+        880,
+        21
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        896,
+        18
+      ],
+      [
+        896,
+        32
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        896,
+        43
+      ],
+      [
+        896,
+        55
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        897,
+        4
+      ],
+      [
+        897,
+        15
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        897,
+        26
+      ],
+      [
+        897,
+        41
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        940,
+        24
+      ],
+      [
+        940,
+        41
+      ]
+    ],
+    [
+      "struct arc_instruction",
+      {},
+      "",
+      [
+        949,
+        38
+      ],
+      [
+        949,
+        60
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        962,
+        20
+      ],
+      [
+        962,
+        34
+      ]
+    ],
+    [
+      "struct arc_instruction",
+      {},
+      "",
+      [
+        962,
+        51
+      ],
+      [
+        962,
+        73
+      ]
+    ],
+    [
+      "struct pv_area",
+      {},
+      "",
+      [
+        963,
+        18
+      ],
+      [
+        963,
+        32
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        1194,
+        0
+      ],
+      [
+        1194,
+        23
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1195,
+        22
+      ],
+      [
+        1195,
+        36
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        1197,
+        2
+      ],
+      [
+        1197,
+        25
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        1203,
+        24
+      ],
+      [
+        1203,
+        47
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1261,
+        22
+      ],
+      [
+        1261,
+        36
+      ]
+    ],
+    [
+      "struct arc_frame_cache",
+      {},
+      "",
+      [
+        1262,
+        34
+      ],
+      [
+        1262,
+        56
+      ]
+    ],
+    [
+      "struct pv_area",
+      {},
+      "",
+      [
+        1273,
+        2
+      ],
+      [
+        1273,
+        16
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        1275,
+        2
+      ],
+      [
+        1275,
+        16
+      ]
+    ],
+    [
+      "struct arc_instruction",
+      {},
+      "",
+      [
+        1282,
+        6
+      ],
+      [
+        1282,
+        28
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        1283,
+        6
+      ],
+      [
+        1283,
+        29
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1357,
+        19
+      ],
+      [
+        1357,
+        33
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        1407,
+        38
+      ],
+      [
+        1407,
+        61
+      ]
+    ],
+    [
+      "struct obj_section",
+      {},
+      "",
+      [
+        1431,
+        6
+      ],
+      [
+        1431,
+        24
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1482,
+        29
+      ],
+      [
+        1482,
+        43
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1499,
+        29
+      ],
+      [
+        1499,
+        43
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1520,
+        15
+      ],
+      [
+        1520,
+        29
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1520,
+        40
+      ],
+      [
+        1520,
+        57
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1534,
+        15
+      ],
+      [
+        1534,
+        29
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1534,
+        40
+      ],
+      [
+        1534,
+        57
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1548,
+        17
+      ],
+      [
+        1548,
+        31
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1556,
+        23
+      ],
+      [
+        1556,
+        37
+      ]
+    ],
+    [
+      "struct arc_frame_cache",
+      {},
+      "",
+      [
+        1557,
+        9
+      ],
+      [
+        1557,
+        31
+      ]
+    ],
+    [
+      "struct arc_frame_cache",
+      {},
+      "",
+      [
+        1577,
+        7
+      ],
+      [
+        1577,
+        29
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1578,
+        22
+      ],
+      [
+        1578,
+        39
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1583,
+        2
+      ],
+      [
+        1583,
+        16
+      ]
+    ],
+    [
+      "struct symtab_and_line",
+      {},
+      "",
+      [
+        1589,
+        6
+      ],
+      [
+        1589,
+        28
+      ]
+    ],
+    [
+      "struct arc_frame_cache",
+      {},
+      "",
+      [
+        1615,
+        2
+      ],
+      [
+        1615,
+        24
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1645,
+        19
+      ],
+      [
+        1645,
+        36
+      ]
+    ],
+    [
+      "struct frame_id",
+      {},
+      "",
+      [
+        1646,
+        5
+      ],
+      [
+        1646,
+        20
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1651,
+        2
+      ],
+      [
+        1651,
+        16
+      ]
+    ],
+    [
+      "struct arc_frame_cache",
+      {},
+      "",
+      [
+        1655,
+        2
+      ],
+      [
+        1655,
+        24
+      ]
+    ],
+    [
+      "struct arc_frame_cache",
+      {},
+      "",
+      [
+        1655,
+        35
+      ],
+      [
+        1655,
+        57
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        1690,
+        7
+      ],
+      [
+        1690,
+        19
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1691,
+        25
+      ],
+      [
+        1691,
+        42
+      ]
+    ],
+    [
+      "struct arc_frame_cache",
+      {},
+      "",
+      [
+        1696,
+        2
+      ],
+      [
+        1696,
+        24
+      ]
+    ],
+    [
+      "struct arc_frame_cache",
+      {},
+      "",
+      [
+        1696,
+        35
+      ],
+      [
+        1696,
+        57
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1698,
+        2
+      ],
+      [
+        1698,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1726,
+        27
+      ],
+      [
+        1726,
+        41
+      ]
+    ],
+    [
+      "struct dwarf2_frame_state_reg",
+      {},
+      "",
+      [
+        1727,
+        6
+      ],
+      [
+        1727,
+        35
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1728,
+        6
+      ],
+      [
+        1728,
+        23
+      ]
+    ],
+    [
+      "struct frame_unwind",
+      {},
+      "",
+      [
+        1742,
+        13
+      ],
+      [
+        1742,
+        32
+      ]
+    ],
+    [
+      "struct frame_base",
+      {},
+      "",
+      [
+        1754,
+        13
+      ],
+      [
+        1754,
+        30
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        1767,
+        16
+      ],
+      [
+        1767,
+        35
+      ]
+    ],
+    [
+      "struct target_desc",
+      {},
+      "",
+      [
+        1767,
+        48
+      ],
+      [
+        1767,
+        66
+      ]
+    ],
+    [
+      "struct tdesc_arch_data",
+      {},
+      "",
+      [
+        1768,
+        2
+      ],
+      [
+        1768,
+        24
+      ]
+    ],
+    [
+      "struct target_desc",
+      {},
+      "",
+      [
+        1773,
+        8
+      ],
+      [
+        1773,
+        26
+      ]
+    ],
+    [
+      "struct tdesc_feature",
+      {},
+      "",
+      [
+        1830,
+        8
+      ],
+      [
+        1830,
+        28
+      ]
+    ],
+    [
+      "struct tdesc_arch_data",
+      {},
+      "",
+      [
+        1898,
+        2
+      ],
+      [
+        1898,
+        24
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1965,
+        7
+      ],
+      [
+        1965,
+        21
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        1966,
+        18
+      ],
+      [
+        1966,
+        37
+      ]
+    ],
+    [
+      "struct gdbarch_list",
+      {},
+      "",
+      [
+        1966,
+        44
+      ],
+      [
+        1966,
+        63
+      ]
+    ],
+    [
+      "struct target_desc",
+      {},
+      "",
+      [
+        1968,
+        8
+      ],
+      [
+        1968,
+        26
+      ]
+    ],
+    [
+      "struct tdesc_arch_data",
+      {},
+      "",
+      [
+        1969,
+        2
+      ],
+      [
+        1969,
+        24
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        1979,
+        2
+      ],
+      [
+        1979,
+        21
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1981,
+        2
+      ],
+      [
+        1981,
+        16
+      ]
+    ],
+    [
+      "struct bfd_arch_info",
+      {},
+      "",
+      [
+        2074,
+        12
+      ],
+      [
+        2074,
+        32
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        2102,
+        15
+      ],
+      [
+        2102,
+        29
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        2102,
+        40
+      ],
+      [
+        2102,
+        54
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        2104,
+        2
+      ],
+      [
+        2104,
+        21
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        2123,
+        2
+      ],
+      [
+        2123,
+        14
+      ]
+    ],
+    [
+      "struct arc_instruction",
+      {},
+      "",
+      [
+        2131,
+        2
+      ],
+      [
+        2131,
+        24
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        2132,
+        2
+      ],
+      [
+        2132,
+        25
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"arch-utils.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"disasm.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"dwarf2-frame.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"frame-base.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"frame-unwind.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcmd.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"objfiles.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"prologue-value.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"trad-frame.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"opcode/arc.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"opcodes/arc-dis.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"arc-tdep.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <algorithm>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"features/arc-v2.c\"\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include \"features/arc-arcompact.c\"\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum return_value_convention",
+      {},
+      "",
+      [
+        895,
+        7
+      ],
+      [
+        895,
+        35
+      ]
+    ]
+  ]
+}

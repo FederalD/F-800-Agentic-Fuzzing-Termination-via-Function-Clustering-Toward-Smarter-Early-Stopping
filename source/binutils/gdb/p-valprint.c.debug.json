@@ -1,0 +1,1342 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "void\npascal_val_print (struct type *type,\n\t\t  int embedded_offset, CORE_ADDR address,\n\t\t  struct ui_file *stream, int recurse,\n\t\t  struct value *original_value,\n\t\t  const struct value_print_options *options)\n{\n  struct gdbarch *gdbarch = get_type_arch (type);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  unsigned int i = 0;\t/* Number of characters printed */\n  unsigned len;\n  LONGEST low_bound, high_bound;\n  struct type *elttype;\n  unsigned eltlen;\n  int length_pos, length_size, string_pos;\n  struct type *char_type;\n  CORE_ADDR addr;\n  int want_space = 0;\n  const gdb_byte *valaddr = value_contents_for_printing (original_value);\n\n  type = check_typedef (type);\n  switch (TYPE_CODE (type))\n    {\n    case TYPE_CODE_ARRAY:\n      if (get_array_bounds (type, &low_bound, &high_bound))\n\t{\n\t  len = high_bound - low_bound + 1;\n\t  elttype = check_typedef (TYPE_TARGET_TYPE (type));\n\t  eltlen = TYPE_LENGTH (elttype);\n\t  if (options->prettyformat_arrays)\n\t    {\n\t      print_spaces_filtered (2 + 2 * recurse, stream);\n\t    }\n\t  /* If 's' format is used, try to print out as string.\n\t     If no format is given, print as string if element type\n\t     is of TYPE_CODE_CHAR and element size is 1,2 or 4.  */\n\t  if (options->format == 's'\n\t      || ((eltlen == 1 || eltlen == 2 || eltlen == 4)\n\t\t  && TYPE_CODE (elttype) == TYPE_CODE_CHAR\n\t\t  && options->format == 0))\n\t    {\n\t      /* If requested, look for the first null char and only print\n\t         elements up to it.  */\n\t      if (options->stop_print_at_null)\n\t\t{\n\t\t  unsigned int temp_len;\n\n\t\t  /* Look for a NULL char.  */\n\t\t  for (temp_len = 0;\n\t\t       extract_unsigned_integer (valaddr + embedded_offset +\n\t\t\t\t\t\t temp_len * eltlen, eltlen,\n\t\t\t\t\t\t byte_order)\n\t\t       && temp_len < len && temp_len < options->print_max;\n\t\t       temp_len++);\n\t\t  len = temp_len;\n\t\t}\n\n\t      LA_PRINT_STRING (stream, TYPE_TARGET_TYPE (type),\n\t\t\t       valaddr + embedded_offset, len, NULL, 0,\n\t\t\t       options);\n\t      i = len;\n\t    }\n\t  else\n\t    {\n\t      fprintf_filtered (stream, \"{\");\n\t      /* If this is a virtual function table, print the 0th\n\t         entry specially, and the rest of the members normally.  */\n\t      if (pascal_object_is_vtbl_ptr_type (elttype))\n\t\t{\n\t\t  i = 1;\n\t\t  fprintf_filtered (stream, \"%d vtable entries\", len - 1);\n\t\t}\n\t      else\n\t\t{\n\t\t  i = 0;\n\t\t}\n\t      val_print_array_elements (type, embedded_offset,\n\t\t\t\t\taddress, stream, recurse,\n\t\t\t\t\toriginal_value, options, i);\n\t      fprintf_filtered (stream, \"}\");\n\t    }\n\t  break;\n\t}\n      /* Array of unspecified length: treat like pointer to first elt.  */\n      addr = address + embedded_offset;\n      goto print_unpacked_pointer;\n\n    case TYPE_CODE_PTR:\n      if (options->format && options->format != 's')\n\t{\n\t  val_print_scalar_formatted (type, embedded_offset,\n\t\t\t\t      original_value, options, 0, stream);\n\t  break;\n\t}\n      if (options->vtblprint && pascal_object_is_vtbl_ptr_type (type))\n\t{\n\t  /* Print the unmangled name if desired.  */\n\t  /* Print vtable entry - we only get here if we ARE using\n\t     -fvtable_thunks.  (Otherwise, look under TYPE_CODE_STRUCT.)  */\n\t  /* Extract the address, assume that it is unsigned.  */\n\t  addr = extract_unsigned_integer (valaddr + embedded_offset,\n\t\t\t\t\t   TYPE_LENGTH (type), byte_order);\n\t  print_address_demangle (options, gdbarch, addr, stream, demangle);\n\t  break;\n\t}\n      check_typedef (TYPE_TARGET_TYPE (type));\n\n      addr = unpack_pointer (type, valaddr + embedded_offset);\n    print_unpacked_pointer:\n      elttype = check_typedef (TYPE_TARGET_TYPE (type));\n\n      if (TYPE_CODE (elttype) == TYPE_CODE_FUNC)\n\t{\n\t  /* Try to print what function it points to.  */\n\t  print_address_demangle (options, gdbarch, addr, stream, demangle);\n\t  return;\n\t}\n\n      if (options->addressprint && options->format != 's')\n\t{\n\t  fputs_filtered (paddress (gdbarch, addr), stream);\n\t  want_space = 1;\n\t}\n\n      /* For a pointer to char or unsigned char, also print the string\n\t pointed to, unless pointer is null.  */\n      if (((TYPE_LENGTH (elttype) == 1\n\t   && (TYPE_CODE (elttype) == TYPE_CODE_INT\n\t      || TYPE_CODE (elttype) == TYPE_CODE_CHAR))\n\t  || ((TYPE_LENGTH (elttype) == 2 || TYPE_LENGTH (elttype) == 4)\n\t      && TYPE_CODE (elttype) == TYPE_CODE_CHAR))\n\t  && (options->format == 0 || options->format == 's')\n\t  && addr != 0)\n\t{\n\t  if (want_space)\n\t    fputs_filtered (\" \", stream);\n\t  /* No wide string yet.  */\n\t  i = val_print_string (elttype, NULL, addr, -1, stream, options);\n\t}\n      /* Also for pointers to pascal strings.  */\n      /* Note: this is Free Pascal specific:\n\t as GDB does not recognize stabs pascal strings\n\t Pascal strings are mapped to records\n\t with lowercase names PM.  */\n      if (is_pascal_string_type (elttype, &length_pos, &length_size,\n\t\t\t\t &string_pos, &char_type, NULL)\n\t  && addr != 0)\n\t{\n\t  ULONGEST string_length;\n\t  gdb_byte *buffer;\n\n\t  if (want_space)\n\t    fputs_filtered (\" \", stream);\n\t  buffer = (gdb_byte *) xmalloc (length_size);\n\t  read_memory (addr + length_pos, buffer, length_size);\n\t  string_length = extract_unsigned_integer (buffer, length_size,\n\t\t\t\t\t\t    byte_order);\n\t  xfree (buffer);\n\t  i = val_print_string (char_type, NULL,\n\t\t\t\taddr + string_pos, string_length,\n\t\t\t\tstream, options);\n\t}\n      else if (pascal_object_is_vtbl_member (type))\n\t{\n\t  /* Print vtbl's nicely.  */\n\t  CORE_ADDR vt_address = unpack_pointer (type,\n\t\t\t\t\t\t valaddr + embedded_offset);\n\t  struct bound_minimal_symbol msymbol =\n\t    lookup_minimal_symbol_by_pc (vt_address);\n\n\t  /* If 'symbol_print' is set, we did the work above.  */\n\t  if (!options->symbol_print\n\t      && (msymbol.minsym != NULL)\n\t      && (vt_address == BMSYMBOL_VALUE_ADDRESS (msymbol)))\n\t    {\n\t      if (want_space)\n\t\tfputs_filtered (\" \", stream);\n\t      fputs_filtered (\"<\", stream);\n\t      fputs_filtered (MSYMBOL_PRINT_NAME (msymbol.minsym), stream);\n\t      fputs_filtered (\">\", stream);\n\t      want_space = 1;\n\t    }\n\t  if (vt_address && options->vtblprint)\n\t    {\n\t      struct value *vt_val;\n\t      struct symbol *wsym = NULL;\n\t      struct type *wtype;\n\t      struct block *block = NULL;\n\t      struct field_of_this_result is_this_fld;\n\n\t      if (want_space)\n\t\tfputs_filtered (\" \", stream);\n\n\t      if (msymbol.minsym != NULL)\n\t\twsym = lookup_symbol (MSYMBOL_LINKAGE_NAME (msymbol.minsym),\n\t\t\t\t      block,\n\t\t\t\t      VAR_DOMAIN, &is_this_fld).symbol;\n\n\t      if (wsym)\n\t\t{\n\t\t  wtype = SYMBOL_TYPE (wsym);\n\t\t}\n\t      else\n\t\t{\n\t\t  wtype = TYPE_TARGET_TYPE (type);\n\t\t}\n\t      vt_val = value_at (wtype, vt_address);\n\t      common_val_print (vt_val, stream, recurse + 1, options,\n\t\t\t\tcurrent_language);\n\t      if (options->prettyformat)\n\t\t{\n\t\t  fprintf_filtered (stream, \"\\n\");\n\t\t  print_spaces_filtered (2 + 2 * recurse, stream);\n\t\t}\n\t    }\n\t}\n\n      return;\n\n    case TYPE_CODE_REF:\n    case TYPE_CODE_ENUM:\n    case TYPE_CODE_FLAGS:\n    case TYPE_CODE_FUNC:\n    case TYPE_CODE_RANGE:\n    case TYPE_CODE_INT:\n    case TYPE_CODE_FLT:\n    case TYPE_CODE_VOID:\n    case TYPE_CODE_ERROR:\n    case TYPE_CODE_UNDEF:\n    case TYPE_CODE_BOOL:\n    case TYPE_CODE_CHAR:\n      generic_val_print (type, embedded_offset, address,\n\t\t\t stream, recurse, original_value, options,\n\t\t\t &p_decorations);\n      break;\n\n    case TYPE_CODE_UNION:\n      if (recurse && !options->unionprint)\n\t{\n\t  fprintf_filtered (stream, \"{...}\");\n\t  break;\n\t}\n      /* Fall through.  */\n    case TYPE_CODE_STRUCT:\n      if (options->vtblprint && pascal_object_is_vtbl_ptr_type (type))\n\t{\n\t  /* Print the unmangled name if desired.  */\n\t  /* Print vtable entry - we only get here if NOT using\n\t     -fvtable_thunks.  (Otherwise, look under TYPE_CODE_PTR.)  */\n\t  /* Extract the address, assume that it is unsigned.  */\n\t  print_address_demangle\n\t    (options, gdbarch,\n\t     extract_unsigned_integer (valaddr + embedded_offset\n\t\t\t\t       + TYPE_FIELD_BITPOS (type,\n\t\t\t\t\t\t\t    VTBL_FNADDR_OFFSET) / 8,\n\t\t\t\t       TYPE_LENGTH (TYPE_FIELD_TYPE (type,\n\t\t\t\t\t\t\t\t     VTBL_FNADDR_OFFSET)),\n\t\t\t\t       byte_order),\n\t     stream, demangle);\n\t}\n      else\n\t{\n          if (is_pascal_string_type (type, &length_pos, &length_size,\n                                     &string_pos, &char_type, NULL))\n\t    {\n\t      len = extract_unsigned_integer (valaddr + embedded_offset\n\t\t\t\t\t      + length_pos, length_size,\n\t\t\t\t\t      byte_order);\n\t      LA_PRINT_STRING (stream, char_type,\n\t\t\t       valaddr + embedded_offset + string_pos,\n\t\t\t       len, NULL, 0, options);\n\t    }\n\t  else\n\t    pascal_object_print_value_fields (type, valaddr, embedded_offset,\n\t\t\t\t\t      address, stream, recurse,\n\t\t\t\t\t      original_value, options,\n\t\t\t\t\t      NULL, 0);\n\t}\n      break;\n\n    case TYPE_CODE_SET:\n      elttype = TYPE_INDEX_TYPE (type);\n      elttype = check_typedef (elttype);\n      if (TYPE_STUB (elttype))\n\t{\n\t  fprintf_filtered (stream, \"<incomplete type>\");\n\t  gdb_flush (stream);\n\t  break;\n\t}\n      else\n\t{\n\t  struct type *range = elttype;\n\t  LONGEST low_bound, high_bound;\n\t  int i;\n\t  int need_comma = 0;\n\n\t  fputs_filtered (\"[\", stream);\n\n\t  i = get_discrete_bounds (range, &low_bound, &high_bound);\n\t  if (low_bound == 0 && high_bound == -1 && TYPE_LENGTH (type) > 0)\n\t    {\n\t      /* If we know the size of the set type, we can figure out the\n\t      maximum value.  */\n\t      i = 0;\n\t      high_bound = TYPE_LENGTH (type) * TARGET_CHAR_BIT - 1;\n\t      TYPE_HIGH_BOUND (range) = high_bound;\n\t    }\n\tmaybe_bad_bstring:\n\t  if (i < 0)\n\t    {\n\t      fputs_filtered (\"<error value>\", stream);\n\t      goto done;\n\t    }\n\n\t  for (i = low_bound; i <= high_bound; i++)\n\t    {\n\t      int element = value_bit_index (type,\n\t\t\t\t\t     valaddr + embedded_offset, i);\n\n\t      if (element < 0)\n\t\t{\n\t\t  i = element;\n\t\t  goto maybe_bad_bstring;\n\t\t}\n\t      if (element)\n\t\t{\n\t\t  if (need_comma)\n\t\t    fputs_filtered (\", \", stream);\n\t\t  print_type_scalar (range, i, stream);\n\t\t  need_comma = 1;\n\n\t\t  if (i + 1 <= high_bound\n\t\t      && value_bit_index (type,\n\t\t\t\t\t  valaddr + embedded_offset, ++i))\n\t\t    {\n\t\t      int j = i;\n\n\t\t      fputs_filtered (\"..\", stream);\n\t\t      while (i + 1 <= high_bound\n\t\t\t     && value_bit_index (type,\n\t\t\t\t\t\t valaddr + embedded_offset,\n\t\t\t\t\t\t ++i))\n\t\t\tj = i;\n\t\t      print_type_scalar (range, j, stream);\n\t\t    }\n\t\t}\n\t    }\n\tdone:\n\t  fputs_filtered (\"]\", stream);\n\t}\n      break;\n\n    default:\n      error (_(\"Invalid pascal type code %d in symbol table.\"),\n\t     TYPE_CODE (type));\n    }\n  gdb_flush (stream);\n}",
+      "fn_code_pos": [
+        [
+          59,
+          0
+        ],
+        [
+          416,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pascal_val_print",
+        "parameters": {
+          "type": "struct type",
+          "embedded_offset": "int",
+          "address": "CORE_ADDR",
+          "stream": "struct ui_file",
+          "recurse": "int",
+          "original_value": "struct value",
+          "options": "struct value_print_options"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\npascal_value_print (struct value *val, struct ui_file *stream,\n\t\t    const struct value_print_options *options)\n{\n  struct type *type = value_type (val);\n  struct value_print_options opts = *options;\n\n  opts.deref_ref = 1;\n\n  /* If it is a pointer, indicate what it points to.\n\n     Print type also if it is a reference.\n\n     Object pascal: if it is a member pointer, we will take care\n     of that when we print it.  */\n  if (TYPE_CODE (type) == TYPE_CODE_PTR\n      || TYPE_CODE (type) == TYPE_CODE_REF)\n    {\n      /* Hack:  remove (char *) for char strings.  Their\n         type is indicated by the quoted string anyway.  */\n      if (TYPE_CODE (type) == TYPE_CODE_PTR\n\t  && TYPE_NAME (type) == NULL\n\t  && TYPE_NAME (TYPE_TARGET_TYPE (type)) != NULL\n\t  && strcmp (TYPE_NAME (TYPE_TARGET_TYPE (type)), \"char\") == 0)\n\t{\n\t  /* Print nothing.  */\n\t}\n      else\n\t{\n\t  fprintf_filtered (stream, \"(\");\n\t  type_print (type, \"\", stream, -1);\n\t  fprintf_filtered (stream, \") \");\n\t}\n    }\n  common_val_print (val, stream, 0, &opts, current_language);\n}",
+      "fn_code_pos": [
+        [
+          418,
+          0
+        ],
+        [
+          453,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pascal_value_print",
+        "parameters": {
+          "val": "struct value",
+          "stream": "struct ui_file",
+          "options": "struct value_print_options"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nshow_pascal_static_field_print (struct ui_file *file, int from_tty,\n\t\t\t\tstruct cmd_list_element *c, const char *value)\n{\n  fprintf_filtered (file, _(\"Printing of pascal static members is %s.\\n\"),\n\t\t    value);\n}",
+      "fn_code_pos": [
+        [
+          456,
+          0
+        ],
+        [
+          462,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "show_pascal_static_field_print",
+        "parameters": {
+          "file": "struct ui_file",
+          "from_tty": "int",
+          "c": "struct cmd_list_element",
+          "value": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\npascal_object_is_vtbl_ptr_type (struct type *type)\n{\n  const char *type_name = type_name_no_tag (type);\n\n  return (type_name != NULL\n\t  && strcmp (type_name, pascal_vtbl_ptr_name) == 0);\n}",
+      "fn_code_pos": [
+        [
+          485,
+          0
+        ],
+        [
+          492,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pascal_object_is_vtbl_ptr_type",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npascal_object_is_vtbl_member (struct type *type)\n{\n  if (TYPE_CODE (type) == TYPE_CODE_PTR)\n    {\n      type = TYPE_TARGET_TYPE (type);\n      if (TYPE_CODE (type) == TYPE_CODE_ARRAY)\n\t{\n\t  type = TYPE_TARGET_TYPE (type);\n\t  if (TYPE_CODE (type) == TYPE_CODE_STRUCT\t/* If not using\n\t\t\t\t\t\t\t   thunks.  */\n\t      || TYPE_CODE (type) == TYPE_CODE_PTR)\t/* If using thunks.  */\n\t    {\n\t      /* Virtual functions tables are full of pointers\n\t         to virtual functions.  */\n\t      return pascal_object_is_vtbl_ptr_type (type);\n\t    }\n\t}\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          497,
+          0
+        ],
+        [
+          517,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pascal_object_is_vtbl_member",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\npascal_object_print_value_fields (struct type *type, const gdb_byte *valaddr,\n\t\t\t\t  LONGEST offset,\n\t\t\t\t  CORE_ADDR address, struct ui_file *stream,\n\t\t\t\t  int recurse,\n\t\t\t\t  struct value *val,\n\t\t\t\t  const struct value_print_options *options,\n\t\t\t\t  struct type **dont_print_vb,\n\t\t\t\t  int dont_print_statmem)\n{\n  int i, len, n_baseclasses;\n  char *last_dont_print\n    = (char *) obstack_next_free (&dont_print_statmem_obstack);\n\n  type = check_typedef (type);\n\n  fprintf_filtered (stream, \"{\");\n  len = TYPE_NFIELDS (type);\n  n_baseclasses = TYPE_N_BASECLASSES (type);\n\n  /* Print out baseclasses such that we don't print\n     duplicates of virtual baseclasses.  */\n  if (n_baseclasses > 0)\n    pascal_object_print_value (type, valaddr, offset, address,\n\t\t\t       stream, recurse + 1, val,\n\t\t\t       options, dont_print_vb);\n\n  if (!len && n_baseclasses == 1)\n    fprintf_filtered (stream, \"<No data fields>\");\n  else\n    {\n      struct obstack tmp_obstack = dont_print_statmem_obstack;\n      int fields_seen = 0;\n\n      if (dont_print_statmem == 0)\n\t{\n\t  /* If we're at top level, carve out a completely fresh\n\t     chunk of the obstack and use that until this particular\n\t     invocation returns.  */\n\t  obstack_finish (&dont_print_statmem_obstack);\n\t}\n\n      for (i = n_baseclasses; i < len; i++)\n\t{\n\t  /* If requested, skip printing of static fields.  */\n\t  if (!options->pascal_static_field_print\n\t      && field_is_static (&TYPE_FIELD (type, i)))\n\t    continue;\n\t  if (fields_seen)\n\t    fprintf_filtered (stream, \", \");\n\t  else if (n_baseclasses > 0)\n\t    {\n\t      if (options->prettyformat)\n\t\t{\n\t\t  fprintf_filtered (stream, \"\\n\");\n\t\t  print_spaces_filtered (2 + 2 * recurse, stream);\n\t\t  fputs_filtered (\"members of \", stream);\n\t\t  fputs_filtered (type_name_no_tag (type), stream);\n\t\t  fputs_filtered (\": \", stream);\n\t\t}\n\t    }\n\t  fields_seen = 1;\n\n\t  if (options->prettyformat)\n\t    {\n\t      fprintf_filtered (stream, \"\\n\");\n\t      print_spaces_filtered (2 + 2 * recurse, stream);\n\t    }\n\t  else\n\t    {\n\t      wrap_here (n_spaces (2 + 2 * recurse));\n\t    }\n\n\t  annotate_field_begin (TYPE_FIELD_TYPE (type, i));\n\n\t  if (field_is_static (&TYPE_FIELD (type, i)))\n\t    fputs_filtered (\"static \", stream);\n\t  fprintf_symbol_filtered (stream, TYPE_FIELD_NAME (type, i),\n\t\t\t\t   language_cplus,\n\t\t\t\t   DMGL_PARAMS | DMGL_ANSI);\n\t  annotate_field_name_end ();\n\t  fputs_filtered (\" = \", stream);\n\t  annotate_field_value ();\n\n\t  if (!field_is_static (&TYPE_FIELD (type, i))\n\t      && TYPE_FIELD_PACKED (type, i))\n\t    {\n\t      struct value *v;\n\n\t      /* Bitfields require special handling, especially due to byte\n\t         order problems.  */\n\t      if (TYPE_FIELD_IGNORE (type, i))\n\t\t{\n\t\t  fputs_filtered (\"<optimized out or zero length>\", stream);\n\t\t}\n\t      else if (value_bits_synthetic_pointer (val,\n\t\t\t\t\t\t     TYPE_FIELD_BITPOS (type,\n\t\t\t\t\t\t\t\t\ti),\n\t\t\t\t\t\t     TYPE_FIELD_BITSIZE (type,\n\t\t\t\t\t\t\t\t\t i)))\n\t\t{\n\t\t  fputs_filtered (_(\"<synthetic pointer>\"), stream);\n\t\t}\n\t      else\n\t\t{\n\t\t  struct value_print_options opts = *options;\n\n\t\t  v = value_field_bitfield (type, i, valaddr, offset, val);\n\n\t\t  opts.deref_ref = 0;\n\t\t  common_val_print (v, stream, recurse + 1, &opts,\n\t\t\t\t    current_language);\n\t\t}\n\t    }\n\t  else\n\t    {\n\t      if (TYPE_FIELD_IGNORE (type, i))\n\t\t{\n\t\t  fputs_filtered (\"<optimized out or zero length>\", stream);\n\t\t}\n\t      else if (field_is_static (&TYPE_FIELD (type, i)))\n\t\t{\n\t\t  /* struct value *v = value_static_field (type, i);\n\t\t     v4.17 specific.  */\n\t\t  struct value *v;\n\n\t\t  v = value_field_bitfield (type, i, valaddr, offset, val);\n\n\t\t  if (v == NULL)\n\t\t    val_print_optimized_out (NULL, stream);\n\t\t  else\n\t\t    pascal_object_print_static_field (v, stream, recurse + 1,\n\t\t\t\t\t\t      options);\n\t\t}\n\t      else\n\t\t{\n\t\t  struct value_print_options opts = *options;\n\n\t\t  opts.deref_ref = 0;\n\t\t  /* val_print (TYPE_FIELD_TYPE (type, i),\n\t\t     valaddr + TYPE_FIELD_BITPOS (type, i) / 8,\n\t\t     address + TYPE_FIELD_BITPOS (type, i) / 8, 0,\n\t\t     stream, format, 0, recurse + 1, pretty); */\n\t\t  val_print (TYPE_FIELD_TYPE (type, i),\n\t\t\t     offset + TYPE_FIELD_BITPOS (type, i) / 8,\n\t\t\t     address, stream, recurse + 1, val, &opts,\n\t\t\t     current_language);\n\t\t}\n\t    }\n\t  annotate_field_end ();\n\t}\n\n      if (dont_print_statmem == 0)\n\t{\n\t  /* Free the space used to deal with the printing\n\t     of the members from top level.  */\n\t  obstack_free (&dont_print_statmem_obstack, last_dont_print);\n\t  dont_print_statmem_obstack = tmp_obstack;\n\t}\n\n      if (options->prettyformat)\n\t{\n\t  fprintf_filtered (stream, \"\\n\");\n\t  print_spaces_filtered (2 * recurse, stream);\n\t}\n    }\n  fprintf_filtered (stream, \"}\");\n}",
+      "fn_code_pos": [
+        [
+          529,
+          0
+        ],
+        [
+          696,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pascal_object_print_value_fields",
+        "parameters": {
+          "type": "struct type",
+          "valaddr": "gdb_byte",
+          "offset": "LONGEST",
+          "address": "CORE_ADDR",
+          "stream": "struct ui_file",
+          "recurse": "int",
+          "val": "struct value",
+          "options": "struct value_print_options",
+          "dont_print_vb": "struct type",
+          "dont_print_statmem": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\npascal_object_print_value (struct type *type, const gdb_byte *valaddr,\n\t\t\t   LONGEST offset,\n\t\t\t   CORE_ADDR address, struct ui_file *stream,\n\t\t\t   int recurse,\n\t\t\t   struct value *val,\n\t\t\t   const struct value_print_options *options,\n\t\t\t   struct type **dont_print_vb)\n{\n  struct type **last_dont_print\n    = (struct type **) obstack_next_free (&dont_print_vb_obstack);\n  struct obstack tmp_obstack = dont_print_vb_obstack;\n  int i, n_baseclasses = TYPE_N_BASECLASSES (type);\n\n  if (dont_print_vb == 0)\n    {\n      /* If we're at top level, carve out a completely fresh\n         chunk of the obstack and use that until this particular\n         invocation returns.  */\n      /* Bump up the high-water mark.  Now alpha is omega.  */\n      obstack_finish (&dont_print_vb_obstack);\n    }\n\n  for (i = 0; i < n_baseclasses; i++)\n    {\n      LONGEST boffset = 0;\n      struct type *baseclass = check_typedef (TYPE_BASECLASS (type, i));\n      const char *basename = type_name_no_tag (baseclass);\n      const gdb_byte *base_valaddr = NULL;\n      LONGEST thisoffset;\n      int skip = 0;\n\n      if (BASETYPE_VIA_VIRTUAL (type, i))\n\t{\n\t  struct type **first_dont_print\n\t    = (struct type **) obstack_base (&dont_print_vb_obstack);\n\n\t  int j = (struct type **) obstack_next_free (&dont_print_vb_obstack)\n\t    - first_dont_print;\n\n\t  while (--j >= 0)\n\t    if (baseclass == first_dont_print[j])\n\t      goto flush_it;\n\n\t  obstack_ptr_grow (&dont_print_vb_obstack, baseclass);\n\t}\n\n      thisoffset = offset;\n\n      TRY\n\t{\n\t  boffset = baseclass_offset (type, i, valaddr, offset, address, val);\n\t}\n      CATCH (ex, RETURN_MASK_ERROR)\n\t{\n\t  if (ex.error == NOT_AVAILABLE_ERROR)\n\t    skip = -1;\n\t  else\n\t    skip = 1;\n\t}\n      END_CATCH\n\n      if (skip == 0)\n\t{\n\t  /* The virtual base class pointer might have been clobbered by the\n\t     user program. Make sure that it still points to a valid memory\n\t     location.  */\n\n\t  if (boffset < 0 || boffset >= TYPE_LENGTH (type))\n\t    {\n\t      gdb_byte *buf;\n\t      struct cleanup *back_to;\n\n\t      buf = (gdb_byte *) xmalloc (TYPE_LENGTH (baseclass));\n\t      back_to = make_cleanup (xfree, buf);\n\n\t      base_valaddr = buf;\n\t      if (target_read_memory (address + boffset, buf,\n\t\t\t\t      TYPE_LENGTH (baseclass)) != 0)\n\t\tskip = 1;\n\t      address = address + boffset;\n\t      thisoffset = 0;\n\t      boffset = 0;\n\t      do_cleanups (back_to);\n\t    }\n\t  else\n\t    base_valaddr = valaddr;\n\t}\n\n      if (options->prettyformat)\n\t{\n\t  fprintf_filtered (stream, \"\\n\");\n\t  print_spaces_filtered (2 * recurse, stream);\n\t}\n      fputs_filtered (\"<\", stream);\n      /* Not sure what the best notation is in the case where there is no\n         baseclass name.  */\n\n      fputs_filtered (basename ? basename : \"\", stream);\n      fputs_filtered (\"> = \", stream);\n\n      if (skip < 0)\n\tval_print_unavailable (stream);\n      else if (skip > 0)\n\tval_print_invalid_address (stream);\n      else\n\tpascal_object_print_value_fields (baseclass, base_valaddr,\n\t\t\t\t\t  thisoffset + boffset, address,\n\t\t\t\t\t  stream, recurse, val, options,\n\t\t     (struct type **) obstack_base (&dont_print_vb_obstack),\n\t\t\t\t\t  0);\n      fputs_filtered (\", \", stream);\n\n    flush_it:\n      ;\n    }",
+      "fn_code_pos": [
+        [
+          701,
+          0
+        ],
+        [
+          816,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pascal_object_print_value",
+        "parameters": {
+          "type": "struct type",
+          "valaddr": "gdb_byte",
+          "offset": "LONGEST",
+          "address": "CORE_ADDR",
+          "stream": "struct ui_file",
+          "recurse": "int",
+          "val": "struct value",
+          "options": "struct value_print_options",
+          "dont_print_vb": "struct type"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "CATCH (ex, RETURN_MASK_ERROR)\n\t{\n\t  if (ex.error == NOT_AVAILABLE_ERROR)\n\t    skip = -1;\n\t  else\n\t    skip = 1;\n\t}",
+      "fn_code_pos": [
+        [
+          754,
+          6
+        ],
+        [
+          760,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\npascal_object_print_static_field (struct value *val,\n\t\t\t\t  struct ui_file *stream,\n\t\t\t\t  int recurse,\n\t\t\t\t  const struct value_print_options *options)\n{\n  struct type *type = value_type (val);\n  struct value_print_options opts;\n\n  if (value_entirely_optimized_out (val))\n    {\n      val_print_optimized_out (val, stream);\n      return;\n    }\n\n  if (TYPE_CODE (type) == TYPE_CODE_STRUCT)\n    {\n      CORE_ADDR *first_dont_print, addr;\n      int i;\n\n      first_dont_print\n\t= (CORE_ADDR *) obstack_base (&dont_print_statmem_obstack);\n      i = (CORE_ADDR *) obstack_next_free (&dont_print_statmem_obstack)\n\t- first_dont_print;\n\n      while (--i >= 0)\n\t{\n\t  if (value_address (val) == first_dont_print[i])\n\t    {\n\t      fputs_filtered (\"\\\n<same as static member of an already seen type>\",\n\t\t\t      stream);\n\t      return;\n\t    }\n\t}\n\n      addr = value_address (val);\n      obstack_grow (&dont_print_statmem_obstack, (char *) &addr,\n\t\t    sizeof (CORE_ADDR));\n\n      type = check_typedef (type);\n      pascal_object_print_value_fields (type,\n\t\t\t\t\tvalue_contents_for_printing (val),\n\t\t\t\t\tvalue_embedded_offset (val),\n\t\t\t\t\taddr,\n\t\t\t\t\tstream, recurse,\n\t\t\t\t\tval, options, NULL, 1);\n      return;\n    }\n\n  opts = *options;\n  opts.deref_ref = 0;\n  common_val_print (val, stream, recurse, &opts, current_language);\n}",
+      "fn_code_pos": [
+        [
+          838,
+          0
+        ],
+        [
+          891,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pascal_object_print_static_field",
+        "parameters": {
+          "val": "struct value",
+          "stream": "struct ui_file",
+          "recurse": "int",
+          "options": "struct value_print_options"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_pascal_valprint (void)\n{\n  add_setshow_boolean_cmd (\"pascal_static-members\", class_support,\n\t\t\t   &user_print_options.pascal_static_field_print, _(\"\\\nSet printing of pascal static members.\"), _(\"\\\nShow printing of pascal static members.\"), NULL,\n\t\t\t   NULL,\n\t\t\t   show_pascal_static_field_print,\n\t\t\t   &setprintlist, &showprintlist);\n}",
+      "fn_code_pos": [
+        [
+          896,
+          0
+        ],
+        [
+          906,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_pascal_valprint",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "pascal_object_print_static_field (struct value *,\n\t\t\t\t\t      struct ui_file *, int,\n\t\t\t\t\t      const struct value_print_options *)",
+      "fn_dec_pos": [
+        [
+          467,
+          12
+        ],
+        [
+          469,
+          46
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pascal_object_print_static_field",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pascal_object_print_value (struct type *, const gdb_byte *,\n\t\t\t\t       LONGEST,\n\t\t\t\t       CORE_ADDR, struct ui_file *, int,\n\t\t\t\t       struct value *,\n\t\t\t\t       const struct value_print_options *,\n\t\t\t\t       struct type **)",
+      "fn_dec_pos": [
+        [
+          471,
+          12
+        ],
+        [
+          476,
+          26
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pascal_object_print_value",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct generic_val_print_decorations",
+      {},
+      "",
+      [
+        44,
+        13
+      ],
+      [
+        44,
+        49
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        60,
+        18
+      ],
+      [
+        60,
+        29
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        62,
+        4
+      ],
+      [
+        62,
+        18
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        63,
+        4
+      ],
+      [
+        63,
+        16
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        64,
+        10
+      ],
+      [
+        64,
+        36
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        66,
+        2
+      ],
+      [
+        66,
+        16
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        71,
+        2
+      ],
+      [
+        71,
+        13
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        74,
+        2
+      ],
+      [
+        74,
+        13
+      ]
+    ],
+    [
+      "struct bound_minimal_symbol",
+      {},
+      "",
+      [
+        226,
+        3
+      ],
+      [
+        226,
+        30
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        243,
+        7
+      ],
+      [
+        243,
+        19
+      ]
+    ],
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        244,
+        7
+      ],
+      [
+        244,
+        20
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        245,
+        7
+      ],
+      [
+        245,
+        18
+      ]
+    ],
+    [
+      "struct block",
+      {},
+      "",
+      [
+        246,
+        7
+      ],
+      [
+        246,
+        19
+      ]
+    ],
+    [
+      "struct field_of_this_result",
+      {},
+      "",
+      [
+        247,
+        7
+      ],
+      [
+        247,
+        34
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        350,
+        3
+      ],
+      [
+        350,
+        14
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        419,
+        20
+      ],
+      [
+        419,
+        32
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        419,
+        39
+      ],
+      [
+        419,
+        53
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        420,
+        12
+      ],
+      [
+        420,
+        38
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        422,
+        2
+      ],
+      [
+        422,
+        13
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        423,
+        2
+      ],
+      [
+        423,
+        28
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        457,
+        32
+      ],
+      [
+        457,
+        46
+      ]
+    ],
+    [
+      "struct cmd_list_element",
+      {},
+      "",
+      [
+        458,
+        4
+      ],
+      [
+        458,
+        27
+      ]
+    ],
+    [
+      "struct obstack",
+      {},
+      "",
+      [
+        464,
+        7
+      ],
+      [
+        464,
+        21
+      ]
+    ],
+    [
+      "struct obstack",
+      {},
+      "",
+      [
+        465,
+        7
+      ],
+      [
+        465,
+        21
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        467,
+        46
+      ],
+      [
+        467,
+        58
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        468,
+        11
+      ],
+      [
+        468,
+        25
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        469,
+        17
+      ],
+      [
+        469,
+        43
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        471,
+        39
+      ],
+      [
+        471,
+        50
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        473,
+        22
+      ],
+      [
+        473,
+        36
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        474,
+        11
+      ],
+      [
+        474,
+        23
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        475,
+        17
+      ],
+      [
+        475,
+        43
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        476,
+        11
+      ],
+      [
+        476,
+        22
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        486,
+        32
+      ],
+      [
+        486,
+        43
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        498,
+        30
+      ],
+      [
+        498,
+        41
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        530,
+        34
+      ],
+      [
+        530,
+        45
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        532,
+        25
+      ],
+      [
+        532,
+        39
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        534,
+        6
+      ],
+      [
+        534,
+        18
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        535,
+        12
+      ],
+      [
+        535,
+        38
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        536,
+        6
+      ],
+      [
+        536,
+        17
+      ]
+    ],
+    [
+      "struct obstack",
+      {},
+      "",
+      [
+        560,
+        6
+      ],
+      [
+        560,
+        20
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        616,
+        7
+      ],
+      [
+        616,
+        19
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        634,
+        4
+      ],
+      [
+        634,
+        30
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        653,
+        4
+      ],
+      [
+        653,
+        16
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        665,
+        4
+      ],
+      [
+        665,
+        30
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        702,
+        27
+      ],
+      [
+        702,
+        38
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        704,
+        25
+      ],
+      [
+        704,
+        39
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        706,
+        6
+      ],
+      [
+        706,
+        18
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        707,
+        12
+      ],
+      [
+        707,
+        38
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        708,
+        6
+      ],
+      [
+        708,
+        17
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        710,
+        2
+      ],
+      [
+        710,
+        13
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        711,
+        7
+      ],
+      [
+        711,
+        18
+      ]
+    ],
+    [
+      "struct obstack",
+      {},
+      "",
+      [
+        712,
+        2
+      ],
+      [
+        712,
+        16
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        727,
+        6
+      ],
+      [
+        727,
+        17
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        735,
+        3
+      ],
+      [
+        735,
+        14
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        736,
+        8
+      ],
+      [
+        736,
+        19
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        738,
+        12
+      ],
+      [
+        738,
+        23
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        772,
+        7
+      ],
+      [
+        772,
+        21
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        810,
+        8
+      ],
+      [
+        810,
+        19
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        839,
+        34
+      ],
+      [
+        839,
+        46
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        840,
+        6
+      ],
+      [
+        840,
+        20
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        842,
+        12
+      ],
+      [
+        842,
+        38
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        844,
+        2
+      ],
+      [
+        844,
+        13
+      ]
+    ],
+    [
+      "struct value_print_options",
+      {},
+      "",
+      [
+        845,
+        2
+      ],
+      [
+        845,
+        28
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_obstack.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbtypes.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"expression.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"value.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"command.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcmd.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"demangle.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"valprint.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"typeprint.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"language.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"target.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"annotate.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"p-lang.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"cp-abi.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"cp-support.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include \"objfiles.h\"\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        67,
+        2
+      ],
+      [
+        67,
+        17
+      ]
+    ]
+  ]
+}

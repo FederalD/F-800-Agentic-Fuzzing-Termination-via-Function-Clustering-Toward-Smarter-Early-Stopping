@@ -1,0 +1,925 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static unsigned long\nget_field (const bfd_byte *data, enum floatformat_byteorders order,\n\t   unsigned int total_len, unsigned int start, unsigned int len)\n{\n  unsigned long result;\n  unsigned int cur_byte;\n  int cur_bitshift;\n\n  /* Caller must byte-swap words before calling this routine.  */\n  gdb_assert (order == floatformat_little || order == floatformat_big);\n\n  /* Start at the least significant part of the field.  */\n  if (order == floatformat_little)\n    {\n      /* We start counting from the other end (i.e, from the high bytes\n\t rather than the low bytes).  As such, we need to be concerned\n\t with what happens if bit 0 doesn't start on a byte boundary.\n\t I.e, we need to properly handle the case where total_len is\n\t not evenly divisible by 8.  So we compute ``excess'' which\n\t represents the number of bits from the end of our starting\n\t byte needed to get to bit 0.  */\n      int excess = FLOATFORMAT_CHAR_BIT - (total_len % FLOATFORMAT_CHAR_BIT);\n\n      cur_byte = (total_len / FLOATFORMAT_CHAR_BIT) \n                 - ((start + len + excess) / FLOATFORMAT_CHAR_BIT);\n      cur_bitshift = ((start + len + excess) % FLOATFORMAT_CHAR_BIT) \n                     - FLOATFORMAT_CHAR_BIT;\n    }\n  else\n    {\n      cur_byte = (start + len) / FLOATFORMAT_CHAR_BIT;\n      cur_bitshift =\n\t((start + len) % FLOATFORMAT_CHAR_BIT) - FLOATFORMAT_CHAR_BIT;\n    }\n  if (cur_bitshift > -FLOATFORMAT_CHAR_BIT)\n    result = *(data + cur_byte) >> (-cur_bitshift);\n  else\n    result = 0;\n  cur_bitshift += FLOATFORMAT_CHAR_BIT;\n  if (order == floatformat_little)\n    ++cur_byte;\n  else\n    --cur_byte;\n\n  /* Move towards the most significant part of the field.  */\n  while (cur_bitshift < len)\n    {\n      result |= (unsigned long)*(data + cur_byte) << cur_bitshift;\n      cur_bitshift += FLOATFORMAT_CHAR_BIT;\n      switch (order)\n\t{\n\tcase floatformat_little:\n\t  ++cur_byte;\n\t  break;\n\tcase floatformat_big:\n\t  --cur_byte;\n\t  break;\n\t}\n    }\n  if (len < sizeof(result) * FLOATFORMAT_CHAR_BIT)\n    /* Mask out bits which are not part of the field.  */\n    result &= ((1UL << len) - 1);\n  return result;\n}",
+      "fn_code_pos": [
+        [
+          43,
+          0
+        ],
+        [
+          106,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_field",
+        "parameters": {
+          "data": "bfd_byte",
+          "order": "enum floatformat_byteorders",
+          "total_len": "unsigned int",
+          "start": "unsigned int",
+          "len": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static enum floatformat_byteorders\nfloatformat_normalize_byteorder (const struct floatformat *fmt,\n\t\t\t\t const void *from, void *to)\n{\n  const unsigned char *swapin;\n  unsigned char *swapout;\n  int words;\n  \n  if (fmt->byteorder == floatformat_little\n      || fmt->byteorder == floatformat_big)\n    return fmt->byteorder;\n\n  words = fmt->totalsize / FLOATFORMAT_CHAR_BIT;\n  words >>= 2;\n\n  swapout = (unsigned char *)to;\n  swapin = (const unsigned char *)from;\n\n  if (fmt->byteorder == floatformat_vax)\n    {\n      while (words-- > 0)\n\t{\n\t  *swapout++ = swapin[1];\n\t  *swapout++ = swapin[0];\n\t  *swapout++ = swapin[3];\n\t  *swapout++ = swapin[2];\n\t  swapin += 4;\n\t}\n      /* This may look weird, since VAX is little-endian, but it is\n\t easier to translate to big-endian than to little-endian.  */\n      return floatformat_big;\n    }\n  else\n    {\n      gdb_assert (fmt->byteorder == floatformat_littlebyte_bigword);\n\n      while (words-- > 0)\n\t{\n\t  *swapout++ = swapin[3];\n\t  *swapout++ = swapin[2];\n\t  *swapout++ = swapin[1];\n\t  *swapout++ = swapin[0];\n\t  swapin += 4;\n\t}\n      return floatformat_big;\n    }\n}",
+      "fn_code_pos": [
+        [
+          112,
+          0
+        ],
+        [
+          158,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "floatformat_normalize_byteorder",
+        "parameters": {
+          "fmt": "struct floatformat",
+          "from": "void",
+          "to": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nconvert_floatformat_to_doublest (const struct floatformat *fmt,\n\t\t\t\t const void *from,\n\t\t\t\t DOUBLEST *to)\n{\n  unsigned char *ufrom = (unsigned char *) from;\n  DOUBLEST dto;\n  long exponent;\n  unsigned long mant;\n  unsigned int mant_bits, mant_off;\n  int mant_bits_left;\n  int special_exponent;\t\t/* It's a NaN, denorm or zero.  */\n  enum floatformat_byteorders order;\n  unsigned char newfrom[FLOATFORMAT_LARGEST_BYTES];\n  enum float_kind kind;\n  \n  gdb_assert (fmt->totalsize\n\t      <= FLOATFORMAT_LARGEST_BYTES * FLOATFORMAT_CHAR_BIT);\n\n  /* For non-numbers, reuse libiberty's logic to find the correct\n     format.  We do not lose any precision in this case by passing\n     through a double.  */\n  kind = floatformat_classify (fmt, (const bfd_byte *) from);\n  if (kind == float_infinite || kind == float_nan)\n    {\n      double dto;\n\n      floatformat_to_double (fmt->split_half ? fmt->split_half : fmt,\n\t\t\t     from, &dto);\n      *to = (DOUBLEST) dto;\n      return;\n    }\n\n  order = floatformat_normalize_byteorder (fmt, ufrom, newfrom);\n\n  if (order != fmt->byteorder)\n    ufrom = newfrom;\n\n  if (fmt->split_half)\n    {\n      DOUBLEST dtop, dbot;\n\n      floatformat_to_doublest (fmt->split_half, ufrom, &dtop);\n      /* Preserve the sign of 0, which is the sign of the top\n\t half.  */\n      if (dtop == 0.0)\n\t{\n\t  *to = dtop;\n\t  return;\n\t}\n      floatformat_to_doublest (fmt->split_half,\n\t\t\t     ufrom + fmt->totalsize / FLOATFORMAT_CHAR_BIT / 2,\n\t\t\t     &dbot);\n      *to = dtop + dbot;\n      return;\n    }\n\n  exponent = get_field (ufrom, order, fmt->totalsize, fmt->exp_start,\n\t\t\tfmt->exp_len);\n  /* Note that if exponent indicates a NaN, we can't really do anything useful\n     (not knowing if the host has NaN's, or how to build one).  So it will\n     end up as an infinity or something close; that is OK.  */\n\n  mant_bits_left = fmt->man_len;\n  mant_off = fmt->man_start;\n  dto = 0.0;\n\n  special_exponent = exponent == 0 || exponent == fmt->exp_nan;\n\n  /* Don't bias NaNs.  Use minimum exponent for denorms.  For\n     simplicity, we don't check for zero as the exponent doesn't matter.\n     Note the cast to int; exp_bias is unsigned, so it's important to\n     make sure the operation is done in signed arithmetic.  */\n  if (!special_exponent)\n    exponent -= fmt->exp_bias;\n  else if (exponent == 0)\n    exponent = 1 - fmt->exp_bias;\n\n  /* Build the result algebraically.  Might go infinite, underflow, etc;\n     who cares.  */\n\n/* If this format uses a hidden bit, explicitly add it in now.  Otherwise,\n   increment the exponent by one to account for the integer bit.  */\n\n  if (!special_exponent)\n    {\n      if (fmt->intbit == floatformat_intbit_no)\n\tdto = ldexp (1.0, exponent);\n      else\n\texponent++;\n    }\n\n  while (mant_bits_left > 0)\n    {\n      mant_bits = std::min (mant_bits_left, 32);\n\n      mant = get_field (ufrom, order, fmt->totalsize, mant_off, mant_bits);\n\n      dto += ldexp ((double) mant, exponent - mant_bits);\n      exponent -= mant_bits;\n      mant_off += mant_bits;\n      mant_bits_left -= mant_bits;\n    }\n\n  /* Negate it if negative.  */\n  if (get_field (ufrom, order, fmt->totalsize, fmt->sign_start, 1))\n    dto = -dto;\n  *to = dto;\n}",
+      "fn_code_pos": [
+        [
+          164,
+          0
+        ],
+        [
+          272,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "convert_floatformat_to_doublest",
+        "parameters": {
+          "fmt": "struct floatformat",
+          "from": "void",
+          "to": "DOUBLEST"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nput_field (unsigned char *data, enum floatformat_byteorders order,\n\t   unsigned int total_len, unsigned int start, unsigned int len,\n\t   unsigned long stuff_to_put)\n{\n  unsigned int cur_byte;\n  int cur_bitshift;\n\n  /* Caller must byte-swap words before calling this routine.  */\n  gdb_assert (order == floatformat_little || order == floatformat_big);\n\n  /* Start at the least significant part of the field.  */\n  if (order == floatformat_little)\n    {\n      int excess = FLOATFORMAT_CHAR_BIT - (total_len % FLOATFORMAT_CHAR_BIT);\n\n      cur_byte = (total_len / FLOATFORMAT_CHAR_BIT) \n                 - ((start + len + excess) / FLOATFORMAT_CHAR_BIT);\n      cur_bitshift = ((start + len + excess) % FLOATFORMAT_CHAR_BIT) \n                     - FLOATFORMAT_CHAR_BIT;\n    }\n  else\n    {\n      cur_byte = (start + len) / FLOATFORMAT_CHAR_BIT;\n      cur_bitshift =\n\t((start + len) % FLOATFORMAT_CHAR_BIT) - FLOATFORMAT_CHAR_BIT;\n    }\n  if (cur_bitshift > -FLOATFORMAT_CHAR_BIT)\n    {\n      *(data + cur_byte) &=\n\t~(((1 << ((start + len) % FLOATFORMAT_CHAR_BIT)) - 1)\n\t  << (-cur_bitshift));\n      *(data + cur_byte) |=\n\t(stuff_to_put & ((1 << FLOATFORMAT_CHAR_BIT) - 1)) << (-cur_bitshift);\n    }\n  cur_bitshift += FLOATFORMAT_CHAR_BIT;\n  if (order == floatformat_little)\n    ++cur_byte;\n  else\n    --cur_byte;\n\n  /* Move towards the most significant part of the field.  */\n  while (cur_bitshift < len)\n    {\n      if (len - cur_bitshift < FLOATFORMAT_CHAR_BIT)\n\t{\n\t  /* This is the last byte.  */\n\t  *(data + cur_byte) &=\n\t    ~((1 << (len - cur_bitshift)) - 1);\n\t  *(data + cur_byte) |= (stuff_to_put >> cur_bitshift);\n\t}\n      else\n\t*(data + cur_byte) = ((stuff_to_put >> cur_bitshift)\n\t\t\t      & ((1 << FLOATFORMAT_CHAR_BIT) - 1));\n      cur_bitshift += FLOATFORMAT_CHAR_BIT;\n      if (order == floatformat_little)\n\t++cur_byte;\n      else\n\t--cur_byte;\n    }\n}",
+      "fn_code_pos": [
+        [
+          276,
+          0
+        ],
+        [
+          336,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "put_field",
+        "parameters": {
+          "data": "unsigned char",
+          "order": "enum floatformat_byteorders",
+          "total_len": "unsigned int",
+          "start": "unsigned int",
+          "len": "unsigned int",
+          "stuff_to_put": "unsigned long"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nconvert_doublest_to_floatformat (const struct floatformat *fmt,\n\t\t\t\t const DOUBLEST *from, void *to)\n{\n  DOUBLEST dfrom;\n  int exponent;\n  DOUBLEST mant;\n  unsigned int mant_bits, mant_off;\n  int mant_bits_left;\n  unsigned char *uto = (unsigned char *) to;\n  enum floatformat_byteorders order = fmt->byteorder;\n  unsigned char newto[FLOATFORMAT_LARGEST_BYTES];\n\n  if (order != floatformat_little)\n    order = floatformat_big;\n\n  if (order != fmt->byteorder)\n    uto = newto;\n\n  memcpy (&dfrom, from, sizeof (dfrom));\n  memset (uto, 0, floatformat_totalsize_bytes (fmt));\n\n  if (fmt->split_half)\n    {\n      /* Use static volatile to ensure that any excess precision is\n\t removed via storing in memory, and so the top half really is\n\t the result of converting to double.  */\n      static volatile double dtop, dbot;\n      DOUBLEST dtopnv, dbotnv;\n\n      dtop = (double) dfrom;\n      /* If the rounded top half is Inf, the bottom must be 0 not NaN\n\t or Inf.  */\n      if (dtop + dtop == dtop && dtop != 0.0)\n\tdbot = 0.0;\n      else\n\tdbot = (double) (dfrom - (DOUBLEST) dtop);\n      dtopnv = dtop;\n      dbotnv = dbot;\n      floatformat_from_doublest (fmt->split_half, &dtopnv, uto);\n      floatformat_from_doublest (fmt->split_half, &dbotnv,\n\t\t\t       (uto\n\t\t\t\t+ fmt->totalsize / FLOATFORMAT_CHAR_BIT / 2));\n      return;\n    }\n\n  if (dfrom == 0)\n    return;\t\t\t/* Result is zero */\n  if (dfrom != dfrom)\t\t/* Result is NaN */\n    {\n      /* From is NaN */\n      put_field (uto, order, fmt->totalsize, fmt->exp_start,\n\t\t fmt->exp_len, fmt->exp_nan);\n      /* Be sure it's not infinity, but NaN value is irrel.  */\n      put_field (uto, order, fmt->totalsize, fmt->man_start,\n\t\t fmt->man_len, 1);\n      goto finalize_byteorder;\n    }\n\n  /* If negative, set the sign bit.  */\n  if (dfrom < 0)\n    {\n      put_field (uto, order, fmt->totalsize, fmt->sign_start, 1, 1);\n      dfrom = -dfrom;\n    }\n\n  if (dfrom + dfrom == dfrom && dfrom != 0.0)\t/* Result is Infinity.  */\n    {\n      /* Infinity exponent is same as NaN's.  */\n      put_field (uto, order, fmt->totalsize, fmt->exp_start,\n\t\t fmt->exp_len, fmt->exp_nan);\n      /* Infinity mantissa is all zeroes.  */\n      put_field (uto, order, fmt->totalsize, fmt->man_start,\n\t\t fmt->man_len, 0);\n      goto finalize_byteorder;\n    }\n\n#ifdef HAVE_LONG_DOUBLE\n  mant = frexpl (dfrom, &exponent);\n#else\n  mant = frexp (dfrom, &exponent);\n#endif\n\n  if (exponent + fmt->exp_bias <= 0)\n    {\n      /* The value is too small to be expressed in the destination\n\t type (not enough bits in the exponent.  Treat as 0.  */\n      put_field (uto, order, fmt->totalsize, fmt->exp_start,\n\t\t fmt->exp_len, 0);\n      put_field (uto, order, fmt->totalsize, fmt->man_start,\n\t\t fmt->man_len, 0);\n      goto finalize_byteorder;\n    }\n\n  if (exponent + fmt->exp_bias >= (1 << fmt->exp_len))\n    {\n      /* The value is too large to fit into the destination.\n\t Treat as infinity.  */\n      put_field (uto, order, fmt->totalsize, fmt->exp_start,\n\t\t fmt->exp_len, fmt->exp_nan);\n      put_field (uto, order, fmt->totalsize, fmt->man_start,\n\t\t fmt->man_len, 0);\n      goto finalize_byteorder;\n    }\n\n  put_field (uto, order, fmt->totalsize, fmt->exp_start, fmt->exp_len,\n\t     exponent + fmt->exp_bias - 1);\n\n  mant_bits_left = fmt->man_len;\n  mant_off = fmt->man_start;\n  while (mant_bits_left > 0)\n    {\n      unsigned long mant_long;\n\n      mant_bits = mant_bits_left < 32 ? mant_bits_left : 32;\n\n      mant *= 4294967296.0;\n      mant_long = ((unsigned long) mant) & 0xffffffffL;\n      mant -= mant_long;\n\n      /* If the integer bit is implicit, then we need to discard it.\n         If we are discarding a zero, we should be (but are not) creating\n         a denormalized number which means adjusting the exponent\n         (I think).  */\n      if (mant_bits_left == fmt->man_len\n\t  && fmt->intbit == floatformat_intbit_no)\n\t{\n\t  mant_long <<= 1;\n\t  mant_long &= 0xffffffffL;\n          /* If we are processing the top 32 mantissa bits of a doublest\n             so as to convert to a float value with implied integer bit,\n             we will only be putting 31 of those 32 bits into the\n             final value due to the discarding of the top bit.  In the \n             case of a small float value where the number of mantissa \n             bits is less than 32, discarding the top bit does not alter\n             the number of bits we will be adding to the result.  */\n          if (mant_bits == 32)\n            mant_bits -= 1;\n\t}\n\n      if (mant_bits < 32)\n\t{\n\t  /* The bits we want are in the most significant MANT_BITS bits of\n\t     mant_long.  Move them to the least significant.  */\n\t  mant_long >>= 32 - mant_bits;\n\t}\n\n      put_field (uto, order, fmt->totalsize,\n\t\t mant_off, mant_bits, mant_long);\n      mant_off += mant_bits;\n      mant_bits_left -= mant_bits;\n    }\n\n finalize_byteorder:\n  /* Do we need to byte-swap the words in the result?  */\n  if (order != fmt->byteorder)\n    floatformat_normalize_byteorder (fmt, newto, to);\n}",
+      "fn_code_pos": [
+        [
+          342,
+          0
+        ],
+        [
+          499,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "convert_doublest_to_floatformat",
+        "parameters": {
+          "fmt": "struct floatformat",
+          "from": "DOUBLEST",
+          "to": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\nfloatformat_is_negative (const struct floatformat *fmt,\n\t\t\t const bfd_byte *uval)\n{\n  enum floatformat_byteorders order;\n  unsigned char newfrom[FLOATFORMAT_LARGEST_BYTES];\n  \n  gdb_assert (fmt != NULL);\n  gdb_assert (fmt->totalsize\n\t      <= FLOATFORMAT_LARGEST_BYTES * FLOATFORMAT_CHAR_BIT);\n\n  /* An IBM long double (a two element array of double) always takes the\n     sign of the first double.  */\n  if (fmt->split_half)\n    fmt = fmt->split_half;\n\n  order = floatformat_normalize_byteorder (fmt, uval, newfrom);\n\n  if (order != fmt->byteorder)\n    uval = newfrom;\n\n  return get_field (uval, order, fmt->totalsize, fmt->sign_start, 1);\n}",
+      "fn_code_pos": [
+        [
+          504,
+          0
+        ],
+        [
+          526,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "floatformat_is_negative",
+        "parameters": {
+          "fmt": "struct floatformat",
+          "uval": "bfd_byte"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "enum float_kind\nfloatformat_classify (const struct floatformat *fmt,\n\t\t      const bfd_byte *uval)\n{\n  long exponent;\n  unsigned long mant;\n  unsigned int mant_bits, mant_off;\n  int mant_bits_left;\n  enum floatformat_byteorders order;\n  unsigned char newfrom[FLOATFORMAT_LARGEST_BYTES];\n  int mant_zero;\n  \n  gdb_assert (fmt != NULL);\n  gdb_assert (fmt->totalsize\n\t      <= FLOATFORMAT_LARGEST_BYTES * FLOATFORMAT_CHAR_BIT);\n\n  /* An IBM long double (a two element array of double) can be classified\n     by looking at the first double.  inf and nan are specified as\n     ignoring the second double.  zero and subnormal will always have\n     the second double 0.0 if the long double is correctly rounded.  */\n  if (fmt->split_half)\n    fmt = fmt->split_half;\n\n  order = floatformat_normalize_byteorder (fmt, uval, newfrom);\n\n  if (order != fmt->byteorder)\n    uval = newfrom;\n\n  exponent = get_field (uval, order, fmt->totalsize, fmt->exp_start,\n\t\t\tfmt->exp_len);\n\n  mant_bits_left = fmt->man_len;\n  mant_off = fmt->man_start;\n\n  mant_zero = 1;\n  while (mant_bits_left > 0)\n    {\n      mant_bits = std::min (mant_bits_left, 32);\n\n      mant = get_field (uval, order, fmt->totalsize, mant_off, mant_bits);\n\n      /* If there is an explicit integer bit, mask it off.  */\n      if (mant_off == fmt->man_start\n\t  && fmt->intbit == floatformat_intbit_yes)\n\tmant &= ~(1 << (mant_bits - 1));\n\n      if (mant)\n\t{\n\t  mant_zero = 0;\n\t  break;\n\t}\n\n      mant_off += mant_bits;\n      mant_bits_left -= mant_bits;\n    }\n\n  /* If exp_nan is not set, assume that inf, NaN, and subnormals are not\n     supported.  */\n  if (! fmt->exp_nan)\n    {\n      if (mant_zero)\n\treturn float_zero;\n      else\n\treturn float_normal;\n    }\n\n  if (exponent == 0 && !mant_zero)\n    return float_subnormal;\n\n  if (exponent == fmt->exp_nan)\n    {\n      if (mant_zero)\n\treturn float_infinite;\n      else\n\treturn float_nan;\n    }\n\n  if (mant_zero)\n    return float_zero;\n\n  return float_normal;\n}",
+      "fn_code_pos": [
+        [
+          530,
+          0
+        ],
+        [
+          611,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "floatformat_classify",
+        "parameters": {
+          "fmt": "struct floatformat",
+          "uval": "bfd_byte"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "const char *\nfloatformat_mantissa (const struct floatformat *fmt,\n\t\t      const bfd_byte *val)\n{\n  unsigned char *uval = (unsigned char *) val;\n  unsigned long mant;\n  unsigned int mant_bits, mant_off;\n  int mant_bits_left;\n  static char res[50];\n  char buf[9];\n  int len;\n  enum floatformat_byteorders order;\n  unsigned char newfrom[FLOATFORMAT_LARGEST_BYTES];\n  \n  gdb_assert (fmt != NULL);\n  gdb_assert (fmt->totalsize\n\t      <= FLOATFORMAT_LARGEST_BYTES * FLOATFORMAT_CHAR_BIT);\n\n  /* For IBM long double (a two element array of double), return the\n     mantissa of the first double.  The problem with returning the\n     actual mantissa from both doubles is that there can be an\n     arbitrary number of implied 0's or 1's between the mantissas\n     of the first and second double.  In any case, this function\n     is only used for dumping out nans, and a nan is specified to\n     ignore the value in the second double.  */\n  if (fmt->split_half)\n    fmt = fmt->split_half;\n\n  order = floatformat_normalize_byteorder (fmt, uval, newfrom);\n\n  if (order != fmt->byteorder)\n    uval = newfrom;\n\n  if (! fmt->exp_nan)\n    return 0;\n\n  /* Make sure we have enough room to store the mantissa.  */\n  gdb_assert (sizeof res > ((fmt->man_len + 7) / 8) * 2);\n\n  mant_off = fmt->man_start;\n  mant_bits_left = fmt->man_len;\n  mant_bits = (mant_bits_left % 32) > 0 ? mant_bits_left % 32 : 32;\n\n  mant = get_field (uval, order, fmt->totalsize, mant_off, mant_bits);\n\n  len = xsnprintf (res, sizeof res, \"%lx\", mant);\n\n  mant_off += mant_bits;\n  mant_bits_left -= mant_bits;\n\n  while (mant_bits_left > 0)\n    {\n      mant = get_field (uval, order, fmt->totalsize, mant_off, 32);\n\n      xsnprintf (buf, sizeof buf, \"%08lx\", mant);\n      gdb_assert (len + strlen (buf) <= sizeof res);\n      strcat (res, buf);\n\n      mant_off += 32;\n      mant_bits_left -= 32;\n    }\n\n  return res;\n}",
+      "fn_code_pos": [
+        [
+          617,
+          0
+        ],
+        [
+          680,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "floatformat_mantissa",
+        "parameters": {
+          "fmt": "struct floatformat",
+          "val": "bfd_byte"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "size_t\nfloatformat_totalsize_bytes (const struct floatformat *fmt)\n{\n  return ((fmt->totalsize + FLOATFORMAT_CHAR_BIT - 1)\n\t  / FLOATFORMAT_CHAR_BIT);\n}",
+      "fn_code_pos": [
+        [
+          705,
+          0
+        ],
+        [
+          710,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "floatformat_totalsize_bytes",
+        "parameters": {
+          "fmt": "struct floatformat"
+        },
+        "return_type": "size_t"
+      }
+    },
+    {
+      "fn_code": "void\nfloatformat_to_doublest (const struct floatformat *fmt,\n\t\t\t const void *in, DOUBLEST *out)\n{\n  gdb_assert (fmt != NULL);\n\n  if (fmt == host_float_format)\n    {\n      float val = 0;\n\n      memcpy (&val, in, floatformat_totalsize_bytes (fmt));\n      *out = val;\n    }\n  else if (fmt == host_double_format)\n    {\n      double val = 0;\n\n      memcpy (&val, in, floatformat_totalsize_bytes (fmt));\n      *out = val;\n    }\n  else if (fmt == host_long_double_format)\n    {\n      long double val = 0;\n\n      memcpy (&val, in, floatformat_totalsize_bytes (fmt));\n      *out = val;\n    }\n  else\n    convert_floatformat_to_doublest (fmt, in, out);\n}",
+      "fn_code_pos": [
+        [
+          712,
+          0
+        ],
+        [
+          741,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "floatformat_to_doublest",
+        "parameters": {
+          "fmt": "struct floatformat",
+          "in": "void",
+          "out": "DOUBLEST"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nfloatformat_from_doublest (const struct floatformat *fmt,\n\t\t\t   const DOUBLEST *in, void *out)\n{\n  gdb_assert (fmt != NULL);\n\n  if (fmt == host_float_format)\n    {\n      float val = *in;\n\n      memcpy (out, &val, floatformat_totalsize_bytes (fmt));\n    }\n  else if (fmt == host_double_format)\n    {\n      double val = *in;\n\n      memcpy (out, &val, floatformat_totalsize_bytes (fmt));\n    }\n  else if (fmt == host_long_double_format)\n    {\n      long double val = *in;\n\n      memcpy (out, &val, floatformat_totalsize_bytes (fmt));\n    }\n  else\n    convert_doublest_to_floatformat (fmt, in, out);\n}",
+      "fn_code_pos": [
+        [
+          743,
+          0
+        ],
+        [
+          769,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "floatformat_from_doublest",
+        "parameters": {
+          "fmt": "struct floatformat",
+          "in": "DOUBLEST",
+          "out": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "const struct floatformat *\nfloatformat_from_type (const struct type *type)\n{\n  struct gdbarch *gdbarch = get_type_arch (type);\n  const struct floatformat *fmt;\n\n  gdb_assert (TYPE_CODE (type) == TYPE_CODE_FLT);\n  gdb_assert (TYPE_FLOATFORMAT (type));\n  fmt = TYPE_FLOATFORMAT (type)[gdbarch_byte_order (gdbarch)];\n  gdb_assert (TYPE_LENGTH (type) >= floatformat_totalsize_bytes (fmt));\n  return fmt;\n}",
+      "fn_code_pos": [
+        [
+          775,
+          0
+        ],
+        [
+          786,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "floatformat_from_type",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "DOUBLEST\nextract_typed_floating (const void *addr, const struct type *type)\n{\n  const struct floatformat *fmt = floatformat_from_type (type);\n  DOUBLEST retval;\n\n  floatformat_to_doublest (fmt, addr, &retval);\n  return retval;\n}",
+      "fn_code_pos": [
+        [
+          791,
+          0
+        ],
+        [
+          799,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "extract_typed_floating",
+        "parameters": {
+          "addr": "void",
+          "type": "struct type"
+        },
+        "return_type": "DOUBLEST"
+      }
+    },
+    {
+      "fn_code": "void\nstore_typed_floating (void *addr, const struct type *type, DOUBLEST val)\n{\n  const struct floatformat *fmt = floatformat_from_type (type);\n\n  /* FIXME: kettenis/2001-10-28: It is debatable whether we should\n     zero out any remaining bytes in the target buffer when TYPE is\n     longer than the actual underlying floating-point format.  Perhaps\n     we should store a fixed bitpattern in those remaining bytes,\n     instead of zero, or perhaps we shouldn't touch those remaining\n     bytes at all.\n\n     NOTE: cagney/2001-10-28: With the way things currently work, it\n     isn't a good idea to leave the end bits undefined.  This is\n     because GDB writes out the entire sizeof(<floating>) bits of the\n     floating-point type even though the value might only be stored\n     in, and the target processor may only refer to, the first N <\n     TYPE_LENGTH (type) bits.  If the end of the buffer wasn't\n     initialized, GDB would write undefined data to the target.  An\n     errant program, refering to that undefined data, would then\n     become non-deterministic.\n\n     See also the function convert_typed_floating below.  */\n  memset (addr, 0, TYPE_LENGTH (type));\n\n  floatformat_from_doublest (fmt, &val, addr);\n}",
+      "fn_code_pos": [
+        [
+          804,
+          0
+        ],
+        [
+          830,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_typed_floating",
+        "parameters": {
+          "addr": "void",
+          "type": "struct type",
+          "val": "DOUBLEST"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nconvert_typed_floating (const void *from, const struct type *from_type,\n                        void *to, const struct type *to_type)\n{\n  const struct floatformat *from_fmt = floatformat_from_type (from_type);\n  const struct floatformat *to_fmt = floatformat_from_type (to_type);\n\n  if (from_fmt == NULL || to_fmt == NULL)\n    {\n      /* If we don't know the floating-point format of FROM_TYPE or\n         TO_TYPE, there's not much we can do.  We might make the\n         assumption that if the length of FROM_TYPE and TO_TYPE match,\n         their floating-point format would match too, but that\n         assumption might be wrong on targets that support\n         floating-point types that only differ in endianness for\n         example.  So we warn instead, and zero out the target buffer.  */\n      warning (_(\"Can't convert floating-point number to desired type.\"));\n      memset (to, 0, TYPE_LENGTH (to_type));\n    }\n  else if (from_fmt == to_fmt)\n    {\n      /* We're in business.  The floating-point format of FROM_TYPE\n         and TO_TYPE match.  However, even though the floating-point\n         format matches, the length of the type might still be\n         different.  Make sure we don't overrun any buffers.  See\n         comment in store_typed_floating for a discussion about\n         zeroing out remaining bytes in the target buffer.  */\n      memset (to, 0, TYPE_LENGTH (to_type));\n      memcpy (to, from, std::min (TYPE_LENGTH (from_type),\n\t\t\t\t  TYPE_LENGTH (to_type)));\n    }\n  else\n    {\n      /* The floating-point types don't match.  The best we can do\n         (apart from simulating the target FPU) is converting to the\n         widest floating-point type supported by the host, and then\n         again to the desired type.  */\n      DOUBLEST d;\n\n      floatformat_to_doublest (from_fmt, from, &d);\n      floatformat_from_doublest (to_fmt, &d, to);\n    }\n}",
+      "fn_code_pos": [
+        [
+          836,
+          0
+        ],
+        [
+          878,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "convert_typed_floating",
+        "parameters": {
+          "from": "void",
+          "from_type": "struct type",
+          "to": "void",
+          "to_type": "struct type"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "floatformat_mantissa (const struct floatformat *fmt,\n\t\t      const bfd_byte *val)",
+      "fn_dec_pos": [
+        [
+          618,
+          0
+        ],
+        [
+          619,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "floatformat_mantissa",
+        "parameters": {
+          "fmt": "struct floatformat",
+          "val": "bfd_byte"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "floatformat_from_type (const struct type *type)",
+      "fn_dec_pos": [
+        [
+          776,
+          0
+        ],
+        [
+          776,
+          47
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "floatformat_from_type",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        113,
+        39
+      ],
+      [
+        113,
+        57
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        165,
+        39
+      ],
+      [
+        165,
+        57
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        343,
+        39
+      ],
+      [
+        343,
+        57
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        505,
+        31
+      ],
+      [
+        505,
+        49
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        531,
+        28
+      ],
+      [
+        531,
+        46
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        618,
+        28
+      ],
+      [
+        618,
+        46
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        698,
+        13
+      ],
+      [
+        698,
+        31
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        699,
+        13
+      ],
+      [
+        699,
+        31
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        700,
+        13
+      ],
+      [
+        700,
+        31
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        706,
+        35
+      ],
+      [
+        706,
+        53
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        713,
+        31
+      ],
+      [
+        713,
+        49
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        744,
+        33
+      ],
+      [
+        744,
+        51
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        775,
+        6
+      ],
+      [
+        775,
+        24
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        776,
+        29
+      ],
+      [
+        776,
+        40
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        778,
+        2
+      ],
+      [
+        778,
+        16
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        779,
+        8
+      ],
+      [
+        779,
+        26
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        792,
+        48
+      ],
+      [
+        792,
+        59
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        794,
+        8
+      ],
+      [
+        794,
+        26
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        805,
+        40
+      ],
+      [
+        805,
+        51
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        807,
+        8
+      ],
+      [
+        807,
+        26
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        837,
+        48
+      ],
+      [
+        837,
+        59
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        838,
+        40
+      ],
+      [
+        838,
+        51
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        840,
+        8
+      ],
+      [
+        840,
+        26
+      ]
+    ],
+    [
+      "struct floatformat",
+      {},
+      "",
+      [
+        841,
+        8
+      ],
+      [
+        841,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"doublest.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"floatformat.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbtypes.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <math.h>\t\t/* ldexp */\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <algorithm>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum floatformat_byteorders",
+      {},
+      "",
+      [
+        44,
+        33
+      ],
+      [
+        44,
+        60
+      ]
+    ],
+    [
+      "enum floatformat_byteorders",
+      {},
+      "",
+      [
+        112,
+        7
+      ],
+      [
+        112,
+        34
+      ]
+    ],
+    [
+      "enum floatformat_byteorders",
+      {},
+      "",
+      [
+        176,
+        2
+      ],
+      [
+        176,
+        29
+      ]
+    ],
+    [
+      "enum float_kind",
+      {},
+      "",
+      [
+        178,
+        2
+      ],
+      [
+        178,
+        17
+      ]
+    ],
+    [
+      "enum floatformat_byteorders",
+      {},
+      "",
+      [
+        277,
+        32
+      ],
+      [
+        277,
+        59
+      ]
+    ],
+    [
+      "enum floatformat_byteorders",
+      {},
+      "",
+      [
+        352,
+        2
+      ],
+      [
+        352,
+        29
+      ]
+    ],
+    [
+      "enum floatformat_byteorders",
+      {},
+      "",
+      [
+        508,
+        2
+      ],
+      [
+        508,
+        29
+      ]
+    ],
+    [
+      "enum float_kind",
+      {},
+      "",
+      [
+        530,
+        0
+      ],
+      [
+        530,
+        15
+      ]
+    ],
+    [
+      "enum floatformat_byteorders",
+      {},
+      "",
+      [
+        538,
+        2
+      ],
+      [
+        538,
+        29
+      ]
+    ],
+    [
+      "enum floatformat_byteorders",
+      {},
+      "",
+      [
+        628,
+        2
+      ],
+      [
+        628,
+        29
+      ]
+    ]
+  ]
+}

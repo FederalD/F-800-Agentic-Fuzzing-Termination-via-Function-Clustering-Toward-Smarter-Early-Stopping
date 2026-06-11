@@ -1,0 +1,865 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "template<int size>\nvoid\nObject_merge_map::initialize_input_to_output_map(\n    unsigned int shndx,\n    typename elfcpp::Elf_types<size>::Elf_Addr starting_address,\n    Unordered_map<section_offset_type,\n\t\t  typename elfcpp::Elf_types<size>::Elf_Addr>* initialize_map)\n{\n  Input_merge_map* map = this->get_input_merge_map(shndx);\n  gold_assert(map != NULL);\n\n  gold_assert(initialize_map->empty());\n  // We know how many entries we are going to add.\n  // reserve_unordered_map takes an expected count of buckets, not a\n  // count of elements, so double it to try to reduce collisions.\n  reserve_unordered_map(initialize_map, map->entries.size() * 2);\n\n  for (Input_merge_map::Entries::const_iterator p = map->entries.begin();\n       p != map->entries.end();\n       ++p)\n    {\n      section_offset_type output_offset = p->output_offset;\n      if (output_offset != -1)\n\toutput_offset += starting_address;\n      else\n\t{\n\t  // If we see a relocation against an address we have chosen\n\t  // to discard, we relocate to zero.  FIXME: We could also\n\t  // issue a warning in this case; that would require\n\t  // reporting this somehow and checking it in the routines in\n\t  // reloc.h.\n\t  output_offset = 0;\n\t}\n      initialize_map->insert(std::make_pair(p->input_offset, output_offset));\n    }\n}",
+      "fn_code_pos": [
+        [
+          185,
+          0
+        ],
+        [
+          220,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<typename Char_type>\nbool\nOutput_merge_string<Char_type>::do_add_input_section(Relobj* object,\n\t\t\t\t\t\t     unsigned int shndx)\n{\n  section_size_type sec_len;\n  bool is_new;\n  const unsigned char* pdata = object->decompressed_section_contents(shndx,\n\t\t\t\t\t\t\t\t     &sec_len,\n\t\t\t\t\t\t\t\t     &is_new);\n\n  const Char_type* p = reinterpret_cast<const Char_type*>(pdata);\n  const Char_type* pend = p + sec_len / sizeof(Char_type);\n  const Char_type* pend0 = pend;\n\n  if (sec_len % sizeof(Char_type) != 0)\n    {\n      object->error(_(\"mergeable string section length not multiple of \"\n\t\t      \"character size\"));\n      if (is_new)\n\tdelete[] pdata;\n      return false;\n    }\n\n  if (pend[-1] != 0)\n    {\n      gold_warning(_(\"%s: last entry in mergeable string section '%s' \"\n\t\t     \"not null terminated\"),\n\t\t   object->name().c_str(),\n\t\t   object->section_name(shndx).c_str());\n      // Find the end of the last NULL-terminated string in the buffer.\n      while (pend0 > p && pend0[-1] != 0)\n\t--pend0;\n    }\n\n  Merged_strings_list* merged_strings_list =\n      new Merged_strings_list(object, shndx);\n  this->merged_strings_lists_.push_back(merged_strings_list);\n  Merged_strings& merged_strings = merged_strings_list->merged_strings;\n\n  // Count the number of non-null strings in the section and size the list.\n  size_t count = 0;\n  const Char_type* pt = p;\n  while (pt < pend0)\n    {\n      size_t len = string_length(pt);\n      if (len != 0)\n\t++count;\n      pt += len + 1;\n    }\n  if (pend0 < pend)\n    ++count;\n  merged_strings.reserve(count + 1);\n\n  // The index I is in bytes, not characters.\n  section_size_type i = 0;\n\n  // We assume here that the beginning of the section is correctly\n  // aligned, so each string within the section must retain the same\n  // modulo.\n  uintptr_t init_align_modulo = (reinterpret_cast<uintptr_t>(pdata)\n\t\t\t\t & (this->addralign() - 1));\n  bool has_misaligned_strings = false;\n\n  while (p < pend)\n    {\n      size_t len = p < pend0 ? string_length(p) : pend - p;\n\n      // Within merge input section each string must be aligned.\n      if (len != 0\n\t  && ((reinterpret_cast<uintptr_t>(p) & (this->addralign() - 1))\n\t      != init_align_modulo))\n\t  has_misaligned_strings = true;\n\n      Stringpool::Key key;\n      this->stringpool_.add_with_length(p, len, true, &key);\n\n      merged_strings.push_back(Merged_string(i, key));\n      p += len + 1;\n      i += (len + 1) * sizeof(Char_type);\n    }\n\n  // Record the last offset in the input section so that we can\n  // compute the length of the last string.\n  merged_strings.push_back(Merged_string(i, 0));\n\n  this->input_count_ += count;\n  this->input_size_ += i;\n\n  if (has_misaligned_strings)\n    gold_warning(_(\"%s: section %s contains incorrectly aligned strings;\"\n\t\t   \" the alignment of those strings won't be preserved\"),\n\t\t object->name().c_str(),\n\t\t object->section_name(shndx).c_str());\n\n  // For script processing, we keep the input sections.\n  if (this->keeps_input_sections())\n    record_input_section(object, shndx);\n\n  if (is_new)\n    delete[] pdata;\n\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          435,
+          0
+        ],
+        [
+          538,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<typename Char_type>\nsection_size_type\nOutput_merge_string<Char_type>::finalize_merged_data()\n{\n  this->stringpool_.set_string_offsets();\n\n  for (typename Merged_strings_lists::const_iterator l =\n\t this->merged_strings_lists_.begin();\n       l != this->merged_strings_lists_.end();\n       ++l)\n    {\n      section_offset_type last_input_offset = 0;\n      section_offset_type last_output_offset = 0;\n      Relobj *object = (*l)->object;\n      Object_merge_map* merge_map = object->get_or_create_merge_map();\n      Object_merge_map::Input_merge_map* input_merge_map =\n        merge_map->get_or_make_input_merge_map(this, (*l)->shndx);\n\n      for (typename Merged_strings::const_iterator p =\n\t     (*l)->merged_strings.begin();\n\t   p != (*l)->merged_strings.end();\n\t   ++p)\n\t{\n\t  section_size_type length = p->offset - last_input_offset;\n\t  if (length > 0)\n\t    input_merge_map->add_mapping(last_input_offset, length,\n                                         last_output_offset);\n\t  last_input_offset = p->offset;\n\t  if (p->stringpool_key != 0)\n\t    last_output_offset =\n\t        this->stringpool_.get_offset_from_key(p->stringpool_key);\n\t}\n      delete *l;\n    }\n\n  // Save some memory.  This also ensures that this function will work\n  // if called twice, as may happen if Layout::set_segment_offsets\n  // finds a better alignment.\n  this->merged_strings_lists_.clear();\n\n  return this->stringpool_.get_strtab_size();\n}",
+      "fn_code_pos": [
+        [
+          543,
+          0
+        ],
+        [
+          584,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<typename Char_type>\nvoid\nOutput_merge_string<Char_type>::set_final_data_size()\n{\n  const off_t final_data_size = this->finalize_merged_data();\n  this->set_data_size(final_data_size);\n}",
+      "fn_code_pos": [
+        [
+          586,
+          0
+        ],
+        [
+          592,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<typename Char_type>\nvoid\nOutput_merge_string<Char_type>::do_write(Output_file* of)\n{\n  this->stringpool_.write(of, this->offset());\n}",
+      "fn_code_pos": [
+        [
+          596,
+          0
+        ],
+        [
+          601,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<typename Char_type>\nvoid\nOutput_merge_string<Char_type>::do_write_to_buffer(unsigned char* buffer)\n{\n  this->stringpool_.write_to_buffer(buffer, this->data_size());\n}",
+      "fn_code_pos": [
+        [
+          605,
+          0
+        ],
+        [
+          610,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<typename Char_type>\nconst char*\nOutput_merge_string<Char_type>::string_name()\n{\n  gold_unreachable();\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          615,
+          0
+        ],
+        [
+          621,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<>\nconst char*\nOutput_merge_string<char>::string_name()\n{\n  return \"strings\";\n}",
+      "fn_code_pos": [
+        [
+          623,
+          0
+        ],
+        [
+          628,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<>\nconst char*\nOutput_merge_string<uint16_t>::string_name()\n{\n  return \"16-bit strings\";\n}",
+      "fn_code_pos": [
+        [
+          630,
+          0
+        ],
+        [
+          635,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<>\nconst char*\nOutput_merge_string<uint32_t>::string_name()\n{\n  return \"32-bit strings\";\n}",
+      "fn_code_pos": [
+        [
+          637,
+          0
+        ],
+        [
+          642,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<typename Char_type>\nvoid\nOutput_merge_string<Char_type>::do_print_merge_stats(const char* section_name)\n{\n  char buf[200];\n  snprintf(buf, sizeof buf, \"%s merged %s\", section_name, this->string_name());\n  fprintf(stderr, _(\"%s: %s input bytes: %zu\\n\"),\n\t  program_name, buf, this->input_size_);\n  fprintf(stderr, _(\"%s: %s input strings: %zu\\n\"),\n\t  program_name, buf, this->input_count_);\n  this->stringpool_.print_stats(buf);\n}",
+      "fn_code_pos": [
+        [
+          646,
+          0
+        ],
+        [
+          657,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Object_merge_map::~Object_merge_map()\n{\n  for (Section_merge_maps::iterator p = this->section_merge_maps_.begin();\n       p != this->section_merge_maps_.end();\n       ++p)\n    delete p->second;\n}",
+      "fn_code_pos": [
+        [
+          37,
+          0
+        ],
+        [
+          43,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::~Object_merge_map",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "const Object_merge_map::Input_merge_map*\nObject_merge_map::get_input_merge_map(unsigned int shndx) const\n{\n  gold_assert(shndx != -1U);\n  const Section_merge_maps &maps = this->section_merge_maps_;\n  for (Section_merge_maps::const_iterator i = maps.begin(), e = maps.end();\n       i != e; ++i)\n    {\n      if (i->first == shndx)\n\treturn i->second;\n    }\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          47,
+          0
+        ],
+        [
+          59,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::get_input_merge_map",
+        "parameters": {
+          "shndx": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Object_merge_map::Input_merge_map*\nObject_merge_map::get_or_make_input_merge_map(\n    const Output_section_data* output_data, unsigned int shndx) {\n  Input_merge_map* map = this->get_input_merge_map(shndx);\n  if (map != NULL)\n    {\n      // For a given input section in a given object, every mapping\n      // must be done with the same Merge_map.\n      gold_assert(map->output_data == output_data);\n      return map;\n    }\n\n  Input_merge_map* new_map = new Input_merge_map;\n  new_map->output_data = output_data;\n  Section_merge_maps &maps = this->section_merge_maps_;\n  maps.push_back(std::make_pair(shndx, new_map));\n  return new_map;\n}",
+      "fn_code_pos": [
+        [
+          63,
+          0
+        ],
+        [
+          80,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::get_or_make_input_merge_map",
+        "parameters": {
+          "output_data": "Output_section_data",
+          "shndx": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\nObject_merge_map::add_mapping(const Output_section_data* output_data,\n\t\t\t      unsigned int shndx,\n\t\t\t      section_offset_type input_offset,\n\t\t\t      section_size_type length,\n\t\t\t      section_offset_type output_offset)\n{\n  Input_merge_map* map = this->get_or_make_input_merge_map(output_data, shndx);\n  map->add_mapping(input_offset, length, output_offset);\n}",
+      "fn_code_pos": [
+        [
+          84,
+          0
+        ],
+        [
+          93,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::add_mapping",
+        "parameters": {
+          "output_data": "Output_section_data",
+          "shndx": "unsigned int",
+          "input_offset": "section_offset_type",
+          "length": "section_size_type",
+          "output_offset": "section_offset_type"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nObject_merge_map::Input_merge_map::add_mapping(\n    section_offset_type input_offset, section_size_type length,\n    section_offset_type output_offset) {\n  // Try to merge the new entry in the last one we saw.\n  if (!this->entries.empty())\n    {\n      Input_merge_entry& entry(this->entries.back());\n\n      // Use section_size_type to avoid signed/unsigned warnings.\n      section_size_type input_offset_u = input_offset;\n      section_size_type output_offset_u = output_offset;\n\n      // If this entry is not in order, we need to sort the vector\n      // before looking anything up.\n      if (input_offset_u < entry.input_offset + entry.length)\n\t{\n\t  gold_assert(input_offset < entry.input_offset);\n\t  gold_assert(input_offset_u + length\n\t\t      <= static_cast<section_size_type>(entry.input_offset));\n\t  this->sorted = false;\n\t}\n      else if (entry.input_offset + entry.length == input_offset_u\n\t       && (output_offset == -1\n\t\t   ? entry.output_offset == -1\n\t\t   : entry.output_offset + entry.length == output_offset_u))\n\t{\n\t  entry.length += length;\n\t  return;\n\t}\n    }\n\n  Input_merge_entry entry;\n  entry.input_offset = input_offset;\n  entry.length = length;\n  entry.output_offset = output_offset;\n  this->entries.push_back(entry);\n}",
+      "fn_code_pos": [
+        [
+          95,
+          0
+        ],
+        [
+          132,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::Input_merge_map::add_mapping",
+        "parameters": {
+          "input_offset": "section_offset_type",
+          "length": "section_size_type",
+          "output_offset": "section_offset_type"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "bool\nObject_merge_map::get_output_offset(unsigned int shndx,\n\t\t\t\t    section_offset_type input_offset,\n\t\t\t\t    section_offset_type* output_offset)\n{\n  Input_merge_map* map = this->get_input_merge_map(shndx);\n  if (map == NULL)\n    return false;\n\n  if (!map->sorted)\n    {\n      std::sort(map->entries.begin(), map->entries.end(),\n\t\tInput_merge_compare());\n      map->sorted = true;\n    }\n\n  Input_merge_entry entry;\n  entry.input_offset = input_offset;\n  std::vector<Input_merge_entry>::const_iterator p =\n    std::upper_bound(map->entries.begin(), map->entries.end(),\n\t\t     entry, Input_merge_compare());\n  if (p == map->entries.begin())\n    return false;\n  --p;\n  gold_assert(p->input_offset <= input_offset);\n\n  if (input_offset - p->input_offset\n      >= static_cast<section_offset_type>(p->length))\n    return false;\n\n  *output_offset = p->output_offset;\n  if (*output_offset != -1)\n    *output_offset += (input_offset - p->input_offset);\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          136,
+          0
+        ],
+        [
+          170,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::get_output_offset",
+        "parameters": {
+          "shndx": "unsigned int",
+          "input_offset": "section_offset_type",
+          "output_offset": "section_offset_type"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "const Output_section_data*\nObject_merge_map::find_merge_section(unsigned int shndx) const {\n  const Object_merge_map::Input_merge_map* map =\n    this->get_input_merge_map(shndx);\n  if (map == NULL)\n    return NULL;\n  return map->output_data;\n}",
+      "fn_code_pos": [
+        [
+          174,
+          0
+        ],
+        [
+          181,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::find_merge_section",
+        "parameters": {
+          "shndx": "unsigned int"
+        },
+        "return_type": "Output_section_data"
+      }
+    },
+    {
+      "fn_code": "bool\nOutput_merge_base::do_output_offset(const Relobj* object,\n\t\t\t\t    unsigned int shndx,\n\t\t\t\t    section_offset_type offset,\n\t\t\t\t    section_offset_type* poutput) const\n{\n  return object->merge_output_offset(shndx, offset, poutput);\n}",
+      "fn_code_pos": [
+        [
+          228,
+          0
+        ],
+        [
+          235,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_base::do_output_offset",
+        "parameters": {
+          "object": "Relobj",
+          "shndx": "unsigned int",
+          "offset": "section_offset_type",
+          "poutput": "section_offset_type"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "void\nOutput_merge_base::record_input_section(Relobj* relobj, unsigned int shndx)\n{\n  gold_assert(this->keeps_input_sections_ && relobj != NULL);\n  // If this is the first input section, record it.  We need do this because\n  // this->input_sections_ is unordered.\n  if (this->first_relobj_ == NULL)\n    {\n      this->first_relobj_ = relobj;\n      this->first_shndx_ = shndx;\n    }\n\n  std::pair<Input_sections::iterator, bool> result =\n    this->input_sections_.insert(Section_id(relobj, shndx));\n  // We should insert a merge section once only.\n  gold_assert(result.second);\n}",
+      "fn_code_pos": [
+        [
+          239,
+          0
+        ],
+        [
+          255,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_base::record_input_section",
+        "parameters": {
+          "relobj": "Relobj",
+          "shndx": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "size_t\nOutput_merge_data::Merge_data_hash::operator()(Merge_data_key k) const\n{\n  const unsigned char* p = this->pomd_->constant(k);\n  section_size_type entsize =\n    convert_to_section_size_type(this->pomd_->entsize());\n\n  // Fowler/Noll/Vo (FNV) hash (type FNV-1a).\n  if (sizeof(size_t) == 8)\n    {\n      size_t result = static_cast<size_t>(14695981039346656037ULL);\n      for (section_size_type i = 0; i < entsize; ++i)\n\t{\n\t  result &= (size_t) *p++;\n\t  result *= 1099511628211ULL;\n\t}\n      return result;\n    }\n  else\n    {\n      size_t result = 2166136261UL;\n      for (section_size_type i = 0; i < entsize; ++i)\n\t{\n\t  result ^= (size_t) *p++;\n\t  result *= 16777619UL;\n\t}\n      return result;\n    }\n}",
+      "fn_code_pos": [
+        [
+          261,
+          0
+        ],
+        [
+          289,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_data::Merge_data_hash::operator()",
+        "parameters": {
+          "k": "Merge_data_key"
+        },
+        "return_type": "size_t"
+      }
+    },
+    {
+      "fn_code": "bool\nOutput_merge_data::Merge_data_eq::operator()(Merge_data_key k1,\n\t\t\t\t\t     Merge_data_key k2) const\n{\n  const unsigned char* p1 = this->pomd_->constant(k1);\n  const unsigned char* p2 = this->pomd_->constant(k2);\n  return memcmp(p1, p2, this->pomd_->entsize()) == 0;\n}",
+      "fn_code_pos": [
+        [
+          293,
+          0
+        ],
+        [
+          300,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_data::Merge_data_eq::operator()",
+        "parameters": {
+          "k1": "Merge_data_key",
+          "k2": "Merge_data_key"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "void\nOutput_merge_data::add_constant(const unsigned char* p)\n{\n  section_size_type entsize = convert_to_section_size_type(this->entsize());\n  section_size_type addralign =\n    convert_to_section_size_type(this->addralign());\n  section_size_type addsize = std::max(entsize, addralign);\n  if (this->len_ + addsize > this->alc_)\n    {\n      if (this->alc_ == 0)\n\tthis->alc_ = 128 * addsize;\n      else\n\tthis->alc_ *= 2;\n      this->p_ = static_cast<unsigned char*>(realloc(this->p_, this->alc_));\n      if (this->p_ == NULL)\n\tgold_nomem();\n    }\n\n  memcpy(this->p_ + this->len_, p, entsize);\n  if (addsize > entsize)\n    memset(this->p_ + this->len_ + entsize, 0, addsize - entsize);\n  this->len_ += addsize;\n}",
+      "fn_code_pos": [
+        [
+          304,
+          0
+        ],
+        [
+          326,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_data::add_constant",
+        "parameters": {
+          "p": "unsigned char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "bool\nOutput_merge_data::do_add_input_section(Relobj* object, unsigned int shndx)\n{\n  section_size_type len;\n  bool is_new;\n  const unsigned char* p = object->decompressed_section_contents(shndx, &len,\n\t\t\t\t\t\t\t\t &is_new);\n\n  section_size_type entsize = convert_to_section_size_type(this->entsize());\n\n  if (len % entsize != 0)\n    {\n      if (is_new)\n\tdelete[] p;\n      return false;\n    }\n\n  this->input_count_ += len / entsize;\n\n  Object_merge_map* merge_map = object->get_or_create_merge_map();\n  Object_merge_map::Input_merge_map* input_merge_map =\n    merge_map->get_or_make_input_merge_map(this, shndx);\n\n  for (section_size_type i = 0; i < len; i += entsize, p += entsize)\n    {\n      // Add the constant to the section contents.  If we find that it\n      // is already in the hash table, we will remove it again.\n      Merge_data_key k = this->len_;\n      this->add_constant(p);\n\n      std::pair<Merge_data_hashtable::iterator, bool> ins =\n\tthis->hashtable_.insert(k);\n\n      if (!ins.second)\n\t{\n\t  // Key was already present.  Remove the copy we just added.\n\t  this->len_ -= entsize;\n\t  k = *ins.first;\n\t}\n\n      // Record the offset of this constant in the output section.\n      input_merge_map->add_mapping(i, entsize, k);\n    }\n\n  // For script processing, we keep the input sections.\n  if (this->keeps_input_sections())\n    record_input_section(object, shndx);\n\n  if (is_new)\n    delete[] p;\n\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          333,
+          0
+        ],
+        [
+          385,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_data::do_add_input_section",
+        "parameters": {
+          "object": "Relobj",
+          "shndx": "unsigned int"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "void\nOutput_merge_data::set_final_data_size()\n{\n  // Release the memory we don't need.\n  this->p_ = static_cast<unsigned char*>(realloc(this->p_, this->len_));\n  // An Output_merge_data object may be empty and realloc is allowed\n  // to return a NULL pointer in this case.  An Output_merge_data is empty\n  // if all its input sections have sizes that are not multiples of entsize.\n  gold_assert(this->p_ != NULL || this->len_ == 0);\n  this->set_data_size(this->len_);\n}",
+      "fn_code_pos": [
+        [
+          390,
+          0
+        ],
+        [
+          400,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_data::set_final_data_size",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nOutput_merge_data::do_write(Output_file* of)\n{\n  of->write(this->offset(), this->p_, this->len_);\n}",
+      "fn_code_pos": [
+        [
+          405,
+          0
+        ],
+        [
+          409,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_data::do_write",
+        "parameters": {
+          "of": "Output_file"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nOutput_merge_data::do_write_to_buffer(unsigned char* buffer)\n{\n  memcpy(buffer, this->p_, this->len_);\n}",
+      "fn_code_pos": [
+        [
+          413,
+          0
+        ],
+        [
+          417,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_data::do_write_to_buffer",
+        "parameters": {
+          "buffer": "unsigned char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nOutput_merge_data::do_print_merge_stats(const char* section_name)\n{\n  fprintf(stderr,\n\t  _(\"%s: %s merged constants size: %lu; input: %zu; output: %zu\\n\"),\n\t  program_name, section_name,\n\t  static_cast<unsigned long>(this->entsize()),\n\t  this->input_count_, this->hashtable_.size());\n}",
+      "fn_code_pos": [
+        [
+          421,
+          0
+        ],
+        [
+          429,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_data::do_print_merge_stats",
+        "parameters": {
+          "section_name": "char"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "Object_merge_map::get_input_merge_map(unsigned int shndx) const",
+      "fn_dec_pos": [
+        [
+          48,
+          0
+        ],
+        [
+          48,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::get_input_merge_map",
+        "parameters": {
+          "shndx": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Object_merge_map::get_or_make_input_merge_map(\n    const Output_section_data* output_data, unsigned int shndx)",
+      "fn_dec_pos": [
+        [
+          64,
+          0
+        ],
+        [
+          65,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::get_or_make_input_merge_map",
+        "parameters": {
+          "output_data": "Output_section_data",
+          "shndx": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Object_merge_map::find_merge_section(unsigned int shndx) const",
+      "fn_dec_pos": [
+        [
+          175,
+          0
+        ],
+        [
+          175,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::find_merge_section",
+        "parameters": {
+          "shndx": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Output_merge_string<Char_type>::string_name()",
+      "fn_dec_pos": [
+        [
+          617,
+          0
+        ],
+        [
+          617,
+          45
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_string<Char_type>::string_name",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Output_merge_string<char>::string_name()",
+      "fn_dec_pos": [
+        [
+          625,
+          0
+        ],
+        [
+          625,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_string<char>::string_name",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Output_merge_string<uint16_t>::string_name()",
+      "fn_dec_pos": [
+        [
+          632,
+          0
+        ],
+        [
+          632,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_string<uint16_t>::string_name",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Output_merge_string<uint32_t>::string_name()",
+      "fn_dec_pos": [
+        [
+          639,
+          0
+        ],
+        [
+          639,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Output_merge_string<uint32_t>::string_name",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Object_merge_map::initialize_input_to_output_map<32>(\n    unsigned int shndx,\n    elfcpp::Elf_types<32>::Elf_Addr starting_address,\n    Unordered_map<section_offset_type, elfcpp::Elf_types<32>::Elf_Addr>*)",
+      "fn_dec_pos": [
+        [
+          673,
+          0
+        ],
+        [
+          676,
+          73
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::initialize_input_to_output_map<32>",
+        "parameters": {
+          "shndx": "unsigned int",
+          "starting_address": "elfcpp::Elf_types<32>::Elf_Addr"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Object_merge_map::initialize_input_to_output_map<64>(\n    unsigned int shndx,\n    elfcpp::Elf_types<64>::Elf_Addr starting_address,\n    Unordered_map<section_offset_type, elfcpp::Elf_types<64>::Elf_Addr>*)",
+      "fn_dec_pos": [
+        [
+          682,
+          0
+        ],
+        [
+          685,
+          73
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Object_merge_map::initialize_input_to_output_map<64>",
+        "parameters": {
+          "shndx": "unsigned int",
+          "starting_address": "elfcpp::Elf_types<64>::Elf_Addr"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"gold.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <cstdlib>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <algorithm>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"merge.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"compressed_output.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

@@ -1,0 +1,929 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "template<int size, bool big_endian, typename Target_type,\n\t typename Scan, typename Classify_reloc>\ninline void\nscan_relocs(\n    Symbol_table* symtab,\n    Layout* layout,\n    Target_type* target,\n    Sized_relobj_file<size, big_endian>* object,\n    unsigned int data_shndx,\n    const unsigned char* prelocs,\n    size_t reloc_count,\n    Output_section* output_section,\n    bool needs_special_offset_handling,\n    size_t local_count,\n    const unsigned char* plocal_syms)\n{\n  typedef typename Classify_reloc::Reltype Reltype;\n  const int reloc_size = Classify_reloc::reloc_size;\n  const int sym_size = elfcpp::Elf_sizes<size>::sym_size;\n  Scan scan;\n\n  for (size_t i = 0; i < reloc_count; ++i, prelocs += reloc_size)\n    {\n      Reltype reloc(prelocs);\n\n      if (needs_special_offset_handling\n\t  && !output_section->is_input_address_mapped(object, data_shndx,\n\t\t\t\t\t\t      reloc.get_r_offset()))\n\tcontinue;\n\n      unsigned int r_sym = Classify_reloc::get_r_sym(&reloc);\n      unsigned int r_type = Classify_reloc::get_r_type(&reloc);\n\n      if (r_sym < local_count)\n\t{\n\t  gold_assert(plocal_syms != NULL);\n\t  typename elfcpp::Sym<size, big_endian> lsym(plocal_syms\n\t\t\t\t\t\t      + r_sym * sym_size);\n\t  unsigned int shndx = lsym.get_st_shndx();\n\t  bool is_ordinary;\n\t  shndx = object->adjust_sym_shndx(r_sym, shndx, &is_ordinary);\n\t  // If RELOC is a relocation against a local symbol in a\n\t  // section we are discarding then we can ignore it.  It will\n\t  // eventually become a reloc against the value zero.\n\t  //\n\t  // FIXME: We should issue a warning if this is an\n\t  // allocated section; is this the best place to do it?\n\t  //\n\t  // FIXME: The old GNU linker would in some cases look\n\t  // for the linkonce section which caused this section to\n\t  // be discarded, and, if the other section was the same\n\t  // size, change the reloc to refer to the other section.\n\t  // That seems risky and weird to me, and I don't know of\n\t  // any case where it is actually required.\n\t  bool is_discarded = (is_ordinary\n\t\t\t       && shndx != elfcpp::SHN_UNDEF\n\t\t\t       && !object->is_section_included(shndx)\n\t\t\t       && !symtab->is_section_folded(object, shndx));\n\t  scan.local(symtab, layout, target, object, data_shndx,\n\t\t     output_section, reloc, r_type, lsym, is_discarded);\n\t}\n      else\n\t{\n\t  Symbol* gsym = object->global_symbol(r_sym);\n\t  gold_assert(gsym != NULL);\n\t  if (gsym->is_forwarder())\n\t    gsym = symtab->resolve_forwards(gsym);\n\n\t  scan.global(symtab, layout, target, object, data_shndx,\n\t\t      output_section, reloc, r_type, gsym);\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          41,
+          0
+        ],
+        [
+          113,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian, typename Target_type,\n\t typename Relocate,\n\t typename Relocate_comdat_behavior,\n\t typename Classify_reloc>\ninline void\nrelocate_section(\n    const Relocate_info<size, big_endian>* relinfo,\n    Target_type* target,\n    const unsigned char* prelocs,\n    size_t reloc_count,\n    Output_section* output_section,\n    bool needs_special_offset_handling,\n    unsigned char* view,\n    typename elfcpp::Elf_types<size>::Elf_Addr view_address,\n    section_size_type view_size,\n    const Reloc_symbol_changes* reloc_symbol_changes)\n{\n  typedef typename Classify_reloc::Reltype Reltype;\n  const int reloc_size = Classify_reloc::reloc_size;\n  Relocate relocate;\n  Relocate_comdat_behavior relocate_comdat_behavior;\n\n  Sized_relobj_file<size, big_endian>* object = relinfo->object;\n  unsigned int local_count = object->local_symbol_count();\n\n  Comdat_behavior comdat_behavior = CB_UNDETERMINED;\n\n  for (size_t i = 0; i < reloc_count; ++i, prelocs += reloc_size)\n    {\n      Reltype reloc(prelocs);\n\n      section_offset_type offset =\n\tconvert_to_section_size_type(reloc.get_r_offset());\n\n      if (needs_special_offset_handling)\n\t{\n\t  offset = output_section->output_offset(relinfo->object,\n\t\t\t\t\t\t relinfo->data_shndx,\n\t\t\t\t\t\t offset);\n\t  if (offset == -1)\n\t    continue;\n\t}\n\n      unsigned int r_sym = Classify_reloc::get_r_sym(&reloc);\n\n      const Sized_symbol<size>* sym;\n\n      Symbol_value<size> symval;\n      const Symbol_value<size> *psymval;\n      bool is_defined_in_discarded_section;\n      unsigned int shndx;\n      if (r_sym < local_count\n\t  && (reloc_symbol_changes == NULL\n\t      || (*reloc_symbol_changes)[i] == NULL))\n\t{\n\t  sym = NULL;\n\t  psymval = object->local_symbol(r_sym);\n\n          // If the local symbol belongs to a section we are discarding,\n          // and that section is a debug section, try to find the\n          // corresponding kept section and map this symbol to its\n          // counterpart in the kept section.  The symbol must not\n          // correspond to a section we are folding.\n\t  bool is_ordinary;\n\t  shndx = psymval->input_shndx(&is_ordinary);\n\t  is_defined_in_discarded_section =\n\t    (is_ordinary\n\t     && shndx != elfcpp::SHN_UNDEF\n\t     && !object->is_section_included(shndx)\n\t     && !relinfo->symtab->is_section_folded(object, shndx));\n\t}\n      else\n\t{\n\t  const Symbol* gsym;\n\t  if (reloc_symbol_changes != NULL\n\t      && (*reloc_symbol_changes)[i] != NULL)\n\t    gsym = (*reloc_symbol_changes)[i];\n\t  else\n\t    {\n\t      gsym = object->global_symbol(r_sym);\n\t      gold_assert(gsym != NULL);\n\t      if (gsym->is_forwarder())\n\t\tgsym = relinfo->symtab->resolve_forwards(gsym);\n\t    }\n\n\t  sym = static_cast<const Sized_symbol<size>*>(gsym);\n\t  if (sym->has_symtab_index() && sym->symtab_index() != -1U)\n\t    symval.set_output_symtab_index(sym->symtab_index());\n\t  else\n\t    symval.set_no_output_symtab_entry();\n\t  symval.set_output_value(sym->value());\n\t  if (gsym->type() == elfcpp::STT_TLS)\n\t    symval.set_is_tls_symbol();\n\t  else if (gsym->type() == elfcpp::STT_GNU_IFUNC)\n\t    symval.set_is_ifunc_symbol();\n\t  psymval = &symval;\n\n\t  is_defined_in_discarded_section =\n\t    (gsym->is_defined_in_discarded_section()\n\t     && gsym->is_undefined());\n\t  shndx = 0;\n\t}\n\n      Symbol_value<size> symval2;\n      if (is_defined_in_discarded_section)\n\t{\n\t  if (comdat_behavior == CB_UNDETERMINED)\n\t    {\n\t      std::string name = object->section_name(relinfo->data_shndx);\n\t      comdat_behavior = relocate_comdat_behavior.get(name.c_str());\n\t    }\n\t  if (comdat_behavior == CB_PRETEND)\n\t    {\n\t      // FIXME: This case does not work for global symbols.\n\t      // We have no place to store the original section index.\n\t      // Fortunately this does not matter for comdat sections,\n\t      // only for sections explicitly discarded by a linker\n\t      // script.\n\t      bool found;\n\t      typename elfcpp::Elf_types<size>::Elf_Addr value =\n\t\tobject->map_to_kept_section(shndx, &found);\n\t      if (found)\n\t\tsymval2.set_output_value(value + psymval->input_value());\n\t      else\n\t\tsymval2.set_output_value(0);\n\t    }\n\t  else\n\t    {\n\t      if (comdat_behavior == CB_WARNING)\n\t\tgold_warning_at_location(relinfo, i, offset,\n\t\t\t\t\t _(\"relocation refers to discarded \"\n\t\t\t\t\t   \"section\"));\n\t      symval2.set_output_value(0);\n\t    }\n\t  symval2.set_no_output_symtab_entry();\n\t  psymval = &symval2;\n\t}\n\n      // If OFFSET is out of range, still let the target decide to\n      // ignore the relocation.  Pass in NULL as the VIEW argument so\n      // that it can return quickly without trashing an invalid memory\n      // address.\n      unsigned char *v = view + offset;\n      if (offset < 0 || static_cast<section_size_type>(offset) >= view_size)\n\tv = NULL;\n\n      if (!relocate.relocate(relinfo, Classify_reloc::sh_type, target,\n\t\t\t     output_section, i, prelocs, sym, psymval,\n\t\t\t     v, view_address + offset, view_size))\n\tcontinue;\n\n      if (v == NULL)\n\t{\n\t  gold_error_at_location(relinfo, i, offset,\n\t\t\t\t _(\"reloc has bad offset %zu\"),\n\t\t\t\t static_cast<size_t>(offset));\n\t  continue;\n\t}\n\n      if (issue_undefined_symbol_error(sym))\n\tgold_undefined_symbol_at_location(sym, relinfo, i, offset);\n      else if (sym != NULL\n\t       && sym->visibility() != elfcpp::STV_DEFAULT\n\t       && (sym->is_strong_undefined() || sym->is_from_dynobj()))\n\tvisibility_error(sym);\n\n      if (sym != NULL && sym->has_warning())\n\trelinfo->symtab->issue_warning(sym, relinfo, i, offset);\n    }\n}",
+      "fn_code_pos": [
+        [
+          256,
+          0
+        ],
+        [
+          425,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian, typename Target_type,\n\t typename Relocate>\nvoid\napply_relocation(const Relocate_info<size, big_endian>* relinfo,\n\t\t Target_type* target,\n\t\t typename elfcpp::Elf_types<size>::Elf_Addr r_offset,\n\t\t unsigned int r_type,\n\t\t typename elfcpp::Elf_types<size>::Elf_Swxword r_addend,\n\t\t const Symbol* gsym,\n\t\t unsigned char* view,\n\t\t typename elfcpp::Elf_types<size>::Elf_Addr address,\n\t\t section_size_type view_size)\n{\n  // Construct the ELF relocation in a temporary buffer.\n  const int reloc_size = elfcpp::Elf_sizes<size>::rela_size;\n  unsigned char relbuf[reloc_size];\n  elfcpp::Rela_write<size, big_endian> orel(relbuf);\n  orel.put_r_offset(r_offset);\n  orel.put_r_info(elfcpp::elf_r_info<size>(0, r_type));\n  orel.put_r_addend(r_addend);\n\n  // Setup a Symbol_value for the global symbol.\n  const Sized_symbol<size>* sym = static_cast<const Sized_symbol<size>*>(gsym);\n  Symbol_value<size> symval;\n  gold_assert(sym->has_symtab_index() && sym->symtab_index() != -1U);\n  symval.set_output_symtab_index(sym->symtab_index());\n  symval.set_output_value(sym->value());\n  if (gsym->type() == elfcpp::STT_TLS)\n    symval.set_is_tls_symbol();\n  else if (gsym->type() == elfcpp::STT_GNU_IFUNC)\n    symval.set_is_ifunc_symbol();\n\n  Relocate relocate;\n  relocate.relocate(relinfo, elfcpp::SHT_RELA, target, NULL,\n\t\t    -1U, relbuf, sym, &symval,\n\t\t    view + r_offset, address + r_offset, view_size);\n}",
+      "fn_code_pos": [
+        [
+          429,
+          0
+        ],
+        [
+          465,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian, typename Scan_relocatable_reloc>\nvoid\nscan_relocatable_relocs(\n    Symbol_table*,\n    Layout*,\n    Sized_relobj_file<size, big_endian>* object,\n    unsigned int data_shndx,\n    const unsigned char* prelocs,\n    size_t reloc_count,\n    Output_section* output_section,\n    bool needs_special_offset_handling,\n    size_t local_symbol_count,\n    const unsigned char* plocal_syms,\n    Relocatable_relocs* rr)\n{\n  typedef typename Scan_relocatable_reloc::Reltype Reltype;\n  const int reloc_size = Scan_relocatable_reloc::reloc_size;\n  const int sym_size = elfcpp::Elf_sizes<size>::sym_size;\n  Scan_relocatable_reloc scan;\n\n  for (size_t i = 0; i < reloc_count; ++i, prelocs += reloc_size)\n    {\n      Reltype reloc(prelocs);\n\n      Relocatable_relocs::Reloc_strategy strategy;\n\n      if (needs_special_offset_handling\n\t  && !output_section->is_input_address_mapped(object, data_shndx,\n\t\t\t\t\t\t      reloc.get_r_offset()))\n\tstrategy = Relocatable_relocs::RELOC_DISCARD;\n      else\n\t{\n\t  const unsigned int r_sym = Scan_relocatable_reloc::get_r_sym(&reloc);\n\t  const unsigned int r_type =\n\t      Scan_relocatable_reloc::get_r_type(&reloc);\n\n\t  if (r_sym >= local_symbol_count)\n\t    strategy = scan.global_strategy(r_type, object, r_sym);\n\t  else\n\t    {\n\t      gold_assert(plocal_syms != NULL);\n\t      typename elfcpp::Sym<size, big_endian> lsym(plocal_syms\n\t\t\t\t\t\t\t  + r_sym * sym_size);\n\t      unsigned int shndx = lsym.get_st_shndx();\n\t      bool is_ordinary;\n\t      shndx = object->adjust_sym_shndx(r_sym, shndx, &is_ordinary);\n\t      if (is_ordinary\n\t\t  && shndx != elfcpp::SHN_UNDEF\n\t\t  && !object->is_section_included(shndx))\n\t\t{\n\t\t  // RELOC is a relocation against a local symbol\n\t\t  // defined in a section we are discarding.  Discard\n\t\t  // the reloc.  FIXME: Should we issue a warning?\n\t\t  strategy = Relocatable_relocs::RELOC_DISCARD;\n\t\t}\n\t      else if (lsym.get_st_type() != elfcpp::STT_SECTION)\n\t\tstrategy = scan.local_non_section_strategy(r_type, object,\n\t\t\t\t\t\t\t   r_sym);\n\t      else\n\t\t{\n\t\t  strategy = scan.local_section_strategy(r_type, object);\n\t\t  if (strategy != Relocatable_relocs::RELOC_DISCARD)\n                    object->output_section(shndx)->set_needs_symtab_index();\n\t\t}\n\n\t      if (strategy == Relocatable_relocs::RELOC_COPY)\n\t\tobject->set_must_have_output_symtab_entry(r_sym);\n\t    }\n\t}\n\n      rr->set_next_reloc_strategy(strategy);\n    }\n}",
+      "fn_code_pos": [
+        [
+          655,
+          0
+        ],
+        [
+          727,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian, typename Classify_reloc>\nvoid\nrelocate_relocs(\n    const Relocate_info<size, big_endian>* relinfo,\n    const unsigned char* prelocs,\n    size_t reloc_count,\n    Output_section* output_section,\n    typename elfcpp::Elf_types<size>::Elf_Off offset_in_output_section,\n    unsigned char* view,\n    typename elfcpp::Elf_types<size>::Elf_Addr view_address,\n    section_size_type view_size,\n    unsigned char* reloc_view,\n    section_size_type reloc_view_size)\n{\n  typedef typename elfcpp::Elf_types<size>::Elf_Addr Address;\n  typedef typename Classify_reloc::Reltype Reltype;\n  typedef typename Classify_reloc::Reltype_write Reltype_write;\n  const int reloc_size = Classify_reloc::reloc_size;\n  const Address invalid_address = static_cast<Address>(0) - 1;\n\n  Sized_relobj_file<size, big_endian>* const object = relinfo->object;\n  const unsigned int local_count = object->local_symbol_count();\n\n  unsigned char* pwrite = reloc_view;\n\n  for (size_t i = 0; i < reloc_count; ++i, prelocs += reloc_size)\n    {\n      Relocatable_relocs::Reloc_strategy strategy = relinfo->rr->strategy(i);\n      if (strategy == Relocatable_relocs::RELOC_DISCARD)\n\tcontinue;\n\n      if (strategy == Relocatable_relocs::RELOC_SPECIAL)\n\t{\n\t  // Target wants to handle this relocation.\n\t  Sized_target<size, big_endian>* target =\n\t    parameters->sized_target<size, big_endian>();\n\t  target->relocate_special_relocatable(relinfo, Classify_reloc::sh_type,\n\t\t\t\t\t       prelocs, i, output_section,\n\t\t\t\t\t       offset_in_output_section,\n\t\t\t\t\t       view, view_address,\n\t\t\t\t\t       view_size, pwrite);\n\t  pwrite += reloc_size;\n\t  continue;\n\t}\n      Reltype reloc(prelocs);\n      Reltype_write reloc_write(pwrite);\n\n      const unsigned int r_sym = Classify_reloc::get_r_sym(&reloc);\n\n      // Get the new symbol index.\n\n      Output_section* os = NULL;\n      unsigned int new_symndx;\n      if (r_sym < local_count)\n\t{\n\t  switch (strategy)\n\t    {\n\t    case Relocatable_relocs::RELOC_COPY:\n\t      if (r_sym == 0)\n\t\tnew_symndx = 0;\n\t      else\n\t\t{\n\t\t  new_symndx = object->symtab_index(r_sym);\n\t\t  gold_assert(new_symndx != -1U);\n\t\t}\n\t      break;\n\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_RELA:\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_0:\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_1:\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_2:\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_4:\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_8:\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_4_UNALIGNED:\n\t      {\n\t\t// We are adjusting a section symbol.  We need to find\n\t\t// the symbol table index of the section symbol for\n\t\t// the output section corresponding to input section\n\t\t// in which this symbol is defined.\n\t\tgold_assert(r_sym < local_count);\n\t\tbool is_ordinary;\n\t\tunsigned int shndx =\n\t\t  object->local_symbol_input_shndx(r_sym, &is_ordinary);\n\t\tgold_assert(is_ordinary);\n\t\tos = object->output_section(shndx);\n\t\tgold_assert(os != NULL);\n\t\tgold_assert(os->needs_symtab_index());\n\t\tnew_symndx = os->symtab_index();\n\t      }\n\t      break;\n\n\t    default:\n\t      gold_unreachable();\n\t    }\n\t}\n      else\n\t{\n\t  const Symbol* gsym = object->global_symbol(r_sym);\n\t  gold_assert(gsym != NULL);\n\t  if (gsym->is_forwarder())\n\t    gsym = relinfo->symtab->resolve_forwards(gsym);\n\n\t  gold_assert(gsym->has_symtab_index());\n\t  new_symndx = gsym->symtab_index();\n\t}\n\n      // Get the new offset--the location in the output section where\n      // this relocation should be applied.\n\n      Address offset = reloc.get_r_offset();\n      Address new_offset;\n      if (offset_in_output_section != invalid_address)\n\tnew_offset = offset + offset_in_output_section;\n      else\n\t{\n          section_offset_type sot_offset =\n              convert_types<section_offset_type, Address>(offset);\n\t  section_offset_type new_sot_offset =\n              output_section->output_offset(object, relinfo->data_shndx,\n                                            sot_offset);\n\t  gold_assert(new_sot_offset != -1);\n          new_offset = new_sot_offset;\n\t}\n\n      // In an object file, r_offset is an offset within the section.\n      // In an executable or dynamic object, generated by\n      // --emit-relocs, r_offset is an absolute address.\n      if (!parameters->options().relocatable())\n\t{\n\t  new_offset += view_address;\n\t  if (offset_in_output_section != invalid_address)\n\t    new_offset -= offset_in_output_section;\n\t}\n\n      reloc_write.put_r_offset(new_offset);\n      Classify_reloc::put_r_info(&reloc_write, &reloc, new_symndx);\n\n      // Handle the reloc addend based on the strategy.\n\n      if (strategy == Relocatable_relocs::RELOC_COPY)\n\t{\n\t  if (Classify_reloc::sh_type == elfcpp::SHT_RELA)\n\t    Classify_reloc::put_r_addend(&reloc_write,\n\t\t\t\t\t Classify_reloc::get_r_addend(&reloc));\n\t}\n      else\n\t{\n\t  // The relocation uses a section symbol in the input file.\n\t  // We are adjusting it to use a section symbol in the output\n\t  // file.  The input section symbol refers to some address in\n\t  // the input section.  We need the relocation in the output\n\t  // file to refer to that same address.  This adjustment to\n\t  // the addend is the same calculation we use for a simple\n\t  // absolute relocation for the input section symbol.\n\n\t  const Symbol_value<size>* psymval = object->local_symbol(r_sym);\n\n\t  unsigned char* padd = view + offset;\n\t  switch (strategy)\n\t    {\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_RELA:\n\t      {\n\t\ttypename elfcpp::Elf_types<size>::Elf_Swxword addend;\n\t\taddend = Classify_reloc::get_r_addend(&reloc);\n\t\tgold_assert(os != NULL);\n\t\taddend = psymval->value(object, addend) - os->address();\n\t\tClassify_reloc::put_r_addend(&reloc_write, addend);\n\t      }\n\t      break;\n\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_0:\n\t      break;\n\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_1:\n\t      Relocate_functions<size, big_endian>::rel8(padd, object,\n\t\t\t\t\t\t\t psymval);\n\t      break;\n\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_2:\n\t      Relocate_functions<size, big_endian>::rel16(padd, object,\n\t\t\t\t\t\t\t  psymval);\n\t      break;\n\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_4:\n\t      Relocate_functions<size, big_endian>::rel32(padd, object,\n\t\t\t\t\t\t\t  psymval);\n\t      break;\n\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_8:\n\t      Relocate_functions<size, big_endian>::rel64(padd, object,\n\t\t\t\t\t\t\t  psymval);\n\t      break;\n\n\t    case Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_4_UNALIGNED:\n\t      Relocate_functions<size, big_endian>::rel32_unaligned(padd,\n\t\t\t\t\t\t\t\t    object,\n\t\t\t\t\t\t\t\t    psymval);\n\t      break;\n\n\t    default:\n\t      gold_unreachable();\n\t    }\n\t}\n\n      pwrite += reloc_size;\n    }\n\n  gold_assert(static_cast<section_size_type>(pwrite - reloc_view)\n\t      == reloc_view_size);\n}",
+      "fn_code_pos": [
+        [
+          732,
+          0
+        ],
+        [
+          941,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "inline Comdat_behavior\n  get(const char* name)\n  {\n    if (Layout::is_debug_info_section(name))\n      return CB_PRETEND;\n    if (strcmp(name, \".eh_frame\") == 0\n\t|| strcmp(name, \".gcc_except_table\") == 0)\n      return CB_IGNORE;\n    return CB_WARNING;\n  }",
+      "fn_code_pos": [
+        [
+          132,
+          2
+        ],
+        [
+          141,
+          3
+        ]
+      ],
+      "class_code": "05d6af867cd4b0a2cd41a6f9ac4ffb69e266940cfdaa0e785e84c757bc2a778b",
+      "class_node_pos": [
+        [
+          125,
+          0
+        ],
+        [
+          142,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "get",
+        "parameters": {
+          "name": "char"
+        },
+        "return_type": "Comdat_behavior"
+      }
+    },
+    {
+      "fn_code": "inline void\nvisibility_error(const Symbol* sym)\n{\n  const char* v;\n  switch (sym->visibility())\n    {\n    case elfcpp::STV_INTERNAL:\n      v = _(\"internal\");\n      break;\n    case elfcpp::STV_HIDDEN:\n      v = _(\"hidden\");\n      break;\n    case elfcpp::STV_PROTECTED:\n      v = _(\"protected\");\n      break;\n    default:\n      gold_unreachable();\n    }\n  gold_error(_(\"%s symbol '%s' is not defined locally\"),\n\t     v, sym->name());\n}",
+      "fn_code_pos": [
+        [
+          147,
+          0
+        ],
+        [
+          167,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "visibility_error",
+        "parameters": {
+          "sym": "Symbol"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "inline bool\nissue_undefined_symbol_error(const Symbol* sym)\n{\n  // We only report global symbols.\n  if (sym == NULL)\n    return false;\n\n  // We only report undefined symbols.\n  if (!sym->is_undefined() && !sym->is_placeholder())\n    return false;\n\n  // We don't report weak symbols.\n  if (sym->is_weak_undefined())\n    return false;\n\n  // We don't report symbols defined in discarded sections,\n  // unless they're placeholder symbols that should have been\n  // provided by a plugin.\n  if (sym->is_defined_in_discarded_section() && !sym->is_placeholder())\n    return false;\n\n  // If the target defines this symbol, don't report it here.\n  if (parameters->target().is_defined_by_abi(sym))\n    return false;\n\n  // See if we've been told to ignore whether this symbol is\n  // undefined.\n  const char* const u = parameters->options().unresolved_symbols();\n  if (u != NULL)\n    {\n      if (strcmp(u, \"ignore-all\") == 0)\n\treturn false;\n      if (strcmp(u, \"report-all\") == 0)\n\treturn true;\n      if (strcmp(u, \"ignore-in-object-files\") == 0 && !sym->in_dyn())\n\treturn false;\n      if (strcmp(u, \"ignore-in-shared-libs\") == 0 && !sym->in_reg())\n\treturn false;\n    }\n\n  // If the symbol is hidden, report it.\n  if (sym->visibility() == elfcpp::STV_HIDDEN)\n    return true;\n\n  // When creating a shared library, only report unresolved symbols if\n  // -z defs was used.\n  if (parameters->options().shared() && !parameters->options().defs())\n    return false;\n\n  // Otherwise issue a warning.\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          173,
+          0
+        ],
+        [
+          224,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "issue_undefined_symbol_error",
+        "parameters": {
+          "sym": "Symbol"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "static inline unsigned int\n  get_r_sym(const Reltype* reloc)\n  { return elfcpp::elf_r_sym<size>(reloc->get_r_info()); }",
+      "fn_code_pos": [
+        [
+          489,
+          2
+        ],
+        [
+          491,
+          58
+        ]
+      ],
+      "class_code": "c2bc95c9f9953fecb6d9a313925e3390c9a9ec036b9767d07779a13fdee1af1d",
+      "class_node_pos": [
+        [
+          477,
+          0
+        ],
+        [
+          525,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "get_r_sym",
+        "parameters": {
+          "reloc": "Reltype"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static inline unsigned int\n  get_r_type(const Reltype* reloc)\n  { return elfcpp::elf_r_type<size>(reloc->get_r_info()); }",
+      "fn_code_pos": [
+        [
+          494,
+          2
+        ],
+        [
+          496,
+          59
+        ]
+      ],
+      "class_code": "c2bc95c9f9953fecb6d9a313925e3390c9a9ec036b9767d07779a13fdee1af1d",
+      "class_node_pos": [
+        [
+          477,
+          0
+        ],
+        [
+          525,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "get_r_type",
+        "parameters": {
+          "reloc": "Reltype"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static inline typename elfcpp::Elf_types<size>::Elf_Swxword\n  get_r_addend(const Reltype* reloc)\n  { return Reloc_types<sh_type_, size, big_endian>::get_reloc_addend(reloc); }",
+      "fn_code_pos": [
+        [
+          499,
+          2
+        ],
+        [
+          501,
+          78
+        ]
+      ],
+      "class_code": "c2bc95c9f9953fecb6d9a313925e3390c9a9ec036b9767d07779a13fdee1af1d",
+      "class_node_pos": [
+        [
+          477,
+          0
+        ],
+        [
+          525,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "get_r_addend",
+        "parameters": {
+          "reloc": "Reltype"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static inline void\n  put_r_info(Reltype_write* new_reloc, Reltype* reloc, unsigned int r_sym)\n  {\n    unsigned int r_type = elfcpp::elf_r_type<size>(reloc->get_r_info());\n    new_reloc->put_r_info(elfcpp::elf_r_info<size>(r_sym, r_type));\n  }",
+      "fn_code_pos": [
+        [
+          505,
+          2
+        ],
+        [
+          510,
+          3
+        ]
+      ],
+      "class_code": "c2bc95c9f9953fecb6d9a313925e3390c9a9ec036b9767d07779a13fdee1af1d",
+      "class_node_pos": [
+        [
+          477,
+          0
+        ],
+        [
+          525,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "put_r_info",
+        "parameters": {
+          "new_reloc": "Reltype_write",
+          "reloc": "Reltype",
+          "r_sym": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static inline void\n  put_r_addend(Reltype_write* to,\n\t       typename elfcpp::Elf_types<size>::Elf_Swxword addend)\n  { Reloc_types<sh_type_, size, big_endian>::set_reloc_addend(to, addend); }",
+      "fn_code_pos": [
+        [
+          513,
+          2
+        ],
+        [
+          516,
+          76
+        ]
+      ],
+      "class_code": "c2bc95c9f9953fecb6d9a313925e3390c9a9ec036b9767d07779a13fdee1af1d",
+      "class_node_pos": [
+        [
+          477,
+          0
+        ],
+        [
+          525,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "put_r_addend",
+        "parameters": {
+          "to": "Reltype_write",
+          "addend": "typename elfcpp::Elf_types<size>::Elf_Swxword"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned int\n  get_size_for_reloc(unsigned int, Relobj*)\n  {\n    gold_unreachable();\n    return 0;\n  }",
+      "fn_code_pos": [
+        [
+          519,
+          2
+        ],
+        [
+          524,
+          3
+        ]
+      ],
+      "class_code": "c2bc95c9f9953fecb6d9a313925e3390c9a9ec036b9767d07779a13fdee1af1d",
+      "class_node_pos": [
+        [
+          477,
+          0
+        ],
+        [
+          525,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "get_size_for_reloc",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static inline unsigned int\n  get_r_sym(const Reltype* reloc)\n  { return Classify_reloc::get_r_sym(reloc); }",
+      "fn_code_pos": [
+        [
+          542,
+          2
+        ],
+        [
+          544,
+          46
+        ]
+      ],
+      "class_code": "d09a776b1768e25bdce5889bed8acb2961d52e058912969df877b79c27a1ba34",
+      "class_node_pos": [
+        [
+          534,
+          0
+        ],
+        [
+          595,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "get_r_sym",
+        "parameters": {
+          "reloc": "Reltype"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static inline unsigned int\n  get_r_type(const Reltype* reloc)\n  { return Classify_reloc::get_r_type(reloc); }",
+      "fn_code_pos": [
+        [
+          547,
+          2
+        ],
+        [
+          549,
+          47
+        ]
+      ],
+      "class_code": "d09a776b1768e25bdce5889bed8acb2961d52e058912969df877b79c27a1ba34",
+      "class_node_pos": [
+        [
+          534,
+          0
+        ],
+        [
+          595,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "get_r_type",
+        "parameters": {
+          "reloc": "Reltype"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "inline Relocatable_relocs::Reloc_strategy\n  local_non_section_strategy(unsigned int r_type, Relobj*, unsigned int r_sym)\n  {\n    // We assume that relocation type 0 is NONE.  Targets which are\n    // different must override.\n    if (r_type == 0 && r_sym == 0)\n      return Relocatable_relocs::RELOC_DISCARD;\n    return Relocatable_relocs::RELOC_COPY;\n  }",
+      "fn_code_pos": [
+        [
+          553,
+          2
+        ],
+        [
+          561,
+          3
+        ]
+      ],
+      "class_code": "d09a776b1768e25bdce5889bed8acb2961d52e058912969df877b79c27a1ba34",
+      "class_node_pos": [
+        [
+          534,
+          0
+        ],
+        [
+          595,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "local_non_section_strategy",
+        "parameters": {
+          "r_type": "unsigned int",
+          "r_sym": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "inline Relocatable_relocs::Reloc_strategy\n  local_section_strategy(unsigned int r_type, Relobj* object)\n  {\n    if (sh_type == elfcpp::SHT_RELA)\n      return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_RELA;\n    else\n      {\n\tswitch (Classify_reloc::get_size_for_reloc(r_type, object))\n\t  {\n\t  case 0:\n\t    return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_0;\n\t  case 1:\n\t    return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_1;\n\t  case 2:\n\t    return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_2;\n\t  case 4:\n\t    return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_4;\n\t  case 8:\n\t    return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_8;\n\t  default:\n\t    gold_unreachable();\n\t  }\n      }\n  }",
+      "fn_code_pos": [
+        [
+          565,
+          2
+        ],
+        [
+          588,
+          3
+        ]
+      ],
+      "class_code": "d09a776b1768e25bdce5889bed8acb2961d52e058912969df877b79c27a1ba34",
+      "class_node_pos": [
+        [
+          534,
+          0
+        ],
+        [
+          595,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "local_section_strategy",
+        "parameters": {
+          "r_type": "unsigned int",
+          "object": "Relobj"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "inline Relocatable_relocs::Reloc_strategy\n  global_strategy(unsigned int, Relobj*, unsigned int)\n  { return Relocatable_relocs::RELOC_COPY; }",
+      "fn_code_pos": [
+        [
+          592,
+          2
+        ],
+        [
+          594,
+          44
+        ]
+      ],
+      "class_code": "d09a776b1768e25bdce5889bed8acb2961d52e058912969df877b79c27a1ba34",
+      "class_node_pos": [
+        [
+          534,
+          0
+        ],
+        [
+          595,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "global_strategy",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static inline unsigned int\n  get_r_sym(const Reltype* reloc)\n  { return Classify_reloc::get_r_sym(reloc); }",
+      "fn_code_pos": [
+        [
+          609,
+          2
+        ],
+        [
+          611,
+          46
+        ]
+      ],
+      "class_code": "a9bbab1f0cc1048f1a8112836527456d29b841d4360d1dede92b8489d1998066",
+      "class_node_pos": [
+        [
+          601,
+          0
+        ],
+        [
+          645,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "get_r_sym",
+        "parameters": {
+          "reloc": "Reltype"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static inline unsigned int\n  get_r_type(const Reltype* reloc)\n  { return Classify_reloc::get_r_type(reloc); }",
+      "fn_code_pos": [
+        [
+          614,
+          2
+        ],
+        [
+          616,
+          47
+        ]
+      ],
+      "class_code": "a9bbab1f0cc1048f1a8112836527456d29b841d4360d1dede92b8489d1998066",
+      "class_node_pos": [
+        [
+          601,
+          0
+        ],
+        [
+          645,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "get_r_type",
+        "parameters": {
+          "reloc": "Reltype"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "inline Relocatable_relocs::Reloc_strategy\n  local_non_section_strategy(unsigned int, Relobj*, unsigned int)\n  { return Relocatable_relocs::RELOC_COPY; }",
+      "fn_code_pos": [
+        [
+          619,
+          2
+        ],
+        [
+          621,
+          44
+        ]
+      ],
+      "class_code": "a9bbab1f0cc1048f1a8112836527456d29b841d4360d1dede92b8489d1998066",
+      "class_node_pos": [
+        [
+          601,
+          0
+        ],
+        [
+          645,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "local_non_section_strategy",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "inline Relocatable_relocs::Reloc_strategy\n  local_section_strategy(unsigned int, Relobj*)\n  {\n    if (sh_type == elfcpp::SHT_RELA)\n      return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_RELA;\n    else\n      {\n\t// The addend is stored in the section contents.  Since this\n\t// is not a relocatable link, we are going to apply the\n\t// relocation contents to the section as usual.  This means\n\t// that we have no way to record the original addend.  If the\n\t// original addend is not zero, there is basically no way for\n\t// the user to handle this correctly.  Caveat emptor.\n\treturn Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_0;\n      }\n  }",
+      "fn_code_pos": [
+        [
+          624,
+          2
+        ],
+        [
+          639,
+          3
+        ]
+      ],
+      "class_code": "a9bbab1f0cc1048f1a8112836527456d29b841d4360d1dede92b8489d1998066",
+      "class_node_pos": [
+        [
+          601,
+          0
+        ],
+        [
+          645,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "local_section_strategy",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "inline Relocatable_relocs::Reloc_strategy\n  global_strategy(unsigned int, Relobj*, unsigned int)\n  { return Relocatable_relocs::RELOC_COPY; }",
+      "fn_code_pos": [
+        [
+          642,
+          2
+        ],
+        [
+          644,
+          44
+        ]
+      ],
+      "class_code": "a9bbab1f0cc1048f1a8112836527456d29b841d4360d1dede92b8489d1998066",
+      "class_node_pos": [
+        [
+          601,
+          0
+        ],
+        [
+          645,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "global_strategy",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "reloc(prelocs)",
+      "fn_dec_pos": [
+        [
+          64,
+          14
+        ],
+        [
+          64,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "reloc",
+        "parameters": {},
+        "return_type": "Reltype"
+      }
+    },
+    {
+      "fn_code": "reloc(prelocs)",
+      "fn_dec_pos": [
+        [
+          285,
+          14
+        ],
+        [
+          285,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "reloc",
+        "parameters": {},
+        "return_type": "Reltype"
+      }
+    },
+    {
+      "fn_code": "orel(relbuf)",
+      "fn_dec_pos": [
+        [
+          445,
+          39
+        ],
+        [
+          445,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "orel",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "reloc(prelocs)",
+      "fn_dec_pos": [
+        [
+          677,
+          14
+        ],
+        [
+          677,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "reloc",
+        "parameters": {},
+        "return_type": "Reltype"
+      }
+    },
+    {
+      "fn_code": "reloc(prelocs)",
+      "fn_dec_pos": [
+        [
+          776,
+          14
+        ],
+        [
+          776,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "reloc",
+        "parameters": {},
+        "return_type": "Reltype"
+      }
+    },
+    {
+      "fn_code": "reloc_write(pwrite)",
+      "fn_dec_pos": [
+        [
+          777,
+          20
+        ],
+        [
+          777,
+          39
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "reloc_write",
+        "parameters": {},
+        "return_type": "Reltype_write"
+      }
+    }
+  ],
+  "class_node_list": {
+    "05d6af867cd4b0a2cd41a6f9ac4ffb69e266940cfdaa0e785e84c757bc2a778b": {
+      "class_code": "class Default_comdat_behavior\n{\n public:\n  // Decide what the linker should do for relocations that refer to\n  // discarded comdat sections.  This decision is based on the name of\n  // the section being relocated.\n\n  inline Comdat_behavior\n  get(const char* name)\n  {\n    if (Layout::is_debug_info_section(name))\n      return CB_PRETEND;\n    if (strcmp(name, \".eh_frame\") == 0\n\t|| strcmp(name, \".gcc_except_table\") == 0)\n      return CB_IGNORE;\n    return CB_WARNING;\n  }\n}",
+      "class_name": "Default_comdat_behavior",
+      "class_pos": [
+        [
+          125,
+          0
+        ],
+        [
+          142,
+          1
+        ]
+      ]
+    },
+    "f09b247cf6482367afdd0380b7ca2b7f6f431aed917842cf4a3e4d46e8f123d8": {
+      "class_code": "template<int sh_type_, int size, bool big_endian>\nclass Default_classify_reloc\n{\n public:\n  typedef typename Reloc_types<sh_type_, size, big_endian>::Reloc\n      Reltype;\n  typedef typename Reloc_types<sh_type_, size, big_endian>::Reloc_write\n      Reltype_write;\n  static const int reloc_size =\n      Reloc_types<sh_type_, size, big_endian>::reloc_size;\n  static const int sh_type = sh_type_;\n\n  // Return the symbol referred to by the relocation.\n  static inline unsigned int\n  get_r_sym(const Reltype* reloc)\n  { return elfcpp::elf_r_sym<size>(reloc->get_r_info()); }\n\n  // Return the type of the relocation.\n  static inline unsigned int\n  get_r_type(const Reltype* reloc)\n  { return elfcpp::elf_r_type<size>(reloc->get_r_info()); }\n\n  // Return the explicit addend of the relocation (return 0 for SHT_REL).\n  static inline typename elfcpp::Elf_types<size>::Elf_Swxword\n  get_r_addend(const Reltype* reloc)\n  { return Reloc_types<sh_type_, size, big_endian>::get_reloc_addend(reloc); }\n\n  // Write the r_info field to a new reloc, using the r_info field from\n  // the original reloc, replacing the r_sym field with R_SYM.\n  static inline void\n  put_r_info(Reltype_write* new_reloc, Reltype* reloc, unsigned int r_sym)\n  {\n    unsigned int r_type = elfcpp::elf_r_type<size>(reloc->get_r_info());\n    new_reloc->put_r_info(elfcpp::elf_r_info<size>(r_sym, r_type));\n  }\n\n  // Write the r_addend field to a new reloc.\n  static inline void\n  put_r_addend(Reltype_write* to,\n\t       typename elfcpp::Elf_types<size>::Elf_Swxword addend)\n  { Reloc_types<sh_type_, size, big_endian>::set_reloc_addend(to, addend); }\n\n  // Return the size of the addend of the relocation (only used for SHT_REL).\n  static unsigned int\n  get_size_for_reloc(unsigned int, Relobj*)\n  {\n    gold_unreachable();\n    return 0;\n  }\n};",
+      "class_name": "Default_classify_reloc",
+      "class_pos": [
+        [
+          476,
+          0
+        ],
+        [
+          525,
+          2
+        ]
+      ]
+    },
+    "44532346f6141979a261ed3f75843aa83be63dad7838a5d3b60f1dd74d5756ec": {
+      "class_code": "template<typename Classify_reloc>\nclass Default_scan_relocatable_relocs\n{\n public:\n  typedef typename Classify_reloc::Reltype Reltype;\n  static const int reloc_size = Classify_reloc::reloc_size;\n  static const int sh_type = Classify_reloc::sh_type;\n\n  // Return the symbol referred to by the relocation.\n  static inline unsigned int\n  get_r_sym(const Reltype* reloc)\n  { return Classify_reloc::get_r_sym(reloc); }\n\n  // Return the type of the relocation.\n  static inline unsigned int\n  get_r_type(const Reltype* reloc)\n  { return Classify_reloc::get_r_type(reloc); }\n\n  // Return the strategy to use for a local symbol which is not a\n  // section symbol, given the relocation type.\n  inline Relocatable_relocs::Reloc_strategy\n  local_non_section_strategy(unsigned int r_type, Relobj*, unsigned int r_sym)\n  {\n    // We assume that relocation type 0 is NONE.  Targets which are\n    // different must override.\n    if (r_type == 0 && r_sym == 0)\n      return Relocatable_relocs::RELOC_DISCARD;\n    return Relocatable_relocs::RELOC_COPY;\n  }\n\n  // Return the strategy to use for a local symbol which is a section\n  // symbol, given the relocation type.\n  inline Relocatable_relocs::Reloc_strategy\n  local_section_strategy(unsigned int r_type, Relobj* object)\n  {\n    if (sh_type == elfcpp::SHT_RELA)\n      return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_RELA;\n    else\n      {\n\tswitch (Classify_reloc::get_size_for_reloc(r_type, object))\n\t  {\n\t  case 0:\n\t    return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_0;\n\t  case 1:\n\t    return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_1;\n\t  case 2:\n\t    return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_2;\n\t  case 4:\n\t    return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_4;\n\t  case 8:\n\t    return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_8;\n\t  default:\n\t    gold_unreachable();\n\t  }\n      }\n  }\n\n  // Return the strategy to use for a global symbol, given the\n  // relocation type, the object, and the symbol index.\n  inline Relocatable_relocs::Reloc_strategy\n  global_strategy(unsigned int, Relobj*, unsigned int)\n  { return Relocatable_relocs::RELOC_COPY; }\n};",
+      "class_name": "Default_scan_relocatable_relocs",
+      "class_pos": [
+        [
+          533,
+          0
+        ],
+        [
+          595,
+          2
+        ]
+      ]
+    },
+    "cf5fd52decca019b1a8e78a4cfee34548bad0cd70abe19c6d2716d2cdd50e3e3": {
+      "class_code": "template<typename Classify_reloc>\nclass Default_emit_relocs_strategy\n{\n public:\n  typedef typename Classify_reloc::Reltype Reltype;\n  static const int reloc_size = Classify_reloc::reloc_size;\n  static const int sh_type = Classify_reloc::sh_type;\n\n  // Return the symbol referred to by the relocation.\n  static inline unsigned int\n  get_r_sym(const Reltype* reloc)\n  { return Classify_reloc::get_r_sym(reloc); }\n\n  // Return the type of the relocation.\n  static inline unsigned int\n  get_r_type(const Reltype* reloc)\n  { return Classify_reloc::get_r_type(reloc); }\n\n  // A local non-section symbol.\n  inline Relocatable_relocs::Reloc_strategy\n  local_non_section_strategy(unsigned int, Relobj*, unsigned int)\n  { return Relocatable_relocs::RELOC_COPY; }\n\n  // A local section symbol.\n  inline Relocatable_relocs::Reloc_strategy\n  local_section_strategy(unsigned int, Relobj*)\n  {\n    if (sh_type == elfcpp::SHT_RELA)\n      return Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_RELA;\n    else\n      {\n\t// The addend is stored in the section contents.  Since this\n\t// is not a relocatable link, we are going to apply the\n\t// relocation contents to the section as usual.  This means\n\t// that we have no way to record the original addend.  If the\n\t// original addend is not zero, there is basically no way for\n\t// the user to handle this correctly.  Caveat emptor.\n\treturn Relocatable_relocs::RELOC_ADJUST_FOR_SECTION_0;\n      }\n  }\n\n  // A global symbol.\n  inline Relocatable_relocs::Reloc_strategy\n  global_strategy(unsigned int, Relobj*, unsigned int)\n  { return Relocatable_relocs::RELOC_COPY; }\n};",
+      "class_name": "Default_emit_relocs_strategy",
+      "class_pos": [
+        [
+          600,
+          0
+        ],
+        [
+          645,
+          2
+        ]
+      ]
+    }
+  },
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"elfcpp.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"object.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"reloc.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"reloc-types.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum Comdat_behavior\n{\n  CB_UNDETERMINED,   // Not yet determined -- need to look at section name.\n  CB_PRETEND,        // Attempt to map to the corresponding kept section.\n  CB_IGNORE,         // Ignore the relocation.\n  CB_WARNING         // Print a warning.\n}",
+      {
+        "CB_UNDETERMINED": "",
+        "CB_PRETEND": "",
+        "CB_IGNORE": "",
+        "CB_WARNING": ""
+      },
+      "Comdat_behavior",
+      [
+        117,
+        0
+      ],
+      [
+        123,
+        1
+      ]
+    ]
+  ]
+}

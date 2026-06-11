@@ -1,0 +1,1776 @@
+{
+  "src": {
+    "./tosem/source/gif2png\\437_l1.c": {
+      "fn_def_list": [],
+      "fn_declaraion": [],
+      "class_node_list": {},
+      "struct_node_list": [],
+      "include_list": [],
+      "global_variables": [],
+      "enumerate_node_list": []
+    },
+    "./tosem/source/gif2png\\gif2png.c": {
+      "fn_def_list": [
+        {
+          "fn_code": "int interlace_line(int height, int line)\n/* return the actual line # used to store an interlaced line */\n{\n    int res;\n\n    /*@-shiftimplementation@*/\n    if ((line & 7) == 0) {\n\treturn line >> 3;\n    }\n    res = (height+7) >> 3;\n    if ((line & 7) == 4) {\n\treturn res+((line-4) >> 3);\n    }\n    res += (height+3) >> 3;\n    if ((line & 3) == 2) {\n\treturn res + ((line-2) >> 2);\n    }\n    return res + ((height+1) >> 2) + ((line-1) >> 1);\n    /*@=shiftimplementation@*/\n}",
+          "fn_code_pos": [
+            [
+              44,
+              0
+            ],
+            [
+              63,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "interlace_line",
+            "parameters": {
+              "height": "int",
+              "line": "int"
+            },
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "int inv_interlace_line(int height, int line)\n/* inverse function of above, used for recovery of interlaced images */\n{\n    /*@-shiftimplementation@*/\n    if ((line << 3)<height) {\n\treturn line << 3;\n    }\n    line -= (height+7) >> 3;\n    if ((line << 3) + 4 < height) {\n\treturn (line << 3) + 4;\n    }\n    line -= (height+3) >> 3;\n    if ((line << 2) + 2 < height) {\n\treturn (line << 2) + 2;\n    }\n    line -= (height + 1) >> 2;\n    return (line << 1) + 1;\n    /*@=shiftimplementation@*/\n}",
+          "fn_code_pos": [
+            [
+              65,
+              0
+            ],
+            [
+              83,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "inv_interlace_line",
+            "parameters": {
+              "height": "int",
+              "line": "int"
+            },
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "static bool is_gray(png_color c)\n{\n    /* check if r==g==b, moved to function to work around NeXTstep 3.3 cc bug.\n     * life could be so easy if at least the basic tools worked as expected.\n     */\n    return c.red == c.green && c.green == c.blue;\n}",
+          "fn_code_pos": [
+            [
+              108,
+              0
+            ],
+            [
+              114,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "is_gray",
+            "parameters": {
+              "c": "png_color"
+            },
+            "return_type": "bool"
+          }
+        },
+        {
+          "fn_code": "static int writefile(struct GIFelement *s, struct GIFelement *e, \n\t\t     FILE *fp, bool lastimg)\n{\n    int i;\n    struct GIFimagestruct *img = e->imagestruct;\n    unsigned long *count = img->color_count;\n    GifColor *colors = img->colors;\n    int colors_used = 0;\n    byte remap[MAXCMSIZE];\n    png_struct *png_ptr;\n    png_info *info_ptr;\n    int p;\n    png_color pal_rgb[MAXCMSIZE];\n    png_byte pal_trans[MAXCMSIZE];\n    png_color_16 color16trans, color16back;\n    byte buffer[24]; /* used for gIFt and gIFg */\n    int j;\n    png_uint_16 histogr[MAXCMSIZE];\n    int passcount;\n    int errtype, errorcount = 0;\n    png_text software;\n    png_text comment;\n\n    /* these volatile declarations prevent gcc warnings (\"variable might be\n     *  clobbered by `longjmp' or `vfork'\") */\n    volatile bool gray = true;\n    volatile int last_color = 0;\n    volatile bool remapping = false;\n    volatile int bitdepth;\n\n    /*@-nullpass@*/\n    png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);\n    if (png_ptr == NULL) {\n\t(void)fprintf(stderr, \"gif2png: fatal error, out of memory\\n\");\n\t(void)fprintf(stderr, \"gif2png: exiting ungracefully\\n\");\n\texit(1);\n    }\n    info_ptr = png_create_info_struct(png_ptr);\n    if (info_ptr == NULL) {\n\t(void)fprintf(stderr, \"gif2png: fatal error, out of memory\\n\");\n\t(void)fprintf(stderr, \"gif2png: exiting ungracefully\\n\");\n\texit(1);\n    }\n    /*@=nullpass@*/\n\n    /* pacify splint by defining all this storage */\n    memset(remap, '\\0', sizeof(remap));\n    memset(pal_rgb, '\\0', sizeof(pal_rgb));\n    memset(pal_trans, '\\0', sizeof(pal_trans));\n\n    /* ignore the transparency value if no pixel in the image uses it */\n    if (img->trans != -1 && count[img->trans] == 0)\n\timg->trans = -1;\n\n    if (optimize) {\n\t/* zero out unused color table entries and use zlib level 9 */\n\tfor (i = 0; i < MAXCMSIZE; i++)\n\t    if(count[i] == 0)\n\t\tcolors[i].red = colors[i].green = colors[i].blue = 0;\n\t/*\n\t * The way that last_color is computed ensures that trailing zeroed-out\n\t * entries will be dropped.\n\t * FIXME: someday, actually compact unused colors out of the table\n\t * and remap pixels appropriately.\n\t */\n    } else if (!recover) {\n\t/* report unused colors so user can choose to reconvert */\n\tint unused = 0;\n\n\tfor (i = 0; i < MAXCMSIZE; i++)\n\t    if (count[i] == 0)\n\t\tunused++;\n\n\tif (unused > 0)\n\t{\n\t    (void)fprintf(stderr, \n\t\t\t  \"gif2png: %d unused colors; convert with -O to remove\\n\",\n\t\t\t  unused);\n\t    errorcount++;\n\t}\n    }\n\n    for (i = 0; i < MAXCMSIZE; i++)\n\tif (count[i] != 0) {\n\t    gray &= is_gray(colors[i]);\n\t    colors_used++;\n\t    if (last_color < i) \n\t\tlast_color = i;\n\t}\n\n    if (gray) {\n\tif (verbose > 1)\n\t    (void)fprintf(stderr, \"gif2png: input image is grayscale\\n\");\n\n\tif (img->trans != -1) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tif (i!=img->trans && colors[i].red == colors[img->trans].red) {\n\t\t    gray = false;\n\t\t    if (verbose > 1)\n\t\t\t(void)fprintf(stderr,\n\t\t\t\t      \"gif2png: transparent color is repeated in visible colors, using palette\\n\");\n\t\t    break;\n\t\t}\n\t    }\n\t}\n    }\n\n    bitdepth = 8;\n    if (last_color<16) bitdepth = 4;\n    if (last_color<4) bitdepth = 2;\n    if (last_color<2) bitdepth = 1;\n\n    if (gray) {\n\tbool low_prec;\n\tint gray_bitdepth;\n\tremapping = true;\n\tfor (i = 0; i < MAXCMSIZE; i++)\n\t    remap[i] = colors[i].red;\n\n\tgray_bitdepth = 8;\n\n\t/* try to adjust to 4-bit precision grayscale */\n\n\tlow_prec = true;\n\tfor (i = 0; i < MAXCMSIZE; i++) {\n\t    if ((remap[i]&0xf)*0x11 != remap[i]) {\n\t\tlow_prec = false;\n\t\tbreak;\n\t    }\n\t}\n\tif (low_prec) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tremap[i] &= 0xf;\n\t    }\n\t    gray_bitdepth = 4;\n\t}\n\n\t/* try to adjust to 2-bit precision grayscale */\n\n\tif (low_prec) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tif ((remap[i]&3)*5 != remap[i]) {\n\t\t    low_prec = false;\n\t\t    break;\n\t\t}\n\t    }\n\t}\n\n\tif (low_prec) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tremap[i] &= 3;\n\t    }\n\t    gray_bitdepth = 2;\n\t}\n\n\t/* try to adjust to 1-bit precision grayscale */\n\n\tif (low_prec) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tif ((remap[i]&1)*3 != remap[i]) {\n\t\t    low_prec = false;\n\t\t    break;\n\t\t}\n\t    }\n\t}\n\tif (low_prec) {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tremap[i] &= 1;\n\t    }\n\t    gray_bitdepth=1;\n\t}\n\n\tif (bitdepth<gray_bitdepth) {\n\t    gray = false;\t\t/* write palette file */\n\t    remapping = false;\n\t} else {\n\t    bitdepth = gray_bitdepth;\n\t}\n    }\n\n    if (verbose > 1)\n\t(void)fprintf(stderr, \"gif2png: %d colors used, highest color %d, %s, bitdepth %d\\n\",\n\t\t      colors_used, last_color, gray ? \"gray\":\"palette\", bitdepth);\n\n    if (verbose > 2)\n\tfor (i = 0; i <= last_color; i++) {\n\t    (void)fprintf(stderr, \"(%3d, %3d, %3d)\\n\", \n\t\t\t  colors[i].red, colors[i].blue, colors[i].green);  \n\t}\n\n    if (setjmp(png_jmpbuf(png_ptr)) != 0) {\n\t(void)fprintf(stderr, \"gif2png:  libpng returns fatal error condition\\n\");\n\t(void)free(png_ptr);\n\t(void)free(info_ptr);\n\treturn 1;\n    }\n\n    /* Create and initialize the png_struct with the desired error handler\n     * functions.  If you want to use the default stderr and longjump method,\n     * you can supply NULL for the last three parameters.  We also check that\n     * the library version is compatible with the one used at compile time,\n     * in case we are using dynamically linked libraries.  REQUIRED.\n     */\n    /*@-nullpass@*/\n    png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING,\n\t\t\t\t      (void *)NULL, NULL, NULL);\n\n    /*@=nullpass@*/\n    if (png_ptr == NULL)\n\treturn(2);\n\n    /* Allocate/initialize the image information data.  REQUIRED */\n    info_ptr = png_create_info_struct(png_ptr);\n    if (info_ptr == NULL)\n    {\n\t/*@i1@*/png_destroy_write_struct(&png_ptr,  (png_infopp)NULL);\n\treturn(2);\n    }\n\n    /* if errtype is not 1, this was generated by fatal() */ \n    if ((errtype = setjmp(png_jmpbuf(png_ptr))) != 0) {\n\tpng_destroy_write_struct(&png_ptr, &info_ptr);\n\treturn errtype;\n    }\n\n    /* use standard C streams */\n    png_init_io(png_ptr, fp);\n\n    if(optimize)\n       png_set_compression_level(png_ptr, Z_BEST_COMPRESSION);\n\n    if (gamma_srgb)\n    {\n          png_set_gAMA(png_ptr, info_ptr, 1./2.2);\n#if (PNG_LIBPNG_VER > 96)\n\t  png_set_sRGB(png_ptr, info_ptr, PNG_sRGB_INTENT_PERCEPTUAL);\n#endif\n    }\n\n    /* set basic image properties: width/height, type, bit depth, interlace */\n    if (interlaced == PNG_INTERLACE_LAST)\n\tinterlaced = current->imagestruct->interlace!=0 ? PNG_INTERLACE_ADAM7 : PNG_INTERLACE_NONE;\n\n    png_set_IHDR(png_ptr, info_ptr, \n\t\t current->imagestruct->width, current->imagestruct->height,\n\t\t bitdepth, \n\t\t gray ? PNG_COLOR_TYPE_GRAY : PNG_COLOR_TYPE_PALETTE,\n\t\t interlaced, \n\t\t PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);\n\n    /* if the GIF specified an aspect ratio, turn it into a pHYs chunk */\n    if (GifScreen.AspectRatio != 0 && GifScreen.AspectRatio != 49)\n\tpng_set_pHYs(png_ptr, info_ptr, \n\t\t     GifScreen.AspectRatio+15, 64, PNG_RESOLUTION_UNKNOWN);\n\n    /* if the GIF specified an image offset, turn it into a oFFs chunk */\n    if (img->offset_x>0 && img->offset_y>0)\n\tpng_set_oFFs(png_ptr, info_ptr, \n\t\t     img->offset_x, img->offset_y, PNG_OFFSET_PIXEL);\n\n    if (GifScreen.Background > 0) { /* no background for palette entry 0 */\n\t/* if the background color doesn't appear in local palette, we just\n\t   leave it out, if the pic is part of an animation, at least some will\n\t   use the global palette */\n\n\tif (gray) {\n\t    if (is_gray(GifScreen.ColorMap[GifScreen.Background])) {\n\t\tcolor16back.gray = remap[GifScreen.Background];\n\t\t/*@-compdef@*/\n\t\tpng_set_bKGD(png_ptr, info_ptr, &color16back);\n\t\t/*@=compdef@*/\n\t    }\n\t} else {\n\t    for (i = 0; i < MAXCMSIZE; i++) {\n\t\tif (GifScreen.ColorMap[GifScreen.Background].red == colors[i].red &&\n\t\t    GifScreen.ColorMap[GifScreen.Background].green == colors[i].green &&\n\t\t    GifScreen.ColorMap[GifScreen.Background].blue == colors[i].blue) {\n\t\t    if (last_color < i) \n\t\t\tlast_color = i;\n\t\t    color16back.index = (png_byte)i;\n\t\t    /*@-compdef@*/\n\t\t    png_set_bKGD(png_ptr, info_ptr, &color16back);\n\t\t    /*@=compdef@*/\n\t\t    break;\n\t\t}\n\t    }\n\t}\n    }\n\n    /* transparency handling */\n    if (img->trans != -1) {\n\tif (gray) {\n\t    if (verbose > 2)\n\t\t(void)fprintf(stderr, \n\t\t\t      \"gif2png: handling grayscale transparency\\n\");\n\t    color16trans.gray = remap[img->trans];\n\t    /*@-nullpass -compdef@*/\n\t    png_set_tRNS(png_ptr, info_ptr, NULL, 0, &color16trans);\n\t    /*@=nullpass =compdef@*/\n\t} else {\n\t    if (verbose > 2)\n\t\t(void)fprintf(stderr, \n\t\t\t      \"gif2png: handling palette transparency\\n\");\n\t    /* GRR NOTE: may be inconsistent with background-color logic (above) */\n\t    remapping = true;\n\t    for (i = 0; i < MAXCMSIZE; i++)\n\t\tremap[i] = (byte)i;\n\t    remap[0] = (byte)img->trans;\n\t    remap[img->trans] = 0;\n\t    pal_trans[0] = 0;\n\t    /*@-nullpass@*/\n\t    png_set_tRNS(png_ptr, info_ptr, pal_trans, 1, NULL);\n\t    /*@=nullpass@*/\n\t}\n    }\n\n    /* generate the PNG palette */\n    if (!gray) {\n\tpng_color *pltep;\n\tif (remapping) {\n\t    if (verbose > 2)\n\t\t(void)fprintf(stderr, \"Remapping palette...\\n\");\n\t    for (i = 0; i <= last_color; i++) {\n\t\tpal_rgb[i].red   = current->imagestruct->colors[remap[i]].red;\n\t\tpal_rgb[i].green = current->imagestruct->colors[remap[i]].green;\n\t\tpal_rgb[i].blue  = current->imagestruct->colors[remap[i]].blue;\n\t    }\n\t    pltep = pal_rgb;\n\t} else {\n\t    if (verbose > 2)\n\t\t(void)fprintf(stderr, \"Palette copied from GIF colors...\\n\");\n\t    pltep = current->imagestruct->colors;\n\t}\n\tpng_set_PLTE(png_ptr, info_ptr, pltep, last_color+1);\n\n\tif (verbose > 2) {\n\t    (void)fprintf(stderr,\n\t\t\t  \"PNG palette generated with %d colors:\\n\",\n\t\t\t  last_color+1);\n\t    for (i = 0; i <= last_color; i++) {\n\t\t(void)fprintf(stderr, \"(%3d, %3d, %3d)\\n\", \n\t\t\t      pltep[i].red, pltep[i].blue, pltep[i].green);  \n\t    }\n\t}\n    }\n\n    /* generate histogram chunk for paletted images only */\n    if (histogram && !gray) {\n\tunsigned long hist_maxvalue = 0;\n\tfor (i = 0; i < MAXCMSIZE; i++)\n\t    if (count[i]>hist_maxvalue)\n\t\thist_maxvalue = count[i];\n\tif (hist_maxvalue <= 65535) {\n\t    /* no scaling necessary */\n\t    for (i = 0; i < MAXCMSIZE; i++)\n\t\thistogr[i] = (png_uint_16)count[i];\n\t} else {\n\t    for (i = 0; i < MAXCMSIZE; i++)\n\t\tif (count[i] != 0) {\n\t\t    histogr[i] = (png_uint_16)\n#ifdef __GO32__\n\t\t\t/* avoid using fpu instructions on djgpp, so we don't need emu387 */\n\t\t\t(((long long)count[i]*65535)/hist_maxvalue);\n#else\n\t\t    ((double)count[i]*65535.0/hist_maxvalue);\n#endif\n\t\t    if (histogr[i] == 0)\n\t\t\thistogr[i] = 1;\n\t\t} else {\n\t\t    histogr[i] = 0;\n\t\t}\n\t}\n\tpng_set_hIST(png_ptr, info_ptr, histogr);\n    }\n\n    /* transcribe software chunk if necessary */\n    /*@-observertrans -statictrans@ -unqualifiedtrans -branchstate*/\n    if (software_chunk) {\n\tsoftware.compression = PNG_TEXT_COMPRESSION_NONE;\n\tsoftware.key = \"Software\";\n\tsoftware.text = (char*)version;\n\tsoftware.text_length = strlen(software.text);\n\n\tpng_set_text(png_ptr, info_ptr, &software, 1);\n    }\n    /*@=observertrans =statictrans =unqualifiedtrans =branchstate@*/\n\n    png_write_info(png_ptr, info_ptr);\n\n    if (bitdepth<8)\n\tpng_set_packing(png_ptr);\n\n    /* loop over elements until we reach the image or the last element if\n       this is the last image in a GIF */\n\n    while(lastimg ? s != NULL : s != e->next) {\n\tbyte *data;\n\tswitch((byte)s->GIFtype) {\n        /*@-branchstate@*/\n\tcase GIFimage:\n\t    passcount = png_set_interlace_handling(png_ptr);\n\t    for (p = 0; p<passcount;p++)\n\t\tfor (i = 0; i < (int)current->imagestruct->height; i++) {\n\t\t    if (progress) {\n\t\t\tif (passcount>1)\n\t\t\t    (void)fprintf(stderr, \"%d/%d \", p+1, passcount);\n\t\t\t(void)fprintf(stderr, \"%2d%%\\r\",\n\t\t\t\t      (int)(((long)i*100)/current->imagestruct->height));\n\t\t\t(void)fflush(stderr);\n\t\t    }\n\t\t    data = current->data + \n\t\t\t\t       (long) (img->interlace!=0 ?\n\t\t\t\t\t       interlace_line((int)current->imagestruct->height,i) : i) * current->imagestruct->width;\n\t\t    /* we have to remap once */\n\t\t    if (remapping && p == 0)\n\t\t    {\n\t\t\tfor (j = 0; j < (int)img->width; j++) {\n\t\t\t    data[j] = remap[data[j]];\n\t\t\t}\n\t\t    }\n\t\t    png_write_row(png_ptr, data);\n\t\t}\n\t    break;\n\n\tcase GIFcomment:\n\t    j = (int)s->size;\n\t    /* some GIF encoders produce trailing garbage and NULs */\n\t    if (j > 0 && ((s->data[j-1] == '\\0') || (s->data[j-1] & 0x80)!=0))\n\t\t--j;\n\t    /*@-observertrans -statictrans @*/\n\t    comment.key = \"Comment\";\n\t    if (j<500) {\n\t\tcomment.compression = PNG_TEXT_COMPRESSION_NONE;\n\t    } else {\n\t\tcomment.compression = PNG_TEXT_COMPRESSION_zTXt;\n\t    }\n\t    comment.text = (png_charp)s->data;\n \t    comment.text_length = strlen(comment.text);\n \t    png_set_text(png_ptr, info_ptr, &comment, 1);\n\t    /*@=observertrans =statictrans@*/\n\t    break;\n\n\tcase GIFapplication:\n\t    png_write_chunk_start(png_ptr, \n\t\t\t\t  (unsigned char *)\"gIFx\", \n\t\t\t\t  (png_uint_32)s->size);\n\t    png_write_chunk_data(png_ptr, \n\t\t\t\t s->data, \n\t\t\t\t (png_size_t)s->size);\n\t    png_write_chunk_end(png_ptr);\n\t    break;\n\n/* Plain Text Extensions are not supported because they represent a separate\n   subimage, and PNG is explicitly a single-image format.  PNG's gIFt chunk\n   has been officially deprecated.\n*/\n#if 0\n\tcase GIFplaintext:\n\t    /* gIFt is 12 bytes longer than GCE, due to 32-bit ints and\n\t       rgb colors */\n\t    png_write_chunk_start(png_ptr, \"gIFt\", s->size+12);\n\t    memset(buffer, 0, 24);\n\t    buffer[2] = s->data[1];\n\t    buffer[3] = s->data[0];\n\t    buffer[6] = s->data[3];\n\t    buffer[7] = s->data[2];\n\t    buffer[10] = s->data[5];\n\t    buffer[11] = s->data[4];\n\t    buffer[14] = s->data[7];\n\t    buffer[15] = s->data[6];\n\t    buffer[16] = s->data[8];\n\t    buffer[17] = s->data[9];\n\t    buffer[18] = GifScreen.ColorMap[s->data[10]].red;\n\t    buffer[19] = GifScreen.ColorMap[s->data[10]].green;\n\t    buffer[20] = GifScreen.ColorMap[s->data[10]].blue;\n\t    buffer[21] = GifScreen.ColorMap[s->data[11]].red;\n\t    buffer[22] = GifScreen.ColorMap[s->data[11]].green;\n\t    buffer[23] = GifScreen.ColorMap[s->data[11]].blue;\n\t    png_write_chunk_s->data(png_ptr, buffer, 24);\n\t    png_write_chunk_s->data(png_ptr, s->data+12, s->size-12);\n\t    png_write_chunk_end(png_ptr);\n\t    break;\n#endif\n\n\tcase GIFgraphicctl:\n\t    buffer[0] = (s->data[0] >> 2) & 7;\n\t    buffer[1] = (s->data[0] >> 1) & 1;\n\t    buffer[2] = s->data[2];\n\t    buffer[3] = s->data[1];\n\n\t    png_write_chunk(png_ptr, (unsigned char *)\"gIFg\", buffer, 4);\n\t    break;\n\n\tdefault:\n\t    (void)fprintf(stderr, \n\t\t\t  \"gif2png internal error: encountered unused element type %c\\n\", \n\t\t\t  s->GIFtype);\n\t    break;\n\t}\n        /*@=branchstate@*/\n\ts = s->next;\n    }\n    png_write_end(png_ptr, info_ptr);\n\n    /* clean up after the write, and free any memory allocated */\n    png_destroy_write_struct(&png_ptr, &info_ptr);\n\n    return errorcount;\n}",
+          "fn_code_pos": [
+            [
+              117,
+              0
+            ],
+            [
+              625,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "writefile",
+            "parameters": {
+              "s": "struct GIFelement",
+              "e": "struct GIFelement",
+              "fp": "FILE",
+              "lastimg": "bool"
+            },
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "int\nMatteGIF(GifColor matte)\n/* convert transparent pixels to a matte of given color */\n{\n    int icount = 0;\n\n    /* apply matte color to image-local transparency values */\n    for (current = &first; current ; current = current->next) {\n\tif (current->imagestruct) {\n\t    if (current->imagestruct->trans == -1)\n\t\t(void)fprintf(stderr, \n\t\t\t\"gif2png: no transparency color in image %d, matte argument ignored\\n\",\n\t\t\ticount);\n\t    else {\n\t\tif (verbose > 0) {\n\t\t    (void)fprintf(stderr, \n\t\t\t\"gif2png: transparent value in image %d is %d\\n\",  \n\t\t\ticount, current->imagestruct->trans);\n\t\t}\n\n\t\tcurrent->imagestruct->colors[current->imagestruct->trans] = matte;\n\t\tcurrent->imagestruct->trans = -1;\n\t    }\n\t}\n    }\n    return icount;\n}",
+          "fn_code_pos": [
+            [
+              629,
+              0
+            ],
+            [
+              655,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "MatteGIF",
+            "parameters": {
+              "matte": "GifColor"
+            },
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "static int processfilter(void)\n{\n    int num_pics;\n    struct GIFelement *start;\n\n    current = &first;\n    num_pics = ReadGIF (stdin);\n    (void)fclose(stdin);\n\n    if (num_pics != 1) {\n\t(void)fprintf(stderr, \n\t\t      \"gif2png: %d images in -f (filter) mode\\n\", num_pics);\n\treturn 1;\n    }\n\n    /* eliminate use of transparency, if that is called for */\n    if (matte)\n\t(void)MatteGIF(matte_color);\n\n    start = NULL;\n    for (current = first.next; current ; current = current->next) {\n\tif (start == NULL) start = current;\n\tif (current->GIFtype == GIFimage) {\n\t    (void)writefile(start, current, stdout, true);\n\t    start = NULL;\n\t    ++numpngs;\n\t}\n    }\n    free_mem();\n    return 0;\n}",
+          "fn_code_pos": [
+            [
+              659,
+              0
+            ],
+            [
+              689,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "processfilter",
+            "parameters": {},
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "static int processfile(char *fname, FILE *fp)\n{\n    char outname[1025]; /* MAXPATHLEN comes under too many names */\n    int num_pics;\n    struct GIFelement *start;\n    int i; \n    bool suppress_delete = false;\n    char *file_ext;\n    struct utimbuf time_buf;\n\n    if (fp == NULL) return 1;\n\n    current = &first;\n\n    num_pics = ReadGIF (fp);\n\n    if (preserve_mtime)\n    {\n        struct stat stat_buf;\n\n\t/*@-compdef@*/\n\t/*@-unrecog@*//* needed because splint's POSIX library is buggy */\n        if (fstat(fileno(fp), &stat_buf) < 0)\n        {\n            perror(\"Could not get input file times\");\n            return 1;\n        }\n\t/*@=compdef@*/\n\n\t/*@-usedef@*/\n        time_buf.actime  = stat_buf.st_atime;\n        time_buf.modtime = stat_buf.st_mtime;\n\t/*@=usedef@*/\n    }\n\n    (void)fclose(fp);\n\n    if (num_pics >= 0 && verbose > 1)\n\t(void)fprintf(stderr, \"gif2png: number of images %d\\n\", num_pics);\n\n    if (num_pics <= 0)\n\treturn 1;\n\n    if (webconvert)\n\tif (num_pics != 1)\n\t{\n\t    (void)fprintf(stderr, \"gif2png: %s is multi-image\\n\", fname);\n\t    return 0;\n\t}\n\telse\n\t{\n\t    (void)printf(\"%s\\n\", fname);\n\t    return 0;\n\t}\n\n    /* eliminate use of transparency, if that is called for */\n    if (matte)\n\t(void)MatteGIF(matte_color);\n\n    /* create output filename */\n\n    (void)strcpy(outname, fname);\n\n    file_ext = outname+strlen(outname);\n    if (file_ext >= outname + 4)\n\tfile_ext -= 4;\n\n    if (strcmp(file_ext, \".gif\") != 0 && strcmp(file_ext, \".GIF\") != 0 &&\n\tstrcmp(file_ext, \"_gif\") != 0 && strcmp(file_ext, \"_GIF\") != 0) {\n\t/* try to derive basename */\n\tfile_ext = outname+strlen(outname);\n\twhile(file_ext >= outname) {\n\t    if (*file_ext == '.' || *file_ext == '/' || *file_ext == '\\\\') break;\n\t    file_ext--;\n\t}\n\tif (file_ext<outname || *file_ext != '.') {\n\t    /* as a last resort, just add .png to the filename */\n\t    file_ext = outname+strlen(outname);\n\t}\n    }\n\n    (void)strcpy(file_ext, \".png\"); /* images are named .png, .p01, .p02, ... */\n\n    start = NULL;\n\n    i = 0;\n\n    for (current = first.next; current ; current = current->next) {\n\tif (start == NULL) start = current;\n\tif (current->GIFtype == GIFimage) {\n\t    i++;\n\t    if ((fp = fopen(outname, \"wb\")) == NULL) {\n\t\tperror(outname);\n\t\treturn 1;\n\t    } else {\n\t\tsuppress_delete |= writefile(start, current, fp, i == num_pics);\n\t\t(void)fclose(fp);\n\n                if (preserve_mtime)\n                {\n\t\t    /*@-compdef@*/\n                    if (utime(outname, &time_buf) < 0)\n                    {\n                        perror(\"Could not set output file times\");\n                        return 1;\n                    }\n\t\t    /*@=compdef@*/\n                }\n\n\t\t++numpngs;\n\t\tstart = NULL;\n\t\t/*@-bufferoverflowhigh*/\n\t\t(void)sprintf(file_ext, \".p%02d\", i);\n\t\t/*@=bufferoverflowhigh*/\n\t    }\n\t}\n    }\n\n    free_mem();\n\n    if (delete && !suppress_delete) {\n\t(void)unlink(fname);\n    }\n\n    return 0;\n}",
+          "fn_code_pos": [
+            [
+              693,
+              0
+            ],
+            [
+              818,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "processfile",
+            "parameters": {
+              "fname": "char",
+              "fp": "FILE"
+            },
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "static bool input_is_terminal(void)\n{\n    return isatty(fileno(stdin))!=0;\n}",
+          "fn_code_pos": [
+            [
+              821,
+              0
+            ],
+            [
+              824,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "input_is_terminal",
+            "parameters": {},
+            "return_type": "bool"
+          }
+        },
+        {
+          "fn_code": "static void bailout(int sig)\n{\n    (void)fprintf(stderr, \"gif2png: GIF is fatally malformed, bailing out.\\n\");\n    exit(2);\n}",
+          "fn_code_pos": [
+            [
+              826,
+              0
+            ],
+            [
+              830,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "bailout",
+            "parameters": {
+              "sig": "int"
+            },
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "int main(int argc, char *argv[])\n{\n    FILE *fp;\n    int i; \n    unsigned int background;\n    int errors = 0;\n    char name[1025];\n    int ac;\n    char *color;\n\n    signal(SIGSEGV, bailout);\n\n    software_chunk = true;\n\n    for (ac = 1; ac < argc && argv[ac][0] == '-'; ac++)\n    {\n\tfor (i = 1; i < (int)strlen(argv[ac]); i++)\n\t    switch(argv[ac][i]) {\n\t    case 'b':\n\t\tif (ac >= argc - 1)\n\t\t{\n\t\t    (void)fputs(\"gif2png: missing background-matte argument\\n\",\n\t\t\t\tstderr);\n\t\t    exit(1);\n\t\t}\n\t\tcolor = argv[++ac];\n\t\tif (*color == '#')\n\t\t    color++;\n\t        (void)sscanf(color, \"%2ux\", &background);\n\t\tmatte_color.red = (background >> 16) & 0xff;\n\t\tmatte_color.green = (background >> 8) & 0xff; \n\t\tmatte_color.blue = background & 0xff;\n\t\tmatte = true;\n\t\tgoto skiparg;\n\n\t    case 'd':\n\t\tdelete = true;\n\t\tbreak;\n\n\t    case 'f':\n\t    case '1': /* backward compatibility */\n\t\tfiltermode = true;\n\t\tbreak;\n\n\t    case 'g':\n\t\tgamma_srgb = true;\n\t\tbreak;\n\n\t    case 'h':\n\t\thistogram = true;\n\t\tbreak;\n\n\t    case 'i':\n\t\tinterlaced = PNG_INTERLACE_ADAM7;\n\t\tbreak;\n\n\t    case 'm':\n\t\tpreserve_mtime = true;\n\t\tbreak;\n\n\t    case 'n':\n\t\tinterlaced = PNG_INTERLACE_NONE;\n\t\tbreak;\n\n\t    case 'p':\n\t\tprogress = true;\n\t\tbreak;\n\n\t    case 'r':\n\t\trecover = true;\n\t\tbreak;\n\n\t    case 's':\n\t\tsoftware_chunk = false;\n\t\tbreak;\n\n\t    case 'v':\n\t\t++verbose;\n\t\tbreak;\n\n\t    case 'w':\n\t\twebconvert = true;\n\t\tbreak;\n\n\t    case 'O':\n\t\toptimize = true;\n\t\tbreak;\n\n\t    default:\n\t\t(void)fprintf(stderr, \n\t\t\t      \"gif2png: unknown option `-%c'\\n\", argv[ac][i]);\n\t    usage:\n\t\t(void)fprintf(stderr,\n\t\"\\n\"\n\t\"usage: gif2png [ -bdfghimnprstvwO ] [file[.gif]] ...\\n\"\n\t\"\\n\"\n\t\"   -b  replace background pixels with given RRGGBB color (hex digits)\\n\"\n\t\"   -d  delete source GIF files after successful conversion\\n\"\n\t\"   -f  allow use as filter, die on multi-image GIF\\n\"\n\t\"   -g  write gamma=(1.0/2.2) and sRGB chunks\\n\"\n\t\"   -h  generate PNG histogram chunks into color output files\\n\"\n\t\"   -i  force conversion to interlaced PNG files\\n\"\n\t\"   -m  preserve input file modification time\\n\"\n\t\"   -n  force conversion to noninterlaced PNG files\\n\"\n\t\"   -p  display progress of PNG writing in %%\\n\"\n\t\"   -r  try to recover corrupted GIF files\\n\"\n\t\"   -s  do not write Software text chunk\\n\"\n\t\"   -v  verbose; display conversion statistics and debugging messages\\n\"\n\t\"   -w  web probe, list images without animation\\n\"\n\t\"   -O  optimize; remove unused color-table entries; use zlib level 9\\n\"\n\t\"   -1  one-only; same as -f; provided for backward compatibility\\n\"\n\t\"\\n\"\n\t\"   If no source files are listed, stdin is converted to noname.png.\\n\"\n\t\"\\n\"\n\t\"   This is %s, %s\\n\", version, compile_info);\n\t\treturn 1;\n\t    }\n    skiparg:;\n    }\n\n    if (verbose > 1)\n\t(void)fprintf(stderr, \"gif2png: %s, %s\\n\", version, compile_info);\n\n    /* loop over arguments or use stdin */\n    if (argc == ac) {\n\tif (input_is_terminal()) {\n\t    goto usage;\n\t}\n\tif (verbose > 1)\n\t    (void)fprintf(stderr, \"stdin:\\n\");\n\tif (filtermode) {\n\t    if (processfilter() != 0) ++errors;\n\t} else {\n\t    (void)processfile(\"noname.gif\", stdin);\n\t    ++numgifs;\n\t}\n    } else {\n\tfor (i = ac;i<argc; i++) {\n\t    /* make sure that there is enough space for a '.p<NUM>' suffix;\n\t       this check catches also the '.gif' case below. */\n\t    if (strlen(argv[i]) >= sizeof name - sizeof \".p\" - 3 * sizeof(int)) {\n\t\t(void)fprintf(stderr, \"%s: name too long\\n\", argv[i]);\n\t\terrors = 1;\n\t\tcontinue;\n\t    }\n\n\t    (void)strcpy(name, argv[i]);\n\t    if ((fp = fopen(name, \"rb\")) == NULL) {\n\t\t/* retry with .gif appended */\n\t\t(void)strcat(name, \".gif\");\n\t\tfp = fopen(name,\"rb\");\n\t    }\n\t    if (fp == NULL) {\n\t\tperror(argv[i]);\n\t\terrors = 1;\n\t    } else {\n\t\tif (verbose > 1)\n\t\t    (void)fprintf(stderr, \"%s:\\n\", name);\n\t\terrors |= processfile(name, fp);\n\t\t/* fp is closed in processfile */\n\t\t++numgifs;\n\t    }\n\t}\n    }\n\n    if (verbose > 0)\n\t(void)fprintf(stderr, \"Done (%s).  Converted %ld GIF%s into %ld PNG%s.\\n\",\n\t\t      errors!=0? \"with one or more errors\" : \"no errors detected\", \n\t\t      numgifs, (numgifs == 1) ? \"\" : \"s\", numpngs, (numpngs == 1)? \"\" : \"s\");\n\n    return (errors > 0) ? 1 : 0;\n}",
+          "fn_code_pos": [
+            [
+              832,
+              0
+            ],
+            [
+              1003,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "main",
+            "parameters": {
+              "argc": "int",
+              "argv": "char"
+            },
+            "return_type": "int"
+          }
+        }
+      ],
+      "fn_declaraion": [],
+      "class_node_list": {},
+      "struct_node_list": [
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            24,
+            8
+          ],
+          [
+            24,
+            25
+          ]
+        ],
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            25,
+            0
+          ],
+          [
+            25,
+            17
+          ]
+        ],
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            117,
+            21
+          ],
+          [
+            117,
+            38
+          ]
+        ],
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            117,
+            43
+          ],
+          [
+            117,
+            60
+          ]
+        ],
+        [
+          "struct GIFimagestruct",
+          {},
+          "",
+          [
+            121,
+            4
+          ],
+          [
+            121,
+            25
+          ]
+        ],
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            662,
+            4
+          ],
+          [
+            662,
+            21
+          ]
+        ],
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            697,
+            4
+          ],
+          [
+            697,
+            21
+          ]
+        ],
+        [
+          "struct utimbuf",
+          {},
+          "",
+          [
+            701,
+            4
+          ],
+          [
+            701,
+            18
+          ]
+        ],
+        [
+          "struct stat",
+          {},
+          "",
+          [
+            711,
+            8
+          ],
+          [
+            711,
+            19
+          ]
+        ]
+      ],
+      "include_list": [
+        [
+          "#include <stdio.h>\n",
+          [
+            7,
+            0
+          ],
+          [
+            8,
+            0
+          ]
+        ],
+        [
+          "#include <string.h>\n",
+          [
+            8,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ],
+        [
+          "#include <stdlib.h>\n",
+          [
+            9,
+            0
+          ],
+          [
+            10,
+            0
+          ]
+        ],
+        [
+          "#include <unistd.h>\t/* for isatty() */\n",
+          [
+            10,
+            0
+          ],
+          [
+            11,
+            0
+          ]
+        ],
+        [
+          "#include <zlib.h>\n",
+          [
+            11,
+            0
+          ],
+          [
+            12,
+            0
+          ]
+        ],
+        [
+          "#include <sys/stat.h>\n",
+          [
+            12,
+            0
+          ],
+          [
+            13,
+            0
+          ]
+        ],
+        [
+          "#include <utime.h>\n",
+          [
+            13,
+            0
+          ],
+          [
+            14,
+            0
+          ]
+        ],
+        [
+          "#include <stdbool.h>\n",
+          [
+            14,
+            0
+          ],
+          [
+            15,
+            0
+          ]
+        ],
+        [
+          "#include <signal.h>\n",
+          [
+            15,
+            0
+          ],
+          [
+            16,
+            0
+          ]
+        ],
+        [
+          "#include \"gif2png.h\"\n",
+          [
+            17,
+            0
+          ],
+          [
+            18,
+            0
+          ]
+        ]
+      ],
+      "global_variables": [],
+      "enumerate_node_list": []
+    },
+    "./tosem/source/gif2png\\gifread.c": {
+      "fn_def_list": [
+        {
+          "fn_code": "static int check_recover(bool some_data)\n{\n    if(recover)\n\treturn imagecount;\n    if(!recover_message && (imagecount>0 || some_data)) {\n\t(void)fprintf(stderr, \"gif2png: image reading error, use option -r to recover \");\n\tif(imagecount>0)\n\t    (void)fprintf(stderr, \"%d complete image%s \", imagecount,\n\t\t    (imagecount>1?\"s\":\"\"));\n\tif(imagecount>0 && some_data)\n\t    (void)fprintf(stderr, \"and \");\n\tif(some_data)\n\t    (void)fprintf(stderr, \"partial data of a broken image\");\n\t(void)fprintf(stderr, \"\\n\");\n\trecover_message=true;\n    }\n    return -1;\n}",
+          "fn_code_pos": [
+            [
+              46,
+              0
+            ],
+            [
+              63,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "check_recover",
+            "parameters": {
+              "some_data": "bool"
+            },
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "int\nReadGIF(FILE *fd)\n{\n    unsigned char buf[16];\n    unsigned char c;\n    GifColor      localColorMap[MAXCMSIZE];\n    bool          useGlobalColormap;\n    unsigned int  bitPixel;\n    char          gif_version[4];\n    int w, h, x_off, y_off;\n\n    imagecount=0;\n    recover_message=false;\n\n    /*\n     * Initialize GIF89 extensions\n     */\n    Gif89.transparent = -1;\n    Gif89.delayTime = -1;\n    Gif89.inputFlag = -1;\n    Gif89.disposal = 0;\n\n    if (! ReadOK(fd,buf,6)) {\n\t(void)fprintf(stderr, \"gif2png: error reading magic number\\n\");\n\treturn(-1);\n    }\n\n    if (strncmp((char *)buf,\"GIF\",3) != 0) {\n\t(void)fprintf(stderr, \"gif2png: not a GIF file\\n\");\n\treturn(-1);\n    }\n\n    strncpy(gif_version, (char *)buf + 3, 3);\n    gif_version[3] = '\\0';\n\n    if ((strcmp(gif_version, \"87a\") != 0) && (strcmp(gif_version, \"89a\") != 0)) {\n\t(void)fprintf(stderr, \"gif2png: bad version number, not '87a' or '89a', trying anyway\\n\");\n    }\n\n    if (! ReadOK(fd,buf,7)) {\n\t(void)fprintf(stderr, \"gif2png: failed to read screen descriptor\\n\");\n\treturn(-1);\n    }\n\n    GifScreen.Width           = LM_to_uint(buf[0],buf[1]);\n    GifScreen.Height          = LM_to_uint(buf[2],buf[3]);\n    GifScreen.BitPixel        = 2<<(buf[4]&0x07);\n    GifScreen.ColorResolution = (((buf[4]&0x70)>>3)+1);\n    GifScreen.ColorMap_present = BitSet(buf[4], GLOBALCOLORMAP);\n\n    if (GifScreen.ColorMap_present) {     /* Global Colormap */\n\n\tif (ReadColorMap(fd, GifScreen.BitPixel, GifScreen.ColorMap)) {\n\t    (void)fprintf(stderr, \"gif2png: error reading global colormap\\n\");\n\t    return(-1);\n\t}\n    } else {\n\t/* the GIF spec says that if neither global nor local\n\t * color maps are present, the decoder should use a system\n\t * default map, which should have black and white as the\n\t * first two colors. So we use black, white, red, green, blue,\n\t * yellow, purple and cyan.\n\t * I don't think missing color tables are a common case,\n\t * at least it's not handled by most GIF readers.\n\t */\n\n\tstatic int colors[]={0, 7, 1, 2, 4, 3, 5, 6};\n\tint i;\n\n\t/*@-predboolint -type@*/\n\tfor(i=0 ; i<MAXCMSIZE-8 ; i++) {\n\t    GifScreen.ColorMap[i].red   = (colors[i&7]&1) ? ((255-i)&0xf8) : 0;\n\t    GifScreen.ColorMap[i].green = (colors[i&7]&2) ? ((255-i)&0xf8) : 0;\n\t    GifScreen.ColorMap[i].blue  = (colors[i&7]&4) ? ((255-i)&0xf8) : 0;\n\t}\n\tfor(i=MAXCMSIZE-8 ; i<MAXCMSIZE; i++) {\n\t    GifScreen.ColorMap[i].red   = (colors[i&7]&1) ? 4 : 0;\n\t    GifScreen.ColorMap[i].green = (colors[i&7]&2) ? 4 : 0;\n\t    GifScreen.ColorMap[i].blue  = (colors[i&7]&4) ? 4 : 0;\n\t}\n\t/*@=predboolint =type@*/\n    }\n\n    if(GifScreen.ColorMap_present) {\n\tGifScreen.Background       = buf[5];\n    } else {\n\tGifScreen.Background       = -1; /* background unspecified */\n    }\n\n    GifScreen.AspectRatio     = buf[6];\n\n    for (;;) {\n\tif (! ReadOK(fd,&c,1)) {\n\t    (void)fprintf(stderr, \"gif2png: EOF / read error on image data\\n\");\n\t    return check_recover(false);\n\t}\n\n\tif (c == GIFterminator) {           /* GIF terminator */\n\t    if (verbose > 1)\n\t\t(void)fprintf(stderr, \"gif2png: end of GIF data stream\\n\");\n\t    return(imagecount);\n\t}\n\n\tif (c == GIFextension) {    /* Extension */\n\t    if (! ReadOK(fd,&c,1)) {\n\t\t(void)fprintf(stderr, \"gif2png: EOF / read error on extension function code\\n\");\n\t\treturn check_recover(false);\n\t    }\n\t    if(DoExtension(fd, c))\n\t\treturn check_recover(false);\n\t    continue;\n\t}\n\n\tif (c != GIFimage) {                /* Not a valid start character */\n\t    (void)fprintf(stderr, \"gif2png: bogus character 0x%02x\\n\",\n\t\t\t  (unsigned int)c);\n\t    return check_recover(false);\n\t}\n\n\tif (! ReadOK(fd,buf,9)) {\n\t    (void)fprintf(stderr,\"gif2png: couldn't read left/top/width/height\\n\");\n\t    return check_recover(false);\n\t}\n\n\tuseGlobalColormap = ! BitSet(buf[8], LOCALCOLORMAP);\n\n\tbitPixel = 1<<((buf[8]&0x07)+1);\n\n\tx_off = LM_to_uint(buf[0],buf[1]);\n\ty_off = LM_to_uint(buf[2],buf[3]);\n\tw = LM_to_uint(buf[4],buf[5]);\n\th = LM_to_uint(buf[6],buf[7]);\n\n\tif (! useGlobalColormap) {\n\t    if (ReadColorMap(fd, bitPixel, localColorMap)) {\n\t\t(void)fprintf(stderr, \n\t\t\t      \"gif2png: error reading local colormap\\n\");\n\t\treturn check_recover(false);\n\t    }\n\n\t    if(!ReadImage(fd, x_off, y_off, w, h, bitPixel,\n\t\t\t  localColorMap, BitSet(buf[8], INTERLACE))) {\n\t\timagecount++;\n\t    }\n\t} else {\n\t    if(!GifScreen.ColorMap_present) {\n\t\tif (verbose > 1)\n\t\t    (void)fprintf(stderr, \n\t\t\t\t  \"gif2png: neither global nor local colormap, using default\\n\");\n\t    }\n\n\t    if(!ReadImage(fd, x_off, y_off, w, h, GifScreen.BitPixel,\n\t\t\t  GifScreen.ColorMap,  BitSet(buf[8], INTERLACE))) {\n\t\timagecount++;\n\t    }\n\t}\n\n\t/*\n\t * reset GIF89 extensions after image\n\t */\n\tGif89.transparent = -1;\n\tGif89.delayTime = -1;\n\tGif89.inputFlag = -1;\n\tGif89.disposal = 0;\n    }\n\n    /* should never get here */\n}",
+          "fn_code_pos": [
+            [
+              66,
+              0
+            ],
+            [
+              233,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "ReadGIF",
+            "parameters": {
+              "fd": "FILE"
+            },
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "static bool\nReadColorMap(FILE *fd, unsigned int number, GifColor colors[])\n{\n    unsigned int   i;\n    byte  rgb[3];\n\n    for (i = 0; i < number; ++i) {\n\tif (!ReadOK(fd, rgb, sizeof(rgb))) {\n\t    (void)fprintf(stderr, \"gif2png: bad colormap\\n\");\n\t    return(true);\n\t}\n\n\tcolors[i].red   = rgb[0];\n\tcolors[i].green = rgb[1];\n\tcolors[i].blue  = rgb[2];\n    }\n\n    for (i = number; i<MAXCMSIZE; ++i) {\n\tcolors[i].red   = 0;\n\tcolors[i].green = 0;\n\tcolors[i].blue  = 0;\n    }\n\n    return false;\n}",
+          "fn_code_pos": [
+            [
+              236,
+              0
+            ],
+            [
+              260,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "ReadColorMap",
+            "parameters": {
+              "fd": "FILE",
+              "number": "unsigned int",
+              "colors": "GifColor"
+            },
+            "return_type": "bool"
+          }
+        },
+        {
+          "fn_code": "static bool\nDoExtension(FILE *fd, int label)\n{\n    static char   buf[256];\n    char *str;\n    char *p,*p2;\n    ssize_t size;\n    bool last_cr;\n\n    switch (label) {\n    case GIFplaintext:            /* Plain Text Extension */\n\tstr = \"Plain Text Extension\";\n\t/*\n\t * reset GIF89 extensions after Plain Text\n\t */\n\tGif89.transparent = -1;\n\tGif89.delayTime = -1;\n\tGif89.inputFlag = -1;\n\tGif89.disposal = 0;\n\tif (verbose > 1)\n\t    (void)fprintf(stderr, \"gif2png: got a 'Plain Text Extension' extension (skipping)\\n\");\n\n\twhile (GetDataBlock(fd, (unsigned char*) buf) > 0)\n\t    continue;\n\treturn (false);\n\n    case GIFapplication:/* Application Extension */\n\tstr = \"Application Extension\";\n\tbreak;\n\n    case GIFcomment:      /* Comment Extension */\n\tallocate_element(); /* current now points to new element struct */\n\n\t/* the GIF89a spec defines comment extensions to contain ASCII\n\t   text, but doesn't specify what end-of-line delimiter is to\n\t   be used.  Most programs use DOS style (CR/LF), at least one\n\t   uses CR (Graphic Workshop for Windows), unix programs\n\t   probably use LF. We just delete CRs unless they are not\n\t   followed by a LF, then we convert CR to LF.  Even though 7\n\t   bit ASCII is specified, there are some GIF files with\n\t   comments that use codepage 437 and most DOS GIF readers\n\t   display this in the DOS charset (e.g. VPIC). We convert the\n\t   characters both in cp437 and latin1 and try to approximate\n\t   some of the box drawing chars.\n\t*/\n\n\tlast_cr=false;\n\n\twhile ((size=GetDataBlock(fd, (unsigned char*) buf)) > 0) {\n\n\t    p2=p=buf;\n\n\t    /* take care of CR as last char of one sub-block and no LF at first of\n\t       the next */\n\t    if(last_cr && *p!='\\n') {\n\t\tstore_block(\"\\n\",1);\n\t\tlast_cr=false;\n\t    }\n\n\t    while(p-buf<size) {\n\t\tif(last_cr) {\n\t\t    if(*p!='\\n')\n\t\t\t*p2++='\\n';\n\t\t    last_cr=false;\n\t\t}\n\t\tif(*p=='\\r')\n\t\t    last_cr=true;\n\t\telse\n\t\t    *p2++=c_437_l1[(unsigned char)*p];\n\t\tp++;\n\t    }\n\t    size=p2-buf;\n\n\t    store_block(buf, (size_t)size);\n\t}\n\n\tif (verbose > 1)\n\t    (void)fprintf(stderr, \"gif2png: got a 'Comment Extension' extension\\n\");\n\n\tcurrent->GIFtype=label;\n\n\tfix_current();\n\treturn false;\n\n    case GIFgraphicctl:           /* Graphic Control Extension */\n\tstr = \"Graphic Control Extension\";\n\tsize = GetDataBlock(fd, (unsigned char*) buf);\n\t/*@-shiftimplementation@*/\n\tGif89.disposal    = (buf[0] >> 2) & 0x7;\n\tGif89.inputFlag   = (buf[0] >> 1) & 0x1;\n\tGif89.delayTime   = LM_to_uint(buf[1],buf[2]);\n\t/*@=shiftimplementation@*/\n\tif ((buf[0] & 0x1) != 0)\n\t    Gif89.transparent = (int)((unsigned char)buf[3]);\n\n\tif(Gif89.disposal==0 && Gif89.inputFlag==0 &&\n\t   Gif89.delayTime==0) {\n\n\t    /* do not keep GCEs only indicating transparency */\n\n\t    while (GetDataBlock(fd, (unsigned char*) buf) > 0)\n\t\t;\n\n\t    return (false);\n\t} else {\n\t    /* copy block already read */\n\t    allocate_element(); /* current now points to new element struct */\n\n\t    goto copy_block;\n\t}\n    default:\n\tif (verbose > 1)\n\t    (void)fprintf(stderr, \"gif2png: skipping unknown extension 0x%02x\\n\",\n\t\t    (unsigned char)label);\n\twhile (GetDataBlock(fd, (unsigned char*) buf) > 0)\n\t    ;\n\treturn (true);\n    }\n\n    allocate_element(); /* current now points to new element struct */\n\n    while ((size=GetDataBlock(fd, (unsigned char*) buf)) > 0) {\n    copy_block:\n\tstore_block(buf, (size_t)size);\n    }\n\n    if (verbose > 1)\n\t(void)fprintf(stderr, \"gif2png: got a '%s' extension\\n\", str);\n\n    current->GIFtype=label;\n\n    fix_current();\n\n    return (false);\n}",
+          "fn_code_pos": [
+            [
+              262,
+              0
+            ],
+            [
+              396,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "DoExtension",
+            "parameters": {
+              "fd": "FILE",
+              "label": "int"
+            },
+            "return_type": "bool"
+          }
+        },
+        {
+          "fn_code": "static ssize_t\nGetDataBlock(FILE *fd, unsigned char *buf)\n{\n    size_t count;\n\n    count = 0;\n    if (! ReadOK(fd, &count, 1)) {\n\t(void)fprintf(stderr, \"gif2png: error in getting DataBlock size\\n\");\n\treturn -1;\n    }\n\n    ZeroDataBlock = count == 0;\n\n    if ((count != 0) && (! ReadOK(fd, buf, count))) {\n\t(void)fprintf(stderr, \"gif2png: error in reading DataBlock\\n\");\n\treturn -1;\n    }\n\n    return((ssize_t)count);\n}",
+          "fn_code_pos": [
+            [
+              401,
+              0
+            ],
+            [
+              420,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "GetDataBlock",
+            "parameters": {
+              "fd": "FILE",
+              "buf": "unsigned char"
+            },
+            "return_type": "ssize_t"
+          }
+        },
+        {
+          "fn_code": "static void initLWZ(unsigned int input_code_size)\n{\n    /*@-shiftnegative@*/\n    set_code_size = (int)input_code_size;\n    code_size     = set_code_size + 1;\n    clear_code    = 1 << set_code_size ;\n    end_code      = clear_code + 1;\n    max_code_size = 2 * clear_code;\n    max_code      = clear_code + 2;\n    /*@=shiftnegative@*/\n\n    curbit = lastbit = 0;\n    last_byte = 2;\n    get_done = false;\n\n    return_clear = true;\n\n    sp = stack;\n}",
+          "fn_code_pos": [
+            [
+              436,
+              0
+            ],
+            [
+              454,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "initLWZ",
+            "parameters": {
+              "input_code_size": "unsigned int"
+            },
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "static int nextCode(FILE *fd, int code_size)\n{\n    static unsigned char    buf[280];\n    static int maskTbl[16] = {\n\t0x0000, 0x0001, 0x0003, 0x0007,\n\t0x000f, 0x001f, 0x003f, 0x007f,\n\t0x00ff, 0x01ff, 0x03ff, 0x07ff,\n\t0x0fff, 0x1fff, 0x3fff, 0x7fff,\n    };\n    int i, j, end;\n    long ret;\n\n    if (return_clear) {\n\treturn_clear = false;\n\treturn clear_code;\n    }\n\n    end = curbit + code_size;\n\n    if (end >= lastbit) {\n\tssize_t     count;\n\n\tif (get_done) {\n\t    if (verbose!=0 && curbit >= lastbit) {\n\t\t(void)fprintf(stderr, \"gif2png: ran off the end of input bits\\n\");\n\t    }\n\t    return -1;\n\t}\n\tbuf[0] = buf[last_byte-2];\n\tbuf[1] = buf[last_byte-1];\n\n\tif ((count = GetDataBlock(fd, &buf[2])) == 0)\n\t    get_done = true;\n\n\tif (count<0) return -1;\n\n\tlast_byte = 2 + (int)count;\n\tcurbit = (curbit - lastbit) + 16;\n\tlastbit = (2+(int)count)*8 ;\n\n\tend = curbit + code_size;\n    }\n\n    j = end / 8;\n    i = curbit / 8;\n\n    /*@-shiftimplementation@*/\n    if (i == j)\n\tret = (long)buf[i];\n    else if (i + 1 == j)\n\tret = (long)buf[i] | ((long)buf[i+1] << 8);\n    else\n\tret = (long)buf[i] | ((long)buf[i+1] << 8) | ((long)buf[i+2] << 16);\n\n    /*@-shiftnegative@*/\n    if( code_size < 16) {\n        ret = (ret >> (curbit % 8)) & maskTbl[code_size];\n    } else {\n        (void)fprintf(stderr, \"gif2png: LWZMinimumCodeSize can't be bigger than 15\\n\");\n        exit(1);\n    }\n    /*@=shiftnegative@*/\n    /*@=shiftimplementation@*/\n\n    curbit += code_size;\n\n    return (int)ret;\n}",
+          "fn_code_pos": [
+            [
+              456,
+              0
+            ],
+            [
+              523,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "nextCode",
+            "parameters": {
+              "fd": "FILE",
+              "code_size": "int"
+            },
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "static int nextLWZ(FILE *fd)\n{\n    static int       table[2][(1<< MAX_LWZ_BITS)];\n    static int       firstcode, oldcode;\n    int              code;\n    register int     i;\n\n    while ((code = nextCode(fd, code_size)) >= 0) {\n\tint              incode;\n\tif (code == clear_code) {\n\t    /* corrupt GIFs can make this happen */\n\t    if (clear_code >= (1<<MAX_LWZ_BITS)) {\n\t\treturn -2;\n\t    }\n\n\t    for (i = 0; i < clear_code; ++i) {\n\t\ttable[0][i] = 0;\n\t\ttable[1][i] = i;\n\t    }\n\t    for (; i < (1<<MAX_LWZ_BITS); ++i)\n\t\ttable[0][i] = table[1][i] = 0;\n\t    code_size = set_code_size+1;\n\t    max_code_size = 2*clear_code;\n\t    max_code = clear_code+2;\n\t    sp = stack;\n\t    do {\n\t\tfirstcode = oldcode = nextCode(fd, code_size);\n\t    } while (firstcode == clear_code);\n\n\t    return firstcode;\n\t}\n\tif (code == end_code) {\n\t    ssize_t         count;\n\t    unsigned char   buf[260];\n\n\t    if (ZeroDataBlock)\n\t\treturn -2;\n\n\t    while ((count = GetDataBlock(fd, buf)) > 0)\n\t\t;\n\n\t    if (count != 0) {\n\t\t(void)fprintf(stderr, \"gif2png: missing EOD in data stream (common occurrence)\\n\");\n\t    }\n\t    return -2;\n\t}\n\n\tincode = code;\n\n\tif (code >= max_code) {\n\t    *sp++ = firstcode;\n\t    code = oldcode;\n\t}\n\n\twhile (code >= clear_code) {\n\t    *sp++ = table[1][code];\n\t    if (code == table[0][code]) {\n\t\t(void)fprintf(stderr, \"gif2png: circular table entry BIG ERROR\\n\");\n\t\texit(1);\n\t    }\n\t    if ((size_t)((char *)sp - (char *)stack) >= sizeof(stack)) {\n\t\t(void)fprintf(stderr, \"gif2png: circular table STACK OVERFLOW!\\n\");\n\t\texit(1);\n\t    }\n\t    code = table[0][code];\n\t}\n\n\t*sp++ = firstcode = table[1][code];\n\n\tif ((code = max_code) <(1<<MAX_LWZ_BITS)) {\n\t    table[0][code] = oldcode;\n\t    table[1][code] = firstcode;\n\t    ++max_code;\n\t    if ((max_code >= max_code_size) &&\n\t\t(max_code_size < (1<<MAX_LWZ_BITS))) {\n\t\tmax_code_size *= 2;\n\t\t++code_size;\n\t    }\n\t}\n\n\toldcode = incode;\n\n\tif (sp > stack)\n\t    return *--sp;\n    }\n    return code;\n}",
+          "fn_code_pos": [
+            [
+              527,
+              0
+            ],
+            [
+              613,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "nextLWZ",
+            "parameters": {
+              "fd": "FILE"
+            },
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "static byte *\nget_prev_line(int width, int height, int line)\n{\n    int prev_line;\n    byte *res;\n\n    prev_line=inv_interlace_line(height,line)-1;\n    while(interlace_line(height, prev_line)>=line)\n\tprev_line--;\n\n    res = current->data + width*interlace_line(height, prev_line);\n\n    return res;\n}",
+          "fn_code_pos": [
+            [
+              618,
+              0
+            ],
+            [
+              631,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "get_prev_line",
+            "parameters": {
+              "width": "int",
+              "height": "int",
+              "line": "int"
+            },
+            "return_type": "byte"
+          }
+        },
+        {
+          "fn_code": "static bool\nReadImage(FILE *fd, int x_off, int y_off, int width, int height, \n\t  unsigned int cmapSize, GifColor cmap[], bool interlace)\n{\n    unsigned char *dp, c;\n    int           v;\n    int           xpos = 0, ypos = 0;\n    unsigned char *image;\n    int i;\n    unsigned long *count;\n\n    /*\n    **  Initialize the compression routines\n    */\n    if (! ReadOK(fd,&c,1)) {\n\t(void)fprintf(stderr, \"gif2png: EOF / read error on image data\\n\");\n\treturn(true);\n    }\n\n    initLWZ(c);\n\n    if (verbose > 1)\n\t(void)fprintf(stderr, \"gif2png: reading %d by %d%s GIF image\\n\",\n\t\twidth, height, interlace ? \" interlaced\" : \"\" );\n\n    allocate_image();\n    /* since we know how large the image will be, we set the size in advance.\n       This saves a lot of realloc calls, which may require copying memory. */\n\n    set_size((size_t)width*height);\n\n    image=xalloc((size_t)width);\n\n    current->imagestruct->offset_x = x_off;\n    current->imagestruct->offset_y = y_off;\n    current->imagestruct->width    = (png_uint_32)width;\n    current->imagestruct->height   = (png_uint_32)height;\n    current->imagestruct->trans    = Gif89.transparent;\n    current->imagestruct->interlace= interlace;\n\n    /*@-mayaliasunique@*/\n    memcpy(current->imagestruct->colors, cmap, sizeof(GifColor)*MAXCMSIZE);\n    /*@=mayaliasunique@*/\n\n    count=current->imagestruct->color_count;\n\n    for(i=0;i<MAXCMSIZE;i++) {\n\tcount[i]=0;\n    }\n\n    for (ypos = 0; ypos < height; ypos++) {\n\tdp=image;\n\tfor (xpos = 0; xpos < width; xpos++) {\n\t    if ((v = readLWZ(fd)) < 0 || v >= (int)cmapSize) {\n\t\tif(v >= (int)cmapSize)\n\t\t    (void)fprintf(stderr, \n\t\t\t\t  \"gif2png: reference to undefined colormap entry\\n\");\n\n\t\tif(xpos>0 || ypos>0) {\n\t\t    if(recover) {\n\t\t\tif(!interlace) {\n\t\t\t    /* easy part, just fill the rest of the `screen' with color 0 */\n\t\t\t    memset(image+xpos,0, (size_t)(width-xpos));\n\t\t\t    store_block((char *)image,(size_t)width);\n\t\t\t    ypos++;\n\n\t\t\t    memset(image, 0, (size_t)width);\n\t\t\t    for( ; ypos < height ; ypos++)\n\t\t\t\tstore_block((char *)image,(size_t)width);\n\t\t\t} else {\n\t\t\t    /* interlacing recovery is a bit tricky */\n\n\t\t\t    if(xpos>0) {\n\t\t\t\tif((inv_interlace_line(height, ypos)&7)==0) {\n\t\t\t\t    /* in 1st pass */\n\t\t\t\t    memset(image+xpos, 0, (size_t)(width-xpos));\n\t\t\t\t} else {\n\t\t\t\t    /* pass >=2 */\n\t\t\t\t    memcpy(image+xpos, get_prev_line(width, height, ypos)+xpos,\n\t\t\t\t\t   (size_t)(width-xpos));\n\t\t\t\t}\n\t\t\t\tstore_block((char *)image,(size_t)width);\n\t\t\t\typos++;\n\t\t\t    }\n\n\t\t\t    /* fill rest of 1st pass with color 0 */\n\t\t\t    memset(image, 0, (size_t)width);\n\t\t\t    for( ; (inv_interlace_line(height, ypos)&7)==0 ; ypos++)\n\t\t\t\tstore_block((char *)image,(size_t)width);\n\n\t\t\t    /* all other passes, copy from line above */\n\t\t\t    for( ; ypos<height ; ypos++) {\n\t\t\t\tmemcpy(image, get_prev_line(width, height, ypos), (size_t)width);\n\t\t\t\tstore_block((char *)image,(size_t)width);\n\t\t\t    }\n\t\t\t}\n\t\t\tgoto fini;\n\t\t    } else {\n\t\t\t(void)check_recover(true);\n\t\t\treturn(true);\n\t\t    }\n\t\t} else {\n\t\t    return(true);\n\t\t}\n\t    }\n\n\t    count[v]++;\n\n\t    *dp++ = (unsigned char)v;\n\t}\n\tstore_block((char *)image,(size_t)width);\n    }\nfini:\n\n    while(readLWZ(fd)>=0)\n\tcontinue;\n\n    /*@-usedef@*/\n    (void)free(image);\n    /*@=usedef@*/\n\n    fix_current();\n\n    /*\n     * reset GIF89 extensions after image\n     */\n\n    Gif89.transparent = -1;\n    Gif89.delayTime = -1;\n    Gif89.inputFlag = -1;\n    Gif89.disposal = 0;\n\n    return(false);\n}",
+          "fn_code_pos": [
+            [
+              635,
+              0
+            ],
+            [
+              768,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "ReadImage",
+            "parameters": {
+              "fd": "FILE",
+              "x_off": "int",
+              "y_off": "int",
+              "width": "int",
+              "height": "int",
+              "cmapSize": "unsigned int",
+              "cmap": "GifColor",
+              "interlace": "bool"
+            },
+            "return_type": "bool"
+          }
+        }
+      ],
+      "fn_declaraion": [
+        {
+          "fn_code": "ReadColorMap(FILE *fd, unsigned int number, \n\t\t\t /*@out@*/GifColor buffer[])",
+          "fn_dec_pos": [
+            [
+              34,
+              12
+            ],
+            [
+              35,
+              31
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "ReadColorMap",
+            "parameters": {
+              "fd": "FILE",
+              "number": "unsigned int",
+              "buffer": "GifColor"
+            },
+            "return_type": "bool"
+          }
+        },
+        {
+          "fn_code": "DoExtension(FILE *fd, int label)",
+          "fn_dec_pos": [
+            [
+              36,
+              12
+            ],
+            [
+              36,
+              44
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "DoExtension",
+            "parameters": {
+              "fd": "FILE",
+              "label": "int"
+            },
+            "return_type": "bool"
+          }
+        },
+        {
+          "fn_code": "GetDataBlock(FILE *fd, /*@out@*/unsigned char *buf)",
+          "fn_dec_pos": [
+            [
+              37,
+              15
+            ],
+            [
+              37,
+              66
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "GetDataBlock",
+            "parameters": {
+              "fd": "FILE",
+              "buf": "unsigned char"
+            },
+            "return_type": "ssize_t"
+          }
+        },
+        {
+          "fn_code": "ReadImage(FILE *fd, int x_off, int y_off, int len, int height, \n\t\t      unsigned int cmapSize, GifColor cmap[], bool interlace)",
+          "fn_dec_pos": [
+            [
+              38,
+              12
+            ],
+            [
+              39,
+              63
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "ReadImage",
+            "parameters": {
+              "fd": "FILE",
+              "x_off": "int",
+              "y_off": "int",
+              "len": "int",
+              "height": "int",
+              "cmapSize": "unsigned int",
+              "cmap": "GifColor",
+              "interlace": "bool"
+            },
+            "return_type": "bool"
+          }
+        },
+        {
+          "fn_code": "get_prev_line(int width, int height, int line)",
+          "fn_dec_pos": [
+            [
+              619,
+              0
+            ],
+            [
+              619,
+              46
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "get_prev_line",
+            "parameters": {
+              "width": "int",
+              "height": "int",
+              "line": "int"
+            },
+            "return_type": null
+          }
+        }
+      ],
+      "class_node_list": {},
+      "struct_node_list": [
+        [
+          "struct {\n    int   transparent;\n    int   delayTime;\n    int   inputFlag;\n    int   disposal;\n}",
+          {
+            "transparent": "int",
+            "delayTime": "int",
+            "inputFlag": "int",
+            "disposal": "int"
+          },
+          "",
+          [
+            24,
+            0
+          ],
+          [
+            29,
+            1
+          ]
+        ],
+        [
+          "struct gif_scr",
+          {},
+          "",
+          [
+            22,
+            0
+          ],
+          [
+            22,
+            14
+          ]
+        ],
+        [
+          "struct {\n    int   transparent;\n    int   delayTime;\n    int   inputFlag;\n    int   disposal;\n}",
+          {
+            "transparent": "int",
+            "delayTime": "int",
+            "inputFlag": "int",
+            "disposal": "int"
+          },
+          "",
+          [
+            24,
+            0
+          ],
+          [
+            29,
+            1
+          ]
+        ]
+      ],
+      "include_list": [
+        [
+          "#include <stdio.h>\n",
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        [
+          "#include <string.h>\n",
+          [
+            3,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        [
+          "#include <stdlib.h>\n",
+          [
+            4,
+            0
+          ],
+          [
+            5,
+            0
+          ]
+        ],
+        [
+          "#include \"gif2png.h\"\n",
+          [
+            5,
+            0
+          ],
+          [
+            6,
+            0
+          ]
+        ]
+      ],
+      "global_variables": [],
+      "enumerate_node_list": []
+    },
+    "./tosem/source/gif2png\\memory.c": {
+      "fn_def_list": [
+        {
+          "fn_code": "void *xalloc(size_t s)\n{\n    void *p=malloc(s);\n\n    if(p==NULL) {\n\t(void)fprintf(stderr, \"gif2png: fatal error, out of memory\\n\");\n\t(void)fprintf(stderr, \"gif2png: exiting ungracefully\\n\");\n\texit(1);\n    }\n\n    return p;\n}",
+          "fn_code_pos": [
+            [
+              14,
+              0
+            ],
+            [
+              25,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "xalloc",
+            "parameters": {
+              "s": "size_t"
+            },
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "void *xrealloc(void *p, size_t s)\n{\n    p=realloc(p,s);\n\n    if(p==NULL) {\n\t(void)fprintf(stderr, \"gif2png: fatal error, out of memory\\n\");\n\t(void)fprintf(stderr, \"gif2png: exiting ungracefully\\n\");\n\texit(1);\n    }\n\n    return p;\n}",
+          "fn_code_pos": [
+            [
+              29,
+              0
+            ],
+            [
+              40,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "xrealloc",
+            "parameters": {
+              "p": "void",
+              "s": "size_t"
+            },
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "void allocate_element(void)\n{\n    struct GIFelement *new=xalloc(sizeof(*new));\n\n    memset(new, 0, sizeof(*new));\n\n    new->next=NULL; /* just in case NULL is not represented by a binary 0 */\n\n    current->next=new;\n    current=new;\n}",
+          "fn_code_pos": [
+            [
+              49,
+              0
+            ],
+            [
+              59,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "allocate_element",
+            "parameters": {},
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "void set_size(size_t size)\n{\n    size_t nalloc;\n\n    if(current->allocated_size==0) {\n\tnalloc=size;\n\tif(nalloc<ALLOCSIZE) nalloc=ALLOCSIZE;\n\tcurrent->data=xalloc(nalloc);\n\tcurrent->allocated_size=nalloc;\n    } else\n\tif(current->allocated_size<size) {\n\t    nalloc=size-current->allocated_size;\n\t    if(nalloc<ALLOCSIZE) nalloc=ALLOCSIZE;\n\t    current->data=xrealloc(current->data, current->allocated_size+nalloc);\n\t    current->allocated_size+=nalloc;\n\t}\n}",
+          "fn_code_pos": [
+            [
+              64,
+              0
+            ],
+            [
+              80,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "set_size",
+            "parameters": {
+              "size": "size_t"
+            },
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "void store_block(char *data, size_t size)\n{\n    set_size(current->size+size);\n    memcpy(current->data+current->size, data, size);\n    current->size+=size;\n}",
+          "fn_code_pos": [
+            [
+              83,
+              0
+            ],
+            [
+              88,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "store_block",
+            "parameters": {
+              "data": "char",
+              "size": "size_t"
+            },
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "void allocate_image(void)\n{\n    allocate_element();\n    current->GIFtype=GIFimage;\n    current->imagestruct=xalloc(sizeof(*current->imagestruct));\n    memset(current->imagestruct, 0, sizeof(*current->imagestruct));\n}",
+          "fn_code_pos": [
+            [
+              91,
+              0
+            ],
+            [
+              97,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "allocate_image",
+            "parameters": {},
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "void fix_current(void)\n{\n    if(current->allocated_size!=current->size) {\n\tcurrent->data=xrealloc(current->data, current->size);\n\tcurrent->allocated_size=current->size;\n    }\n}",
+          "fn_code_pos": [
+            [
+              101,
+              0
+            ],
+            [
+              107,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "fix_current",
+            "parameters": {},
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "void free_mem(void)\n{\n    struct GIFelement *p;\n\n    p=first.next;\n    first.next=NULL;\n\n    while(p) {\n\tstruct GIFelement *t=p;\n\tp=p->next;\n\tif(t->data) free(t->data);\n\tif(t->imagestruct) free(t->imagestruct);\n\tfree(t);\n    }\n}",
+          "fn_code_pos": [
+            [
+              111,
+              0
+            ],
+            [
+              125,
+              1
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "free_mem",
+            "parameters": {},
+            "return_type": "void"
+          }
+        }
+      ],
+      "fn_declaraion": [
+        {
+          "fn_code": "xalloc(size_t s)",
+          "fn_dec_pos": [
+            [
+              14,
+              6
+            ],
+            [
+              14,
+              22
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "xalloc",
+            "parameters": {
+              "s": "size_t"
+            },
+            "return_type": null
+          }
+        },
+        {
+          "fn_code": "xrealloc(void *p, size_t s)",
+          "fn_dec_pos": [
+            [
+              29,
+              6
+            ],
+            [
+              29,
+              33
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "xrealloc",
+            "parameters": {
+              "p": "void",
+              "s": "size_t"
+            },
+            "return_type": null
+          }
+        },
+        {
+          "fn_code": "memset(new, 0, sizeof(*new))",
+          "fn_dec_pos": [
+            [
+              53,
+              4
+            ],
+            [
+              53,
+              32
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "memset",
+            "parameters": {
+              "new": "sizeof"
+            },
+            "return_type": null
+          }
+        }
+      ],
+      "class_node_list": {},
+      "struct_node_list": [
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            51,
+            4
+          ],
+          [
+            51,
+            21
+          ]
+        ],
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            113,
+            4
+          ],
+          [
+            113,
+            21
+          ]
+        ],
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            119,
+            1
+          ],
+          [
+            119,
+            18
+          ]
+        ]
+      ],
+      "include_list": [
+        [
+          "#include <stdio.h>\n",
+          [
+            6,
+            0
+          ],
+          [
+            7,
+            0
+          ]
+        ],
+        [
+          "#include <string.h>\n",
+          [
+            7,
+            0
+          ],
+          [
+            8,
+            0
+          ]
+        ],
+        [
+          "#include <stdlib.h>\n",
+          [
+            8,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ],
+        [
+          "#include <assert.h>\n",
+          [
+            9,
+            0
+          ],
+          [
+            10,
+            0
+          ]
+        ],
+        [
+          "#include \"gif2png.h\"\n",
+          [
+            11,
+            0
+          ],
+          [
+            12,
+            0
+          ]
+        ]
+      ],
+      "global_variables": [],
+      "enumerate_node_list": []
+    },
+    "./tosem/source/gif2png\\version.c": {
+      "fn_def_list": [],
+      "fn_declaraion": [],
+      "class_node_list": {},
+      "struct_node_list": [],
+      "include_list": [
+        [
+          "#include \"zlib.h\"\n",
+          [
+            6,
+            0
+          ],
+          [
+            7,
+            0
+          ]
+        ],
+        [
+          "#include \"png.h\"\n",
+          [
+            7,
+            0
+          ],
+          [
+            8,
+            0
+          ]
+        ]
+      ],
+      "global_variables": [],
+      "enumerate_node_list": []
+    }
+  },
+  "head": {
+    "./tosem/source/gif2png\\gif2png.h": {
+      "fn_def_list": [],
+      "fn_declaraion": [
+        {
+          "fn_code": "ReadGIF(FILE *)",
+          "fn_dec_pos": [
+            [
+              54,
+              4
+            ],
+            [
+              54,
+              19
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "ReadGIF",
+            "parameters": {},
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "MatteGIF(GifColor)",
+          "fn_dec_pos": [
+            [
+              55,
+              4
+            ],
+            [
+              55,
+              22
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "MatteGIF",
+            "parameters": {},
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "allocate_element(void)",
+          "fn_dec_pos": [
+            [
+              57,
+              5
+            ],
+            [
+              57,
+              27
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "allocate_element",
+            "parameters": {},
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "store_block(char *, size_t)",
+          "fn_dec_pos": [
+            [
+              58,
+              5
+            ],
+            [
+              58,
+              32
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "store_block",
+            "parameters": {},
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "allocate_image(void)",
+          "fn_dec_pos": [
+            [
+              59,
+              5
+            ],
+            [
+              59,
+              25
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "allocate_image",
+            "parameters": {},
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "set_size(size_t)",
+          "fn_dec_pos": [
+            [
+              60,
+              5
+            ],
+            [
+              60,
+              21
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "set_size",
+            "parameters": {},
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "xalloc(size_t)",
+          "fn_dec_pos": [
+            [
+              62,
+              6
+            ],
+            [
+              62,
+              20
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "xalloc",
+            "parameters": {},
+            "return_type": null
+          }
+        },
+        {
+          "fn_code": "xrealloc(void *, size_t)",
+          "fn_dec_pos": [
+            [
+              63,
+              6
+            ],
+            [
+              63,
+              30
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "xrealloc",
+            "parameters": {},
+            "return_type": null
+          }
+        },
+        {
+          "fn_code": "fix_current(void)",
+          "fn_dec_pos": [
+            [
+              64,
+              5
+            ],
+            [
+              64,
+              22
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "fix_current",
+            "parameters": {},
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "free_mem(void)",
+          "fn_dec_pos": [
+            [
+              65,
+              5
+            ],
+            [
+              65,
+              19
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "free_mem",
+            "parameters": {},
+            "return_type": "void"
+          }
+        },
+        {
+          "fn_code": "interlace_line(int height, int line)",
+          "fn_dec_pos": [
+            [
+              67,
+              4
+            ],
+            [
+              67,
+              40
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "interlace_line",
+            "parameters": {
+              "height": "int",
+              "line": "int"
+            },
+            "return_type": "int"
+          }
+        },
+        {
+          "fn_code": "inv_interlace_line(int height, int line)",
+          "fn_dec_pos": [
+            [
+              68,
+              4
+            ],
+            [
+              68,
+              44
+            ]
+          ],
+          "class_code": "",
+          "class_node_pos": [],
+          "fn_meta": {
+            "identifier": "inv_interlace_line",
+            "parameters": {
+              "height": "int",
+              "line": "int"
+            },
+            "return_type": "int"
+          }
+        }
+      ],
+      "class_node_list": {},
+      "struct_node_list": [
+        [
+          "struct GIFimagestruct {\n  GifColor colors[MAXCMSIZE];\n  unsigned long color_count[MAXCMSIZE];\n  int offset_x;\n  int offset_y;\n  png_uint_32 width;\n  png_uint_32 height;\n  int trans;\n  bool interlace;\n}",
+          {
+            "colors[MAXCMSIZE]": "GifColor",
+            "color_count[MAXCMSIZE]": "unsigned long",
+            "offset_x": "int",
+            "offset_y": "int",
+            "width": "png_uint_32",
+            "height": "png_uint_32",
+            "trans": "int",
+            "interlace": "bool"
+          },
+          "GIFimagestruct",
+          [
+            22,
+            0
+          ],
+          [
+            31,
+            1
+          ]
+        ],
+        [
+          "struct GIFelement {\n  struct GIFelement *next;\n  char GIFtype;\n  byte *data;\n  size_t allocated_size;\n  size_t size;\n  /* only used if GIFtype==GIFimage */\n  struct GIFimagestruct *imagestruct;\n}",
+          {
+            "*next": "struct GIFelement",
+            "GIFtype": "char",
+            "*data": "byte",
+            "allocated_size": "size_t",
+            "size": "size_t",
+            "*imagestruct": "struct GIFimagestruct"
+          },
+          "GIFelement",
+          [
+            33,
+            0
+          ],
+          [
+            41,
+            1
+          ]
+        ],
+        [
+          "struct gif_scr{\n  unsigned int  Width;\n  unsigned int  Height;\n  GifColor      ColorMap[MAXCMSIZE];\n  bool          ColorMap_present;\n  unsigned int  BitPixel;\n  unsigned int  ColorResolution;\n  int           Background;\n  unsigned int  AspectRatio;\n}",
+          {
+            "Width": "unsigned int",
+            "Height": "unsigned int",
+            "ColorMap[MAXCMSIZE]": "GifColor",
+            "ColorMap_present": "bool",
+            "BitPixel": "unsigned int",
+            "ColorResolution": "unsigned int",
+            "Background": "int",
+            "AspectRatio": "unsigned int"
+          },
+          "gif_scr",
+          [
+            43,
+            7
+          ],
+          [
+            52,
+            1
+          ]
+        ],
+        [
+          "struct GIFimagestruct {\n  GifColor colors[MAXCMSIZE];\n  unsigned long color_count[MAXCMSIZE];\n  int offset_x;\n  int offset_y;\n  png_uint_32 width;\n  png_uint_32 height;\n  int trans;\n  bool interlace;\n}",
+          {
+            "colors[MAXCMSIZE]": "GifColor",
+            "color_count[MAXCMSIZE]": "unsigned long",
+            "offset_x": "int",
+            "offset_y": "int",
+            "width": "png_uint_32",
+            "height": "png_uint_32",
+            "trans": "int",
+            "interlace": "bool"
+          },
+          "GIFimagestruct",
+          [
+            22,
+            0
+          ],
+          [
+            31,
+            1
+          ]
+        ],
+        [
+          "struct GIFelement {\n  struct GIFelement *next;\n  char GIFtype;\n  byte *data;\n  size_t allocated_size;\n  size_t size;\n  /* only used if GIFtype==GIFimage */\n  struct GIFimagestruct *imagestruct;\n}",
+          {
+            "*next": "struct GIFelement",
+            "GIFtype": "char",
+            "*data": "byte",
+            "allocated_size": "size_t",
+            "size": "size_t",
+            "*imagestruct": "struct GIFimagestruct"
+          },
+          "GIFelement",
+          [
+            33,
+            0
+          ],
+          [
+            41,
+            1
+          ]
+        ],
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            34,
+            2
+          ],
+          [
+            34,
+            19
+          ]
+        ],
+        [
+          "struct GIFimagestruct",
+          {},
+          "",
+          [
+            40,
+            2
+          ],
+          [
+            40,
+            23
+          ]
+        ],
+        [
+          "struct gif_scr{\n  unsigned int  Width;\n  unsigned int  Height;\n  GifColor      ColorMap[MAXCMSIZE];\n  bool          ColorMap_present;\n  unsigned int  BitPixel;\n  unsigned int  ColorResolution;\n  int           Background;\n  unsigned int  AspectRatio;\n}",
+          {
+            "Width": "unsigned int",
+            "Height": "unsigned int",
+            "ColorMap[MAXCMSIZE]": "GifColor",
+            "ColorMap_present": "bool",
+            "BitPixel": "unsigned int",
+            "ColorResolution": "unsigned int",
+            "Background": "int",
+            "AspectRatio": "unsigned int"
+          },
+          "gif_scr",
+          [
+            43,
+            7
+          ],
+          [
+            52,
+            1
+          ]
+        ],
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            70,
+            7
+          ],
+          [
+            70,
+            24
+          ]
+        ],
+        [
+          "struct GIFelement",
+          {},
+          "",
+          [
+            71,
+            7
+          ],
+          [
+            71,
+            24
+          ]
+        ]
+      ],
+      "include_list": [
+        [
+          "#include \"png.h\"\n",
+          [
+            3,
+            0
+          ],
+          [
+            4,
+            0
+          ]
+        ],
+        [
+          "#include <stdbool.h>\n",
+          [
+            5,
+            0
+          ],
+          [
+            6,
+            0
+          ]
+        ]
+      ],
+      "global_variables": [],
+      "enumerate_node_list": []
+    }
+  }
+}

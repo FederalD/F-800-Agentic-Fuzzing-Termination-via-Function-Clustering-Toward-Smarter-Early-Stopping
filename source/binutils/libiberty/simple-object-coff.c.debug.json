@@ -1,0 +1,1872 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void *\nsimple_object_coff_match (unsigned char header[SIMPLE_OBJECT_MATCH_HEADER_LEN],\n\t\t\t  int descriptor, off_t offset,\n\t\t\t  const char *segment_name ATTRIBUTE_UNUSED,\n\t\t\t  const char **errmsg, int *err)\n{\n  size_t c;\n  unsigned short magic_big;\n  unsigned short magic_little;\n  unsigned short magic;\n  size_t i;\n  int is_big_endian;\n  unsigned short (*fetch_16) (const unsigned char *);\n  unsigned int (*fetch_32) (const unsigned char *);\n  unsigned char hdrbuf[sizeof (struct external_filehdr)];\n  unsigned short flags;\n  struct simple_object_coff_read *ocr;\n\n  c = sizeof (coff_magic) / sizeof (coff_magic[0]);\n  magic_big = simple_object_fetch_big_16 (header);\n  magic_little = simple_object_fetch_little_16 (header);\n  for (i = 0; i < c; ++i)\n    {\n      if (coff_magic[i].is_big_endian\n\t  ? coff_magic[i].magic == magic_big\n\t  : coff_magic[i].magic == magic_little)\n\tbreak;\n    }\n  if (i >= c)\n    {\n      *errmsg = NULL;\n      *err = 0;\n      return NULL;\n    }\n  is_big_endian = coff_magic[i].is_big_endian;\n\n  magic = is_big_endian ? magic_big : magic_little;\n  fetch_16 = (is_big_endian\n\t      ? simple_object_fetch_big_16\n\t      : simple_object_fetch_little_16);\n  fetch_32 = (is_big_endian\n\t      ? simple_object_fetch_big_32\n\t      : simple_object_fetch_little_32);\n\n  if (!simple_object_internal_read (descriptor, offset, hdrbuf, sizeof hdrbuf,\n\t\t\t\t    errmsg, err))\n    return NULL;\n\n  flags = fetch_16 (hdrbuf + offsetof (struct external_filehdr, f_flags));\n  if ((flags & coff_magic[i].non_object_flags) != 0)\n    {\n      *errmsg = \"not relocatable object file\";\n      *err = 0;\n      return NULL;\n    }\n\n  ocr = XNEW (struct simple_object_coff_read);\n  ocr->magic = magic;\n  ocr->is_big_endian = is_big_endian;\n  ocr->nscns = fetch_16 (hdrbuf + offsetof (struct external_filehdr, f_nscns));\n  ocr->symptr = fetch_32 (hdrbuf\n\t\t\t  + offsetof (struct external_filehdr, f_symptr));\n  ocr->nsyms = fetch_32 (hdrbuf + offsetof (struct external_filehdr, f_nsyms));\n  ocr->flags = flags;\n  ocr->scnhdr_offset = (sizeof (struct external_filehdr)\n\t\t\t+ fetch_16 (hdrbuf + offsetof (struct external_filehdr,\n\t\t\t\t\t\t       f_opthdr)));\n\n  return (void *) ocr;\n}",
+      "fn_code_pos": [
+        [
+          226,
+          0
+        ],
+        [
+          295,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_match",
+        "parameters": {
+          "header": "unsigned char",
+          "descriptor": "int",
+          "offset": "off_t",
+          "ATTRIBUTE_UNUSED": "char",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\nsimple_object_coff_read_strtab (simple_object_read *sobj, size_t *strtab_size,\n\t\t\t\tconst char **errmsg, int *err)\n{\n  struct simple_object_coff_read *ocr =\n    (struct simple_object_coff_read *) sobj->data;\n  off_t strtab_offset;\n  unsigned char strsizebuf[4];\n  size_t strsize;\n  char *strtab;\n\n  strtab_offset = sobj->offset + ocr->symptr\n\t\t  + ocr->nsyms * sizeof (struct external_syment);\n  if (!simple_object_internal_read (sobj->descriptor, strtab_offset,\n\t\t\t\t    strsizebuf, 4, errmsg, err))\n    return NULL;\n  strsize = (ocr->is_big_endian\n\t     ? simple_object_fetch_big_32 (strsizebuf)\n\t     : simple_object_fetch_little_32 (strsizebuf));\n  strtab = XNEWVEC (char, strsize);\n  if (!simple_object_internal_read (sobj->descriptor, strtab_offset,\n\t\t\t\t    (unsigned char *) strtab, strsize, errmsg,\n\t\t\t\t    err))\n    {\n      XDELETEVEC (strtab);\n      return NULL;\n    }\n  *strtab_size = strsize;\n  return strtab;\n}",
+      "fn_code_pos": [
+        [
+          299,
+          0
+        ],
+        [
+          328,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_read_strtab",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "strtab_size": "size_t",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static const char *\nsimple_object_coff_find_sections (simple_object_read *sobj,\n\t\t\t\t  int (*pfn) (void *, const char *,\n\t\t\t\t\t      off_t offset, off_t length),\n\t\t\t\t  void *data,\n\t\t\t\t  int *err)\n{\n  struct simple_object_coff_read *ocr =\n    (struct simple_object_coff_read *) sobj->data;\n  size_t scnhdr_size;\n  unsigned char *scnbuf;\n  const char *errmsg;\n  unsigned int (*fetch_32) (const unsigned char *);\n  unsigned int nscns;\n  char *strtab;\n  size_t strtab_size;\n  unsigned int i;\n\n  scnhdr_size = sizeof (struct external_scnhdr);\n  scnbuf = XNEWVEC (unsigned char, scnhdr_size * ocr->nscns);\n  if (!simple_object_internal_read (sobj->descriptor,\n\t\t\t\t    sobj->offset + ocr->scnhdr_offset,\n\t\t\t\t    scnbuf, scnhdr_size * ocr->nscns, &errmsg,\n\t\t\t\t    err))\n    {\n      XDELETEVEC (scnbuf);\n      return errmsg;\n    }\n\n  fetch_32 = (ocr->is_big_endian\n\t      ? simple_object_fetch_big_32\n\t      : simple_object_fetch_little_32);\n\n  nscns = ocr->nscns;\n  strtab = NULL;\n  strtab_size = 0;\n  for (i = 0; i < nscns; ++i)\n    {\n      unsigned char *scnhdr;\n      unsigned char *scnname;\n      char namebuf[SCNNMLEN + 1];\n      char *name;\n      off_t scnptr;\n      unsigned int size;\n\n      scnhdr = scnbuf + i * scnhdr_size;\n      scnname = scnhdr + offsetof (struct external_scnhdr, s_name);\n      memcpy (namebuf, scnname, SCNNMLEN);\n      namebuf[SCNNMLEN] = '\\0';\n      name = &namebuf[0];\n      if (namebuf[0] == '/')\n\t{\n\t  size_t strindex;\n\t  char *end;\n\n\t  strindex = strtol (namebuf + 1, &end, 10);\n\t  if (*end == '\\0')\n\t    {\n\t      /* The real section name is found in the string\n\t\t table.  */\n\t      if (strtab == NULL)\n\t\t{\n\t\t  strtab = simple_object_coff_read_strtab (sobj,\n\t\t\t\t\t\t\t   &strtab_size,\n\t\t\t\t\t\t\t   &errmsg, err);\n\t\t  if (strtab == NULL)\n\t\t    {\n\t\t      XDELETEVEC (scnbuf);\n\t\t      return errmsg;\n\t\t    }\n\t\t}\n\n\t      if (strindex < 4 || strindex >= strtab_size)\n\t\t{\n\t\t  XDELETEVEC (strtab);\n\t\t  XDELETEVEC (scnbuf);\n\t\t  *err = 0;\n\t\t  return \"section string index out of range\";\n\t\t}\n\n\t      name = strtab + strindex;\n\t    }\n\t}\n\n      scnptr = fetch_32 (scnhdr + offsetof (struct external_scnhdr, s_scnptr));\n      size = fetch_32 (scnhdr + offsetof (struct external_scnhdr, s_size));\n\n      if (!(*pfn) (data, name, scnptr, size))\n\tbreak;\n    }\n\n  if (strtab != NULL)\n    XDELETEVEC (strtab);\n  XDELETEVEC (scnbuf);\n\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          332,
+          0
+        ],
+        [
+          428,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_find_sections",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "pfn": "int",
+          "offset": "off_t",
+          "length": "off_t",
+          "data": "void",
+          "err": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void *\nsimple_object_coff_fetch_attributes (simple_object_read *sobj,\n\t\t\t\t     const char **errmsg ATTRIBUTE_UNUSED,\n\t\t\t\t     int *err ATTRIBUTE_UNUSED)\n{\n  struct simple_object_coff_read *ocr =\n    (struct simple_object_coff_read *) sobj->data;\n  struct simple_object_coff_attributes *ret;\n\n  ret = XNEW (struct simple_object_coff_attributes);\n  ret->magic = ocr->magic;\n  ret->is_big_endian = ocr->is_big_endian;\n  ret->flags = ocr->flags;\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          432,
+          0
+        ],
+        [
+          446,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_fetch_attributes",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nsimple_object_coff_release_read (void *data)\n{\n  XDELETE (data);\n}",
+      "fn_code_pos": [
+        [
+          450,
+          0
+        ],
+        [
+          454,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_release_read",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static const char *\nsimple_object_coff_attributes_merge (void *todata, void *fromdata, int *err)\n{\n  struct simple_object_coff_attributes *to =\n    (struct simple_object_coff_attributes *) todata;\n  struct simple_object_coff_attributes *from =\n    (struct simple_object_coff_attributes *) fromdata;\n\n  if (to->magic != from->magic || to->is_big_endian != from->is_big_endian)\n    {\n      *err = 0;\n      return \"COFF object format mismatch\";\n    }\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          458,
+          0
+        ],
+        [
+          472,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_attributes_merge",
+        "parameters": {
+          "todata": "void",
+          "fromdata": "void",
+          "err": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nsimple_object_coff_release_attributes (void *data)\n{\n  XDELETE (data);\n}",
+      "fn_code_pos": [
+        [
+          476,
+          0
+        ],
+        [
+          480,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_release_attributes",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void *\nsimple_object_coff_start_write (void *attributes_data,\n\t\t\t\tconst char **errmsg ATTRIBUTE_UNUSED,\n\t\t\t\tint *err ATTRIBUTE_UNUSED)\n{\n  struct simple_object_coff_attributes *attrs =\n    (struct simple_object_coff_attributes *) attributes_data;\n  struct simple_object_coff_attributes *ret;\n\n  /* We're just going to record the attributes, but we need to make a\n     copy because the user may delete them.  */\n  ret = XNEW (struct simple_object_coff_attributes);\n  *ret = *attrs;\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          484,
+          0
+        ],
+        [
+          498,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_start_write",
+        "parameters": {
+          "attributes_data": "void",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nsimple_object_coff_write_filehdr (simple_object_write *sobj, int descriptor,\n\t\t\t\t  unsigned int nscns, size_t symtab_offset,\n\t\t\t\t  unsigned int nsyms, const char **errmsg,\n\t\t\t\t  int *err)\n{\n  struct simple_object_coff_attributes *attrs =\n    (struct simple_object_coff_attributes *) sobj->data;\n  unsigned char hdrbuf[sizeof (struct external_filehdr)];\n  unsigned char *hdr;\n  void (*set_16) (unsigned char *, unsigned short);\n  void (*set_32) (unsigned char *, unsigned int);\n\n  hdr = &hdrbuf[0];\n\n  set_16 = (attrs->is_big_endian\n\t    ? simple_object_set_big_16\n\t    : simple_object_set_little_16);\n  set_32 = (attrs->is_big_endian\n\t    ? simple_object_set_big_32\n\t    : simple_object_set_little_32);\n\n  memset (hdr, 0, sizeof (struct external_filehdr));\n\n  set_16 (hdr + offsetof (struct external_filehdr, f_magic), attrs->magic);\n  set_16 (hdr + offsetof (struct external_filehdr, f_nscns), nscns);\n  /* f_timdat left as zero.  */\n  set_32 (hdr + offsetof (struct external_filehdr, f_symptr), symtab_offset);\n  set_32 (hdr + offsetof (struct external_filehdr, f_nsyms), nsyms);\n  /* f_opthdr left as zero.  */\n  set_16 (hdr + offsetof (struct external_filehdr, f_flags), attrs->flags);\n\n  return simple_object_internal_write (descriptor, 0, hdrbuf,\n\t\t\t\t       sizeof (struct external_filehdr),\n\t\t\t\t       errmsg, err);\n}",
+      "fn_code_pos": [
+        [
+          502,
+          0
+        ],
+        [
+          537,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_write_filehdr",
+        "parameters": {
+          "sobj": "simple_object_write",
+          "descriptor": "int",
+          "nscns": "unsigned int",
+          "symtab_offset": "size_t",
+          "nsyms": "unsigned int",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nsimple_object_coff_write_scnhdr (simple_object_write *sobj, int descriptor,\n\t\t\t\t const char *name, size_t *name_offset,\n\t\t\t\t off_t scnhdr_offset, size_t scnsize,\n\t\t\t\t off_t offset, unsigned int align,\n\t\t\t\t const char **errmsg, int *err)\n{\n  struct simple_object_coff_attributes *attrs =\n    (struct simple_object_coff_attributes *) sobj->data;\n  void (*set_32) (unsigned char *, unsigned int);\n  unsigned char hdrbuf[sizeof (struct external_scnhdr)];\n  unsigned char *hdr;\n  size_t namelen;\n  unsigned int flags;\n\n  set_32 = (attrs->is_big_endian\n\t    ? simple_object_set_big_32\n\t    : simple_object_set_little_32);\n\n  memset (hdrbuf, 0, sizeof hdrbuf);\n  hdr = &hdrbuf[0];\n\n  namelen = strlen (name);\n  if (namelen <= SCNNMLEN)\n    strncpy ((char *) hdr + offsetof (struct external_scnhdr, s_name), name,\n\t     SCNNMLEN);\n  else\n    {\n      snprintf ((char *) hdr + offsetof (struct external_scnhdr, s_name),\n\t\tSCNNMLEN, \"/%lu\", (unsigned long) *name_offset);\n      *name_offset += namelen + 1;\n    }\n\n  /* s_paddr left as zero.  */\n  /* s_vaddr left as zero.  */\n  set_32 (hdr + offsetof (struct external_scnhdr, s_size), scnsize);\n  set_32 (hdr + offsetof (struct external_scnhdr, s_scnptr), offset);\n  /* s_relptr left as zero.  */\n  /* s_lnnoptr left as zero.  */\n  /* s_nreloc left as zero.  */\n  /* s_nlnno left as zero.  */\n  flags = (STYP_DATA | IMAGE_SCN_MEM_DISCARDABLE | IMAGE_SCN_MEM_SHARED\n\t   | IMAGE_SCN_MEM_READ);\n  /* PE can represent alignment up to 13.  */\n  if (align > 13)\n    align = 13;\n  flags |= IMAGE_SCN_ALIGN_POWER_CONST(align);\n  set_32 (hdr + offsetof (struct external_scnhdr, s_flags), flags);\n\n  return simple_object_internal_write (descriptor, scnhdr_offset, hdrbuf,\n\t\t\t\t       sizeof (struct external_scnhdr),\n\t\t\t\t       errmsg, err);\n}",
+      "fn_code_pos": [
+        [
+          541,
+          0
+        ],
+        [
+          593,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_write_scnhdr",
+        "parameters": {
+          "sobj": "simple_object_write",
+          "descriptor": "int",
+          "name": "char",
+          "name_offset": "size_t",
+          "scnhdr_offset": "off_t",
+          "scnsize": "size_t",
+          "offset": "off_t",
+          "align": "unsigned int",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static const char *\nsimple_object_coff_write_to_file (simple_object_write *sobj, int descriptor,\n\t\t\t\t  int *err)\n{\n  struct simple_object_coff_attributes *attrs =\n    (struct simple_object_coff_attributes *) sobj->data;\n  unsigned int nscns, secnum;\n  simple_object_write_section *section;\n  off_t scnhdr_offset;\n  size_t symtab_offset;\n  off_t secsym_offset;\n  unsigned int nsyms;\n  size_t offset;\n  size_t name_offset;\n  const char *errmsg;\n  unsigned char strsizebuf[4];\n  /* The interface doesn't give us access to the name of the input file\n     yet.  We want to use its basename for the FILE symbol.  This is\n     what 'gas' uses when told to assemble from stdin.  */\n  const char *source_filename = \"fake\";\n  size_t sflen;\n  union\n  {\n    struct external_syment sym;\n    union external_auxent aux;\n  } syms[2];\n  void (*set_16) (unsigned char *, unsigned short);\n  void (*set_32) (unsigned char *, unsigned int);\n\n  set_16 = (attrs->is_big_endian\n\t    ? simple_object_set_big_16\n\t    : simple_object_set_little_16);\n  set_32 = (attrs->is_big_endian\n\t    ? simple_object_set_big_32\n\t    : simple_object_set_little_32);\n\n  nscns = 0;\n  for (section = sobj->sections; section != NULL; section = section->next)\n    ++nscns;\n\n  scnhdr_offset = sizeof (struct external_filehdr);\n  offset = scnhdr_offset + nscns * sizeof (struct external_scnhdr);\n  name_offset = 4;\n  for (section = sobj->sections; section != NULL; section = section->next)\n    {\n      size_t mask;\n      size_t new_offset;\n      size_t scnsize;\n      struct simple_object_write_section_buffer *buffer;\n\n      mask = (1U << section->align) - 1;\n      new_offset = offset & mask;\n      new_offset &= ~ mask;\n      while (new_offset > offset)\n\t{\n\t  unsigned char zeroes[16];\n\t  size_t write;\n\n\t  memset (zeroes, 0, sizeof zeroes);\n\t  write = new_offset - offset;\n\t  if (write > sizeof zeroes)\n\t    write = sizeof zeroes;\n\t  if (!simple_object_internal_write (descriptor, offset, zeroes, write,\n\t\t\t\t\t     &errmsg, err))\n\t    return errmsg;\n\t}\n\n      scnsize = 0;\n      for (buffer = section->buffers; buffer != NULL; buffer = buffer->next)\n\t{\n\t  if (!simple_object_internal_write (descriptor, offset + scnsize,\n\t\t\t\t\t     ((const unsigned char *)\n\t\t\t\t\t      buffer->buffer),\n\t\t\t\t\t     buffer->size, &errmsg, err))\n\t    return errmsg;\n\t  scnsize += buffer->size;\n\t}\n\n      if (!simple_object_coff_write_scnhdr (sobj, descriptor, section->name,\n\t\t\t\t\t    &name_offset, scnhdr_offset,\n\t\t\t\t\t    scnsize, offset, section->align,\n\t\t\t\t\t    &errmsg, err))\n\treturn errmsg;\n\n      scnhdr_offset += sizeof (struct external_scnhdr);\n      offset += scnsize;\n    }\n\n  /* Symbol table is always half-word aligned.  */\n  offset += (offset & 1);\n  /* There is a file symbol and a section symbol per section,\n     and each of these has a single auxiliary symbol following.  */\n  nsyms = 2 * (nscns + 1);\n  symtab_offset = offset;\n  /* Advance across space reserved for symbol table to locate\n     start of string table.  */\n  offset += nsyms * sizeof (struct external_syment);\n\n  /* Write out file symbol.  */\n  memset (&syms[0], 0, sizeof (syms));\n  strcpy ((char *)&syms[0].sym.e.e_name[0], \".file\");\n  set_16 (&syms[0].sym.e_scnum[0], IMAGE_SYM_DEBUG);\n  set_16 (&syms[0].sym.e_type[0], IMAGE_SYM_TYPE);\n  syms[0].sym.e_sclass[0] = IMAGE_SYM_CLASS_FILE;\n  syms[0].sym.e_numaux[0] = 1;\n  /* The name need not be nul-terminated if it fits into the x_fname field\n     directly, but must be if it has to be placed into the string table.  */\n  sflen = strlen (source_filename);\n  if (sflen <= E_FILNMLEN)\n    memcpy (&syms[1].aux.x_file.x_fname[0], source_filename, sflen);\n  else\n    {\n      set_32 (&syms[1].aux.x_file.x_n.x_offset[0], name_offset);\n      if (!simple_object_internal_write (descriptor, offset + name_offset,\n\t\t\t\t\t ((const unsigned char *)\n\t\t\t\t\t  source_filename),\n\t\t\t\t\t sflen + 1, &errmsg, err))\n\treturn errmsg;\n      name_offset += strlen (source_filename) + 1;\n    }\n  if (!simple_object_internal_write (descriptor, symtab_offset,\n\t\t\t\t     (const unsigned char *) &syms[0],\n\t\t\t\t     sizeof (syms), &errmsg, err))\n    return errmsg;\n\n  /* Write the string table length, followed by the strings and section\n     symbols in step with each other.  */\n  set_32 (strsizebuf, name_offset);\n  if (!simple_object_internal_write (descriptor, offset, strsizebuf, 4,\n\t\t\t\t     &errmsg, err))\n    return errmsg;\n\n  name_offset = 4;\n  secsym_offset = symtab_offset + sizeof (syms);\n  memset (&syms[0], 0, sizeof (syms));\n  set_16 (&syms[0].sym.e_type[0], IMAGE_SYM_TYPE);\n  syms[0].sym.e_sclass[0] = IMAGE_SYM_CLASS_STATIC;\n  syms[0].sym.e_numaux[0] = 1;\n  secnum = 1;\n\n  for (section = sobj->sections; section != NULL; section = section->next)\n    {\n      size_t namelen;\n      size_t scnsize;\n      struct simple_object_write_section_buffer *buffer;\n\n      namelen = strlen (section->name);\n      set_16 (&syms[0].sym.e_scnum[0], secnum++);\n      scnsize = 0;\n      for (buffer = section->buffers; buffer != NULL; buffer = buffer->next)\n\tscnsize += buffer->size;\n      set_32 (&syms[1].aux.x_scn.x_scnlen[0], scnsize);\n      if (namelen > SCNNMLEN)\n\t{\n\t  set_32 (&syms[0].sym.e.e.e_zeroes[0], 0);\n\t  set_32 (&syms[0].sym.e.e.e_offset[0], name_offset);\n\t  if (!simple_object_internal_write (descriptor, offset + name_offset,\n\t\t\t\t\t     ((const unsigned char *)\n\t\t\t\t\t      section->name),\n\t\t\t\t\t     namelen + 1, &errmsg, err))\n\t    return errmsg;\n\t  name_offset += namelen + 1;\n\t}\n      else\n\t{\n\t  memcpy (&syms[0].sym.e.e_name[0], section->name,\n\t\t  strlen (section->name));\n\t  memset (&syms[0].sym.e.e_name[strlen (section->name)], 0,\n\t\t  E_SYMNMLEN - strlen (section->name));\n\t}\n\n      if (!simple_object_internal_write (descriptor, secsym_offset,\n\t\t\t\t\t (const unsigned char *) &syms[0],\n\t\t\t\t\t sizeof (syms), &errmsg, err))\n\treturn errmsg;\n      secsym_offset += sizeof (syms);\n    }\n\n  if (!simple_object_coff_write_filehdr (sobj, descriptor, nscns,\n\t\t\t\t\t symtab_offset, nsyms, &errmsg, err))\n    return errmsg;\n\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          597,
+          0
+        ],
+        [
+          780,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_write_to_file",
+        "parameters": {
+          "sobj": "simple_object_write",
+          "descriptor": "int",
+          "err": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nsimple_object_coff_release_write (void *data)\n{\n  XDELETE (data);\n}",
+      "fn_code_pos": [
+        [
+          784,
+          0
+        ],
+        [
+          788,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_release_write",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "simple_object_coff_match (unsigned char header[SIMPLE_OBJECT_MATCH_HEADER_LEN],\n\t\t\t  int descriptor, off_t offset,\n\t\t\t  const char *segment_name ATTRIBUTE_UNUSED,\n\t\t\t  const char **errmsg, int *err)",
+      "fn_dec_pos": [
+        [
+          227,
+          0
+        ],
+        [
+          230,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_match",
+        "parameters": {
+          "header": "unsigned char",
+          "descriptor": "int",
+          "offset": "off_t",
+          "ATTRIBUTE_UNUSED": "char",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*fetch_16) (const unsigned char *)",
+      "fn_dec_pos": [
+        [
+          238,
+          17
+        ],
+        [
+          238,
+          52
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*fetch_32) (const unsigned char *)",
+      "fn_dec_pos": [
+        [
+          239,
+          15
+        ],
+        [
+          239,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "simple_object_coff_read_strtab (simple_object_read *sobj, size_t *strtab_size,\n\t\t\t\tconst char **errmsg, int *err)",
+      "fn_dec_pos": [
+        [
+          300,
+          0
+        ],
+        [
+          301,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_read_strtab",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "strtab_size": "size_t",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "simple_object_coff_find_sections (simple_object_read *sobj,\n\t\t\t\t  int (*pfn) (void *, const char *,\n\t\t\t\t\t      off_t offset, off_t length),\n\t\t\t\t  void *data,\n\t\t\t\t  int *err)",
+      "fn_dec_pos": [
+        [
+          333,
+          0
+        ],
+        [
+          337,
+          15
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_find_sections",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "pfn": "int",
+          "offset": "off_t",
+          "length": "off_t",
+          "data": "void",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*pfn) (void *, const char *,\n\t\t\t\t\t      off_t offset, off_t length)",
+      "fn_dec_pos": [
+        [
+          334,
+          10
+        ],
+        [
+          335,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "offset": "off_t",
+          "length": "off_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "(*fetch_32) (const unsigned char *)",
+      "fn_dec_pos": [
+        [
+          344,
+          15
+        ],
+        [
+          344,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "simple_object_coff_fetch_attributes (simple_object_read *sobj,\n\t\t\t\t     const char **errmsg ATTRIBUTE_UNUSED,\n\t\t\t\t     int *err ATTRIBUTE_UNUSED)",
+      "fn_dec_pos": [
+        [
+          433,
+          0
+        ],
+        [
+          435,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_fetch_attributes",
+        "parameters": {
+          "sobj": "simple_object_read",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "simple_object_coff_attributes_merge (void *todata, void *fromdata, int *err)",
+      "fn_dec_pos": [
+        [
+          459,
+          0
+        ],
+        [
+          459,
+          76
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_attributes_merge",
+        "parameters": {
+          "todata": "void",
+          "fromdata": "void",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "simple_object_coff_start_write (void *attributes_data,\n\t\t\t\tconst char **errmsg ATTRIBUTE_UNUSED,\n\t\t\t\tint *err ATTRIBUTE_UNUSED)",
+      "fn_dec_pos": [
+        [
+          485,
+          0
+        ],
+        [
+          487,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_start_write",
+        "parameters": {
+          "attributes_data": "void",
+          "errmsg": "char",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*set_16) (unsigned char *, unsigned short)",
+      "fn_dec_pos": [
+        [
+          512,
+          7
+        ],
+        [
+          512,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "(*set_32) (unsigned char *, unsigned int)",
+      "fn_dec_pos": [
+        [
+          513,
+          7
+        ],
+        [
+          513,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "(*set_32) (unsigned char *, unsigned int)",
+      "fn_dec_pos": [
+        [
+          550,
+          7
+        ],
+        [
+          550,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "simple_object_coff_write_to_file (simple_object_write *sobj, int descriptor,\n\t\t\t\t  int *err)",
+      "fn_dec_pos": [
+        [
+          598,
+          0
+        ],
+        [
+          599,
+          15
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "simple_object_coff_write_to_file",
+        "parameters": {
+          "sobj": "simple_object_write",
+          "descriptor": "int",
+          "err": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*set_16) (unsigned char *, unsigned short)",
+      "fn_dec_pos": [
+        [
+          623,
+          7
+        ],
+        [
+          623,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "(*set_32) (unsigned char *, unsigned int)",
+      "fn_dec_pos": [
+        [
+          624,
+          7
+        ],
+        [
+          624,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct external_filehdr\n{\n  unsigned char f_magic[2];\t/* magic number\t\t\t*/\n  unsigned char f_nscns[2];\t/* number of sections\t\t*/\n  unsigned char f_timdat[4];\t/* time & date stamp\t\t*/\n  unsigned char f_symptr[4];\t/* file pointer to symtab\t*/\n  unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n  unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n  unsigned char f_flags[2];\t/* flags\t\t\t*/\n}",
+      {
+        "f_magic[2]": "unsigned char",
+        "f_nscns[2]": "unsigned char",
+        "f_timdat[4]": "unsigned char",
+        "f_symptr[4]": "unsigned char",
+        "f_nsyms[4]": "unsigned char",
+        "f_opthdr[2]": "unsigned char",
+        "f_flags[2]": "unsigned char"
+      },
+      "external_filehdr",
+      [
+        48,
+        0
+      ],
+      [
+        57,
+        1
+      ]
+    ],
+    [
+      "struct external_scnhdr\n{\n  unsigned char s_name[8];\t/* section name\t\t\t\t*/\n  unsigned char s_paddr[4];\t/* physical address, aliased s_nlib \t*/\n  unsigned char s_vaddr[4];\t/* virtual address\t\t\t*/\n  unsigned char s_size[4];\t/* section size\t\t\t\t*/\n  unsigned char s_scnptr[4];\t/* file ptr to raw data for section \t*/\n  unsigned char s_relptr[4];\t/* file ptr to relocation\t\t*/\n  unsigned char s_lnnoptr[4];\t/* file ptr to line numbers\t\t*/\n  unsigned char s_nreloc[2];\t/* number of relocation entries\t\t*/\n  unsigned char s_nlnno[2];\t/* number of line number entries\t*/\n  unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n}",
+      {
+        "s_name[8]": "unsigned char",
+        "s_paddr[4]": "unsigned char",
+        "s_vaddr[4]": "unsigned char",
+        "s_size[4]": "unsigned char",
+        "s_scnptr[4]": "unsigned char",
+        "s_relptr[4]": "unsigned char",
+        "s_lnnoptr[4]": "unsigned char",
+        "s_nreloc[2]": "unsigned char",
+        "s_nlnno[2]": "unsigned char",
+        "s_flags[4]": "unsigned char"
+      },
+      "external_scnhdr",
+      [
+        67,
+        0
+      ],
+      [
+        79,
+        1
+      ]
+    ],
+    [
+      "struct external_syment\n{\n  union\n  {\n    unsigned char e_name[E_SYMNMLEN];\n\n    struct\n    {\n      unsigned char e_zeroes[4];\n      unsigned char e_offset[4];\n    } e;\n  } e;\n\n  unsigned char e_value[4];\n  unsigned char e_scnum[2];\n  unsigned char e_type[2];\n  unsigned char e_sclass[1];\n  unsigned char e_numaux[1];\n}",
+      {
+        "e": "struct\n    {\n      unsigned char e_zeroes[4];\n      unsigned char e_offset[4];\n    }",
+        "e_name[E_SYMNMLEN]": "unsigned char",
+        "e_zeroes[4]": "unsigned char",
+        "e_offset[4]": "unsigned char",
+        "e_value[4]": "unsigned char",
+        "e_scnum[2]": "unsigned char",
+        "e_type[2]": "unsigned char",
+        "e_sclass[1]": "unsigned char",
+        "e_numaux[1]": "unsigned char"
+      },
+      "external_syment",
+      [
+        101,
+        0
+      ],
+      [
+        119,
+        1
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char e_zeroes[4];\n      unsigned char e_offset[4];\n    }",
+      {
+        "e_zeroes[4]": "unsigned char",
+        "e_offset[4]": "unsigned char"
+      },
+      "",
+      [
+        107,
+        4
+      ],
+      [
+        111,
+        5
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char x_zeroes[4];\n      unsigned char x_offset[4];\n    }",
+      {
+        "x_zeroes[4]": "unsigned char",
+        "x_offset[4]": "unsigned char"
+      },
+      "",
+      [
+        133,
+        4
+      ],
+      [
+        137,
+        5
+      ]
+    ],
+    [
+      "struct\n  {\n    unsigned char x_scnlen[4];\t\t/* section length\t\t*/\n    unsigned char x_nreloc[2];\t\t/* # relocation entries\t\t*/\n    unsigned char x_nlinno[2];\t\t/* # line numbers\t\t*/\n    unsigned char x_checksum[4];\t/* section COMDAT checksum\t*/\n    unsigned char x_associated[2];\t/* COMDAT assoc section index\t*/\n    unsigned char x_comdat[1];\t\t/* COMDAT selection number\t*/\n  }",
+      {
+        "x_scnlen[4]": "unsigned char",
+        "x_nreloc[2]": "unsigned char",
+        "x_nlinno[2]": "unsigned char",
+        "x_checksum[4]": "unsigned char",
+        "x_associated[2]": "unsigned char",
+        "x_comdat[1]": "unsigned char"
+      },
+      "",
+      [
+        140,
+        2
+      ],
+      [
+        148,
+        3
+      ]
+    ],
+    [
+      "struct simple_object_coff_read\n{\n  /* Magic number.  */\n  unsigned short magic;\n  /* Whether the file is big-endian.  */\n  unsigned char is_big_endian;\n  /* Number of sections.  */\n  unsigned short nscns;\n  /* File offset of symbol table.  */\n  off_t symptr;\n  /* Number of symbol table entries.  */\n  unsigned int nsyms;\n  /* Flags.  */\n  unsigned short flags;\n  /* Offset of section headers in file.  */\n  off_t scnhdr_offset;\n}",
+      {
+        "magic": "unsigned short",
+        "is_big_endian": "unsigned char",
+        "nscns": "unsigned short",
+        "symptr": "off_t",
+        "nsyms": "unsigned int",
+        "flags": "unsigned short",
+        "scnhdr_offset": "off_t"
+      },
+      "simple_object_coff_read",
+      [
+        164,
+        0
+      ],
+      [
+        180,
+        1
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes\n{\n  /* Magic number.  */\n  unsigned short magic;\n  /* Whether the file is big-endian.  */\n  unsigned char is_big_endian;\n  /* Flags.  */\n  unsigned short flags;\n}",
+      {
+        "magic": "unsigned short",
+        "is_big_endian": "unsigned char",
+        "flags": "unsigned short"
+      },
+      "simple_object_coff_attributes",
+      [
+        184,
+        0
+      ],
+      [
+        192,
+        1
+      ]
+    ],
+    [
+      "struct coff_magic_struct\n{\n  /* Magic number.  */\n  unsigned short magic;\n  /* Whether this magic number is for a big-endian file.  */\n  unsigned char is_big_endian;\n  /* Flag bits, in the f_flags fields, which indicates that this file\n     is not a relocatable object file.  There is no flag which\n     specifically indicates a relocatable object file, it is only\n     implied by the absence of these flags.  */\n  unsigned short non_object_flags;\n}",
+      {
+        "magic": "unsigned short",
+        "is_big_endian": "unsigned char",
+        "non_object_flags": "unsigned short"
+      },
+      "coff_magic_struct",
+      [
+        200,
+        0
+      ],
+      [
+        211,
+        1
+      ]
+    ],
+    [
+      "struct external_filehdr\n{\n  unsigned char f_magic[2];\t/* magic number\t\t\t*/\n  unsigned char f_nscns[2];\t/* number of sections\t\t*/\n  unsigned char f_timdat[4];\t/* time & date stamp\t\t*/\n  unsigned char f_symptr[4];\t/* file pointer to symtab\t*/\n  unsigned char f_nsyms[4];\t/* number of symtab entries\t*/\n  unsigned char f_opthdr[2];\t/* sizeof(optional hdr)\t\t*/\n  unsigned char f_flags[2];\t/* flags\t\t\t*/\n}",
+      {
+        "f_magic[2]": "unsigned char",
+        "f_nscns[2]": "unsigned char",
+        "f_timdat[4]": "unsigned char",
+        "f_symptr[4]": "unsigned char",
+        "f_nsyms[4]": "unsigned char",
+        "f_opthdr[2]": "unsigned char",
+        "f_flags[2]": "unsigned char"
+      },
+      "external_filehdr",
+      [
+        48,
+        0
+      ],
+      [
+        57,
+        1
+      ]
+    ],
+    [
+      "struct external_scnhdr\n{\n  unsigned char s_name[8];\t/* section name\t\t\t\t*/\n  unsigned char s_paddr[4];\t/* physical address, aliased s_nlib \t*/\n  unsigned char s_vaddr[4];\t/* virtual address\t\t\t*/\n  unsigned char s_size[4];\t/* section size\t\t\t\t*/\n  unsigned char s_scnptr[4];\t/* file ptr to raw data for section \t*/\n  unsigned char s_relptr[4];\t/* file ptr to relocation\t\t*/\n  unsigned char s_lnnoptr[4];\t/* file ptr to line numbers\t\t*/\n  unsigned char s_nreloc[2];\t/* number of relocation entries\t\t*/\n  unsigned char s_nlnno[2];\t/* number of line number entries\t*/\n  unsigned char s_flags[4];\t/* flags\t\t\t\t*/\n}",
+      {
+        "s_name[8]": "unsigned char",
+        "s_paddr[4]": "unsigned char",
+        "s_vaddr[4]": "unsigned char",
+        "s_size[4]": "unsigned char",
+        "s_scnptr[4]": "unsigned char",
+        "s_relptr[4]": "unsigned char",
+        "s_lnnoptr[4]": "unsigned char",
+        "s_nreloc[2]": "unsigned char",
+        "s_nlnno[2]": "unsigned char",
+        "s_flags[4]": "unsigned char"
+      },
+      "external_scnhdr",
+      [
+        67,
+        0
+      ],
+      [
+        79,
+        1
+      ]
+    ],
+    [
+      "struct external_syment\n{\n  union\n  {\n    unsigned char e_name[E_SYMNMLEN];\n\n    struct\n    {\n      unsigned char e_zeroes[4];\n      unsigned char e_offset[4];\n    } e;\n  } e;\n\n  unsigned char e_value[4];\n  unsigned char e_scnum[2];\n  unsigned char e_type[2];\n  unsigned char e_sclass[1];\n  unsigned char e_numaux[1];\n}",
+      {
+        "e": "struct\n    {\n      unsigned char e_zeroes[4];\n      unsigned char e_offset[4];\n    }",
+        "e_name[E_SYMNMLEN]": "unsigned char",
+        "e_zeroes[4]": "unsigned char",
+        "e_offset[4]": "unsigned char",
+        "e_value[4]": "unsigned char",
+        "e_scnum[2]": "unsigned char",
+        "e_type[2]": "unsigned char",
+        "e_sclass[1]": "unsigned char",
+        "e_numaux[1]": "unsigned char"
+      },
+      "external_syment",
+      [
+        101,
+        0
+      ],
+      [
+        119,
+        1
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char e_zeroes[4];\n      unsigned char e_offset[4];\n    }",
+      {
+        "e_zeroes[4]": "unsigned char",
+        "e_offset[4]": "unsigned char"
+      },
+      "",
+      [
+        107,
+        4
+      ],
+      [
+        111,
+        5
+      ]
+    ],
+    [
+      "struct\n    {\n      unsigned char x_zeroes[4];\n      unsigned char x_offset[4];\n    }",
+      {
+        "x_zeroes[4]": "unsigned char",
+        "x_offset[4]": "unsigned char"
+      },
+      "",
+      [
+        133,
+        4
+      ],
+      [
+        137,
+        5
+      ]
+    ],
+    [
+      "struct\n  {\n    unsigned char x_scnlen[4];\t\t/* section length\t\t*/\n    unsigned char x_nreloc[2];\t\t/* # relocation entries\t\t*/\n    unsigned char x_nlinno[2];\t\t/* # line numbers\t\t*/\n    unsigned char x_checksum[4];\t/* section COMDAT checksum\t*/\n    unsigned char x_associated[2];\t/* COMDAT assoc section index\t*/\n    unsigned char x_comdat[1];\t\t/* COMDAT selection number\t*/\n  }",
+      {
+        "x_scnlen[4]": "unsigned char",
+        "x_nreloc[2]": "unsigned char",
+        "x_nlinno[2]": "unsigned char",
+        "x_checksum[4]": "unsigned char",
+        "x_associated[2]": "unsigned char",
+        "x_comdat[1]": "unsigned char"
+      },
+      "",
+      [
+        140,
+        2
+      ],
+      [
+        148,
+        3
+      ]
+    ],
+    [
+      "struct simple_object_coff_read\n{\n  /* Magic number.  */\n  unsigned short magic;\n  /* Whether the file is big-endian.  */\n  unsigned char is_big_endian;\n  /* Number of sections.  */\n  unsigned short nscns;\n  /* File offset of symbol table.  */\n  off_t symptr;\n  /* Number of symbol table entries.  */\n  unsigned int nsyms;\n  /* Flags.  */\n  unsigned short flags;\n  /* Offset of section headers in file.  */\n  off_t scnhdr_offset;\n}",
+      {
+        "magic": "unsigned short",
+        "is_big_endian": "unsigned char",
+        "nscns": "unsigned short",
+        "symptr": "off_t",
+        "nsyms": "unsigned int",
+        "flags": "unsigned short",
+        "scnhdr_offset": "off_t"
+      },
+      "simple_object_coff_read",
+      [
+        164,
+        0
+      ],
+      [
+        180,
+        1
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes\n{\n  /* Magic number.  */\n  unsigned short magic;\n  /* Whether the file is big-endian.  */\n  unsigned char is_big_endian;\n  /* Flags.  */\n  unsigned short flags;\n}",
+      {
+        "magic": "unsigned short",
+        "is_big_endian": "unsigned char",
+        "flags": "unsigned short"
+      },
+      "simple_object_coff_attributes",
+      [
+        184,
+        0
+      ],
+      [
+        192,
+        1
+      ]
+    ],
+    [
+      "struct coff_magic_struct\n{\n  /* Magic number.  */\n  unsigned short magic;\n  /* Whether this magic number is for a big-endian file.  */\n  unsigned char is_big_endian;\n  /* Flag bits, in the f_flags fields, which indicates that this file\n     is not a relocatable object file.  There is no flag which\n     specifically indicates a relocatable object file, it is only\n     implied by the absence of these flags.  */\n  unsigned short non_object_flags;\n}",
+      {
+        "magic": "unsigned short",
+        "is_big_endian": "unsigned char",
+        "non_object_flags": "unsigned short"
+      },
+      "coff_magic_struct",
+      [
+        200,
+        0
+      ],
+      [
+        211,
+        1
+      ]
+    ],
+    [
+      "struct coff_magic_struct",
+      {},
+      "",
+      [
+        216,
+        13
+      ],
+      [
+        216,
+        37
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        240,
+        31
+      ],
+      [
+        240,
+        54
+      ]
+    ],
+    [
+      "struct simple_object_coff_read",
+      {},
+      "",
+      [
+        242,
+        2
+      ],
+      [
+        242,
+        32
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        274,
+        39
+      ],
+      [
+        274,
+        62
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        285,
+        44
+      ],
+      [
+        285,
+        67
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        287,
+        17
+      ],
+      [
+        287,
+        40
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        288,
+        44
+      ],
+      [
+        288,
+        67
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        290,
+        32
+      ],
+      [
+        290,
+        55
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        291,
+        34
+      ],
+      [
+        291,
+        57
+      ]
+    ],
+    [
+      "struct simple_object_coff_read",
+      {},
+      "",
+      [
+        303,
+        2
+      ],
+      [
+        303,
+        32
+      ]
+    ],
+    [
+      "struct simple_object_coff_read",
+      {},
+      "",
+      [
+        304,
+        5
+      ],
+      [
+        304,
+        35
+      ]
+    ],
+    [
+      "struct external_syment",
+      {},
+      "",
+      [
+        311,
+        27
+      ],
+      [
+        311,
+        49
+      ]
+    ],
+    [
+      "struct simple_object_coff_read",
+      {},
+      "",
+      [
+        339,
+        2
+      ],
+      [
+        339,
+        32
+      ]
+    ],
+    [
+      "struct simple_object_coff_read",
+      {},
+      "",
+      [
+        340,
+        5
+      ],
+      [
+        340,
+        35
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        350,
+        24
+      ],
+      [
+        350,
+        46
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        378,
+        35
+      ],
+      [
+        378,
+        57
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        416,
+        44
+      ],
+      [
+        416,
+        66
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        417,
+        42
+      ],
+      [
+        417,
+        64
+      ]
+    ],
+    [
+      "struct simple_object_coff_read",
+      {},
+      "",
+      [
+        437,
+        2
+      ],
+      [
+        437,
+        32
+      ]
+    ],
+    [
+      "struct simple_object_coff_read",
+      {},
+      "",
+      [
+        438,
+        5
+      ],
+      [
+        438,
+        35
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        439,
+        2
+      ],
+      [
+        439,
+        38
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        461,
+        2
+      ],
+      [
+        461,
+        38
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        462,
+        5
+      ],
+      [
+        462,
+        41
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        463,
+        2
+      ],
+      [
+        463,
+        38
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        464,
+        5
+      ],
+      [
+        464,
+        41
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        489,
+        2
+      ],
+      [
+        489,
+        38
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        490,
+        5
+      ],
+      [
+        490,
+        41
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        491,
+        2
+      ],
+      [
+        491,
+        38
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        508,
+        2
+      ],
+      [
+        508,
+        38
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        509,
+        5
+      ],
+      [
+        509,
+        41
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        510,
+        31
+      ],
+      [
+        510,
+        54
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        524,
+        26
+      ],
+      [
+        524,
+        49
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        526,
+        26
+      ],
+      [
+        526,
+        49
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        527,
+        26
+      ],
+      [
+        527,
+        49
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        529,
+        26
+      ],
+      [
+        529,
+        49
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        530,
+        26
+      ],
+      [
+        530,
+        49
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        532,
+        26
+      ],
+      [
+        532,
+        49
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        535,
+        19
+      ],
+      [
+        535,
+        42
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        548,
+        2
+      ],
+      [
+        548,
+        38
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        549,
+        5
+      ],
+      [
+        549,
+        41
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        551,
+        31
+      ],
+      [
+        551,
+        53
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        565,
+        38
+      ],
+      [
+        565,
+        60
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        569,
+        41
+      ],
+      [
+        569,
+        63
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        576,
+        26
+      ],
+      [
+        576,
+        48
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        577,
+        26
+      ],
+      [
+        577,
+        48
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        588,
+        26
+      ],
+      [
+        588,
+        48
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        591,
+        19
+      ],
+      [
+        591,
+        41
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        601,
+        2
+      ],
+      [
+        601,
+        38
+      ]
+    ],
+    [
+      "struct simple_object_coff_attributes",
+      {},
+      "",
+      [
+        602,
+        5
+      ],
+      [
+        602,
+        41
+      ]
+    ],
+    [
+      "struct external_syment",
+      {},
+      "",
+      [
+        620,
+        4
+      ],
+      [
+        620,
+        26
+      ]
+    ],
+    [
+      "struct external_filehdr",
+      {},
+      "",
+      [
+        637,
+        26
+      ],
+      [
+        637,
+        49
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        638,
+        43
+      ],
+      [
+        638,
+        65
+      ]
+    ],
+    [
+      "struct simple_object_write_section_buffer",
+      {},
+      "",
+      [
+        645,
+        6
+      ],
+      [
+        645,
+        47
+      ]
+    ],
+    [
+      "struct external_scnhdr",
+      {},
+      "",
+      [
+        681,
+        31
+      ],
+      [
+        681,
+        53
+      ]
+    ],
+    [
+      "struct external_syment",
+      {},
+      "",
+      [
+        693,
+        28
+      ],
+      [
+        693,
+        50
+      ]
+    ],
+    [
+      "struct simple_object_write_section_buffer",
+      {},
+      "",
+      [
+        741,
+        6
+      ],
+      [
+        741,
+        47
+      ]
+    ],
+    [
+      "struct simple_object_functions",
+      {},
+      "",
+      [
+        792,
+        6
+      ],
+      [
+        792,
+        36
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"simple-object.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <stddef.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <stdint.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <inttypes.h>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"simple-object-common.h\"\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

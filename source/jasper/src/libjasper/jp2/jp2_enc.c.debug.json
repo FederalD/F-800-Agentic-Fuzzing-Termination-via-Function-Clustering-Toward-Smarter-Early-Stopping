@@ -1,0 +1,203 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int jp2_encode(jas_image_t *image, jas_stream_t *out, char *optstr)\n{\n\tjp2_box_t *box;\n\tjp2_ftyp_t *ftyp;\n\tjp2_ihdr_t *ihdr;\n\tjas_stream_t *tmpstream;\n\tint allcmptssame;\n\tjp2_bpcc_t *bpcc;\n\tlong len;\n\tuint_fast16_t cmptno;\n\tjp2_colr_t *colr;\n\tchar buf[4096];\n\tuint_fast32_t overhead;\n\tjp2_cdefchan_t *cdefchanent;\n\tjp2_cdef_t *cdef;\n\tint i;\n\tuint_fast32_t typeasoc;\njas_iccprof_t *iccprof;\njas_stream_t *iccstream;\nint pos;\nint needcdef;\nint prec;\nint sgnd;\n\n\tbox = 0;\n\ttmpstream = 0;\n\n\tallcmptssame = 1;\n\tsgnd = jas_image_cmptsgnd(image, 0);\n\tprec = jas_image_cmptprec(image, 0);\n\tfor (i = 1; i < jas_image_numcmpts(image); ++i) {\n\t\tif (jas_image_cmptsgnd(image, i) != sgnd ||\n\t\t  jas_image_cmptprec(image, i) != prec) {\n\t\t\tallcmptssame = 0;\n\t\t\tbreak;\n\t\t}\n\t}\n\n\t/* Output the signature box. */\n\n\tif (!(box = jp2_box_create(JP2_BOX_JP))) {\n\t\tgoto error;\n\t}\n\tbox->data.jp.magic = JP2_JP_MAGIC;\n\tif (jp2_box_put(box, out)) {\n\t\tgoto error;\n\t}\n\tjp2_box_destroy(box);\n\tbox = 0;\n\n\t/* Output the file type box. */\n\n\tif (!(box = jp2_box_create(JP2_BOX_FTYP))) {\n\t\tgoto error;\n\t}\n\tftyp = &box->data.ftyp;\n\tftyp->majver = JP2_FTYP_MAJVER;\n\tftyp->minver = JP2_FTYP_MINVER;\n\tftyp->numcompatcodes = 1;\n\tftyp->compatcodes[0] = JP2_FTYP_COMPATCODE;\n\tif (jp2_box_put(box, out)) {\n\t\tgoto error;\n\t}\n\tjp2_box_destroy(box);\n\tbox = 0;\n\n\t/*\n\t * Generate the data portion of the JP2 header box.\n\t * We cannot simply output the header for this box\n\t * since we do not yet know the correct value for the length\n\t * field.\n\t */\n\n\tif (!(tmpstream = jas_stream_memopen(0, 0))) {\n\t\tgoto error;\n\t}\n\n\t/* Generate image header box. */\n\n\tif (!(box = jp2_box_create(JP2_BOX_IHDR))) {\n\t\tgoto error;\n\t}\n\tihdr = &box->data.ihdr;\n\tihdr->width = jas_image_width(image);\n\tihdr->height = jas_image_height(image);\n\tihdr->numcmpts = jas_image_numcmpts(image);\n\tihdr->bpc = allcmptssame ? JP2_SPTOBPC(jas_image_cmptsgnd(image, 0),\n\t  jas_image_cmptprec(image, 0)) : JP2_IHDR_BPCNULL;\n\tihdr->comptype = JP2_IHDR_COMPTYPE;\n\tihdr->csunk = 0;\n\tihdr->ipr = 0;\n\tif (jp2_box_put(box, tmpstream)) {\n\t\tgoto error;\n\t}\n\tjp2_box_destroy(box);\n\tbox = 0;\n\n\t/* Generate bits per component box. */\n\n\tif (!allcmptssame) {\n\t\tif (!(box = jp2_box_create(JP2_BOX_BPCC))) {\n\t\t\tgoto error;\n\t\t}\n\t\tbpcc = &box->data.bpcc;\n\t\tbpcc->numcmpts = jas_image_numcmpts(image);\n\t\tif (!(bpcc->bpcs = jas_malloc(bpcc->numcmpts *\n\t\t  sizeof(uint_fast8_t)))) {\n\t\t\tgoto error;\n\t\t}\n\t\tfor (cmptno = 0; cmptno < bpcc->numcmpts; ++cmptno) {\n\t\t\tbpcc->bpcs[cmptno] = JP2_SPTOBPC(jas_image_cmptsgnd(image,\n\t\t\t  cmptno), jas_image_cmptprec(image, cmptno));\n\t\t}\n\t\tif (jp2_box_put(box, tmpstream)) {\n\t\t\tgoto error;\n\t\t}\n\t\tjp2_box_destroy(box);\n\t\tbox = 0;\n\t}\n\n\t/* Generate color specification box. */\n\n\tif (!(box = jp2_box_create(JP2_BOX_COLR))) {\n\t\tgoto error;\n\t}\n\tcolr = &box->data.colr;\n\tswitch (jas_image_clrspc(image)) {\n\tcase JAS_CLRSPC_SRGB:\n\tcase JAS_CLRSPC_SYCBCR:\n\tcase JAS_CLRSPC_SGRAY:\n\t\tcolr->method = JP2_COLR_ENUM;\n\t\tcolr->csid = clrspctojp2(jas_image_clrspc(image));\n\t\tcolr->pri = JP2_COLR_PRI;\n\t\tcolr->approx = 0;\n\t\tbreak;\n\tdefault:\n\t\tcolr->method = JP2_COLR_ICC;\n\t\tcolr->pri = JP2_COLR_PRI;\n\t\tcolr->approx = 0;\n\t\ticcprof = jas_iccprof_createfromcmprof(jas_image_cmprof(image));\n\t\tassert(iccprof);\n\t\ticcstream = jas_stream_memopen(0, 0);\n\t\tassert(iccstream);\n\t\tif (jas_iccprof_save(iccprof, iccstream))\n\t\t\tabort();\n\t\tif ((pos = jas_stream_tell(iccstream)) < 0)\n\t\t\tabort();\n\t\tcolr->iccplen = pos;\n\t\tcolr->iccp = jas_malloc(pos);\n\t\tassert(colr->iccp);\n\t\tjas_stream_rewind(iccstream);\n\t\tif (jas_stream_read(iccstream, colr->iccp, colr->iccplen) != colr->iccplen)\n\t\t\tabort();\n\t\tjas_stream_close(iccstream);\n\t\tjas_iccprof_destroy(iccprof);\n\t\tbreak;\n\t}\n\tif (jp2_box_put(box, tmpstream)) {\n\t\tgoto error;\n\t}\n\tjp2_box_destroy(box);\n\tbox = 0;\n\n\tneedcdef = 1;\n\tswitch (jas_clrspc_fam(jas_image_clrspc(image))) {\n\tcase JAS_CLRSPC_FAM_RGB:\n\t\tif (jas_image_cmpttype(image, 0) ==\n\t\t  JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_RGB_R) &&\n\t\t  jas_image_cmpttype(image, 1) ==\n\t\t  JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_RGB_G) &&\n\t\t  jas_image_cmpttype(image, 2) ==\n\t\t  JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_RGB_B))\n\t\t\tneedcdef = 0;\n\t\tbreak;\n\tcase JAS_CLRSPC_FAM_YCBCR:\n\t\tif (jas_image_cmpttype(image, 0) ==\n\t\t  JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_YCBCR_Y) &&\n\t\t  jas_image_cmpttype(image, 1) ==\n\t\t  JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_YCBCR_CB) &&\n\t\t  jas_image_cmpttype(image, 2) ==\n\t\t  JAS_IMAGE_CT_COLOR(JAS_CLRSPC_CHANIND_YCBCR_CR))\n\t\t\tneedcdef = 0;\n\t\tbreak;\n\tcase JAS_CLRSPC_FAM_GRAY:\n\t\tif (jas_image_cmpttype(image, 0) ==\n\t\t  JAS_IMAGE_CT_COLOR(JAS_IMAGE_CT_GRAY_Y))\n\t\t\tneedcdef = 0;\n\t\tbreak;\n\tdefault:\n\t\tabort();\n\t\tbreak;\n\t}\n\n\tif (needcdef) {\n\t\tif (!(box = jp2_box_create(JP2_BOX_CDEF))) {\n\t\t\tgoto error;\n\t\t}\n\t\tcdef = &box->data.cdef;\n\t\tcdef->numchans = jas_image_numcmpts(image);\n\t\tcdef->ents = jas_malloc(cdef->numchans * sizeof(jp2_cdefchan_t));\n\t\tfor (i = 0; i < jas_image_numcmpts(image); ++i) {\n\t\t\tcdefchanent = &cdef->ents[i];\n\t\t\tcdefchanent->channo = i;\n\t\t\ttypeasoc = jp2_gettypeasoc(jas_image_clrspc(image), jas_image_cmpttype(image, i));\n\t\t\tcdefchanent->type = typeasoc >> 16;\n\t\t\tcdefchanent->assoc = typeasoc & 0x7fff;\n\t\t}\n\t\tif (jp2_box_put(box, tmpstream)) {\n\t\t\tgoto error;\n\t\t}\n\t\tjp2_box_destroy(box);\n\t\tbox = 0;\n\t}\n\n\t/* Determine the total length of the JP2 header box. */\n\n\tlen = jas_stream_tell(tmpstream);\n\tjas_stream_rewind(tmpstream);\n\n\t/*\n\t * Output the JP2 header box and all of the boxes which it contains.\n\t */\n\n\tif (!(box = jp2_box_create(JP2_BOX_JP2H))) {\n\t\tgoto error;\n\t}\n\tbox->len = len + JP2_BOX_HDRLEN(false);\n\tif (jp2_box_put(box, out)) {\n\t\tgoto error;\n\t}\n\tjp2_box_destroy(box);\n\tbox = 0;\n\n\tif (jas_stream_copy(out, tmpstream, len)) {\n\t\tgoto error;\n\t}\n\n\tjas_stream_close(tmpstream);\n\ttmpstream = 0;\n\n\t/*\n\t * Output the contiguous code stream box.\n\t */\n\n\tif (!(box = jp2_box_create(JP2_BOX_JP2C))) {\n\t\tgoto error;\n\t}\n\tbox->len = 0;\n\tif (jp2_box_put(box, out)) {\n\t\tgoto error;\n\t}\n\tjp2_box_destroy(box);\n\tbox = 0;\n\n\t/* Output the JPEG-2000 code stream. */\n\n\toverhead = jas_stream_getrwcount(out);\n\tsprintf(buf, \"%s\\n_jp2overhead=%lu\\n\", (optstr ? optstr : \"\"),\n\t  (unsigned long) overhead);\n\n\tif (jpc_encode(image, out, buf)) {\n\t\tgoto error;\n\t}\n\n\treturn 0;\n\tabort();\n\nerror:\n\n\tif (box) {\n\t\tjp2_box_destroy(box);\n\t}\n\tif (tmpstream) {\n\t\tjas_stream_close(tmpstream);\n\t}\n\treturn -1;\n}",
+      "fn_code_pos": [
+        [
+          88,
+          0
+        ],
+        [
+          364,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_encode",
+        "parameters": {
+          "image": "jas_image_t",
+          "out": "jas_stream_t",
+          "optstr": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static uint_fast32_t jp2_gettypeasoc(int colorspace, int ctype)\n{\n\tint type;\n\tint asoc;\n\n\tif (ctype & JAS_IMAGE_CT_OPACITY) {\n\t\ttype = JP2_CDEF_TYPE_OPACITY;\n\t\tasoc = JP2_CDEF_ASOC_ALL;\n\t\tgoto done;\n\t}\n\n\ttype = JP2_CDEF_TYPE_UNSPEC;\n\tasoc = JP2_CDEF_ASOC_NONE;\n\tswitch (jas_clrspc_fam(colorspace)) {\n\tcase JAS_CLRSPC_FAM_RGB:\n\t\tswitch (JAS_IMAGE_CT_COLOR(ctype)) {\n\t\tcase JAS_IMAGE_CT_RGB_R:\n\t\t\ttype = JP2_CDEF_TYPE_COLOR;\n\t\t\tasoc = JP2_CDEF_RGB_R;\n\t\t\tbreak;\n\t\tcase JAS_IMAGE_CT_RGB_G:\n\t\t\ttype = JP2_CDEF_TYPE_COLOR;\n\t\t\tasoc = JP2_CDEF_RGB_G;\n\t\t\tbreak;\n\t\tcase JAS_IMAGE_CT_RGB_B:\n\t\t\ttype = JP2_CDEF_TYPE_COLOR;\n\t\t\tasoc = JP2_CDEF_RGB_B;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase JAS_CLRSPC_FAM_YCBCR:\n\t\tswitch (JAS_IMAGE_CT_COLOR(ctype)) {\n\t\tcase JAS_IMAGE_CT_YCBCR_Y:\n\t\t\ttype = JP2_CDEF_TYPE_COLOR;\n\t\t\tasoc = JP2_CDEF_YCBCR_Y;\n\t\t\tbreak;\n\t\tcase JAS_IMAGE_CT_YCBCR_CB:\n\t\t\ttype = JP2_CDEF_TYPE_COLOR;\n\t\t\tasoc = JP2_CDEF_YCBCR_CB;\n\t\t\tbreak;\n\t\tcase JAS_IMAGE_CT_YCBCR_CR:\n\t\t\ttype = JP2_CDEF_TYPE_COLOR;\n\t\t\tasoc = JP2_CDEF_YCBCR_CR;\n\t\t\tbreak;\n\t\t}\n\t\tbreak;\n\tcase JAS_CLRSPC_FAM_GRAY:\n\t\ttype = JP2_CDEF_TYPE_COLOR;\n\t\tasoc = JP2_CDEF_GRAY_Y;\n\t\tbreak;\n\t}\n\ndone:\n\treturn (type << 16) | asoc;\n}",
+      "fn_code_pos": [
+        [
+          366,
+          0
+        ],
+        [
+          420,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_gettypeasoc",
+        "parameters": {
+          "colorspace": "int",
+          "ctype": "int"
+        },
+        "return_type": "uint_fast32_t"
+      }
+    },
+    {
+      "fn_code": "static int clrspctojp2(jas_clrspc_t clrspc)\n{\n\tswitch (clrspc) {\n\tcase JAS_CLRSPC_SRGB:\n\t\treturn JP2_COLR_SRGB;\n\tcase JAS_CLRSPC_SYCBCR:\n\t\treturn JP2_COLR_SYCC;\n\tcase JAS_CLRSPC_SGRAY:\n\t\treturn JP2_COLR_SGRAY;\n\tdefault:\n\t\tabort();\n\t\tbreak;\n\t}\n}",
+      "fn_code_pos": [
+        [
+          422,
+          0
+        ],
+        [
+          435,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "clrspctojp2",
+        "parameters": {
+          "clrspc": "jas_clrspc_t"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "jp2_gettypeasoc(int colorspace, int ctype)",
+      "fn_dec_pos": [
+        [
+          81,
+          21
+        ],
+        [
+          81,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "jp2_gettypeasoc",
+        "parameters": {
+          "colorspace": "int",
+          "ctype": "int"
+        },
+        "return_type": "uint_fast32_t"
+      }
+    },
+    {
+      "fn_code": "clrspctojp2(jas_clrspc_t clrspc)",
+      "fn_dec_pos": [
+        [
+          82,
+          11
+        ],
+        [
+          82,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "clrspctojp2",
+        "parameters": {
+          "clrspc": "jas_clrspc_t"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include <assert.h>\n",
+      [
+        73,
+        0
+      ],
+      [
+        74,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_malloc.h\"\n",
+      [
+        74,
+        0
+      ],
+      [
+        75,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_image.h\"\n",
+      [
+        75,
+        0
+      ],
+      [
+        76,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_stream.h\"\n",
+      [
+        76,
+        0
+      ],
+      [
+        77,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_cm.h\"\n",
+      [
+        77,
+        0
+      ],
+      [
+        78,
+        0
+      ]
+    ],
+    [
+      "#include \"jasper/jas_icc.h\"\n",
+      [
+        78,
+        0
+      ],
+      [
+        79,
+        0
+      ]
+    ],
+    [
+      "#include \"jp2_cod.h\"\n",
+      [
+        79,
+        0
+      ],
+      [
+        80,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

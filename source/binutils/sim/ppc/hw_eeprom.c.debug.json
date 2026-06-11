@@ -1,0 +1,804 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static const char *\nstate2a(hw_eeprom_states state)\n{\n  switch (state) {\n  case read_reset: return \"read_reset\";\n  case write_nr_2: return \"write_nr_2\";\n  case write_nr_3: return \"write_nr_3\";\n  case write_nr_4: return \"write_nr_4\";\n  case write_nr_5: return \"write_nr_5\";\n  case write_nr_6: return \"write_nr_6\";\n  case byte_program: return \"byte_program\";\n  case byte_programming: return \"byte_programming\";\n  case chip_erase: return \"chip_erase\";\n  case sector_erase: return \"sector_erase\";\n  case sector_erase_suspend: return \"sector_erase_suspend\";\n  case autoselect: return \"autoselect\";\n  }\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          163,
+          0
+        ],
+        [
+          181,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "state2a",
+        "parameters": {
+          "state": "hw_eeprom_states"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_eeprom_init_data(device *me)\n{\n  hw_eeprom_device *eeprom = (hw_eeprom_device*)device_data(me);\n\n  /* have we any input or output files */\n  if (device_find_property(me, \"input-file\") != NULL)\n    eeprom->input_file_name = device_find_string_property(me, \"input-file\");\n  if (device_find_property(me, \"output-file\") != NULL)\n    eeprom->input_file_name = device_find_string_property(me, \"output-file\");\n\n  /* figure out the sectors in the eeprom */\n  if (eeprom->sectors == NULL) {\n    eeprom->nr_sectors = device_find_integer_property(me, \"nr-sectors\");\n    eeprom->sizeof_sector = device_find_integer_property(me, \"sector-size\");\n    eeprom->sectors = zalloc(eeprom->nr_sectors);\n  }\n  else\n    memset(eeprom->sectors, 0, eeprom->nr_sectors);\n\n  /* initialize the eeprom */\n  if (eeprom->memory == NULL) {\n    eeprom->sizeof_memory = eeprom->sizeof_sector * eeprom->nr_sectors;\n    eeprom->memory = zalloc(eeprom->sizeof_memory);\n  }\n  else\n    memset(eeprom->memory, 0, eeprom->sizeof_memory);\n  if (eeprom->input_file_name != NULL) {\n    int i;\n    FILE *input_file = fopen(eeprom->input_file_name, \"r\");\n    if (input_file == NULL) {\n      perror(\"eeprom\");\n      device_error(me, \"Failed to open input file %s\\n\", eeprom->input_file_name);\n    }\n    for (i = 0; i < eeprom->sizeof_memory; i++) {\n      if (fread(&eeprom->memory[i], 1, 1, input_file) != 1)\n\tbreak;\n    }\n    fclose(input_file);\n  }\n\n  /* timing */\n  eeprom->byte_write_delay = device_find_integer_property(me, \"byte-write-delay\");\n  eeprom->sector_start_delay = device_find_integer_property(me, \"sector-start-delay\");\n  eeprom->erase_delay = device_find_integer_property(me, \"erase-delay\");\n\n  /* misc */\n  eeprom->manufacture_code = device_find_integer_property(me, \"manufacture-code\");\n  eeprom->device_code = device_find_integer_property(me, \"device-code\");\n}",
+      "fn_code_pos": [
+        [
+          215,
+          0
+        ],
+        [
+          264,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_eeprom_init_data",
+        "parameters": {
+          "me": "device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ninvalid_read(device *me,\n\t     hw_eeprom_states state,\n\t     unsigned_word address,\n\t     const char *reason)\n{\n  DTRACE(eeprom, (\"Invalid read to 0x%lx while in state %s (%s)\\n\",\n\t\t  (unsigned long)address,\n\t\t  state2a(state),\n\t\t  reason));\n}",
+      "fn_code_pos": [
+        [
+          267,
+          0
+        ],
+        [
+          277,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "invalid_read",
+        "parameters": {
+          "me": "device",
+          "state": "hw_eeprom_states",
+          "address": "unsigned_word",
+          "reason": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ninvalid_write(device *me,\n\t      hw_eeprom_states state,\n\t      unsigned_word address,\n\t      unsigned8 data,\n\t      const char *reason)\n{\n  DTRACE(eeprom, (\"Invalid write of 0x%lx to 0x%lx while in state %s (%s)\\n\",\n\t\t  (unsigned long)data,\n\t\t  (unsigned long)address,\n\t\t  state2a(state),\n\t\t  reason));\n}",
+      "fn_code_pos": [
+        [
+          279,
+          0
+        ],
+        [
+          291,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "invalid_write",
+        "parameters": {
+          "me": "device",
+          "state": "hw_eeprom_states",
+          "address": "unsigned_word",
+          "data": "unsigned8",
+          "reason": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndump_eeprom(device *me,\n\t    hw_eeprom_device *eeprom)\n{\n  if (eeprom->output_file_name != NULL) {\n    int i;\n    FILE *output_file = fopen(eeprom->output_file_name, \"w\");\n    if (output_file == NULL) {\n      perror(\"eeprom\");\n      device_error(me, \"Failed to open output file %s\\n\",\n\t\t   eeprom->output_file_name);\n    }\n    for (i = 0; i < eeprom->sizeof_memory; i++) {\n      if (fwrite(&eeprom->memory[i], 1, 1, output_file) != 1)\n\tbreak;\n    }\n    fclose(output_file);\n  }\n}",
+      "fn_code_pos": [
+        [
+          293,
+          0
+        ],
+        [
+          311,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dump_eeprom",
+        "parameters": {
+          "me": "device",
+          "eeprom": "hw_eeprom_device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstart_programming_byte(device *me,\n\t\t       hw_eeprom_device *eeprom,\n\t\t       unsigned_word address,\n\t\t       unsigned8 new_byte)\n{\n  unsigned8 old_byte = eeprom->memory[address];\n  DTRACE(eeprom, (\"start-programing-byte - address 0x%lx, new 0x%lx, old 0x%lx\\n\",\n\t\t  (unsigned long)address,\n\t\t  (unsigned long)new_byte,\n\t\t  (unsigned long)old_byte));\n  eeprom->byte_program_address = address;\n  /* : old new : ~old : new&~old\n     :  0   0  :   1  :    0\n     :  0   1  :   1  :    1     -- can not set a bit\n     :  1   0  :   0  :    0\n     :  1   1  :   0  :    0 */\n  if (~old_byte & new_byte)\n    invalid_write(me, eeprom->state, address, new_byte, \"setting cleared bit\");\n  /* : old new : old&new\n     :  0   0  :    0\n     :  0   1  :    0\n     :  1   0  :    0\n     :  1   1  :    1 */\n  eeprom->byte_program_byte = new_byte & old_byte;\n  eeprom->memory[address] = ~new_byte & ~0x24; /* LE-bits 5:3 zero */\n  eeprom->program_start_time = device_event_queue_time(me);\n  eeprom->program_finish_time = (eeprom->program_start_time\n\t\t\t\t + eeprom->byte_write_delay);\n}",
+      "fn_code_pos": [
+        [
+          316,
+          0
+        ],
+        [
+          345,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "start_programming_byte",
+        "parameters": {
+          "me": "device",
+          "eeprom": "hw_eeprom_device",
+          "address": "unsigned_word",
+          "new_byte": "unsigned8"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfinish_programming_byte(device *me,\n\t\t\thw_eeprom_device *eeprom)\n{\n  DTRACE(eeprom, (\"finish-programming-byte - address 0x%lx, byte 0x%lx\\n\",\n\t\t  (unsigned long)eeprom->byte_program_address,\n\t\t  (unsigned long)eeprom->byte_program_byte));\n  eeprom->memory[eeprom->byte_program_address] = eeprom->byte_program_byte;\n  dump_eeprom(me, eeprom);\n}",
+      "fn_code_pos": [
+        [
+          347,
+          0
+        ],
+        [
+          356,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "finish_programming_byte",
+        "parameters": {
+          "me": "device",
+          "eeprom": "hw_eeprom_device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstart_erasing_chip(device *me,\n\t\t   hw_eeprom_device *eeprom)\n{\n  DTRACE(eeprom, (\"start-erasing-chip\\n\"));\n  memset(eeprom->memory, 0, eeprom->sizeof_memory);\n  eeprom->program_start_time = device_event_queue_time(me);\n  eeprom->program_finish_time = (eeprom->program_start_time\n\t\t\t\t + eeprom->erase_delay);\n}",
+      "fn_code_pos": [
+        [
+          361,
+          0
+        ],
+        [
+          370,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "start_erasing_chip",
+        "parameters": {
+          "me": "device",
+          "eeprom": "hw_eeprom_device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfinish_erasing_chip(device *me,\n\t\t    hw_eeprom_device *eeprom)\n{\n  DTRACE(eeprom, (\"finish-erasing-chip\\n\"));\n  memset(eeprom->memory, 0xff, eeprom->sizeof_memory);\n  dump_eeprom(me, eeprom);\n}",
+      "fn_code_pos": [
+        [
+          372,
+          0
+        ],
+        [
+          379,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "finish_erasing_chip",
+        "parameters": {
+          "me": "device",
+          "eeprom": "hw_eeprom_device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstart_erasing_sector(device *me,\n\t\t     hw_eeprom_device *eeprom,\n\t\t     unsigned_word address)\n{\n  int sector = address / eeprom->sizeof_sector;\n  DTRACE(eeprom, (\"start-erasing-sector - address 0x%lx, sector %d\\n\",\n\t\t  (unsigned long)address, sector));\n  ASSERT(sector < eeprom->nr_sectors);\n  eeprom->sectors[sector] = 1;\n  memset(eeprom->memory + sector * eeprom->sizeof_sector,\n\t 0x4, eeprom->sizeof_sector);\n  eeprom->program_start_time = device_event_queue_time(me);\n  eeprom->sector_start_time = (eeprom->program_start_time\n\t\t\t       + eeprom->sector_start_delay);\n  eeprom->program_finish_time = (eeprom->sector_start_time\n\t\t\t\t + eeprom->erase_delay);\n\n}",
+      "fn_code_pos": [
+        [
+          384,
+          0
+        ],
+        [
+          402,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "start_erasing_sector",
+        "parameters": {
+          "me": "device",
+          "eeprom": "hw_eeprom_device",
+          "address": "unsigned_word"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfinish_erasing_sector(device *me,\n\t\t      hw_eeprom_device *eeprom)\n{\n  int sector;\n  DTRACE(eeprom, (\"finish-erasing-sector\\n\"));\n  for (sector = 0; sector < eeprom->nr_sectors; sector++) {\n    if (eeprom->sectors[sector]) {\n      eeprom->sectors[sector] = 0;\n      memset(eeprom->memory + sector * eeprom->sizeof_sector,\n\t     0xff, eeprom->sizeof_sector);\n    }\n  }\n  dump_eeprom(me, eeprom);\n}",
+      "fn_code_pos": [
+        [
+          404,
+          0
+        ],
+        [
+          418,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "finish_erasing_sector",
+        "parameters": {
+          "me": "device",
+          "eeprom": "hw_eeprom_device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned8\ntoggle(hw_eeprom_device *eeprom,\n       unsigned8 byte)\n{\n  eeprom->toggle_bit = eeprom->toggle_bit ^ 0x40; /* le-bit 6 */\n  return eeprom->toggle_bit ^ byte;\n}",
+      "fn_code_pos": [
+        [
+          423,
+          0
+        ],
+        [
+          429,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "toggle",
+        "parameters": {
+          "eeprom": "hw_eeprom_device",
+          "byte": "unsigned8"
+        },
+        "return_type": "unsigned8"
+      }
+    },
+    {
+      "fn_code": "static unsigned8\nread_byte(device *me,\n\t  hw_eeprom_device *eeprom,\n\t  unsigned_word address)\n{\n  /* may need multiple iterations of this */\n  while (1) {\n    switch (eeprom->state) {\n\n    case read_reset:\n      return eeprom->memory[address];\n\n    case autoselect:\n      if ((address & 0xff) == 0x00)\n\treturn eeprom->manufacture_code;\n      else if ((address & 0xff) == 0x01)\n\treturn eeprom->device_code;\n      else\n\treturn 0; /* not certain about this */\n\n    case byte_programming:\n      if (device_event_queue_time(me) > eeprom->program_finish_time) {\n\tfinish_programming_byte(me, eeprom);\n\teeprom->state = read_reset;\n\tcontinue;\n      }\n      else if (address == eeprom->byte_program_address) {\n\treturn toggle(eeprom, eeprom->memory[address]);\n      }\n      else {\n\t/* trash that memory location */\n\tinvalid_read(me, eeprom->state, address, \"not byte program address\");\n\teeprom->memory[address] = (eeprom->memory[address]\n\t\t\t\t   & eeprom->byte_program_byte);\n\treturn toggle(eeprom, eeprom->memory[eeprom->byte_program_address]);\n      }\n\n    case chip_erase:\n      if (device_event_queue_time(me) > eeprom->program_finish_time) {\n\tfinish_erasing_chip(me, eeprom);\n\teeprom->state = read_reset;\n\tcontinue;\n      }\n      else {\n\treturn toggle(eeprom, eeprom->memory[address]);\n      }\n\n    case sector_erase:\n      if (device_event_queue_time(me) > eeprom->program_finish_time) {\n\tfinish_erasing_sector(me, eeprom);\n\teeprom->state = read_reset;\n\tcontinue;\n      }\n      else if (!eeprom->sectors[address / eeprom->sizeof_sector]) {\n\t/* read to wrong sector */\n\tinvalid_read(me, eeprom->state, address, \"sector not being erased\");\n\treturn toggle(eeprom, eeprom->memory[address]) & ~0x8;\n      }\n      else if (device_event_queue_time(me) > eeprom->sector_start_time) {\n\treturn toggle(eeprom, eeprom->memory[address]) | 0x8;\n      }\n      else {\n\treturn toggle(eeprom, eeprom->memory[address]) & ~0x8;\n      }\n\n    case sector_erase_suspend:\n      if (!eeprom->sectors[address / eeprom->sizeof_sector]) {\n\treturn eeprom->memory[address];\n      }\n      else {\n\tinvalid_read(me, eeprom->state, address, \"sector being erased\");\n\treturn eeprom->memory[address];\n      }\n\n    default:\n      invalid_read(me, eeprom->state, address, \"invalid state\");\n      return eeprom->memory[address];\n\n    }\n  }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          431,
+          0
+        ],
+        [
+          512,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_byte",
+        "parameters": {
+          "me": "device",
+          "eeprom": "hw_eeprom_device",
+          "address": "unsigned_word"
+        },
+        "return_type": "unsigned8"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_eeprom_io_read_buffer(device *me,\n\t\t\t void *dest,\n\t\t\t int space,\n\t\t\t unsigned_word addr,\n\t\t\t unsigned nr_bytes,\n\t\t\t cpu *processor,\n\t\t\t unsigned_word cia)\n{\n  hw_eeprom_device *eeprom = (hw_eeprom_device*)device_data(me);\n  int i;\n  for (i = 0; i < nr_bytes; i++) {\n    unsigned_word address = (addr + i) % eeprom->sizeof_memory;\n    unsigned8 byte = read_byte(me, eeprom, address);\n    ((unsigned8*)dest)[i] = byte;\n  }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          514,
+          0
+        ],
+        [
+          531,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_eeprom_io_read_buffer",
+        "parameters": {
+          "me": "device",
+          "dest": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nwrite_byte(device *me,\n\t   hw_eeprom_device *eeprom,\n\t   unsigned_word address,\n\t   unsigned8 data)\n{\n  /* may need multiple transitions to process a write */\n  while (1) {\n    switch (eeprom->state) {\n\n    case read_reset:\n      if (address == 0x5555 && data == 0xaa)\n\teeprom->state = write_nr_2;\n      else if (data == 0xf0)\n\teeprom->state = read_reset;\n      else {\n\tinvalid_write(me, eeprom->state, address, data, \"unexpected\");\n\teeprom->state = read_reset;\n      }\n      return;\n\n    case write_nr_2:\n      if (address == 0x2aaa && data == 0x55)\n\teeprom->state = write_nr_3;\n      else {\n\tinvalid_write(me, eeprom->state, address, data, \"unexpected\");\n\teeprom->state = read_reset;\n      }\n      return;\n\n    case write_nr_3:\n      if (address == 0x5555 && data == 0xf0)\n\teeprom->state = read_reset;\n      else if (address == 0x5555 && data == 0x90)\n\teeprom->state = autoselect;\n      else if (address == 0x5555 && data == 0xa0) {\n\teeprom->state = byte_program;\n      }\n      else if (address == 0x5555 && data == 0x80)\n\teeprom->state = write_nr_4;\n      else {\n\tinvalid_write(me, eeprom->state, address, data, \"unexpected\");\n\teeprom->state = read_reset;\n      }\n      return;\n\n    case write_nr_4:\n      if (address == 0x5555 && data == 0xaa)\n\teeprom->state = write_nr_5;\n      else {\n\tinvalid_write(me, eeprom->state, address, data, \"unexpected\");\n\teeprom->state = read_reset;\n      }\n      return;\n\n    case write_nr_5:\n      if (address == 0x2aaa && data == 0x55)\n\teeprom->state = write_nr_6;\n      else {\n\tinvalid_write(me, eeprom->state, address, data, \"unexpected\");\n\teeprom->state = read_reset;\n      }\n      return;\n\n    case write_nr_6:\n      if (address == 0x5555 && data == 0x10) {\n\tstart_erasing_chip(me, eeprom);\n\teeprom->state = chip_erase;\n      }\n      else {\n\tstart_erasing_sector(me, eeprom, address);\n\teeprom->sector_state = read_reset;\n\teeprom->state = sector_erase;\n      }\n      return;\n\n    case autoselect:\n      if (data == 0xf0)\n\teeprom->state = read_reset;\n      else if (address == 0x5555 && data == 0xaa)\n\teeprom->state = write_nr_2;\n      else {\n\tinvalid_write(me, eeprom->state, address, data, \"unsupported address\");\n\teeprom->state = read_reset;\n      }\n      return;\n\n    case byte_program:\n      start_programming_byte(me, eeprom, address, data);\n      eeprom->state = byte_programming;\n      return;\n\n    case byte_programming:\n      if (device_event_queue_time(me) > eeprom->program_finish_time) {\n\tfinish_programming_byte(me, eeprom);\n\teeprom->state = read_reset;\n\tcontinue;\n      }\n      /* ignore it */\n      return;\n\n    case chip_erase:\n      if (device_event_queue_time(me) > eeprom->program_finish_time) {\n\tfinish_erasing_chip(me, eeprom);\n\teeprom->state = read_reset;\n\tcontinue;\n      }\n      /* ignore it */\n      return;\n\n    case sector_erase:\n      if (device_event_queue_time(me) > eeprom->program_finish_time) {\n\tfinish_erasing_sector(me, eeprom);\n\teeprom->state = eeprom->sector_state;\n\tcontinue;\n      }\n      else if (device_event_queue_time(me) > eeprom->sector_start_time\n\t       && data == 0xb0) {\n\teeprom->sector_state = read_reset;\n\teeprom->state = sector_erase_suspend;\n      }\n      else {\n\tif (eeprom->sector_state == read_reset\n\t    && address == 0x5555 && data == 0xaa)\n\t  eeprom->sector_state = write_nr_2;\n\telse if (eeprom->sector_state == write_nr_2\n\t\t && address == 0x2aaa && data == 0x55)\n\t  eeprom->sector_state = write_nr_3;\n\telse if (eeprom->sector_state == write_nr_3\n\t\t && address == 0x5555 && data == 0x80)\n\t  eeprom->sector_state = write_nr_4;\n\telse if (eeprom->sector_state == write_nr_4\n\t\t && address == 0x5555 && data == 0xaa)\n\t  eeprom->sector_state = write_nr_5;\n\telse if (eeprom->sector_state == write_nr_5\n\t\t && address == 0x2aaa && data == 0x55)\n\t  eeprom->sector_state = write_nr_6;\n\telse if (eeprom->sector_state == write_nr_6\n\t\t && address != 0x5555 && data == 0x30) {\n\t  if (device_event_queue_time(me) > eeprom->sector_start_time) {\n\t    DTRACE(eeprom, (\"sector erase command after window closed\\n\"));\n\t    eeprom->sector_state = read_reset;\n\t  }\n\t  else {\n\t    start_erasing_sector(me, eeprom, address);\n\t    eeprom->sector_state = read_reset;\n\t  }\n\t}\n\telse {\n\t  invalid_write(me, eeprom->state, address, data, state2a(eeprom->sector_state));\n\t  eeprom->state = read_reset;\n\t}\n      }\n      return;\n\n    case sector_erase_suspend:\n      if (data == 0x30)\n\teeprom->state = sector_erase;\n      else {\n\tinvalid_write(me, eeprom->state, address, data, \"not resume command\");\n\teeprom->state = read_reset;\n      }\n      return;\n\n    }\n  }\n}",
+      "fn_code_pos": [
+        [
+          536,
+          0
+        ],
+        [
+          702,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_byte",
+        "parameters": {
+          "me": "device",
+          "eeprom": "hw_eeprom_device",
+          "address": "unsigned_word",
+          "data": "unsigned8"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_eeprom_io_write_buffer(device *me,\n\t\t\t  const void *source,\n\t\t\t  int space,\n\t\t\t  unsigned_word addr,\n\t\t\t  unsigned nr_bytes,\n\t\t\t  cpu *processor,\n\t\t\t  unsigned_word cia)\n{\n  hw_eeprom_device *eeprom = (hw_eeprom_device*)device_data(me);\n  int i;\n  for (i = 0; i < nr_bytes; i++) {\n    unsigned_word address = (addr + i) % eeprom->sizeof_memory;\n    unsigned8 byte = ((unsigned8*)source)[i];\n    write_byte(me, eeprom, address, byte);\n  }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          704,
+          0
+        ],
+        [
+          721,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_eeprom_io_write_buffer",
+        "parameters": {
+          "me": "device",
+          "source": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nhw_eeprom_instance_delete(device_instance *instance)\n{\n  hw_eeprom_instance *data = device_instance_data(instance);\n  free(data);\n}",
+      "fn_code_pos": [
+        [
+          732,
+          0
+        ],
+        [
+          737,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_eeprom_instance_delete",
+        "parameters": {
+          "instance": "device_instance"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nhw_eeprom_instance_read(device_instance *instance,\n\t\t\tvoid *buf,\n\t\t\tunsigned_word len)\n{\n  hw_eeprom_instance *data = device_instance_data(instance);\n  int i;\n  if (data->eeprom->state != read_reset)\n    DITRACE(eeprom, (\"eeprom not idle during instance read\\n\"));\n  for (i = 0; i < len; i++) {\n    ((unsigned8*)buf)[i] = data->eeprom->memory[data->pos];\n    data->pos = (data->pos + 1) % data->eeprom->sizeof_memory;\n  }\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          739,
+          0
+        ],
+        [
+          753,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_eeprom_instance_read",
+        "parameters": {
+          "instance": "device_instance",
+          "buf": "void",
+          "len": "unsigned_word"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nhw_eeprom_instance_write(device_instance *instance,\n\t\t\t const void *buf,\n\t\t\t unsigned_word len)\n{\n  hw_eeprom_instance *data = device_instance_data(instance);\n  int i;\n  if (data->eeprom->state != read_reset)\n    DITRACE(eeprom, (\"eeprom not idle during instance write\\n\"));\n  for (i = 0; i < len; i++) {\n    data->eeprom->memory[data->pos] = ((unsigned8*)buf)[i];\n    data->pos = (data->pos + 1) % data->eeprom->sizeof_memory;\n  }\n  dump_eeprom(data->me, data->eeprom);\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          755,
+          0
+        ],
+        [
+          770,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_eeprom_instance_write",
+        "parameters": {
+          "instance": "device_instance",
+          "buf": "void",
+          "len": "unsigned_word"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nhw_eeprom_instance_seek(device_instance *instance,\n\t\t      unsigned_word pos_hi,\n\t\t      unsigned_word pos_lo)\n{\n  hw_eeprom_instance *data = device_instance_data(instance);\n  if (pos_lo >= data->eeprom->sizeof_memory)\n    device_error(data->me, \"seek value 0x%lx out of range\\n\",\n\t\t (unsigned long)pos_lo);\n  data->pos = pos_lo;\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          772,
+          0
+        ],
+        [
+          783,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_eeprom_instance_seek",
+        "parameters": {
+          "instance": "device_instance",
+          "pos_hi": "unsigned_word",
+          "pos_lo": "unsigned_word"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static device_instance *\nhw_eeprom_create_instance(device *me,\n\t\t\t  const char *path,\n\t\t\t  const char *args)\n{\n  hw_eeprom_device *eeprom = device_data(me);\n  hw_eeprom_instance *data = ZALLOC(hw_eeprom_instance);\n  data->eeprom = eeprom;\n  data->me = me;\n  return device_create_instance_from(me, NULL,\n\t\t\t\t     data,\n\t\t\t\t     path, args,\n\t\t\t\t     &hw_eeprom_instance_callbacks);\n}",
+      "fn_code_pos": [
+        [
+          792,
+          0
+        ],
+        [
+          805,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_eeprom_create_instance",
+        "parameters": {
+          "me": "device",
+          "path": "char",
+          "args": "char"
+        },
+        "return_type": "device_instance"
+      }
+    },
+    {
+      "fn_code": "static void *\nhw_eeprom_create(const char *name,\n\t\t const device_unit *unit_address,\n\t\t const char *args)\n{\n  hw_eeprom_device *eeprom = ZALLOC(hw_eeprom_device);\n  return eeprom;\n}",
+      "fn_code_pos": [
+        [
+          821,
+          0
+        ],
+        [
+          828,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_eeprom_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "state2a(hw_eeprom_states state)",
+      "fn_dec_pos": [
+        [
+          164,
+          0
+        ],
+        [
+          164,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "state2a",
+        "parameters": {
+          "state": "hw_eeprom_states"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "hw_eeprom_create_instance(device *me,\n\t\t\t  const char *path,\n\t\t\t  const char *args)",
+      "fn_dec_pos": [
+        [
+          793,
+          0
+        ],
+        [
+          795,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_eeprom_create_instance",
+        "parameters": {
+          "me": "device",
+          "path": "char",
+          "args": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "hw_eeprom_create(const char *name,\n\t\t const device_unit *unit_address,\n\t\t const char *args)",
+      "fn_dec_pos": [
+        [
+          822,
+          0
+        ],
+        [
+          824,
+          20
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_eeprom_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct _hw_eeprom_device {\n  /* general */\n  hw_eeprom_states state;\n  unsigned8 *memory;\n  unsigned sizeof_memory;\n  unsigned erase_delay;\n  signed64 program_start_time;\n  signed64 program_finish_time;\n  unsigned8 manufacture_code;\n  unsigned8 device_code;\n  unsigned8 toggle_bit;\n  /* initialization */\n  const char *input_file_name;\n  const char *output_file_name;\n  /* for sector and sector programming */\n  hw_eeprom_states sector_state;\n  unsigned8 *sectors;\n  unsigned nr_sectors;\n  unsigned sizeof_sector;\n  unsigned sector_start_delay;\n  unsigned sector_start_time;\n  /* byte and byte programming */\n  unsigned byte_write_delay;\n  unsigned_word byte_program_address;\n  unsigned8 byte_program_byte;\n} hw_eeprom_device;",
+      {
+        "state": "hw_eeprom_states",
+        "*memory": "unsigned8",
+        "sizeof_memory": "unsigned",
+        "erase_delay": "unsigned",
+        "program_start_time": "signed64",
+        "program_finish_time": "signed64",
+        "manufacture_code": "unsigned8",
+        "device_code": "unsigned8",
+        "toggle_bit": "unsigned8",
+        "char": "const",
+        "sector_state": "hw_eeprom_states",
+        "*sectors": "unsigned8",
+        "nr_sectors": "unsigned",
+        "sizeof_sector": "unsigned",
+        "sector_start_delay": "unsigned",
+        "sector_start_time": "unsigned",
+        "byte_write_delay": "unsigned",
+        "byte_program_address": "unsigned_word",
+        "byte_program_byte": "unsigned8"
+      },
+      "hw_eeprom_device",
+      [
+        183,
+        0
+      ],
+      [
+        208,
+        19
+      ]
+    ],
+    [
+      "typedef struct _hw_eeprom_reg_spec {\n  unsigned32 base;\n  unsigned32 size;\n} hw_eeprom_reg_spec;",
+      {
+        "base": "unsigned32",
+        "size": "unsigned32"
+      },
+      "hw_eeprom_reg_spec",
+      [
+        210,
+        0
+      ],
+      [
+        213,
+        21
+      ]
+    ],
+    [
+      "typedef struct _hw_eeprom_instance {\n  unsigned_word pos;\n  hw_eeprom_device *eeprom;\n  device *me;\n} hw_eeprom_instance;",
+      {
+        "pos": "unsigned_word",
+        "*eeprom": "hw_eeprom_device",
+        "*me": "device"
+      },
+      "hw_eeprom_instance",
+      [
+        726,
+        0
+      ],
+      [
+        730,
+        21
+      ]
+    ],
+    [
+      "typedef struct _hw_eeprom_device {\n  /* general */\n  hw_eeprom_states state;\n  unsigned8 *memory;\n  unsigned sizeof_memory;\n  unsigned erase_delay;\n  signed64 program_start_time;\n  signed64 program_finish_time;\n  unsigned8 manufacture_code;\n  unsigned8 device_code;\n  unsigned8 toggle_bit;\n  /* initialization */\n  const char *input_file_name;\n  const char *output_file_name;\n  /* for sector and sector programming */\n  hw_eeprom_states sector_state;\n  unsigned8 *sectors;\n  unsigned nr_sectors;\n  unsigned sizeof_sector;\n  unsigned sector_start_delay;\n  unsigned sector_start_time;\n  /* byte and byte programming */\n  unsigned byte_write_delay;\n  unsigned_word byte_program_address;\n  unsigned8 byte_program_byte;\n} hw_eeprom_device;",
+      {
+        "state": "hw_eeprom_states",
+        "*memory": "unsigned8",
+        "sizeof_memory": "unsigned",
+        "erase_delay": "unsigned",
+        "program_start_time": "signed64",
+        "program_finish_time": "signed64",
+        "manufacture_code": "unsigned8",
+        "device_code": "unsigned8",
+        "toggle_bit": "unsigned8",
+        "char": "const",
+        "sector_state": "hw_eeprom_states",
+        "*sectors": "unsigned8",
+        "nr_sectors": "unsigned",
+        "sizeof_sector": "unsigned",
+        "sector_start_delay": "unsigned",
+        "sector_start_time": "unsigned",
+        "byte_write_delay": "unsigned",
+        "byte_program_address": "unsigned_word",
+        "byte_program_byte": "unsigned8"
+      },
+      "hw_eeprom_device",
+      [
+        183,
+        0
+      ],
+      [
+        208,
+        19
+      ]
+    ],
+    [
+      "typedef struct _hw_eeprom_reg_spec {\n  unsigned32 base;\n  unsigned32 size;\n} hw_eeprom_reg_spec;",
+      {
+        "base": "unsigned32",
+        "size": "unsigned32"
+      },
+      "hw_eeprom_reg_spec",
+      [
+        210,
+        0
+      ],
+      [
+        213,
+        21
+      ]
+    ],
+    [
+      "typedef struct _hw_eeprom_instance {\n  unsigned_word pos;\n  hw_eeprom_device *eeprom;\n  device *me;\n} hw_eeprom_instance;",
+      {
+        "pos": "unsigned_word",
+        "*eeprom": "hw_eeprom_device",
+        "*me": "device"
+      },
+      "hw_eeprom_instance",
+      [
+        726,
+        0
+      ],
+      [
+        730,
+        21
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"device_table.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <strings.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "typedef enum {\n  read_reset,\n  write_nr_2,\n  write_nr_3,\n  write_nr_4,\n  write_nr_5,\n  write_nr_6,\n  byte_program,\n  byte_programming,\n  chip_erase,\n  sector_erase,\n  sector_erase_suspend,\n  autoselect,\n} hw_eeprom_states;",
+      {
+        "read_reset": "",
+        "write_nr_2": "",
+        "write_nr_3": "",
+        "write_nr_4": "",
+        "write_nr_5": "",
+        "write_nr_6": "",
+        "byte_program": "",
+        "byte_programming": "",
+        "chip_erase": "",
+        "sector_erase": "",
+        "sector_erase_suspend": "",
+        "autoselect": ""
+      },
+      "hw_eeprom_states",
+      [
+        148,
+        0
+      ],
+      [
+        161,
+        19
+      ]
+    ]
+  ]
+}

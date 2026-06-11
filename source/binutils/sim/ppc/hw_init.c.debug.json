@@ -1,0 +1,350 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\ndma_file(device *me,\n\t const char *file_name,\n\t unsigned_word addr)\n{\n  int count;\n  int inc;\n  FILE *image;\n  char buf[1024];\n\n  /* get it open */\n  image = fopen(file_name, \"r\");\n  if (image == NULL)\n    return -1;\n\n  /* read it in slowly */\n  count = 0;\n  while (1) {\n    inc = fread(buf, 1, sizeof(buf), image);\n    if (inc <= 0)\n      break;\n    if (device_dma_write_buffer(device_parent(me),\n\t\t\t\tbuf,\n\t\t\t\t0 /*address-space*/,\n\t\t\t\taddr+count,\n\t\t\t\tinc /*nr-bytes*/,\n\t\t\t\t1 /*violate ro*/) != inc) {\n      fclose(image);\n      return -1;\n    }\n    count += inc;\n  }\n\n  /* close down again */\n  fclose(image);\n\n  return count;\n}",
+      "fn_code_pos": [
+        [
+          29,
+          0
+        ],
+        [
+          66,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dma_file",
+        "parameters": {
+          "me": "device",
+          "file_name": "char",
+          "addr": "unsigned_word"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_file_init_data_callback(device *me)\n{\n  int count;\n  const char *file_name = device_find_string_property(me, \"file-name\");\n  unsigned_word addr = device_find_integer_property(me, \"real-address\");\n  /* load the file */\n  count = dma_file(me, file_name, addr);\n  if (count < 0)\n    device_error(me, \"Problem loading file %s\\n\", file_name);\n}",
+      "fn_code_pos": [
+        [
+          88,
+          0
+        ],
+        [
+          98,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_file_init_data_callback",
+        "parameters": {
+          "me": "device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_data_init_data_callback(device *me)\n{\n  unsigned_word addr = device_find_integer_property(me, \"real-address\");\n  const device_property *data = device_find_property(me, \"data\");\n  const char *instance_spec = (device_find_property(me, \"instance\") != NULL\n\t\t\t       ? device_find_string_property(me, \"instance\")\n\t\t\t       : NULL);\n  device_instance *instance = NULL;\n  if (data == NULL)\n    device_error(me, \"missing property <data>\\n\");\n  if (instance_spec != NULL)\n    instance = tree_instance(me, instance_spec);\n  switch (data->type) {\n  case integer_property:\n    {\n      unsigned_cell buf = device_find_integer_property(me, \"data\");\n      H2T(buf);\n      if (instance == NULL) {\n\tif (device_dma_write_buffer(device_parent(me),\n\t\t\t\t    &buf,\n\t\t\t\t    0 /*address-space*/,\n\t\t\t\t    addr,\n\t\t\t\t    sizeof(buf), /*nr-bytes*/\n\t\t\t\t    1 /*violate ro*/) != sizeof(buf))\n\t  device_error(me, \"Problem storing integer 0x%x at 0x%lx\\n\",\n\t\t       (unsigned)buf, (unsigned long)addr);\n      }\n      else {\n\tif (device_instance_seek(instance, 0, addr) < 0\n\t    || device_instance_write(instance, &buf, sizeof(buf)) != sizeof(buf))\n\t  device_error(me, \"Problem storing integer 0x%x at 0x%lx of instance %s\\n\",\n\t\t       (unsigned)buf, (unsigned long)addr, instance_spec);\n      }\n    }\n    break;\n  default:\n    device_error(me, \"Write of this data is not yet implemented\\n\");\n    break;\n  }\n  if (instance != NULL)\n    device_instance_delete(instance);\n}",
+      "fn_code_pos": [
+        [
+          201,
+          0
+        ],
+        [
+          243,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_data_init_data_callback",
+        "parameters": {
+          "me": "device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nupdate_for_binary_section(bfd *abfd,\n\t\t\t  asection *the_section,\n\t\t\t  PTR obj)\n{\n  unsigned_word section_vma;\n  unsigned_word section_size;\n  access_type access;\n  device *me = (device*)obj;\n\n  /* skip the section if no memory to allocate */\n  if (! (bfd_get_section_flags(abfd, the_section) & SEC_ALLOC))\n    return;\n\n  /* check/ignore any sections of size zero */\n  section_size = bfd_get_section_size (the_section);\n  if (section_size == 0)\n    return;\n\n  /* find where it is to go */\n  section_vma = bfd_get_section_vma(abfd, the_section);\n\n  DTRACE(binary,\n\t (\"name=%-7s, vma=0x%.8lx, size=%6ld, flags=%3lx(%s%s%s%s%s )\\n\",\n\t  bfd_get_section_name(abfd, the_section),\n\t  (long)section_vma,\n\t  (long)section_size,\n\t  (long)bfd_get_section_flags(abfd, the_section),\n\t  bfd_get_section_flags(abfd, the_section) & SEC_LOAD ? \" LOAD\" : \"\",\n\t  bfd_get_section_flags(abfd, the_section) & SEC_CODE ? \" CODE\" : \"\",\n\t  bfd_get_section_flags(abfd, the_section) & SEC_DATA ? \" DATA\" : \"\",\n\t  bfd_get_section_flags(abfd, the_section) & SEC_ALLOC ? \" ALLOC\" : \"\",\n\t  bfd_get_section_flags(abfd, the_section) & SEC_READONLY ? \" READONLY\" : \"\"\n\t  ));\n\n  /* If there is an .interp section, it means it needs a shared library interpreter.  */\n  if (strcmp(\".interp\", bfd_get_section_name(abfd, the_section)) == 0)\n    error(\"Shared libraries are not yet supported.\\n\");\n\n  /* determine the devices access */\n  access = access_read;\n  if (bfd_get_section_flags(abfd, the_section) & SEC_CODE)\n    access |= access_exec;\n  if (!(bfd_get_section_flags(abfd, the_section) & SEC_READONLY))\n    access |= access_write;\n\n  /* if claim specified, allocate region from the memory device */\n  if (device_find_property(me, \"claim\") != NULL) {\n    device_instance *memory = tree_find_ihandle_property(me, \"/chosen/memory\");\n    unsigned_cell mem_in[3];\n    unsigned_cell mem_out[1];\n    mem_in[0] = 0; /*alignment - top-of-stack*/\n    mem_in[1] = section_size;\n    mem_in[2] = section_vma;\n    if (device_instance_call_method(memory, \"claim\", 3, mem_in, 1, mem_out) < 0)\n      device_error(me, \"failed to claim memory for section at 0x%lx (0x%lx\",\n\t\t   section_vma,\n\t\t   section_size);\n    if (mem_out[0] != section_vma)\n      device_error(me, \"section address not as requested\");\n  }\n\n  /* if a map, pass up a request to create the memory in core */\n  if (strncmp(device_name(me), \"map-binary\", strlen(\"map-binary\")) == 0)\n    device_attach_address(device_parent(me),\n\t\t\t  attach_raw_memory,\n\t\t\t  0 /*address space*/,\n\t\t\t  section_vma,\n\t\t\t  section_size,\n\t\t\t  access,\n\t\t\t  me);\n\n  /* if a load dma in the required data */\n  if (bfd_get_section_flags(abfd, the_section) & SEC_LOAD) {\n    void *section_init = zalloc(section_size);\n    if (!bfd_get_section_contents(abfd,\n\t\t\t\t  the_section,\n\t\t\t\t  section_init, 0,\n\t\t\t\t  section_size)) {\n      bfd_perror(\"binary\");\n      device_error(me, \"load of data failed\");\n      return;\n    }\n    if (device_dma_write_buffer(device_parent(me),\n\t\t\t\tsection_init,\n\t\t\t\t0 /*space*/,\n\t\t\t\tsection_vma,\n\t\t\t\tsection_size,\n\t\t\t\t1 /*violate_read_only*/)\n\t!= section_size)\n      device_error(me, \"broken transfer\\n\");\n    free(section_init); /* only free if load */\n  }\n}",
+      "fn_code_pos": [
+        [
+          315,
+          0
+        ],
+        [
+          408,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "update_for_binary_section",
+        "parameters": {
+          "abfd": "bfd",
+          "the_section": "asection",
+          "obj": "PTR"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_binary_init_data_callback(device *me)\n{\n  /* get the file name */\n  const char *file_name = device_find_string_property(me, \"file-name\");\n  bfd *image;\n\n  /* open the file */\n  image = bfd_openr(file_name, NULL);\n  if (image == NULL) {\n    bfd_perror(\"binary\");\n    device_error(me, \"Failed to open file %s\\n\", file_name);\n  }\n\n  /* check it is valid */\n  if (!bfd_check_format(image, bfd_object)) {\n    bfd_close(image);\n    device_error(me, \"The file %s has an invalid binary format\\n\", file_name);\n  }\n\n  /* and the data sections */\n  bfd_map_over_sections(image,\n\t\t\tupdate_for_binary_section,\n\t\t\t(PTR)me);\n\n  bfd_close(image);\n}",
+      "fn_code_pos": [
+        [
+          410,
+          0
+        ],
+        [
+          436,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_binary_init_data_callback",
+        "parameters": {
+          "me": "device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nsizeof_argument_strings(char **arg)\n{\n  int sizeof_strings = 0;\n\n  /* robust */\n  if (arg == NULL)\n    return 0;\n\n  /* add up all the string sizes (padding as we go) */\n  for (; *arg != NULL; arg++) {\n    int len = strlen(*arg) + 1;\n    sizeof_strings += ALIGN_8(len);\n  }\n\n  return sizeof_strings;\n}",
+      "fn_code_pos": [
+        [
+          476,
+          0
+        ],
+        [
+          492,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sizeof_argument_strings",
+        "parameters": {
+          "arg": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nnumber_of_arguments(char **arg)\n{\n  int nr;\n  if (arg == NULL)\n    return 0;\n  for (nr = 0; *arg != NULL; arg++, nr++);\n  return nr;\n}",
+      "fn_code_pos": [
+        [
+          494,
+          0
+        ],
+        [
+          502,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "number_of_arguments",
+        "parameters": {
+          "arg": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nsizeof_arguments(char **arg)\n{\n  return ALIGN_8((number_of_arguments(arg) + 1) * sizeof(unsigned_word));\n}",
+      "fn_code_pos": [
+        [
+          504,
+          0
+        ],
+        [
+          508,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sizeof_arguments",
+        "parameters": {
+          "arg": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nwrite_stack_arguments(device *me,\n\t\t      char **arg,\n\t\t      unsigned_word start_block,\n\t\t      unsigned_word end_block,\n\t\t      unsigned_word start_arg,\n\t\t      unsigned_word end_arg)\n{\n  DTRACE(stack,\n\t(\"write_stack_arguments(device=%s, arg=0x%lx, start_block=0x%lx, end_block=0x%lx, start_arg=0x%lx, end_arg=0x%lx)\\n\",\n\t device_name(me), (long)arg, (long)start_block, (long)end_block, (long)start_arg, (long)end_arg));\n  if (arg == NULL)\n    device_error(me, \"Attempt to write a null array onto the stack\\n\");\n  /* only copy in arguments, memory is already zero */\n  for (; *arg != NULL; arg++) {\n    int len = strlen(*arg)+1;\n    unsigned_word target_start_block;\n    DTRACE(stack,\n\t  (\"write_stack_arguments() write %s=%s at %s=0x%lx %s=0x%lx %s=0x%lx\\n\",\n\t   \"**arg\", *arg, \"start_block\", (long)start_block,\n\t   \"len\", (long)len, \"start_arg\", (long)start_arg));\n    if (psim_write_memory(device_system(me), 0, *arg,\n\t\t\t  start_block, len,\n\t\t\t  0/*violate_readonly*/) != len)\n      device_error(me, \"Write of **arg (%s) at 0x%lx of stack failed\\n\",\n\t\t   *arg, (unsigned long)start_block);\n    target_start_block = H2T_word(start_block);\n    if (psim_write_memory(device_system(me), 0, &target_start_block,\n\t\t\t  start_arg, sizeof(target_start_block),\n\t\t\t  0) != sizeof(target_start_block))\n      device_error(me, \"Write of *arg onto stack failed\\n\");\n    start_block += ALIGN_8(len);\n    start_arg += sizeof(start_block);\n  }\n  start_arg += sizeof(start_block); /*the null at the end*/\n  if (start_block != end_block\n      || ALIGN_8(start_arg) != end_arg)\n    device_error(me, \"Probable corrpution of stack arguments\\n\");\n  DTRACE(stack, (\"write_stack_arguments() = void\\n\"));\n}",
+      "fn_code_pos": [
+        [
+          510,
+          0
+        ],
+        [
+          549,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_stack_arguments",
+        "parameters": {
+          "me": "device",
+          "arg": "char",
+          "start_block": "unsigned_word",
+          "end_block": "unsigned_word",
+          "start_arg": "unsigned_word",
+          "end_arg": "unsigned_word"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncreate_ppc_elf_stack_frame(device *me,\n\t\t\t   unsigned_word bottom_of_stack,\n\t\t\t   char **argv,\n\t\t\t   char **envp)\n{\n  /* fixme - this is over aligned */\n\n  /* information block */\n  const unsigned sizeof_envp_block = sizeof_argument_strings(envp);\n  const unsigned_word start_envp_block = bottom_of_stack - sizeof_envp_block;\n  const unsigned sizeof_argv_block = sizeof_argument_strings(argv);\n  const unsigned_word start_argv_block = start_envp_block - sizeof_argv_block;\n\n  /* auxiliary vector - contains only one entry */\n  const unsigned sizeof_aux_entry = 2*sizeof(unsigned_word); /* magic */\n  const unsigned_word start_aux = start_argv_block - ALIGN_8(sizeof_aux_entry);\n\n  /* environment points (including null sentinal) */\n  const unsigned sizeof_envp = sizeof_arguments(envp);\n  const unsigned_word start_envp = start_aux - sizeof_envp;\n\n  /* argument pointers (including null sentinal) */\n  const int argc = number_of_arguments(argv);\n  const unsigned sizeof_argv = sizeof_arguments(argv);\n  const unsigned_word start_argv = start_envp - sizeof_argv;\n\n  /* link register save address - alligned to a 16byte boundary */\n  const unsigned_word top_of_stack = ((start_argv\n\t\t\t\t       - 2 * sizeof(unsigned_word))\n\t\t\t\t      & ~0xf);\n\n  /* install arguments on stack */\n  write_stack_arguments(me, envp,\n\t\t\tstart_envp_block, bottom_of_stack,\n\t\t\tstart_envp, start_aux);\n  write_stack_arguments(me, argv,\n\t\t\tstart_argv_block, start_envp_block,\n\t\t\tstart_argv, start_envp);\n\n  /* set up the registers */\n  ASSERT (psim_write_register(device_system(me), -1,\n\t\t\t      &top_of_stack, \"sp\", cooked_transfer) > 0);\n  ASSERT (psim_write_register(device_system(me), -1,\n\t\t\t      &argc, \"r3\", cooked_transfer) > 0);\n  ASSERT (psim_write_register(device_system(me), -1,\n\t\t\t      &start_argv, \"r4\", cooked_transfer) > 0);\n  ASSERT (psim_write_register(device_system(me), -1,\n\t\t\t      &start_envp, \"r5\", cooked_transfer) > 0);\n  ASSERT (psim_write_register(device_system(me), -1,\n\t\t\t      &start_aux, \"r6\", cooked_transfer) > 0);\n}",
+      "fn_code_pos": [
+        [
+          551,
+          0
+        ],
+        [
+          602,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "create_ppc_elf_stack_frame",
+        "parameters": {
+          "me": "device",
+          "bottom_of_stack": "unsigned_word",
+          "argv": "char",
+          "envp": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncreate_ppc_aix_stack_frame(device *me,\n\t\t\t   unsigned_word bottom_of_stack,\n\t\t\t   char **argv,\n\t\t\t   char **envp)\n{\n  unsigned_word core_envp;\n  unsigned_word core_argv;\n  unsigned_word core_argc;\n  unsigned_word core_aux;\n  unsigned_word top_of_stack;\n\n  /* cheat - create an elf stack frame */\n  create_ppc_elf_stack_frame(me, bottom_of_stack, argv, envp);\n  \n  /* extract argument addresses from registers */\n  ASSERT (psim_read_register(device_system(me), 0,\n\t\t\t     &top_of_stack, \"r1\", cooked_transfer) > 0);\n  ASSERT (psim_read_register(device_system(me), 0,\n\t\t\t     &core_argc, \"r3\", cooked_transfer) > 0);\n  ASSERT (psim_read_register(device_system(me), 0,\n\t\t\t     &core_argv, \"r4\", cooked_transfer) > 0);\n  ASSERT (psim_read_register(device_system(me), 0,\n\t\t\t     &core_envp, \"r5\", cooked_transfer) > 0);\n  ASSERT (psim_read_register(device_system(me), 0,\n\t\t\t     &core_aux, \"r6\", cooked_transfer) > 0);\n\n  /* extract arguments from registers */\n  device_error(me, \"Unfinished procedure create_ppc_aix_stack_frame\\n\");\n}",
+      "fn_code_pos": [
+        [
+          604,
+          0
+        ],
+        [
+          633,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "create_ppc_aix_stack_frame",
+        "parameters": {
+          "me": "device",
+          "bottom_of_stack": "unsigned_word",
+          "argv": "char",
+          "envp": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncreate_ppc_chirp_bootargs(device *me,\n\t\t\t  char **argv)\n{\n  /* concat the arguments */\n  char args[1024];\n  char **chp = argv + 1;\n  args[0] = '\\0';\n  while (*chp != NULL) {\n    if (strlen(args) > 0)\n      strcat(args, \" \");\n    if (strlen(args) + strlen(*chp) >= sizeof(args))\n      device_error(me, \"buffer overflow\");\n    strcat(args, *chp);\n    chp++;\n  }\n\n  /* set the arguments property */\n  tree_parse(me, \"/chosen/bootargs \\\"%s\", args);\n}",
+      "fn_code_pos": [
+        [
+          636,
+          0
+        ],
+        [
+          655,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "create_ppc_chirp_bootargs",
+        "parameters": {
+          "me": "device",
+          "argv": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nhw_stack_ioctl(device *me,\n\t       cpu *processor,\n\t       unsigned_word cia,\n\t       device_ioctl_request request,\n\t       va_list ap)\n{\n  switch (request) {\n  case device_ioctl_create_stack:\n    {\n      unsigned_word stack_pointer = va_arg(ap, unsigned_word);\n      char **argv = va_arg(ap, char **);\n      char **envp = va_arg(ap, char **);\n      const char *stack_type;\n      DTRACE(stack,\n\t     (\"stack_ioctl_callback(me=0x%lx:%s processor=0x%lx cia=0x%lx argv=0x%lx envp=0x%lx)\\n\",\n\t      (long)me, device_name(me),\n\t      (long)processor,\n\t      (long)cia,\n\t      (long)argv,\n\t      (long)envp));\n      stack_type = device_find_string_property(me, \"stack-type\");\n      if (strcmp(stack_type, \"ppc-elf\") == 0)\n\tcreate_ppc_elf_stack_frame(me, stack_pointer, argv, envp);\n      else if (strcmp(stack_type, \"ppc-xcoff\") == 0)\n\tcreate_ppc_aix_stack_frame(me, stack_pointer, argv, envp);\n      else if (strcmp(stack_type, \"chirp\") == 0)\n\tcreate_ppc_chirp_bootargs(me, argv);\n      else if (strcmp(stack_type, \"none\") != 0)\n\tdevice_error(me, \"Unknown initial stack frame type %s\", stack_type);\n      DTRACE(stack, \n\t     (\"stack_ioctl_callback() = void\\n\"));\n      break;\n    }\n  default:\n    device_error(me, \"Unsupported ioctl requested\");\n    break;\n  }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          658,
+          0
+        ],
+        [
+          697,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_stack_ioctl",
+        "parameters": {
+          "me": "device",
+          "processor": "cpu",
+          "cia": "unsigned_word",
+          "request": "device_ioctl_request",
+          "ap": "va_list"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"device_table.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"psim.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

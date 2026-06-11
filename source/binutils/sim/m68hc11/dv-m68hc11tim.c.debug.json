@@ -1,0 +1,780 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nattach_m68hc11tim_regs (struct hw *me,\n                        struct m68hc11tim *controller)\n{\n  hw_attach_address (hw_parent (me), M6811_IO_LEVEL, io_map,\n                     M6811_TIMER_FIRST_REG,\n                     M6811_TIMER_LAST_REG - M6811_TIMER_FIRST_REG + 1,\n\t\t     me);\n}",
+      "fn_code_pos": [
+        [
+          110,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_m68hc11tim_regs",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct m68hc11tim"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11tim_finish (struct hw *me)\n{\n  struct m68hc11tim *controller;\n\n  controller = HW_ZALLOC (me, struct m68hc11tim);\n  set_hw_data (me, controller);\n  set_hw_io_read_buffer (me, m68hc11tim_io_read_buffer);\n  set_hw_io_write_buffer (me, m68hc11tim_io_write_buffer);\n  set_hw_ports (me, m68hc11tim_ports);\n  set_hw_port_event (me, m68hc11tim_port_event);\n#ifdef set_hw_ioctl\n  set_hw_ioctl (me, m68hc11tim_ioctl);\n#else\n  me->to_ioctl = m68hc11tim_ioctl;\n#endif\n  \n  /* Preset defaults.  */\n  controller->clock_prescaler = 1;\n  controller->tcnt_adjust = 0;\n  \n  /* Attach ourself to our parent bus.  */\n  attach_m68hc11tim_regs (me, controller);\n}",
+      "fn_code_pos": [
+        [
+          120,
+          0
+        ],
+        [
+          143,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11tim_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11tim_port_event (struct hw *me,\n                       int my_port,\n                       struct hw *source,\n                       int source_port,\n                       int level)\n{\n  SIM_DESC sd;\n  struct m68hc11tim *controller;\n  sim_cpu *cpu;\n  unsigned8 val;\n  unsigned16 tcnt;\n\n  controller = hw_data (me);\n  sd         = hw_system (me);\n  cpu        = STATE_CPU (sd, 0);\n  switch (my_port)\n    {\n    case RESET_PORT:\n      {\n\tHW_TRACE ((me, \"Timer reset\"));\n\n        /* Cancel all timer events.  */\n        if (controller->rti_timer_event)\n          {\n            hw_event_queue_deschedule (me, controller->rti_timer_event);\n            controller->rti_timer_event = 0;\n            controller->rti_prev_interrupt = 0;\n          }\n        if (controller->cop_timer_event)\n          {\n            hw_event_queue_deschedule (me, controller->cop_timer_event);\n            controller->cop_timer_event = 0;\n            controller->cop_prev_interrupt = 0;\n          }\n        if (controller->tof_timer_event)\n          {\n            hw_event_queue_deschedule (me, controller->tof_timer_event);\n            controller->tof_timer_event = 0;\n          }\n        if (controller->cmp_timer_event)\n          {\n            hw_event_queue_deschedule (me, controller->cmp_timer_event);\n            controller->cmp_timer_event = 0;\n          }\n\n        /* Reset the state of Timer registers.  This also restarts\n           the timer events (overflow and RTI clock).  The pending\n           flags (TFLG2) must be cleared explicitly here.  */\n        val = 0;\n        cpu->ios[M6811_TFLG2] = 0;\n        m68hc11tim_io_write_buffer (me, &val, io_map,\n                                    (unsigned_word) M6811_TMSK2, 1);\n        m68hc11tim_io_write_buffer (me, &val, io_map,\n                                    (unsigned_word) M6811_PACTL, 1);\n        break;\n      }\n\n    case CAPTURE:\n      tcnt = (uint16) ((cpu->cpu_absolute_cycle - controller->tcnt_adjust)\n                       / controller->clock_prescaler);\n      switch (level)\n        {\n        case M6811_TIC1:\n        case M6811_TIC2:\n        case M6811_TIC3:\n          cpu->ios[level] = tcnt >> 8;\n          cpu->ios[level + 1] = tcnt;\n          break;\n\n        default:\n          hw_abort (me, \"Invalid event parameter %d\", level);\n          break;\n        }\n      break;\n\n    default:\n      hw_abort (me, \"Event on unknown port %d\", my_port);\n      break;\n    }\n}",
+      "fn_code_pos": [
+        [
+          148,
+          0
+        ],
+        [
+          228,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11tim_port_event",
+        "parameters": {
+          "me": "struct hw",
+          "my_port": "int",
+          "source": "struct hw",
+          "source_port": "int",
+          "level": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11tim_timer_event (struct hw *me, void *data)\n{\n  SIM_DESC sd;\n  struct m68hc11tim *controller;\n  sim_cpu *cpu;\n  enum event_type type;\n  unsigned long delay;\n  struct hw_event **eventp;\n  int check_interrupt = 0;\n  unsigned mask;\n  unsigned flags;\n  unsigned long tcnt_internal;\n  unsigned long tcnt, tcnt_prev;\n  signed64 tcnt_insn_end;\n  signed64 tcnt_insn_start;\n  int i;\n  sim_events *events;\n  \n  controller = hw_data (me);\n  sd         = hw_system (me);\n  cpu        = STATE_CPU (sd, 0);\n  type       = (enum event_type) ((long) data) & 0x0FF;\n  events     = STATE_EVENTS (sd);\n\n  delay = 0;\n  switch (type)\n    {\n    case COP_EVENT:\n      eventp = &controller->cop_timer_event;\n      delay  = controller->cop_delay;\n      delay  = controller->cop_prev_interrupt + controller->cop_delay;\n      controller->cop_prev_interrupt = delay;\n      delay  = delay - cpu->cpu_absolute_cycle;\n      check_interrupt = 1;\n      delay += events->nr_ticks_to_process;\n      break;\n\n    case RTI_EVENT:\n      eventp = &controller->rti_timer_event;\n      delay  = controller->rti_prev_interrupt + controller->rti_delay;\n      \n      if (((long) (data) & 0x0100) == 0)\n        {\n          cpu->ios[M6811_TFLG2] |= M6811_RTIF;\n          check_interrupt = 1;\n          controller->rti_prev_interrupt = delay;\n          delay += controller->rti_delay;\n        }\n      delay = delay - cpu->cpu_absolute_cycle;\n      delay += events->nr_ticks_to_process;\n      break;\n\n    case OVERFLOW_EVENT:\n      /* Compute the 68HC11 internal free running counter.  */\n      tcnt_internal = (cpu->cpu_absolute_cycle - controller->tcnt_adjust);\n\n      /* We must take into account the prescaler that comes\n         before the counter (it's a power of 2).  */\n      tcnt_internal &= 0x0ffff * controller->clock_prescaler;\n\n      /* Compute the time when the overflow will occur.  It occurs when\n         the counter increments from 0x0ffff to 0x10000 (and thus resets).  */\n      delay = (0x10000 * controller->clock_prescaler) - tcnt_internal;\n\n      /* The 'nr_ticks_to_process' will be subtracted when the event\n         is scheduled.  */\n      delay += events->nr_ticks_to_process;\n\n      eventp = &controller->tof_timer_event;\n      if (((long) (data) & 0x100) == 0)\n        {\n          cpu->ios[M6811_TFLG2] |= M6811_TOF;\n          check_interrupt = 1;\n        }\n      break;\n\n    case COMPARE_EVENT:\n      /* Compute value of TCNT register (64-bit precision) at beginning\n         and end of instruction.  */\n      tcnt_insn_end = (cpu->cpu_absolute_cycle - controller->tcnt_adjust);\n      tcnt_insn_start = (tcnt_insn_end - cpu->cpu_current_cycle);\n\n      /* TCNT value at beginning of current instruction.  */\n      tcnt_prev = (tcnt_insn_start / controller->clock_prescaler) & 0x0ffff;\n\n      /* TCNT value at end of current instruction.  */\n      tcnt = (tcnt_insn_end / controller->clock_prescaler) & 0x0ffff;\n\n      /* We must take into account the prescaler that comes\n         before the counter (it's a power of 2).  */\n      tcnt_internal = tcnt_insn_end;\n      tcnt_internal &= 0x0ffff * controller->clock_prescaler;\n\n      flags = cpu->ios[M6811_TMSK1];\n      mask  = 0x80;\n      delay = 65536 * controller->clock_prescaler;\n\n      /* Scan each output compare register to see if one matches\n         the free running counter.  Set the corresponding OCi flag\n         if the output compare is enabled.  */\n      for (i = M6811_TOC1; i <= M6811_TOC5; i += 2, mask >>= 1)\n        {\n          unsigned long compare;\n\n          compare = (cpu->ios[i] << 8) + cpu->ios[i + 1];\n\n          /* See if compare is reached; handle wrap arround.  */\n          if ((compare >= tcnt_prev && compare <= tcnt && tcnt_prev < tcnt)\n              || (compare >= tcnt_prev && tcnt_prev > tcnt)\n              || (compare < tcnt && tcnt_prev > tcnt))\n            {\n              unsigned dt;\n\n              if (compare > tcnt)\n                dt = 0x10000 - compare - tcnt;\n              else\n                dt = tcnt - compare;\n\n              cpu->ios[M6811_TFLG1] |= mask;\n\n              /* Raise interrupt now at the correct CPU cycle so that\n                 we can find the interrupt latency.  */\n              cpu->cpu_absolute_cycle -= dt;\n              interrupts_update_pending (&cpu->cpu_interrupts);\n              cpu->cpu_absolute_cycle += dt;\n            }\n\n          /* Compute how many times for the next match.\n             Use the internal counter value to take into account the\n             prescaler accurately.  */\n          compare = compare * controller->clock_prescaler;\n          if (compare > tcnt_internal)\n            compare = compare - tcnt_internal;\n          else\n            compare = compare - tcnt_internal\n              + 65536 * controller->clock_prescaler;\n\n          if (compare < delay)\n            delay = compare;\n        }\n\n      /* Deactivate the compare timer if no output compare is enabled.  */\n      if ((flags & 0xF8) == 0)\n        delay = 0;\n      else\n        delay += events->nr_ticks_to_process;\n\n      eventp = &controller->cmp_timer_event;\n      break;\n\n    default:\n      eventp = 0;\n      break;\n    }\n\n  if (*eventp)\n    {\n      hw_event_queue_deschedule (me, *eventp);\n      *eventp = 0;\n    }\n\n  if (delay != 0)\n    {\n      *eventp = hw_event_queue_schedule (me, delay,\n                                         m68hc11tim_timer_event,\n                                         (void*) type);\n    }\n\n  if (check_interrupt)\n    interrupts_update_pending (&cpu->cpu_interrupts);\n}",
+      "fn_code_pos": [
+        [
+          238,
+          0
+        ],
+        [
+          409,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11tim_timer_event",
+        "parameters": {
+          "me": "struct hw",
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static double\nto_realtime (sim_cpu *cpu, signed64 t)\n{\n  return (double) (t) / (double) (cpu->cpu_frequency / 4);\n}",
+      "fn_code_pos": [
+        [
+          470,
+          0
+        ],
+        [
+          474,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "to_realtime",
+        "parameters": {
+          "cpu": "sim_cpu",
+          "t": "signed64"
+        },
+        "return_type": "double"
+      }
+    },
+    {
+      "fn_code": "const char*\ncycle_to_string (sim_cpu *cpu, signed64 t, int flags)\n{\n  char time_buf[32];\n  char cycle_buf[32];\n  static char buf[64];\n\n  time_buf[0] = 0;\n  cycle_buf[0] = 0;\n  if (flags & PRINT_TIME)\n    {\n      double dt;\n\n      dt = to_realtime (cpu, t);\n      if (dt < 0.001)\n        sprintf (time_buf, \" (%3.1f us)\", dt * 1000000.0);\n      else if (dt < 1.0)\n        sprintf (time_buf, \" (%3.1f ms)\", dt * 1000.0);\n      else\n        sprintf (time_buf, \" (%3.1f s)\", dt);\n    }\n\n  if (flags & PRINT_CYCLE)\n    sprintf (cycle_buf, \" cycle%s\",\n             (t > 1 ? \"s\" : \"\"));\n\n  if (t < LONG_MAX)\n    sprintf (buf, \"%9lu%s%s\", (unsigned long) t, cycle_buf, time_buf);\n  else\n    sprintf (buf, \"%llu%s%s\", t, cycle_buf, time_buf);\n  return buf;\n}",
+      "fn_code_pos": [
+        [
+          476,
+          0
+        ],
+        [
+          507,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cycle_to_string",
+        "parameters": {
+          "cpu": "sim_cpu",
+          "t": "signed64",
+          "flags": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11tim_print_timer (struct hw *me, const char *name,\n                        struct hw_event *event)\n{\n  SIM_DESC sd;\n  \n  sd = hw_system (me);\n  if (event == 0)\n    {\n      sim_io_printf (sd, \"  No %s interrupt will be raised.\\n\", name);\n    }\n  else\n    {\n      signed64 t;\n      sim_cpu *cpu;\n\n      cpu = STATE_CPU (sd, 0);\n\n      t  = hw_event_remain_time (me, event);\n      sim_io_printf (sd, \"  Next %s interrupt in %s\\n\",\n                     name, cycle_to_string (cpu, t, PRINT_TIME | PRINT_CYCLE));\n    }\n}",
+      "fn_code_pos": [
+        [
+          509,
+          0
+        ],
+        [
+          531,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11tim_print_timer",
+        "parameters": {
+          "me": "struct hw",
+          "name": "char",
+          "event": "struct hw_event"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11tim_info (struct hw *me)\n{\n  SIM_DESC sd;\n  uint16 base = 0;\n  sim_cpu *cpu;\n  struct m68hc11tim *controller;\n  uint8 val;\n  uint16 val16;\n  \n  sd = hw_system (me);\n  cpu = STATE_CPU (sd, 0);\n  controller = hw_data (me);\n  \n  sim_io_printf (sd, \"M68HC11 Timer:\\n\");\n\n  base = cpu_get_io_base (cpu);\n\n  /* Info for TIC1 */\n  val16  = (cpu->ios[M6811_TIC1_H] << 8) + cpu->ios[M6811_TIC1_L];\n  print_io_word (sd, \"TIC1 \", 0, val16, base + M6811_TIC1);\n  sim_io_printf (sd, \"\\n\");\n\n  /* Info for TIC2 */\n  val16  = (cpu->ios[M6811_TIC2_H] << 8) + cpu->ios[M6811_TIC2_L];\n  print_io_word (sd, \"TIC2 \", 0, val16, base + M6811_TIC2);\n  sim_io_printf (sd, \"\\n\");\n\n  /* Info for TIC3 */\n  val16  = (cpu->ios[M6811_TIC3_H] << 8) + cpu->ios[M6811_TIC3_L];\n  print_io_word (sd, \"TIC3 \", 0, val16, base + M6811_TIC3);\n  sim_io_printf (sd, \"\\n\");\n\n  /* Info for TOC1 */\n  val16  = (cpu->ios[M6811_TOC1_H] << 8) + cpu->ios[M6811_TOC1_L];\n  print_io_word (sd, \"TOC1 \", 0, val16, base + M6811_TOC1);\n  sim_io_printf (sd, \"\\n\");\n\n  /* Info for TOC2 */\n  val16  = (cpu->ios[M6811_TOC2_H] << 8) + cpu->ios[M6811_TOC2_L];\n  print_io_word (sd, \"TOC2 \", 0, val16, base + M6811_TOC2);\n  sim_io_printf (sd, \"\\n\");\n\n  /* Info for TOC3 */\n  val16  = (cpu->ios[M6811_TOC3_H] << 8) + cpu->ios[M6811_TOC3_L];\n  print_io_word (sd, \"TOC3 \", 0, val16, base + M6811_TOC3);\n  sim_io_printf (sd, \"\\n\");\n\n  /* Info for TOC4 */\n  val16  = (cpu->ios[M6811_TOC4_H] << 8) + cpu->ios[M6811_TOC4_L];\n  print_io_word (sd, \"TOC4 \", 0, val16, base + M6811_TOC4);\n  sim_io_printf (sd, \"\\n\");\n\n  /* Info for TOC5 */\n  val16  = (cpu->ios[M6811_TOC5_H] << 8) + cpu->ios[M6811_TOC5_L];\n  print_io_word (sd, \"TOC5 \", 0, val16, base + M6811_TOC5);\n  sim_io_printf (sd, \"\\n\");\n\n  /* Info for TMSK1 */\n  val  = cpu->ios[M6811_TMSK1];\n  print_io_byte (sd, \"TMSK1 \", tmsk1_desc, val, base + M6811_TMSK1);\n  sim_io_printf (sd, \"\\n\");\n\n  /* Info for TFLG1 */\n  val = cpu->ios[M6811_TFLG1];\n  print_io_byte (sd, \"TFLG1\", tflg1_desc, val, base + M6811_TFLG1);\n  sim_io_printf (sd, \"\\n\");\n\n  val  = cpu->ios[M6811_TMSK2];\n  print_io_byte (sd, \"TMSK2 \", tmsk2_desc, val, base + M6811_TMSK2);\n  sim_io_printf (sd, \"\\n\");\n\n  val = cpu->ios[M6811_TFLG2];\n  print_io_byte (sd, \"TFLG2\", tflg2_desc, val, base + M6811_TFLG2);\n  sim_io_printf (sd, \"\\n\");\n\n  val = cpu->ios[M6811_PACTL];\n  print_io_byte (sd, \"PACTL\", pactl_desc, val, base + M6811_PACTL);\n  sim_io_printf (sd, \"\\n\");\n\n  val = cpu->ios[M6811_PACNT];\n  print_io_byte (sd, \"PACNT\", 0, val, base + M6811_PACNT);\n  sim_io_printf (sd, \"\\n\");\n\n  /* Give info about the next timer interrupts.  */\n  m68hc11tim_print_timer (me, \"RTI\", controller->rti_timer_event);\n  m68hc11tim_print_timer (me, \"COP\", controller->cop_timer_event);\n  m68hc11tim_print_timer (me, \"OVERFLOW\", controller->tof_timer_event);\n  m68hc11tim_print_timer (me, \"COMPARE\", controller->cmp_timer_event);\n}",
+      "fn_code_pos": [
+        [
+          533,
+          0
+        ],
+        [
+          622,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11tim_info",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nm68hc11tim_ioctl (struct hw *me,\n                  hw_ioctl_request request,\n                  va_list ap)\n{\n  m68hc11tim_info (me);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          624,
+          0
+        ],
+        [
+          631,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11tim_ioctl",
+        "parameters": {
+          "me": "struct hw",
+          "request": "hw_ioctl_request",
+          "ap": "va_list"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nm68hc11tim_io_read_buffer (struct hw *me,\n                           void *dest,\n                           int space,\n                           unsigned_word base,\n                           unsigned nr_bytes)\n{\n  SIM_DESC sd;\n  struct m68hc11tim *controller;\n  sim_cpu *cpu;\n  unsigned8 val;\n  unsigned cnt = 0;\n  \n  HW_TRACE ((me, \"read 0x%08lx %d\", (long) base, (int) nr_bytes));\n\n  sd  = hw_system (me);\n  cpu = STATE_CPU (sd, 0);\n  controller = hw_data (me);\n\n  while (nr_bytes)\n    {\n      switch (base)\n        {\n          /* The cpu_absolute_cycle is updated after each instruction.\n             Reading in a 16-bit register will be split in two accesses\n             but this will be atomic within the simulator.  */\n        case M6811_TCTN_H:\n          val = (uint8) ((cpu->cpu_absolute_cycle - controller->tcnt_adjust)\n                         / (controller->clock_prescaler * 256));\n          break;\n\n        case M6811_TCTN_L:\n          val = (uint8) ((cpu->cpu_absolute_cycle - controller->tcnt_adjust)\n                         / controller->clock_prescaler);\n          break;\n\n        default:\n          val = cpu->ios[base];\n          break;\n        }\n      *((unsigned8*) dest) = val;\n      dest = (char*) dest + 1;\n      base++;\n      nr_bytes--;\n      cnt++;\n    }\n  return cnt;\n}",
+      "fn_code_pos": [
+        [
+          635,
+          0
+        ],
+        [
+          682,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11tim_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nm68hc11tim_io_write_buffer (struct hw *me,\n                            const void *source,\n                            int space,\n                            unsigned_word base,\n                            unsigned nr_bytes)\n{\n  SIM_DESC sd;\n  struct m68hc11tim *controller;\n  sim_cpu *cpu;\n  unsigned8 val, n;\n  signed64 adj;\n  int reset_compare = 0;\n  int reset_overflow = 0;\n  int cnt = 0;\n  \n  HW_TRACE ((me, \"write 0x%08lx %d\", (long) base, (int) nr_bytes));\n\n  sd  = hw_system (me);\n  cpu = STATE_CPU (sd, 0);\n  controller = hw_data (me);\n\n  while (nr_bytes)\n    {\n      val = *((const unsigned8*) source);\n      switch (base)\n        {\n          /* Set the timer counter low part, trying to preserve the low part.\n             We compute the absolute cycle adjustment that we have to apply\n             to obtain the timer current value.  Computation must be made\n             in 64-bit to avoid overflow problems.  */\n        case M6811_TCTN_L:\n          adj = ((cpu->cpu_absolute_cycle - controller->tcnt_adjust)\n                 / (controller->clock_prescaler * (signed64) 256)) & 0x0FF;\n          adj = cpu->cpu_absolute_cycle\n            - (adj * controller->clock_prescaler * (signed64) 256)\n            - ((signed64) adj * controller->clock_prescaler);\n          controller->tcnt_adjust = adj;\n          reset_compare = 1;\n          reset_overflow = 1;\n          break;\n\n        case M6811_TCTN_H:\n          adj = ((cpu->cpu_absolute_cycle - controller->tcnt_adjust)\n                 / controller->clock_prescaler) & 0x0ff;\n          adj = cpu->cpu_absolute_cycle\n            - ((signed64) val * controller->clock_prescaler * (signed64) 256)\n            - (adj * controller->clock_prescaler);\n          controller->tcnt_adjust = adj;\n          reset_compare = 1;\n          reset_overflow = 1;\n          break;\n\n        case M6811_TMSK2:\n\n          /* Timer prescaler cannot be changed after 64 bus cycles.  */\n          if (cpu->cpu_absolute_cycle >= 64)\n            {\n              val &= ~(M6811_PR1 | M6811_PR0);\n              val |= cpu->ios[M6811_TMSK2] & (M6811_PR1 | M6811_PR0);\n            }\n          switch (val & (M6811_PR1 | M6811_PR0))\n            {\n            case 0:\n              n = 1;\n              break;\n            case M6811_PR0:\n              n = 4;\n              break;\n            case M6811_PR1:\n              n = 8;\n              break;\n            default:\n            case M6811_PR1 | M6811_PR0:\n              n = 16;\n              break;\n            }\n          if (cpu->cpu_absolute_cycle < 64)\n            {\n              reset_overflow = 1;\n              controller->clock_prescaler = n;\n            }\n          cpu->ios[base] = val;\n          interrupts_update_pending (&cpu->cpu_interrupts);\n          break;\n\n        case M6811_PACTL:\n          n = (1 << ((val & (M6811_RTR1 | M6811_RTR0))));\n          cpu->ios[base] = val;\n\n          controller->rti_delay = (long) (n) * 8192;\n          m68hc11tim_timer_event (me, (void*) (RTI_EVENT| 0x100));\n          break;\n      \n        case M6811_TFLG2:\n          val &= cpu->ios[M6811_TFLG2];\n          cpu->ios[M6811_TFLG2] &= ~val;\n          interrupts_update_pending (&cpu->cpu_interrupts);\n          break;\n\n        case M6811_TMSK1:\n          cpu->ios[M6811_TMSK1] = val;\n          interrupts_update_pending (&cpu->cpu_interrupts);\n          reset_compare = 1;\n          break;\n\n        case M6811_TFLG1:\n          val &= cpu->ios[M6811_TFLG1];\n          cpu->ios[M6811_TFLG1] &= ~val;\n          interrupts_update_pending (&cpu->cpu_interrupts);          \n          break;\n\n        case M6811_TOC1:\n        case M6811_TOC2:\n        case M6811_TOC3:\n        case M6811_TOC4:\n        case M6811_TOC5:\n          cpu->ios[base] = val;\n          reset_compare = 1;\n          break;\n\n        case M6811_TCTL1:\n        case M6811_TCTL2:\n          cpu->ios[base] = val;\n          break;\n\n        default:\n          cpu->ios[base] = val;\n          break;\n        }\n\n      base++;\n      nr_bytes--;\n      cnt++;\n      source = (char*) source + 1;\n    }\n\n  /* Re-compute the next timer compare event.  */\n  if (reset_compare)\n    {\n      m68hc11tim_timer_event (me, (void*) (COMPARE_EVENT));\n    }\n  if (reset_overflow)\n    {\n      m68hc11tim_timer_event (me, (void*) (OVERFLOW_EVENT| 0x100));\n    }\n  return cnt;\n}",
+      "fn_code_pos": [
+        [
+          684,
+          0
+        ],
+        [
+          831,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11tim_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "cycle_to_string (sim_cpu *cpu, signed64 t, int flags)",
+      "fn_dec_pos": [
+        [
+          477,
+          0
+        ],
+        [
+          477,
+          53
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cycle_to_string",
+        "parameters": {
+          "cpu": "sim_cpu",
+          "t": "signed64",
+          "flags": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct m68hc11tim \n{\n  unsigned long cop_delay;\n  unsigned long rti_delay;\n  unsigned long ovf_delay;\n  signed64      clock_prescaler;\n  signed64      tcnt_adjust;\n  signed64      cop_prev_interrupt;\n  signed64      rti_prev_interrupt;\n\n  /* Periodic timers.  */\n  struct hw_event *rti_timer_event;\n  struct hw_event *cop_timer_event;\n  struct hw_event *tof_timer_event;\n  struct hw_event *cmp_timer_event;\n}",
+      {
+        "cop_delay": "unsigned long",
+        "rti_delay": "unsigned long",
+        "ovf_delay": "unsigned long",
+        "clock_prescaler": "signed64",
+        "tcnt_adjust": "signed64",
+        "cop_prev_interrupt": "signed64",
+        "rti_prev_interrupt": "signed64",
+        "*rti_timer_event": "struct hw_event",
+        "*cop_timer_event": "struct hw_event",
+        "*tof_timer_event": "struct hw_event",
+        "*cmp_timer_event": "struct hw_event"
+      },
+      "m68hc11tim",
+      [
+        79,
+        0
+      ],
+      [
+        94,
+        1
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        70,
+        13
+      ],
+      [
+        70,
+        38
+      ]
+    ],
+    [
+      "struct m68hc11tim \n{\n  unsigned long cop_delay;\n  unsigned long rti_delay;\n  unsigned long ovf_delay;\n  signed64      clock_prescaler;\n  signed64      tcnt_adjust;\n  signed64      cop_prev_interrupt;\n  signed64      rti_prev_interrupt;\n\n  /* Periodic timers.  */\n  struct hw_event *rti_timer_event;\n  struct hw_event *cop_timer_event;\n  struct hw_event *tof_timer_event;\n  struct hw_event *cmp_timer_event;\n}",
+      {
+        "cop_delay": "unsigned long",
+        "rti_delay": "unsigned long",
+        "ovf_delay": "unsigned long",
+        "clock_prescaler": "signed64",
+        "tcnt_adjust": "signed64",
+        "cop_prev_interrupt": "signed64",
+        "rti_prev_interrupt": "signed64",
+        "*rti_timer_event": "struct hw_event",
+        "*cop_timer_event": "struct hw_event",
+        "*tof_timer_event": "struct hw_event",
+        "*cmp_timer_event": "struct hw_event"
+      },
+      "m68hc11tim",
+      [
+        79,
+        0
+      ],
+      [
+        94,
+        1
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        90,
+        2
+      ],
+      [
+        90,
+        17
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        91,
+        2
+      ],
+      [
+        91,
+        17
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        92,
+        2
+      ],
+      [
+        92,
+        17
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        93,
+        2
+      ],
+      [
+        93,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        111,
+        24
+      ],
+      [
+        111,
+        33
+      ]
+    ],
+    [
+      "struct m68hc11tim",
+      {},
+      "",
+      [
+        112,
+        24
+      ],
+      [
+        112,
+        41
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        121,
+        19
+      ],
+      [
+        121,
+        28
+      ]
+    ],
+    [
+      "struct m68hc11tim",
+      {},
+      "",
+      [
+        123,
+        2
+      ],
+      [
+        123,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        149,
+        23
+      ],
+      [
+        149,
+        32
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        151,
+        23
+      ],
+      [
+        151,
+        32
+      ]
+    ],
+    [
+      "struct m68hc11tim",
+      {},
+      "",
+      [
+        156,
+        2
+      ],
+      [
+        156,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        239,
+        24
+      ],
+      [
+        239,
+        33
+      ]
+    ],
+    [
+      "struct m68hc11tim",
+      {},
+      "",
+      [
+        242,
+        2
+      ],
+      [
+        242,
+        19
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        246,
+        2
+      ],
+      [
+        246,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        510,
+        24
+      ],
+      [
+        510,
+        33
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        511,
+        24
+      ],
+      [
+        511,
+        39
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        534,
+        17
+      ],
+      [
+        534,
+        26
+      ]
+    ],
+    [
+      "struct m68hc11tim",
+      {},
+      "",
+      [
+        539,
+        2
+      ],
+      [
+        539,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        625,
+        18
+      ],
+      [
+        625,
+        27
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        636,
+        27
+      ],
+      [
+        636,
+        36
+      ]
+    ],
+    [
+      "struct m68hc11tim",
+      {},
+      "",
+      [
+        643,
+        2
+      ],
+      [
+        643,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        685,
+        28
+      ],
+      [
+        685,
+        37
+      ]
+    ],
+    [
+      "struct m68hc11tim",
+      {},
+      "",
+      [
+        692,
+        2
+      ],
+      [
+        692,
+        19
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        834,
+        6
+      ],
+      [
+        834,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-assert.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <limits.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum\n{\n  RESET_PORT,\n  CAPTURE\n}",
+      {
+        "RESET_PORT": "",
+        "CAPTURE": ""
+      },
+      "",
+      [
+        63,
+        0
+      ],
+      [
+        67,
+        1
+      ]
+    ],
+    [
+      "enum event_type\n{\n  COP_EVENT,\n  RTI_EVENT,\n  OVERFLOW_EVENT,\n  COMPARE_EVENT\n}",
+      {
+        "COP_EVENT": "",
+        "RTI_EVENT": "",
+        "OVERFLOW_EVENT": "",
+        "COMPARE_EVENT": ""
+      },
+      "event_type",
+      [
+        230,
+        0
+      ],
+      [
+        236,
+        1
+      ]
+    ],
+    [
+      "enum event_type",
+      {},
+      "",
+      [
+        244,
+        2
+      ],
+      [
+        244,
+        17
+      ]
+    ],
+    [
+      "enum event_type",
+      {},
+      "",
+      [
+        260,
+        16
+      ],
+      [
+        260,
+        31
+      ]
+    ]
+  ]
+}

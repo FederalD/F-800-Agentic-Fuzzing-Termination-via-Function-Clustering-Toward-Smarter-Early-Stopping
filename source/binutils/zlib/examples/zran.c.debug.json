@@ -1,0 +1,445 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "local void free_index(struct access *index)\n{\n    if (index != NULL) {\n        free(index->list);\n        free(index);\n    }\n}",
+      "fn_code_pos": [
+        [
+          81,
+          0
+        ],
+        [
+          87,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "free_index",
+        "parameters": {
+          "index": "struct access"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local struct access *addpoint(struct access *index, int bits,\n    off_t in, off_t out, unsigned left, unsigned char *window)\n{\n    struct point *next;\n\n    /* if list is empty, create it (start with eight points) */\n    if (index == NULL) {\n        index = malloc(sizeof(struct access));\n        if (index == NULL) return NULL;\n        index->list = malloc(sizeof(struct point) << 3);\n        if (index->list == NULL) {\n            free(index);\n            return NULL;\n        }\n        index->size = 8;\n        index->have = 0;\n    }\n\n    /* if list is full, make it bigger */\n    else if (index->have == index->size) {\n        index->size <<= 1;\n        next = realloc(index->list, sizeof(struct point) * index->size);\n        if (next == NULL) {\n            free_index(index);\n            return NULL;\n        }\n        index->list = next;\n    }\n\n    /* fill in entry and increment how many we have */\n    next = index->list + index->have;\n    next->bits = bits;\n    next->in = in;\n    next->out = out;\n    if (left)\n        memcpy(next->window, window + WINSIZE - left, left);\n    if (left < WINSIZE)\n        memcpy(next->window + left, window, WINSIZE - left);\n    index->have++;\n\n    /* return list, possibly reallocated */\n    return index;\n}",
+      "fn_code_pos": [
+        [
+          91,
+          0
+        ],
+        [
+          133,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "addpoint",
+        "parameters": {
+          "index": "struct access",
+          "bits": "int",
+          "in": "off_t",
+          "out": "off_t",
+          "left": "unsigned",
+          "window": "unsigned char"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int build_index(FILE *in, off_t span, struct access **built)\n{\n    int ret;\n    off_t totin, totout;        /* our own total counters to avoid 4GB limit */\n    off_t last;                 /* totout value of last access point */\n    struct access *index;       /* access points being generated */\n    z_stream strm;\n    unsigned char input[CHUNK];\n    unsigned char window[WINSIZE];\n\n    /* initialize inflate */\n    strm.zalloc = Z_NULL;\n    strm.zfree = Z_NULL;\n    strm.opaque = Z_NULL;\n    strm.avail_in = 0;\n    strm.next_in = Z_NULL;\n    ret = inflateInit2(&strm, 47);      /* automatic zlib or gzip decoding */\n    if (ret != Z_OK)\n        return ret;\n\n    /* inflate the input, maintain a sliding window, and build an index -- this\n       also validates the integrity of the compressed data using the check\n       information at the end of the gzip or zlib stream */\n    totin = totout = last = 0;\n    index = NULL;               /* will be allocated by first addpoint() */\n    strm.avail_out = 0;\n    do {\n        /* get some compressed data from input file */\n        strm.avail_in = fread(input, 1, CHUNK, in);\n        if (ferror(in)) {\n            ret = Z_ERRNO;\n            goto build_index_error;\n        }\n        if (strm.avail_in == 0) {\n            ret = Z_DATA_ERROR;\n            goto build_index_error;\n        }\n        strm.next_in = input;\n\n        /* process all of that, or until end of stream */\n        do {\n            /* reset sliding window if necessary */\n            if (strm.avail_out == 0) {\n                strm.avail_out = WINSIZE;\n                strm.next_out = window;\n            }\n\n            /* inflate until out of input, output, or at end of block --\n               update the total input and output counters */\n            totin += strm.avail_in;\n            totout += strm.avail_out;\n            ret = inflate(&strm, Z_BLOCK);      /* return at end of block */\n            totin -= strm.avail_in;\n            totout -= strm.avail_out;\n            if (ret == Z_NEED_DICT)\n                ret = Z_DATA_ERROR;\n            if (ret == Z_MEM_ERROR || ret == Z_DATA_ERROR)\n                goto build_index_error;\n            if (ret == Z_STREAM_END)\n                break;\n\n            /* if at end of block, consider adding an index entry (note that if\n               data_type indicates an end-of-block, then all of the\n               uncompressed data from that block has been delivered, and none\n               of the compressed data after that block has been consumed,\n               except for up to seven bits) -- the totout == 0 provides an\n               entry point after the zlib or gzip header, and assures that the\n               index always has at least one access point; we avoid creating an\n               access point after the last block by checking bit 6 of data_type\n             */\n            if ((strm.data_type & 128) && !(strm.data_type & 64) &&\n                (totout == 0 || totout - last > span)) {\n                index = addpoint(index, strm.data_type & 7, totin,\n                                 totout, strm.avail_out, window);\n                if (index == NULL) {\n                    ret = Z_MEM_ERROR;\n                    goto build_index_error;\n                }\n                last = totout;\n            }\n        } while (strm.avail_in != 0);\n    } while (ret != Z_STREAM_END);\n\n    /* clean up and return index (release unused entries in list) */\n    (void)inflateEnd(&strm);\n    index->list = realloc(index->list, sizeof(struct point) * index->have);\n    index->size = index->have;\n    *built = index;\n    return index->size;\n\n    /* return error */\n  build_index_error:\n    (void)inflateEnd(&strm);\n    if (index != NULL)\n        free_index(index);\n    return ret;\n}",
+      "fn_code_pos": [
+        [
+          143,
+          0
+        ],
+        [
+          239,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "build_index",
+        "parameters": {
+          "in": "FILE",
+          "span": "off_t",
+          "built": "struct access"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int extract(FILE *in, struct access *index, off_t offset,\n                  unsigned char *buf, int len)\n{\n    int ret, skip;\n    z_stream strm;\n    struct point *here;\n    unsigned char input[CHUNK];\n    unsigned char discard[WINSIZE];\n\n    /* proceed only if something reasonable to do */\n    if (len < 0)\n        return 0;\n\n    /* find where in stream to start */\n    here = index->list;\n    ret = index->have;\n    while (--ret && here[1].out <= offset)\n        here++;\n\n    /* initialize file and inflate state to start there */\n    strm.zalloc = Z_NULL;\n    strm.zfree = Z_NULL;\n    strm.opaque = Z_NULL;\n    strm.avail_in = 0;\n    strm.next_in = Z_NULL;\n    ret = inflateInit2(&strm, -15);         /* raw inflate */\n    if (ret != Z_OK)\n        return ret;\n    ret = fseeko(in, here->in - (here->bits ? 1 : 0), SEEK_SET);\n    if (ret == -1)\n        goto extract_ret;\n    if (here->bits) {\n        ret = getc(in);\n        if (ret == -1) {\n            ret = ferror(in) ? Z_ERRNO : Z_DATA_ERROR;\n            goto extract_ret;\n        }\n        (void)inflatePrime(&strm, here->bits, ret >> (8 - here->bits));\n    }\n    (void)inflateSetDictionary(&strm, here->window, WINSIZE);\n\n    /* skip uncompressed bytes until offset reached, then satisfy request */\n    offset -= here->out;\n    strm.avail_in = 0;\n    skip = 1;                               /* while skipping to offset */\n    do {\n        /* define where to put uncompressed data, and how much */\n        if (offset == 0 && skip) {          /* at offset now */\n            strm.avail_out = len;\n            strm.next_out = buf;\n            skip = 0;                       /* only do this once */\n        }\n        if (offset > WINSIZE) {             /* skip WINSIZE bytes */\n            strm.avail_out = WINSIZE;\n            strm.next_out = discard;\n            offset -= WINSIZE;\n        }\n        else if (offset != 0) {             /* last skip */\n            strm.avail_out = (unsigned)offset;\n            strm.next_out = discard;\n            offset = 0;\n        }\n\n        /* uncompress until avail_out filled, or end of stream */\n        do {\n            if (strm.avail_in == 0) {\n                strm.avail_in = fread(input, 1, CHUNK, in);\n                if (ferror(in)) {\n                    ret = Z_ERRNO;\n                    goto extract_ret;\n                }\n                if (strm.avail_in == 0) {\n                    ret = Z_DATA_ERROR;\n                    goto extract_ret;\n                }\n                strm.next_in = input;\n            }\n            ret = inflate(&strm, Z_NO_FLUSH);       /* normal inflate */\n            if (ret == Z_NEED_DICT)\n                ret = Z_DATA_ERROR;\n            if (ret == Z_MEM_ERROR || ret == Z_DATA_ERROR)\n                goto extract_ret;\n            if (ret == Z_STREAM_END)\n                break;\n        } while (strm.avail_out != 0);\n\n        /* if reach end of stream, then don't keep trying to get more */\n        if (ret == Z_STREAM_END)\n            break;\n\n        /* do until offset reached and requested data read, or stream ends */\n    } while (skip);\n\n    /* compute number of uncompressed bytes read after offset */\n    ret = skip ? 0 : len - strm.avail_out;\n\n    /* clean up and return bytes read or error */\n  extract_ret:\n    (void)inflateEnd(&strm);\n    return ret;\n}",
+      "fn_code_pos": [
+        [
+          248,
+          0
+        ],
+        [
+          348,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "extract",
+        "parameters": {
+          "in": "FILE",
+          "index": "struct access",
+          "offset": "off_t",
+          "buf": "unsigned char",
+          "len": "int"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "int main(int argc, char **argv)\n{\n    int len;\n    off_t offset;\n    FILE *in;\n    struct access *index = NULL;\n    unsigned char buf[CHUNK];\n\n    /* open input file */\n    if (argc != 2) {\n        fprintf(stderr, \"usage: zran file.gz\\n\");\n        return 1;\n    }\n    in = fopen(argv[1], \"rb\");\n    if (in == NULL) {\n        fprintf(stderr, \"zran: could not open %s for reading\\n\", argv[1]);\n        return 1;\n    }\n\n    /* build index */\n    len = build_index(in, SPAN, &index);\n    if (len < 0) {\n        fclose(in);\n        switch (len) {\n        case Z_MEM_ERROR:\n            fprintf(stderr, \"zran: out of memory\\n\");\n            break;\n        case Z_DATA_ERROR:\n            fprintf(stderr, \"zran: compressed data error in %s\\n\", argv[1]);\n            break;\n        case Z_ERRNO:\n            fprintf(stderr, \"zran: read error on %s\\n\", argv[1]);\n            break;\n        default:\n            fprintf(stderr, \"zran: error %d while building index\\n\", len);\n        }\n        return 1;\n    }\n    fprintf(stderr, \"zran: built index with %d access points\\n\", len);\n\n    /* use index by reading some bytes from an arbitrary offset */\n    offset = (index->list[index->have - 1].out << 1) / 3;\n    len = extract(in, index, offset, buf, CHUNK);\n    if (len < 0)\n        fprintf(stderr, \"zran: extraction failed: %s error\\n\",\n                len == Z_MEM_ERROR ? \"out of memory\" : \"input corrupted\");\n    else {\n        fwrite(buf, 1, len, stdout);\n        fprintf(stderr, \"zran: extracted %d bytes at %llu\\n\", len, offset);\n    }\n\n    /* clean up and exit */\n    free_index(index);\n    fclose(in);\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          353,
+          0
+        ],
+        [
+          408,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "addpoint(struct access *index, int bits,\n    off_t in, off_t out, unsigned left, unsigned char *window)",
+      "fn_dec_pos": [
+        [
+          91,
+          21
+        ],
+        [
+          92,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "addpoint",
+        "parameters": {
+          "index": "struct access",
+          "bits": "int",
+          "in": "off_t",
+          "out": "off_t",
+          "left": "unsigned",
+          "window": "unsigned char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct point {\n    off_t out;          /* corresponding offset in uncompressed data */\n    off_t in;           /* offset in input file of first full byte */\n    int bits;           /* number of bits (1-7) from byte at in - 1, or 0 */\n    unsigned char window[WINSIZE];  /* preceding 32K of uncompressed data */\n}",
+      {
+        "out": "off_t",
+        "in": "off_t",
+        "bits": "int",
+        "window[WINSIZE]": "unsigned char"
+      },
+      "point",
+      [
+        66,
+        0
+      ],
+      [
+        71,
+        1
+      ]
+    ],
+    [
+      "struct access {\n    int have;           /* number of list entries filled in */\n    int size;           /* number of list entries allocated */\n    struct point *list; /* allocated list */\n}",
+      {
+        "have": "int",
+        "size": "int",
+        "*list": "struct point"
+      },
+      "access",
+      [
+        74,
+        0
+      ],
+      [
+        78,
+        1
+      ]
+    ],
+    [
+      "struct point {\n    off_t out;          /* corresponding offset in uncompressed data */\n    off_t in;           /* offset in input file of first full byte */\n    int bits;           /* number of bits (1-7) from byte at in - 1, or 0 */\n    unsigned char window[WINSIZE];  /* preceding 32K of uncompressed data */\n}",
+      {
+        "out": "off_t",
+        "in": "off_t",
+        "bits": "int",
+        "window[WINSIZE]": "unsigned char"
+      },
+      "point",
+      [
+        66,
+        0
+      ],
+      [
+        71,
+        1
+      ]
+    ],
+    [
+      "struct access {\n    int have;           /* number of list entries filled in */\n    int size;           /* number of list entries allocated */\n    struct point *list; /* allocated list */\n}",
+      {
+        "have": "int",
+        "size": "int",
+        "*list": "struct point"
+      },
+      "access",
+      [
+        74,
+        0
+      ],
+      [
+        78,
+        1
+      ]
+    ],
+    [
+      "struct point",
+      {},
+      "",
+      [
+        77,
+        4
+      ],
+      [
+        77,
+        16
+      ]
+    ],
+    [
+      "struct access",
+      {},
+      "",
+      [
+        81,
+        22
+      ],
+      [
+        81,
+        35
+      ]
+    ],
+    [
+      "struct access",
+      {},
+      "",
+      [
+        91,
+        30
+      ],
+      [
+        91,
+        43
+      ]
+    ],
+    [
+      "struct point",
+      {},
+      "",
+      [
+        94,
+        4
+      ],
+      [
+        94,
+        16
+      ]
+    ],
+    [
+      "struct access",
+      {},
+      "",
+      [
+        98,
+        30
+      ],
+      [
+        98,
+        43
+      ]
+    ],
+    [
+      "struct point",
+      {},
+      "",
+      [
+        100,
+        36
+      ],
+      [
+        100,
+        48
+      ]
+    ],
+    [
+      "struct point",
+      {},
+      "",
+      [
+        112,
+        43
+      ],
+      [
+        112,
+        55
+      ]
+    ],
+    [
+      "struct access",
+      {},
+      "",
+      [
+        143,
+        44
+      ],
+      [
+        143,
+        57
+      ]
+    ],
+    [
+      "struct access",
+      {},
+      "",
+      [
+        148,
+        4
+      ],
+      [
+        148,
+        17
+      ]
+    ],
+    [
+      "struct point",
+      {},
+      "",
+      [
+        228,
+        46
+      ],
+      [
+        228,
+        58
+      ]
+    ],
+    [
+      "struct access",
+      {},
+      "",
+      [
+        248,
+        28
+      ],
+      [
+        248,
+        41
+      ]
+    ],
+    [
+      "struct point",
+      {},
+      "",
+      [
+        253,
+        4
+      ],
+      [
+        253,
+        16
+      ]
+    ],
+    [
+      "struct access",
+      {},
+      "",
+      [
+        358,
+        4
+      ],
+      [
+        358,
+        17
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <stdio.h>\n",
+      [
+        54,
+        0
+      ],
+      [
+        55,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        55,
+        0
+      ],
+      [
+        56,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        56,
+        0
+      ],
+      [
+        57,
+        0
+      ]
+    ],
+    [
+      "#include \"zlib.h\"\n",
+      [
+        57,
+        0
+      ],
+      [
+        58,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

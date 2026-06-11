@@ -1,0 +1,887 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\npcap_read_pf(pcap_t *pc, int cnt, pcap_handler callback, u_char *user)\n{\n\tstruct pcap_pf *pf = pc->priv;\n\tregister u_char *p, *bp;\n\tregister int cc, n, buflen, inc;\n\tregister struct enstamp *sp;\n#ifdef LBL_ALIGN\n\tstruct enstamp stamp;\n#endif\n\tregister u_int pad;\n\n again:\n\tcc = pc->cc;\n\tif (cc == 0) {\n\t\tcc = read(pc->fd, (char *)pc->buffer + pc->offset, pc->bufsize);\n\t\tif (cc < 0) {\n\t\t\tif (errno == EWOULDBLOCK)\n\t\t\t\treturn (0);\n\t\t\tif (errno == EINVAL &&\n\t\t\t    lseek(pc->fd, 0L, SEEK_CUR) + pc->bufsize < 0) {\n\t\t\t\t/*\n\t\t\t\t * Due to a kernel bug, after 2^31 bytes,\n\t\t\t\t * the kernel file offset overflows and\n\t\t\t\t * read fails with EINVAL. The lseek()\n\t\t\t\t * to 0 will fix things.\n\t\t\t\t */\n\t\t\t\t(void)lseek(pc->fd, 0L, SEEK_SET);\n\t\t\t\tgoto again;\n\t\t\t}\n\t\t\tpcap_fmt_errmsg_for_errno(pc->errbuf,\n\t\t\t    sizeof(pc->errbuf), errno, \"pf read\");\n\t\t\treturn (-1);\n\t\t}\n\t\tbp = (u_char *)pc->buffer + pc->offset;\n\t} else\n\t\tbp = pc->bp;\n\t/*\n\t * Loop through each packet.\n\t */\n\tn = 0;\n\tpad = pc->fddipad;\n\twhile (cc > 0) {\n\t\t/*\n\t\t * Has \"pcap_breakloop()\" been called?\n\t\t * If so, return immediately - if we haven't read any\n\t\t * packets, clear the flag and return -2 to indicate\n\t\t * that we were told to break out of the loop, otherwise\n\t\t * leave the flag set, so that the *next* call will break\n\t\t * out of the loop without having read any packets, and\n\t\t * return the number of packets we've processed so far.\n\t\t */\n\t\tif (pc->break_loop) {\n\t\t\tif (n == 0) {\n\t\t\t\tpc->break_loop = 0;\n\t\t\t\treturn (-2);\n\t\t\t} else {\n\t\t\t\tpc->cc = cc;\n\t\t\t\tpc->bp = bp;\n\t\t\t\treturn (n);\n\t\t\t}\n\t\t}\n\t\tif (cc < sizeof(*sp)) {\n\t\t\tpcap_snprintf(pc->errbuf, sizeof(pc->errbuf),\n\t\t\t    \"pf short read (%d)\", cc);\n\t\t\treturn (-1);\n\t\t}\n#ifdef LBL_ALIGN\n\t\tif ((long)bp & 3) {\n\t\t\tsp = &stamp;\n\t\t\tmemcpy((char *)sp, (char *)bp, sizeof(*sp));\n\t\t} else\n#endif\n\t\t\tsp = (struct enstamp *)bp;\n\t\tif (sp->ens_stamplen != sizeof(*sp)) {\n\t\t\tpcap_snprintf(pc->errbuf, sizeof(pc->errbuf),\n\t\t\t    \"pf short stamplen (%d)\",\n\t\t\t    sp->ens_stamplen);\n\t\t\treturn (-1);\n\t\t}\n\n\t\tp = bp + sp->ens_stamplen;\n\t\tbuflen = sp->ens_count;\n\t\tif (buflen > pc->snapshot)\n\t\t\tbuflen = pc->snapshot;\n\n\t\t/* Calculate inc before possible pad update */\n\t\tinc = ENALIGN(buflen + sp->ens_stamplen);\n\t\tcc -= inc;\n\t\tbp += inc;\n\t\tpf->TotPkts++;\n\t\tpf->TotDrops += sp->ens_dropped;\n\t\tpf->TotMissed = sp->ens_ifoverflows;\n\t\tif (pf->OrigMissed < 0)\n\t\t\tpf->OrigMissed = pf->TotMissed;\n\n\t\t/*\n\t\t * Short-circuit evaluation: if using BPF filter\n\t\t * in kernel, no need to do it now - we already know\n\t\t * the packet passed the filter.\n\t\t *\n\t\t * Note: the filter code was generated assuming\n\t\t * that pc->fddipad was the amount of padding\n\t\t * before the header, as that's what's required\n\t\t * in the kernel, so we run the filter before\n\t\t * skipping that padding.\n\t\t */\n\t\tif (pf->filtering_in_kernel ||\n\t\t    bpf_filter(pc->fcode.bf_insns, p, sp->ens_count, buflen)) {\n\t\t\tstruct pcap_pkthdr h;\n\t\t\tpf->TotAccepted++;\n\t\t\th.ts = sp->ens_tstamp;\n\t\t\th.len = sp->ens_count - pad;\n\t\t\tp += pad;\n\t\t\tbuflen -= pad;\n\t\t\th.caplen = buflen;\n\t\t\t(*callback)(user, &h, p);\n\t\t\tif (++n >= cnt && !PACKET_COUNT_IS_UNLIMITED(cnt)) {\n\t\t\t\tpc->cc = cc;\n\t\t\t\tpc->bp = bp;\n\t\t\t\treturn (n);\n\t\t\t}\n\t\t}\n\t}\n\tpc->cc = 0;\n\treturn (n);\n}",
+      "fn_code_pos": [
+        [
+          99,
+          0
+        ],
+        [
+          225,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_read_pf",
+        "parameters": {
+          "pc": "pcap_t",
+          "cnt": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_inject_pf(pcap_t *p, const void *buf, size_t size)\n{\n\tint ret;\n\n\tret = write(p->fd, buf, size);\n\tif (ret == -1) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"send\");\n\t\treturn (-1);\n\t}\n\treturn (ret);\n}",
+      "fn_code_pos": [
+        [
+          227,
+          0
+        ],
+        [
+          239,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_inject_pf",
+        "parameters": {
+          "p": "pcap_t",
+          "buf": "void",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_stats_pf(pcap_t *p, struct pcap_stat *ps)\n{\n\tstruct pcap_pf *pf = p->priv;\n\n\t/*\n\t * If packet filtering is being done in the kernel:\n\t *\n\t *\t\"ps_recv\" counts only packets that passed the filter.\n\t *\tThis does not include packets dropped because we\n\t *\tran out of buffer space.  (XXX - perhaps it should,\n\t *\tby adding \"ps_drop\" to \"ps_recv\", for compatibility\n\t *\twith some other platforms.  On the other hand, on\n\t *\tsome platforms \"ps_recv\" counts only packets that\n\t *\tpassed the filter, and on others it counts packets\n\t *\tthat didn't pass the filter....)\n\t *\n\t *\t\"ps_drop\" counts packets that passed the kernel filter\n\t *\t(if any) but were dropped because the input queue was\n\t *\tfull.\n\t *\n\t *\t\"ps_ifdrop\" counts packets dropped by the network\n\t *\tinteface (regardless of whether they would have passed\n\t *\tthe input filter, of course).\n\t *\n\t * If packet filtering is not being done in the kernel:\n\t *\n\t *\t\"ps_recv\" counts only packets that passed the filter.\n\t *\n\t *\t\"ps_drop\" counts packets that were dropped because the\n\t *\tinput queue was full, regardless of whether they passed\n\t *\tthe userland filter.\n\t *\n\t *\t\"ps_ifdrop\" counts packets dropped by the network\n\t *\tinteface (regardless of whether they would have passed\n\t *\tthe input filter, of course).\n\t *\n\t * These statistics don't include packets not yet read from\n\t * the kernel by libpcap, but they may include packets not\n\t * yet read from libpcap by the application.\n\t */\n\tps->ps_recv = pf->TotAccepted;\n\tps->ps_drop = pf->TotDrops;\n\tps->ps_ifdrop = pf->TotMissed - pf->OrigMissed;\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          241,
+          0
+        ],
+        [
+          286,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stats_pf",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_activate_pf(pcap_t *p)\n{\n\tstruct pcap_pf *pf = p->priv;\n\tshort enmode;\n\tint backlog = -1;\t/* request the most */\n\tstruct enfilter Filter;\n\tstruct endevp devparams;\n\tint err;\n\n\t/*\n\t * Initially try a read/write open (to allow the inject\n\t * method to work).  If that fails due to permission\n\t * issues, fall back to read-only.  This allows a\n\t * non-root user to be granted specific access to pcap\n\t * capabilities via file permissions.\n\t *\n\t * XXX - we should have an API that has a flag that\n\t * controls whether to open read-only or read-write,\n\t * so that denial of permission to send (or inability\n\t * to send, if sending packets isn't supported on\n\t * the device in question) can be indicated at open\n\t * time.\n\t *\n\t * XXX - we assume here that \"pfopen()\" does not, in fact, modify\n\t * its argument, even though it takes a \"char *\" rather than a\n\t * \"const char *\" as its first argument.  That appears to be\n\t * the case, at least on Digital UNIX 4.0.\n\t *\n\t * XXX - is there an error that means \"no such device\"?  Is\n\t * there one that means \"that device doesn't support pf\"?\n\t */\n\tp->fd = pfopen(p->opt.device, O_RDWR);\n\tif (p->fd == -1 && errno == EACCES)\n\t\tp->fd = pfopen(p->opt.device, O_RDONLY);\n\tif (p->fd < 0) {\n\t\tif (errno == EACCES) {\n\t\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    \"pf open: %s: Permission denied\\n\"\n\"your system may not be properly configured; see the packetfilter(4) man page\",\n\t\t\t    p->opt.device);\n\t\t\terr = PCAP_ERROR_PERM_DENIED;\n\t\t} else {\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"pf open: %s\", p->opt.device);\n\t\t\terr = PCAP_ERROR;\n\t\t}\n\t\tgoto bad;\n\t}\n\n\t/*\n\t * Turn a negative snapshot value (invalid), a snapshot value of\n\t * 0 (unspecified), or a value bigger than the normal maximum\n\t * value, into the maximum allowed value.\n\t *\n\t * If some application really *needs* a bigger snapshot\n\t * length, we should just increase MAXIMUM_SNAPLEN.\n\t */\n\tif (p->snapshot <= 0 || p->snapshot > MAXIMUM_SNAPLEN)\n\t\tp->snapshot = MAXIMUM_SNAPLEN;\n\n\tpf->OrigMissed = -1;\n\tenmode = ENTSTAMP|ENNONEXCL;\n\tif (!p->opt.immediate)\n\t\tenmode |= ENBATCH;\n\tif (p->opt.promisc)\n\t\tenmode |= ENPROMISC;\n\tif (ioctl(p->fd, EIOCMBIS, (caddr_t)&enmode) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"EIOCMBIS\");\n\t\terr = PCAP_ERROR;\n\t\tgoto bad;\n\t}\n#ifdef\tENCOPYALL\n\t/* Try to set COPYALL mode so that we see packets to ourself */\n\tenmode = ENCOPYALL;\n\t(void)ioctl(p->fd, EIOCMBIS, (caddr_t)&enmode);/* OK if this fails */\n#endif\n\t/* set the backlog */\n\tif (ioctl(p->fd, EIOCSETW, (caddr_t)&backlog) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"EIOCSETW\");\n\t\terr = PCAP_ERROR;\n\t\tgoto bad;\n\t}\n\t/* discover interface type */\n\tif (ioctl(p->fd, EIOCDEVP, (caddr_t)&devparams) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"EIOCDEVP\");\n\t\terr = PCAP_ERROR;\n\t\tgoto bad;\n\t}\n\t/* HACK: to compile prior to Ultrix 4.2 */\n#ifndef\tENDT_FDDI\n#define\tENDT_FDDI\t4\n#endif\n\tswitch (devparams.end_dev_type) {\n\n\tcase ENDT_10MB:\n\t\tp->linktype = DLT_EN10MB;\n\t\tp->offset = 2;\n\t\t/*\n\t\t * This is (presumably) a real Ethernet capture; give it a\n\t\t * link-layer-type list with DLT_EN10MB and DLT_DOCSIS, so\n\t\t * that an application can let you choose it, in case you're\n\t\t * capturing DOCSIS traffic that a Cisco Cable Modem\n\t\t * Termination System is putting out onto an Ethernet (it\n\t\t * doesn't put an Ethernet header onto the wire, it puts raw\n\t\t * DOCSIS frames out on the wire inside the low-level\n\t\t * Ethernet framing).\n\t\t */\n\t\tp->dlt_list = (u_int *) malloc(sizeof(u_int) * 2);\n\t\t/*\n\t\t * If that fails, just leave the list empty.\n\t\t */\n\t\tif (p->dlt_list != NULL) {\n\t\t\tp->dlt_list[0] = DLT_EN10MB;\n\t\t\tp->dlt_list[1] = DLT_DOCSIS;\n\t\t\tp->dlt_count = 2;\n\t\t}\n\t\tbreak;\n\n\tcase ENDT_FDDI:\n\t\tp->linktype = DLT_FDDI;\n\t\tbreak;\n\n#ifdef ENDT_SLIP\n\tcase ENDT_SLIP:\n\t\tp->linktype = DLT_SLIP;\n\t\tbreak;\n#endif\n\n#ifdef ENDT_PPP\n\tcase ENDT_PPP:\n\t\tp->linktype = DLT_PPP;\n\t\tbreak;\n#endif\n\n#ifdef ENDT_LOOPBACK\n\tcase ENDT_LOOPBACK:\n\t\t/*\n\t\t * It appears to use Ethernet framing, at least on\n\t\t * Digital UNIX 4.0.\n\t\t */\n\t\tp->linktype = DLT_EN10MB;\n\t\tp->offset = 2;\n\t\tbreak;\n#endif\n\n#ifdef ENDT_TRN\n\tcase ENDT_TRN:\n\t\tp->linktype = DLT_IEEE802;\n\t\tbreak;\n#endif\n\n\tdefault:\n\t\t/*\n\t\t * XXX - what about ENDT_IEEE802?  The pfilt.h header\n\t\t * file calls this \"IEEE 802 networks (non-Ethernet)\",\n\t\t * but that doesn't specify a specific link layer type;\n\t\t * it could be 802.4, or 802.5 (except that 802.5 is\n\t\t * ENDT_TRN), or 802.6, or 802.11, or....  That's why\n\t\t * DLT_IEEE802 was hijacked to mean Token Ring in various\n\t\t * BSDs, and why we went along with that hijacking.\n\t\t *\n\t\t * XXX - what about ENDT_HDLC and ENDT_NULL?\n\t\t * Presumably, as ENDT_OTHER is just \"Miscellaneous\n\t\t * framing\", there's not much we can do, as that\n\t\t * doesn't specify a particular type of header.\n\t\t */\n\t\tpcap_snprintf(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    \"unknown data-link type %u\", devparams.end_dev_type);\n\t\terr = PCAP_ERROR;\n\t\tgoto bad;\n\t}\n\t/* set truncation */\n\tif (p->linktype == DLT_FDDI) {\n\t\tp->fddipad = PCAP_FDDIPAD;\n\n\t\t/* packetfilter includes the padding in the snapshot */\n\t\tp->snapshot += PCAP_FDDIPAD;\n\t} else\n\t\tp->fddipad = 0;\n\tif (ioctl(p->fd, EIOCTRUNCATE, (caddr_t)&p->snapshot) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"EIOCTRUNCATE\");\n\t\terr = PCAP_ERROR;\n\t\tgoto bad;\n\t}\n\t/* accept all packets */\n\tmemset(&Filter, 0, sizeof(Filter));\n\tFilter.enf_Priority = 37;\t/* anything > 2 */\n\tFilter.enf_FilterLen = 0;\t/* means \"always true\" */\n\tif (ioctl(p->fd, EIOCSETF, (caddr_t)&Filter) < 0) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"EIOCSETF\");\n\t\terr = PCAP_ERROR;\n\t\tgoto bad;\n\t}\n\n\tif (p->opt.timeout != 0) {\n\t\tstruct timeval timeout;\n\t\ttimeout.tv_sec = p->opt.timeout / 1000;\n\t\ttimeout.tv_usec = (p->opt.timeout * 1000) % 1000000;\n\t\tif (ioctl(p->fd, EIOCSRTIMEOUT, (caddr_t)&timeout) < 0) {\n\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t\t    errno, \"EIOCSRTIMEOUT\");\n\t\t\terr = PCAP_ERROR;\n\t\t\tgoto bad;\n\t\t}\n\t}\n\n\tp->bufsize = BUFSPACE;\n\tp->buffer = malloc(p->bufsize + p->offset);\n\tif (p->buffer == NULL) {\n\t\tpcap_fmt_errmsg_for_errno(p->errbuf, PCAP_ERRBUF_SIZE,\n\t\t    errno, \"malloc\");\n\t\terr = PCAP_ERROR;\n\t\tgoto bad;\n\t}\n\n\t/*\n\t * \"select()\" and \"poll()\" work on packetfilter devices.\n\t */\n\tp->selectable_fd = p->fd;\n\n\tp->read_op = pcap_read_pf;\n\tp->inject_op = pcap_inject_pf;\n\tp->setfilter_op = pcap_setfilter_pf;\n\tp->setdirection_op = NULL;\t/* Not implemented. */\n\tp->set_datalink_op = NULL;\t/* can't change data link type */\n\tp->getnonblock_op = pcap_getnonblock_fd;\n\tp->setnonblock_op = pcap_setnonblock_fd;\n\tp->stats_op = pcap_stats_pf;\n\n\treturn (0);\n bad:\n\tpcap_cleanup_live_common(p);\n\treturn (err);\n}",
+      "fn_code_pos": [
+        [
+          296,
+          0
+        ],
+        [
+          535,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_activate_pf",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\npcap_create_interface(const char *device _U_, char *ebuf)\n{\n\tpcap_t *p;\n\n\tp = pcap_create_common(ebuf, sizeof (struct pcap_pf));\n\tif (p == NULL)\n\t\treturn (NULL);\n\n\tp->activate_op = pcap_activate_pf;\n\treturn (p);\n}",
+      "fn_code_pos": [
+        [
+          537,
+          0
+        ],
+        [
+          548,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "static int\ncan_be_bound(const char *name _U_)\n{\n\treturn (1);\n}",
+      "fn_code_pos": [
+        [
+          554,
+          0
+        ],
+        [
+          558,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "can_be_bound",
+        "parameters": {
+          "name": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_if_flags(const char *name _U_, bpf_u_int32 *flags _U_, char *errbuf _U_)\n{\n\t/*\n\t * Nothing we can do other than mark loopback devices as \"the\n\t * connected/disconnected status doesn't apply\".\n\t *\n\t * XXX - is there a way to find out whether an adapter has\n\t * something plugged into it?\n\t */\n\tif (*flags & PCAP_IF_LOOPBACK) {\n\t\t/*\n\t\t * Loopback devices aren't wireless, and \"connected\"/\n\t\t * \"disconnected\" doesn't apply to them.\n\t\t */\n\t\t*flags |= PCAP_IF_CONNECTION_STATUS_NOT_APPLICABLE;\n\t\treturn (0);\n\t}\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          560,
+          0
+        ],
+        [
+          579,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_if_flags",
+        "parameters": {
+          "name": "char",
+          "flags": "bpf_u_int32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npcap_platform_finddevs(pcap_if_list_t *devlistp, char *errbuf)\n{\n\treturn (pcap_findalldevs_interfaces(devlistp, errbuf, can_be_bound,\n\t    get_if_flags));\n}",
+      "fn_code_pos": [
+        [
+          581,
+          0
+        ],
+        [
+          586,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_platform_finddevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_setfilter_pf(pcap_t *p, struct bpf_program *fp)\n{\n\tstruct pcap_pf *pf = p->priv;\n\tstruct bpf_version bv;\n\n\t/*\n\t * See if BIOCVERSION works.  If not, we assume the kernel doesn't\n\t * support BPF-style filters (it's not documented in the bpf(7)\n\t * or packetfiler(7) man pages, but the code used to fail if\n\t * BIOCSETF worked but BIOCVERSION didn't, and I've seen it do\n\t * kernel filtering in DU 4.0, so presumably BIOCVERSION works\n\t * there, at least).\n\t */\n\tif (ioctl(p->fd, BIOCVERSION, (caddr_t)&bv) >= 0) {\n\t\t/*\n\t\t * OK, we have the version of the BPF interpreter;\n\t\t * is it the same major version as us, and the same\n\t\t * or better minor version?\n\t\t */\n\t\tif (bv.bv_major == BPF_MAJOR_VERSION &&\n\t\t    bv.bv_minor >= BPF_MINOR_VERSION) {\n\t\t\t/*\n\t\t\t * Yes.  Try to install the filter.\n\t\t\t */\n\t\t\tif (ioctl(p->fd, BIOCSETF, (caddr_t)fp) < 0) {\n\t\t\t\tpcap_fmt_errmsg_for_errno(p->errbuf,\n\t\t\t\t    sizeof(p->errbuf), errno, \"BIOCSETF\");\n\t\t\t\treturn (-1);\n\t\t\t}\n\n\t\t\t/*\n\t\t\t * OK, that succeeded.  We're doing filtering in\n\t\t\t * the kernel.  (We assume we don't have a\n\t\t\t * userland filter installed - that'd require\n\t\t\t * a previous version check to have failed but\n\t\t\t * this one to succeed.)\n\t\t\t *\n\t\t\t * XXX - this message should be supplied to the\n\t\t\t * application as a warning of some sort,\n\t\t\t * except that if it's a GUI application, it's\n\t\t\t * not clear that it should be displayed in\n\t\t\t * a window to annoy the user.\n\t\t\t */\n\t\t\tfprintf(stderr, \"tcpdump: Using kernel BPF filter\\n\");\n\t\t\tpf->filtering_in_kernel = 1;\n\n\t\t\t/*\n\t\t\t * Discard any previously-received packets,\n\t\t\t * as they might have passed whatever filter\n\t\t\t * was formerly in effect, but might not pass\n\t\t\t * this filter (BIOCSETF discards packets buffered\n\t\t\t * in the kernel, so you can lose packets in any\n\t\t\t * case).\n\t\t\t */\n\t\t\tp->cc = 0;\n\t\t\treturn (0);\n\t\t}\n\n\t\t/*\n\t\t * We can't use the kernel's BPF interpreter; don't give\n\t\t * up, just log a message and be inefficient.\n\t\t *\n\t\t * XXX - this should really be supplied to the application\n\t\t * as a warning of some sort.\n\t\t */\n\t\tfprintf(stderr,\n\t    \"tcpdump: Requires BPF language %d.%d or higher; kernel is %d.%d\\n\",\n\t\t    BPF_MAJOR_VERSION, BPF_MINOR_VERSION,\n\t\t    bv.bv_major, bv.bv_minor);\n\t}\n\n\t/*\n\t * We couldn't do filtering in the kernel; do it in userland.\n\t */\n\tif (install_bpf_program(p, fp) < 0)\n\t\treturn (-1);\n\n\t/*\n\t * XXX - this message should be supplied by the application as\n\t * a warning of some sort.\n\t */\n\tfprintf(stderr, \"tcpdump: Filtering in user process\\n\");\n\tpf->filtering_in_kernel = 0;\n\treturn (0);\n}",
+      "fn_code_pos": [
+        [
+          588,
+          0
+        ],
+        [
+          673,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setfilter_pf",
+        "parameters": {
+          "p": "pcap_t",
+          "fp": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "const char *\npcap_lib_version(void)\n{\n\treturn (PCAP_VERSION_STRING);\n}",
+      "fn_code_pos": [
+        [
+          678,
+          0
+        ],
+        [
+          682,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "pcap_setfilter_pf(pcap_t *, struct bpf_program *)",
+      "fn_dec_pos": [
+        [
+          89,
+          11
+        ],
+        [
+          89,
+          60
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setfilter_pf",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_create_interface(const char *device _U_, char *ebuf)",
+      "fn_dec_pos": [
+        [
+          538,
+          0
+        ],
+        [
+          538,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_lib_version(void)",
+      "fn_dec_pos": [
+        [
+          679,
+          0
+        ],
+        [
+          679,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_pf {\n\tint\tfiltering_in_kernel; /* using kernel filter */\n\tu_long\tTotPkts;\t/* can't oflow for 79 hrs on ether */\n\tu_long\tTotAccepted;\t/* count accepted by filter */\n\tu_long\tTotDrops;\t/* count of dropped packets */\n\tlong\tTotMissed;\t/* missed by i/f during this run */\n\tlong\tOrigMissed;\t/* missed by i/f before this run */\n}",
+      {
+        "filtering_in_kernel": "int",
+        "TotPkts": "u_long",
+        "TotAccepted": "u_long",
+        "TotDrops": "u_long",
+        "TotMissed": "long",
+        "OrigMissed": "long"
+      },
+      "pcap_pf",
+      [
+        80,
+        0
+      ],
+      [
+        87,
+        1
+      ]
+    ],
+    [
+      "struct mbuf",
+      {},
+      "",
+      [
+        36,
+        0
+      ],
+      [
+        36,
+        11
+      ]
+    ],
+    [
+      "struct rtentry",
+      {},
+      "",
+      [
+        37,
+        0
+      ],
+      [
+        37,
+        14
+      ]
+    ],
+    [
+      "struct pcap_pf {\n\tint\tfiltering_in_kernel; /* using kernel filter */\n\tu_long\tTotPkts;\t/* can't oflow for 79 hrs on ether */\n\tu_long\tTotAccepted;\t/* count accepted by filter */\n\tu_long\tTotDrops;\t/* count of dropped packets */\n\tlong\tTotMissed;\t/* missed by i/f during this run */\n\tlong\tOrigMissed;\t/* missed by i/f before this run */\n}",
+      {
+        "filtering_in_kernel": "int",
+        "TotPkts": "u_long",
+        "TotAccepted": "u_long",
+        "TotDrops": "u_long",
+        "TotMissed": "long",
+        "OrigMissed": "long"
+      },
+      "pcap_pf",
+      [
+        80,
+        0
+      ],
+      [
+        87,
+        1
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        89,
+        39
+      ],
+      [
+        89,
+        57
+      ]
+    ],
+    [
+      "struct pcap_pf",
+      {},
+      "",
+      [
+        102,
+        1
+      ],
+      [
+        102,
+        15
+      ]
+    ],
+    [
+      "struct enstamp",
+      {},
+      "",
+      [
+        105,
+        10
+      ],
+      [
+        105,
+        24
+      ]
+    ],
+    [
+      "struct enstamp",
+      {},
+      "",
+      [
+        107,
+        1
+      ],
+      [
+        107,
+        15
+      ]
+    ],
+    [
+      "struct enstamp",
+      {},
+      "",
+      [
+        172,
+        9
+      ],
+      [
+        172,
+        23
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        208,
+        3
+      ],
+      [
+        208,
+        21
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        242,
+        25
+      ],
+      [
+        242,
+        41
+      ]
+    ],
+    [
+      "struct pcap_pf",
+      {},
+      "",
+      [
+        244,
+        1
+      ],
+      [
+        244,
+        15
+      ]
+    ],
+    [
+      "struct pcap_pf",
+      {},
+      "",
+      [
+        299,
+        1
+      ],
+      [
+        299,
+        15
+      ]
+    ],
+    [
+      "struct enfilter",
+      {},
+      "",
+      [
+        302,
+        1
+      ],
+      [
+        302,
+        16
+      ]
+    ],
+    [
+      "struct endevp",
+      {},
+      "",
+      [
+        303,
+        1
+      ],
+      [
+        303,
+        14
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        497,
+        2
+      ],
+      [
+        497,
+        16
+      ]
+    ],
+    [
+      "struct pcap_pf",
+      {},
+      "",
+      [
+        542,
+        38
+      ],
+      [
+        542,
+        52
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        589,
+        29
+      ],
+      [
+        589,
+        47
+      ]
+    ],
+    [
+      "struct pcap_pf",
+      {},
+      "",
+      [
+        591,
+        1
+      ],
+      [
+        591,
+        15
+      ]
+    ],
+    [
+      "struct bpf_version",
+      {},
+      "",
+      [
+        592,
+        1
+      ],
+      [
+        592,
+        19
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <sys/timeb.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <sys/file.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ioctl.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <net/pfilt.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include <net/if.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in.h>\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in_systm.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/ip.h>\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/if_ether.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/ip_var.h>\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/udp.h>\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/udp_var.h>\n",
+      [
+        46,
+        0
+      ],
+      [
+        47,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/tcp.h>\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/tcpip.h>\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        50,
+        0
+      ],
+      [
+        51,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        51,
+        0
+      ],
+      [
+        52,
+        0
+      ]
+    ],
+    [
+      "#include <netdb.h>\n",
+      [
+        52,
+        0
+      ],
+      [
+        53,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        53,
+        0
+      ],
+      [
+        54,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        54,
+        0
+      ],
+      [
+        55,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        55,
+        0
+      ],
+      [
+        56,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        56,
+        0
+      ],
+      [
+        57,
+        0
+      ]
+    ],
+    [
+      "#include <net/bpf.h>\n",
+      [
+        63,
+        0
+      ],
+      [
+        64,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        65,
+        0
+      ],
+      [
+        66,
+        0
+      ]
+    ],
+    [
+      "#include \"os-proto.h\"\n",
+      [
+        68,
+        0
+      ],
+      [
+        69,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

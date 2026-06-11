@@ -1,0 +1,455 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static os_emul_data *\nemul_bugapi_create(device *root,\n\t\t   bfd *image,\n\t\t   const char *name)\n{\n  device *node;\n  os_emul_data *bugapi;\n  char *filename;\n\n  /* check it really is for us */\n  if (name != NULL\n      && strcmp(name, \"bugapi\") != 0\n      && strcmp(name, \"bug\") != 0)\n    return NULL;\n  if (image != NULL\n      && name == NULL\n      && bfd_get_start_address(image) >= BUGAPI_END_ADDRESS)\n    return NULL;\n\n  bugapi = ZALLOC(os_emul_data);\n\n  /* options */\n  emul_add_tree_options(root, image, \"bug\", \"oea\",\n\t\t\t1 /*oea-interrupt-prefix*/);\n\n  /* add some real hardware, include eeprom memory for the eeprom trap\n     addresses */\n  emul_add_tree_hardware(root);\n  node = tree_parse(root, \"/openprom/memory@0xfff00000\");\n  tree_parse(node, \"./psim,description \\\"eeprom trap addresses\");\n  tree_parse(node, \"./reg 0xfff00000 0x3000\");\n\n  bugapi->root = root;\n\n  bugapi->memory_size\n    = tree_find_integer_property(root, \"/openprom/options/oea-memory-size\");\n  bugapi->interrupt_prefix =\n    tree_find_integer_property(root, \"/openprom/options/oea-interrupt-prefix\");\n  bugapi->interrupt_vector_address = (bugapi->interrupt_prefix\n\t\t\t\t      ? MASK(0, 43)\n\t\t\t\t      : 0);\n  bugapi->system_call_address = (bugapi->interrupt_vector_address + 0x00c00);\n  bugapi->stall_cpu_loop_address = (bugapi->system_call_address + 0x000f0);\n  bugapi->top_of_stack = bugapi->memory_size - 0x1000;\n  bugapi->little_endian\n    = tree_find_boolean_property(root, \"/options/little-endian?\");\n  bugapi->floating_point_available\n    = tree_find_boolean_property(root, \"/openprom/options/floating-point?\");\n  bugapi->input = NULL;\n  bugapi->output = NULL;\n\n  /* initialization */\n  if (image != NULL)\n    tree_parse(root, \"/openprom/init/register/0.pc 0x%lx\",\n\t       (unsigned long)bfd_get_start_address(image));\n  tree_parse(root, \"/openprom/init/register/pc 0x%lx\",\n\t     (unsigned long)bugapi->stall_cpu_loop_address);\n  tree_parse(root, \"/openprom/init/register/sp 0x%lx\",\n\t     (unsigned long)(bugapi->top_of_stack - 16));\n  tree_parse(root, \"/openprom/init/register/msr 0x%x\",\n\t     (msr_recoverable_interrupt\n\t      | (bugapi->little_endian\n\t\t ? (msr_little_endian_mode\n\t\t    | msr_interrupt_little_endian_mode)\n\t\t : 0)\n\t      | (bugapi->floating_point_available\n\t\t ? msr_floating_point_available\n\t\t : 0)\n\t      | (bugapi->interrupt_prefix\n\t\t ? msr_interrupt_prefix\n\t\t : 0)\n\t      ));\n\n  /* patch the system call instruction to call this emulation and then\n     do an rfi */\n  node = tree_parse(root, \"/openprom/init/data@0x%lx\",\n\t\t    (unsigned long)bugapi->system_call_address);\n  tree_parse(node, \"./psim,description \\\"system-call trap instruction\");\n  tree_parse(node, \"./real-address 0x%lx\",\n\t     (unsigned long)bugapi->system_call_address);\n  tree_parse(node, \"./data 0x%x\", emul_call_instruction);\n  node = tree_parse(root, \"/openprom/init/data@0x%lx\",\n\t\t    (unsigned long)bugapi->system_call_address + 4);\n  tree_parse(node, \"./psim,description \\\"return from interrupt instruction\");\n  tree_parse(node, \"./real-address 0x%lx\",\n\t     (unsigned long)bugapi->system_call_address + 4);\n  tree_parse(node, \"./data 0x%x\",\n\t     emul_rfi_instruction);\n\n  /* patch the end of the system call instruction so that it contains\n     a loop to self instruction and point all the cpu's at this */\n  node = tree_parse(root, \"/openprom/init/data@0x%lx\",\n\t\t    (unsigned long)bugapi->stall_cpu_loop_address);\n  tree_parse(node, \"./psim,description \\\"cpu-loop instruction\");\n  tree_parse(node, \"./real-address 0x%lx\",\n\t     (unsigned long)bugapi->stall_cpu_loop_address);\n  tree_parse(node, \"./data 0x%lx\",\n\t     (unsigned long)emul_loop_instruction);\n\n  if (image != NULL)\n    tree_parse(root, \"/openprom/init/stack/stack-type %s\",\n\t       (image->xvec->flavour == bfd_target_elf_flavour\n\t\t? \"ppc-elf\"\n\t\t: \"ppc-xcoff\"));\n\n  if (image != NULL)\n    {\n      filename = tree_quote_property (bfd_get_filename(image));\n      tree_parse(root, \"/openprom/init/load-binary/file-name %s\",\n\t\t filename);\n      free (filename);\n    }\n\n  return bugapi;\n}",
+      "fn_code_pos": [
+        [
+          197,
+          0
+        ],
+        [
+          311,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "emul_bugapi_create",
+        "parameters": {
+          "root": "device",
+          "image": "bfd",
+          "name": "char"
+        },
+        "return_type": "os_emul_data"
+      }
+    },
+    {
+      "fn_code": "static void\nemul_bugapi_init(os_emul_data *bugapi,\n\t\t int nr_cpus)\n{\n  int i;\n  /* get the current input/output devices that were created during\n     device tree initialization */\n  bugapi->input = tree_find_ihandle_property(bugapi->root, \"/chosen/stdin\");\n  bugapi->output = tree_find_ihandle_property(bugapi->root, \"/chosen/stdout\");\n  /* if present, extract the selected disk devices */\n  for (i = 0; i < nr_bugapi_disks; i++) {\n    char disk[32];\n    char *chp;\n    strcpy(disk, \"/chosen/disk0\");\n    ASSERT(sizeof(disk) > strlen(disk));\n    chp = strchr(disk, '0');\n    *chp = *chp + i;\n    if (tree_find_property(bugapi->root, disk) != NULL)\n      bugapi->disk[i] = tree_find_ihandle_property(bugapi->root, disk);\n  }\n}",
+      "fn_code_pos": [
+        [
+          313,
+          0
+        ],
+        [
+          333,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "emul_bugapi_init",
+        "parameters": {
+          "bugapi": "os_emul_data",
+          "nr_cpus": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static const char *\nemul_bugapi_instruction_name(int call_id)\n{\n  static char buffer[40];\n  int i;\n\n  for (i = 0; i < ARRAY_SIZE (bug_mapping); i++)\n    {\n      if (bug_mapping[i].value == call_id)\n\treturn bug_mapping[i].info;\n    }\n\n  (void) sprintf (buffer, \"Unknown bug call 0x%x\", call_id);\n  return buffer;\n}",
+      "fn_code_pos": [
+        [
+          335,
+          0
+        ],
+        [
+          349,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "emul_bugapi_instruction_name",
+        "parameters": {
+          "call_id": "int"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static int\nemul_bugapi_do_read(os_emul_data *bugapi,\n\t\t    cpu *processor,\n\t\t    unsigned_word cia,\n\t\t    unsigned_word buf,\n\t\t    int nbytes)\n{\n  unsigned char *scratch_buffer;\n  int status;\n\n  /* get a tempoary bufer */\n  scratch_buffer = (unsigned char *) zalloc(nbytes);\n\n  /* check if buffer exists by reading it */\n  emul_read_buffer((void *)scratch_buffer, buf, nbytes, processor, cia);\n\n  /* read */\n  status = device_instance_read(bugapi->input,\n\t\t\t\t(void *)scratch_buffer, nbytes);\n\n  /* -1 = error, -2 = nothing available - see \"serial\" [IEEE1275] */\n  if (status < 0) {\n    status = 0;\n  }\n\n  if (status > 0) {\n    emul_write_buffer((void *)scratch_buffer, buf, status, processor, cia);\n\n    /* Bugapi chops off the trailing n, but leaves it in the buffer */\n    if (scratch_buffer[status-1] == '\\n' || scratch_buffer[status-1] == '\\r')\n      status--;\n  }\n\n  free(scratch_buffer);\n  return status;\n}",
+      "fn_code_pos": [
+        [
+          351,
+          0
+        ],
+        [
+          386,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "emul_bugapi_do_read",
+        "parameters": {
+          "bugapi": "os_emul_data",
+          "processor": "cpu",
+          "cia": "unsigned_word",
+          "buf": "unsigned_word",
+          "nbytes": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nemul_bugapi_do_diskio(os_emul_data *bugapi,\n\t\t      cpu *processor,\n\t\t      unsigned_word cia,\n\t\t      unsigned_word descriptor_addr,\n\t\t      int call_id)\n{\n  struct dskio_descriptor {\n    unsigned_1 ctrl_lun;\n    unsigned_1 dev_lun;\n    unsigned_2 status;\n    unsigned_word pbuffer;\n    unsigned_4 blk_num;\n    unsigned_2 blk_cnt;\n    unsigned_1 flag;\n#define BUG_FILE_MARK\t 0x80\n#define IGNORE_FILENUM\t 0x02\n#define END_OF_FILE\t 0x01\n    unsigned_1 addr_mod;\n  } descriptor;\n  int block;\n  emul_read_buffer(&descriptor, descriptor_addr, sizeof(descriptor),\n\t\t   processor, cia);\n  T2H(descriptor.ctrl_lun);\n  T2H(descriptor.dev_lun);\n  T2H(descriptor.status);\n  T2H(descriptor.pbuffer);\n  T2H(descriptor.blk_num);\n  T2H(descriptor.blk_cnt);\n  T2H(descriptor.flag);\n  T2H(descriptor.addr_mod);\n  if (descriptor.dev_lun >= nr_bugapi_disks\n      || bugapi->disk[descriptor.dev_lun] == NULL) {\n    error(\"emul_bugapi_do_diskio: attempt to access unconfigured disk /chosen/disk%d\",\n\t  descriptor.dev_lun);\n  }\n  else {\n    for (block = 0; block < descriptor.blk_cnt; block++) {\n      device_instance *disk = bugapi->disk[descriptor.dev_lun];\n      unsigned_1 buf[512]; /*????*/\n      unsigned_word block_nr = descriptor.blk_num + block;\n      unsigned_word byte_nr = block_nr * sizeof(buf);\n      unsigned_word block_addr = descriptor.pbuffer + block*sizeof(buf);\n      if (device_instance_seek(disk, 0, byte_nr) < 0)\n\terror(\"emul_bugapi_do_diskio: bad seek\\n\");\n      switch (call_id) {\n      case _DSKRD:\n\tif (device_instance_read(disk, buf, sizeof(buf)) != sizeof(buf))\n\t  error(\"emul_`bugapi_do_diskio: bad read\\n\");\n\temul_write_buffer(buf, block_addr, sizeof(buf), processor, cia);\n\tbreak;\n      case _DSKWR:\n\temul_read_buffer(buf, block_addr, sizeof(buf), processor, cia);\n\tif (device_instance_write(disk, buf, sizeof(buf)) != sizeof(buf))\n\t  error(\"emul_bugapi_do_diskio: bad write\\n\");\n\tbreak;\n      default:\n\terror(\"emul_bugapi_do_diskio: bad switch\\n\");\n      }\n    }\n  }\n}",
+      "fn_code_pos": [
+        [
+          388,
+          0
+        ],
+        [
+          449,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "emul_bugapi_do_diskio",
+        "parameters": {
+          "bugapi": "os_emul_data",
+          "processor": "cpu",
+          "cia": "unsigned_word",
+          "descriptor_addr": "unsigned_word",
+          "call_id": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nemul_bugapi_do_write(os_emul_data *bugapi,\n\t\t     cpu *processor,\n\t\t     unsigned_word cia,\n\t\t     unsigned_word buf,\n\t\t     int nbytes,\n\t\t     const char *suffix)\n{\n  void *scratch_buffer = NULL;\n\n  /* get a tempoary bufer */\n  if (nbytes > 0)\n    {\n      scratch_buffer = zalloc(nbytes);\n\n      /* copy in */\n      emul_read_buffer(scratch_buffer, buf, nbytes,\n\t\t       processor, cia);\n\n      /* write */\n      device_instance_write(bugapi->output, scratch_buffer, nbytes);\n\n      free(scratch_buffer);\n    }\n\n  if (suffix)\n    device_instance_write(bugapi->output, suffix, strlen(suffix));\n\n  flush_stdoutput ();\n}",
+      "fn_code_pos": [
+        [
+          451,
+          0
+        ],
+        [
+          480,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "emul_bugapi_do_write",
+        "parameters": {
+          "bugapi": "os_emul_data",
+          "processor": "cpu",
+          "cia": "unsigned_word",
+          "buf": "unsigned_word",
+          "nbytes": "int",
+          "suffix": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nemul_bugapi_instruction_call(cpu *processor,\n\t\t\t     unsigned_word cia,\n\t\t\t     unsigned_word ra,\n\t\t\t     os_emul_data *bugapi)\n{\n  const int call_id = cpu_registers(processor)->gpr[10];\n  unsigned char uc;\n\n#define MY_INDEX itable_instruction_call\n  ITRACE (trace_os_emul,\n\t  (\" 0x%x %s, r3 = 0x%lx, r4 = 0x%lx\\n\",\n\t   call_id, emul_bugapi_instruction_name (call_id),\n\t   (long)cpu_registers(processor)->gpr[3],\n\t   (long)cpu_registers(processor)->gpr[4]));;\n\n  /* check that this isn't an invalid instruction */\n  if (cia != bugapi->system_call_address)\n    return 0;\n\n  switch (call_id) {\n  default:\n    error(\"emul-bugapi: unimplemented bugapi %s from address 0x%lx\\n\",\n\t  emul_bugapi_instruction_name (call_id), SRR0);\n    break;\n\n  /* read a single character, output r3 = byte */\n  /* FIXME: Add support to unbuffer input */\n  case _INCHR:\n    if (device_instance_read(bugapi->input, (void *)&uc, 1) <= 0)\n      uc = 0;\n    cpu_registers(processor)->gpr[3] = uc;\n    break;\n\n  /* read a line of at most 256 bytes, r3 = ptr to 1st byte, output r3 = ptr to last byte+1  */\n  case _INLN:\n    cpu_registers(processor)->gpr[3] += emul_bugapi_do_read(bugapi,\n\t\t\t\t\t\t\t    processor, cia,\n\t\t\t\t\t\t\t    cpu_registers(processor)->gpr[3],\n\t\t\t\t\t\t\t    256);\n    break;\n\n  /* output a character, r3 = character */\n  case _OUTCHR:\n    {\n      char out = (char)cpu_registers(processor)->gpr[3];\n      device_instance_write(bugapi->output, &out, 1);\n      break;\n    }\n\n  /* output a string, r3 = ptr to 1st byte, r4 = ptr to last byte+1 */\n  case _OUTSTR:\n    emul_bugapi_do_write(bugapi,\n\t\t\t processor, cia,\n\t\t\t cpu_registers(processor)->gpr[3],\n\t\t\t cpu_registers(processor)->gpr[4] - cpu_registers(processor)->gpr[3],\n\t\t\t (const char *)0);\n    break;\n\n  /* output a string followed by \\r\\n, r3 = ptr to 1st byte, r4 = ptr to last byte+1 */\n  case _OUTLN:\n\n    emul_bugapi_do_write(bugapi,\n\t\t\t processor, cia,\n\t\t\t cpu_registers(processor)->gpr[3],\n\t\t\t cpu_registers(processor)->gpr[4] - cpu_registers(processor)->gpr[3],\n\t\t\t \"\\n\");\n    break;\n\n  /* output a \\r\\n */\n  case _PCRLF:\n    device_instance_write(bugapi->output, \"\\n\", 1);\n    break;\n\n  /* read/write blocks of data to/from the disk */\n  case _DSKWR:\n  case _DSKRD:\n    emul_bugapi_do_diskio(bugapi, processor, cia,\n\t\t\t  cpu_registers(processor)->gpr[3],\n\t\t\t  call_id);\n    break;\n\n  /* return to ppcbug monitor (exiting with gpr[3] as status is not\n     part of the bug monitor) */\n  case _RETURN:\n    cpu_halt(processor, cia, was_exited, cpu_registers(processor)->gpr[3]);\n    break;\n  }\n  return 1;\n  /* the instruction following this one is a RFI.  Thus by just\n     continuing the return from system call is performed */\n}",
+      "fn_code_pos": [
+        [
+          482,
+          0
+        ],
+        [
+          573,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "emul_bugapi_instruction_call",
+        "parameters": {
+          "processor": "cpu",
+          "cia": "unsigned_word",
+          "ra": "unsigned_word",
+          "bugapi": "os_emul_data"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "emul_bugapi_create(device *root,\n\t\t   bfd *image,\n\t\t   const char *name)",
+      "fn_dec_pos": [
+        [
+          198,
+          0
+        ],
+        [
+          200,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "emul_bugapi_create",
+        "parameters": {
+          "root": "device",
+          "image": "bfd",
+          "name": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "emul_bugapi_instruction_name(int call_id)",
+      "fn_dec_pos": [
+        [
+          336,
+          0
+        ],
+        [
+          336,
+          41
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "emul_bugapi_instruction_name",
+        "parameters": {
+          "call_id": "int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct bug_map {\n  int value;\n  const char *info;\n}",
+      {
+        "value": "int",
+        "char": "const"
+      },
+      "bug_map",
+      [
+        111,
+        0
+      ],
+      [
+        114,
+        1
+      ]
+    ],
+    [
+      "struct _os_emul_data {\n  device *root;\n  unsigned_word memory_size;\n  unsigned_word top_of_stack;\n  int interrupt_prefix;\n  unsigned_word interrupt_vector_address;\n  unsigned_word system_call_address;\n  unsigned_word stall_cpu_loop_address;\n  int little_endian;\n  int floating_point_available;\n  /* I/O devices */\n  device_instance *output;\n  device_instance *input;\n  device_instance *(disk[nr_bugapi_disks]);\n}",
+      {
+        "*root": "device",
+        "memory_size": "unsigned_word",
+        "top_of_stack": "unsigned_word",
+        "interrupt_prefix": "int",
+        "interrupt_vector_address": "unsigned_word",
+        "system_call_address": "unsigned_word",
+        "stall_cpu_loop_address": "unsigned_word",
+        "little_endian": "int",
+        "floating_point_available": "int",
+        "*output": "device_instance",
+        "*input": "device_instance",
+        "*(disk[nr_bugapi_disks])": "device_instance"
+      },
+      "_os_emul_data",
+      [
+        180,
+        0
+      ],
+      [
+        194,
+        1
+      ]
+    ],
+    [
+      "struct dskio_descriptor {\n    unsigned_1 ctrl_lun;\n    unsigned_1 dev_lun;\n    unsigned_2 status;\n    unsigned_word pbuffer;\n    unsigned_4 blk_num;\n    unsigned_2 blk_cnt;\n    unsigned_1 flag;\n#define BUG_FILE_MARK\t 0x80\n#define IGNORE_FILENUM\t 0x02\n#define END_OF_FILE\t 0x01\n    unsigned_1 addr_mod;\n  }",
+      {
+        "ctrl_lun": "unsigned_1",
+        "dev_lun": "unsigned_1",
+        "status": "unsigned_2",
+        "pbuffer": "unsigned_word",
+        "blk_num": "unsigned_4",
+        "blk_cnt": "unsigned_2",
+        "flag": "unsigned_1",
+        "addr_mod": "unsigned_1"
+      },
+      "dskio_descriptor",
+      [
+        395,
+        2
+      ],
+      [
+        407,
+        3
+      ]
+    ],
+    [
+      "struct bug_map {\n  int value;\n  const char *info;\n}",
+      {
+        "value": "int",
+        "char": "const"
+      },
+      "bug_map",
+      [
+        111,
+        0
+      ],
+      [
+        114,
+        1
+      ]
+    ],
+    [
+      "struct bug_map",
+      {},
+      "",
+      [
+        116,
+        13
+      ],
+      [
+        116,
+        27
+      ]
+    ],
+    [
+      "struct _os_emul_data {\n  device *root;\n  unsigned_word memory_size;\n  unsigned_word top_of_stack;\n  int interrupt_prefix;\n  unsigned_word interrupt_vector_address;\n  unsigned_word system_call_address;\n  unsigned_word stall_cpu_loop_address;\n  int little_endian;\n  int floating_point_available;\n  /* I/O devices */\n  device_instance *output;\n  device_instance *input;\n  device_instance *(disk[nr_bugapi_disks]);\n}",
+      {
+        "*root": "device",
+        "memory_size": "unsigned_word",
+        "top_of_stack": "unsigned_word",
+        "interrupt_prefix": "int",
+        "interrupt_vector_address": "unsigned_word",
+        "system_call_address": "unsigned_word",
+        "stall_cpu_loop_address": "unsigned_word",
+        "little_endian": "int",
+        "floating_point_available": "int",
+        "*output": "device_instance",
+        "*input": "device_instance",
+        "*(disk[nr_bugapi_disks])": "device_instance"
+      },
+      "_os_emul_data",
+      [
+        180,
+        0
+      ],
+      [
+        194,
+        1
+      ]
+    ],
+    [
+      "struct dskio_descriptor {\n    unsigned_1 ctrl_lun;\n    unsigned_1 dev_lun;\n    unsigned_2 status;\n    unsigned_word pbuffer;\n    unsigned_4 blk_num;\n    unsigned_2 blk_cnt;\n    unsigned_1 flag;\n#define BUG_FILE_MARK\t 0x80\n#define IGNORE_FILENUM\t 0x02\n#define END_OF_FILE\t 0x01\n    unsigned_1 addr_mod;\n  }",
+      {
+        "ctrl_lun": "unsigned_1",
+        "dev_lun": "unsigned_1",
+        "status": "unsigned_2",
+        "pbuffer": "unsigned_word",
+        "blk_num": "unsigned_4",
+        "blk_cnt": "unsigned_2",
+        "flag": "unsigned_1",
+        "addr_mod": "unsigned_1"
+      },
+      "dskio_descriptor",
+      [
+        395,
+        2
+      ],
+      [
+        407,
+        3
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"emul_generic.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"emul_bugapi.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <strings.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum {\n  nr_bugapi_disks = 2,\n}",
+      {
+        "nr_bugapi_disks": ""
+      },
+      "",
+      [
+        175,
+        0
+      ],
+      [
+        177,
+        1
+      ]
+    ]
+  ]
+}

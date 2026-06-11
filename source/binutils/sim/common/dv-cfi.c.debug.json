@@ -1,0 +1,1290 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\ncfi_erase_block (struct hw *me, struct cfi *cfi, unsigned offset)\n{\n  unsigned i;\n  struct cfi_erase_region *region;\n\n  /* If no erase regions, then we can only do whole chip erase.  */\n  /* XXX: Is this within spec ?  Or must there always be at least one ?  */\n  if (!cfi->query.num_erase_regions)\n    memset (cfi->data, 0xff, cfi->dev_size);\n\n  for (i = 0; i < cfi->query.num_erase_regions; ++i)\n    {\n      region = &cfi->erase_regions[i];\n\n      if (offset >= region->end)\n\tcontinue;\n\n      /* XXX: Does spec require the erase addr to be erase block aligned ?\n\t      Maybe this is check is overly cautious ...  */\n      offset &= ~(region->size - 1);\n      memset (cfi->data + offset, 0xff, region->size);\n      break;\n    }\n}",
+      "fn_code_pos": [
+        [
+          177,
+          0
+        ],
+        [
+          201,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cfi_erase_block",
+        "parameters": {
+          "me": "struct hw",
+          "cfi": "struct cfi",
+          "offset": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ncfi_unshift_addr (struct cfi *cfi, unsigned addr)\n{\n  switch (cfi->width)\n    {\n    case 4: addr >>= 1; /* fallthrough.  */\n    case 2: addr >>= 1;\n    }\n  return addr;\n}",
+      "fn_code_pos": [
+        [
+          206,
+          0
+        ],
+        [
+          215,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cfi_unshift_addr",
+        "parameters": {
+          "cfi": "struct cfi",
+          "addr": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ncfi_encode_16bit (unsigned char *data, unsigned num)\n{\n  data[0] = num;\n  data[1] = num >> 8;\n}",
+      "fn_code_pos": [
+        [
+          219,
+          0
+        ],
+        [
+          224,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cfi_encode_16bit",
+        "parameters": {
+          "data": "unsigned char",
+          "num": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static bool\ncmdset_intel_write (struct hw *me, struct cfi *cfi, const void *source,\n\t\t    unsigned offset, unsigned value, unsigned nr_bytes)\n{\n  switch (cfi->state)\n    {\n    case CFI_STATE_READ:\n    case CFI_STATE_READ_ID:\n      switch (value)\n\t{\n\tcase INTEL_CMD_ERASE_BLOCK:\n\t  cfi->state = CFI_STATE_ERASE;\n\t  break;\n\tcase INTEL_CMD_WRITE:\n\tcase INTEL_CMD_WRITE_ALT:\n\t  cfi->state = CFI_STATE_WRITE;\n\t  break;\n\tcase INTEL_CMD_STATUS_CLEAR:\n\t  cfi->status = INTEL_SR_DWS;\n\t  break;\n\tcase INTEL_CMD_LOCK_SETUP:\n\t  cfi->state = CFI_STATE_PROTECT;\n\t  break;\n\tdefault:\n\t  return false;\n\t}\n      break;\n\n    case CFI_STATE_ERASE:\n      if (value == INTEL_CMD_ERASE_CONFIRM)\n\t{\n\t  cfi_erase_block (me, cfi, offset);\n\t  cfi->status &= ~(INTEL_SR_PS | INTEL_SR_ES);\n\t}\n      else\n\tcfi->status |= INTEL_SR_PS | INTEL_SR_ES;\n      cfi->state = CFI_STATE_STATUS;\n      break;\n\n    case CFI_STATE_PROTECT:\n      switch (value)\n\t{\n\tcase INTEL_CMD_LOCK_BLOCK:\n\tcase INTEL_CMD_UNLOCK_BLOCK:\n\tcase INTEL_CMD_LOCK_DOWN_BLOCK:\n\t  /* XXX: Handle the command.  */\n\t  break;\n\tdefault:\n\t  /* Kick out.  */\n\t  cfi->status |= INTEL_SR_PS | INTEL_SR_ES;\n\t  break;\n\t}\n      cfi->state = CFI_STATE_STATUS;\n      break;\n\n    default:\n      return false;\n    }\n\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          228,
+          0
+        ],
+        [
+          288,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdset_intel_write",
+        "parameters": {
+          "me": "struct hw",
+          "cfi": "struct cfi",
+          "source": "void",
+          "offset": "unsigned",
+          "value": "unsigned",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "static bool\ncmdset_intel_read (struct hw *me, struct cfi *cfi, void *dest,\n\t\t   unsigned offset, unsigned shifted_offset, unsigned nr_bytes)\n{\n  unsigned char *sdest = dest;\n\n  switch (cfi->state)\n    {\n    case CFI_STATE_STATUS:\n    case CFI_STATE_ERASE:\n      *sdest = cfi->status;\n      break;\n\n    case CFI_STATE_READ_ID:\n      switch (shifted_offset & 0x1ff)\n\t{\n\tcase 0x00:\t/* Manufacturer Code.  */\n\t  cfi_encode_16bit (dest, INTEL_ID_MANU);\n\t  break;\n\tcase 0x01:\t/* Device ID Code.  */\n\t  /* XXX: Push to device tree ?  */\n\t  cfi_encode_16bit (dest, 0xad);\n\t  break;\n\tcase 0x02:\t/* Block lock state.  */\n\t  /* XXX: This is per-block ...  */\n\t  *sdest = 0x00;\n\t  break;\n\tcase 0x05:\t/* Read Configuration Register.  */\n\t  cfi_encode_16bit (dest, (1 << 15));\n\t  break;\n\tdefault:\n\t  return false;\n\t}\n      break;\n\n    default:\n      return false;\n    }\n\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          290,
+          0
+        ],
+        [
+          330,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdset_intel_read",
+        "parameters": {
+          "me": "struct hw",
+          "cfi": "struct cfi",
+          "dest": "void",
+          "offset": "unsigned",
+          "shifted_offset": "unsigned",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "static void\ncmdset_intel_setup (struct hw *me, struct cfi *cfi)\n{\n  cfi->status = INTEL_SR_DWS;\n}",
+      "fn_code_pos": [
+        [
+          332,
+          0
+        ],
+        [
+          336,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cmdset_intel_setup",
+        "parameters": {
+          "me": "struct hw",
+          "cfi": "struct cfi"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ncfi_io_write_buffer (struct hw *me, const void *source, int space,\n\t\t     address_word addr, unsigned nr_bytes)\n{\n  struct cfi *cfi = hw_data (me);\n  const unsigned char *ssource = source;\n  enum cfi_state old_state;\n  unsigned offset, shifted_offset, value;\n\n  offset = addr & (cfi->dev_size - 1);\n  shifted_offset = cfi_unshift_addr (cfi, offset);\n\n  if (cfi->width != nr_bytes)\n    {\n      HW_TRACE ((me, \"write 0x%08lx length %u does not match flash width %u\",\n\t\t (unsigned long) addr, nr_bytes, cfi->width));\n      return nr_bytes;\n    }\n\n  if (cfi->state == CFI_STATE_WRITE)\n    {\n      /* NOR flash can only go from 1 to 0.  */\n      unsigned i;\n\n      HW_TRACE ((me, \"program %#x length %u\", offset, nr_bytes));\n\n      for (i = 0; i < nr_bytes; ++i)\n\tcfi->data[offset + i] &= ssource[i];\n\n      cfi->state = CFI_STATE_STATUS;\n\n      return nr_bytes;\n    }\n\n  value = ssource[0];\n\n  old_state = cfi->state;\n\n  if (value == CFI_CMD_READ || value == CFI_CMD_RESET)\n    {\n      cfi->state = CFI_STATE_READ;\n      goto done;\n    }\n\n  switch (cfi->state)\n    {\n    case CFI_STATE_READ:\n    case CFI_STATE_READ_ID:\n      if (value == CFI_CMD_CFI_QUERY)\n\t{\n\t  if (shifted_offset == CFI_ADDR_CFI_QUERY_START)\n\t    cfi->state = CFI_STATE_CFI_QUERY;\n\t  goto done;\n\t}\n\n      if (value == CFI_CMD_READ_ID)\n\t{\n\t  cfi->state = CFI_STATE_READ_ID;\n\t  goto done;\n\t}\n\n      /* Fall through.  */\n\n    default:\n      if (!cfi->cmdset->write (me, cfi, source, offset, value, nr_bytes))\n\tHW_TRACE ((me, \"unhandled command %#x at %#x\", value, offset));\n      break;\n    }\n\n done:\n  HW_TRACE ((me, \"write 0x%08lx command {%#x,%#x,%#x,%#x}; state %s -> %s\",\n\t     (unsigned long) addr, ssource[0],\n\t     nr_bytes > 1 ? ssource[1] : 0,\n\t     nr_bytes > 2 ? ssource[2] : 0,\n\t     nr_bytes > 3 ? ssource[3] : 0,\n\t     state_names[old_state], state_names[cfi->state]));\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          354,
+          0
+        ],
+        [
+          432,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cfi_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "addr": "address_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\ncfi_io_read_buffer (struct hw *me, void *dest, int space,\n\t\t    address_word addr, unsigned nr_bytes)\n{\n  struct cfi *cfi = hw_data (me);\n  unsigned char *sdest = dest;\n  unsigned offset, shifted_offset;\n\n  offset = addr & (cfi->dev_size - 1);\n  shifted_offset = cfi_unshift_addr (cfi, offset);\n\n  /* XXX: Is this OK to enforce ?  */\n#if 0\n  if (cfi->state != CFI_STATE_READ && cfi->width != nr_bytes)\n    {\n      HW_TRACE ((me, \"read 0x%08lx length %u does not match flash width %u\",\n\t\t (unsigned long) addr, nr_bytes, cfi->width));\n      return nr_bytes;\n    }\n#endif\n\n  HW_TRACE ((me, \"%s read 0x%08lx length %u\",\n\t     state_names[cfi->state], (unsigned long) addr, nr_bytes));\n\n  switch (cfi->state)\n    {\n    case CFI_STATE_READ:\n      memcpy (dest, cfi->data + offset, nr_bytes);\n      break;\n\n    case CFI_STATE_CFI_QUERY:\n      if (shifted_offset >= CFI_ADDR_CFI_QUERY_RESULT &&\n\t  shifted_offset < CFI_ADDR_CFI_QUERY_RESULT + sizeof (cfi->query) +\n\t\t     (cfi->query.num_erase_regions * 4))\n\t{\n\t  unsigned char *qry;\n\n\t  shifted_offset -= CFI_ADDR_CFI_QUERY_RESULT;\n\t  if (shifted_offset >= sizeof (cfi->query))\n\t    {\n\t      qry = cfi->erase_region_info;\n\t      shifted_offset -= sizeof (cfi->query);\n\t    }\n\t  else\n\t    qry = (void *) &cfi->query;\n\n\t  sdest[0] = qry[shifted_offset];\n\t  memset (sdest + 1, 0, nr_bytes - 1);\n\n\t  break;\n\t}\n\n    default:\n      if (!cfi->cmdset->read (me, cfi, dest, offset, shifted_offset, nr_bytes))\n\tHW_TRACE ((me, \"unhandled state %s\", state_names[cfi->state]));\n      break;\n    }\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          439,
+          0
+        ],
+        [
+          498,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cfi_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "addr": "address_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ncfi_delete_callback (struct hw *me)\n{\n#ifdef HAVE_MMAP\n  struct cfi *cfi = hw_data (me);\n\n  if (cfi->mmap)\n    munmap (cfi->mmap, cfi->dev_size);\n#endif\n}",
+      "fn_code_pos": [
+        [
+          502,
+          0
+        ],
+        [
+          511,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cfi_delete_callback",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncfi_add_erase_region (struct hw *me, struct cfi *cfi,\n\t\t      unsigned blocks, unsigned size)\n{\n  unsigned num_regions = cfi->query.num_erase_regions;\n  struct cfi_erase_region *region;\n  unsigned char *qry_region;\n\n  /* Store for our own usage.  */\n  region = &cfi->erase_regions[num_regions];\n  region->blocks = blocks;\n  region->size = size;\n  if (num_regions == 0)\n    region->start = 0;\n  else\n    region->start = region[-1].end;\n  region->end = region->start + (blocks * size);\n\n  /* Regions are 4 bytes long.  */\n  qry_region = cfi->erase_region_info + 4 * num_regions;\n\n  /* [0][1] = number erase blocks - 1 */\n  if (blocks > 0xffff + 1)\n    hw_abort (me, \"erase blocks %u too big to fit into region info\", blocks);\n  cfi_encode_16bit (&qry_region[0], blocks - 1);\n\n  /* [2][3] = block size / 256 bytes */\n  if (size > 0xffff * 256)\n    hw_abort (me, \"erase size %u too big to fit into region info\", size);\n  cfi_encode_16bit (&qry_region[2], size / 256);\n\n  /* Yet another region.  */\n  cfi->query.num_erase_regions = num_regions + 1;\n}",
+      "fn_code_pos": [
+        [
+          514,
+          0
+        ],
+        [
+          547,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cfi_add_erase_region",
+        "parameters": {
+          "me": "struct hw",
+          "cfi": "struct cfi",
+          "blocks": "unsigned",
+          "size": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nattach_cfi_regs (struct hw *me, struct cfi *cfi)\n{\n  address_word attach_address;\n  int attach_space;\n  unsigned attach_size;\n  reg_property_spec reg;\n  bool fd_writable;\n  int i, ret, fd;\n  signed_cell ival;\n\n  if (hw_find_property (me, \"reg\") == NULL)\n    hw_abort (me, \"Missing \\\"reg\\\" property\");\n  if (hw_find_property (me, \"cmdset\") == NULL)\n    hw_abort (me, \"Missing \\\"cmdset\\\" property\");\n\n  if (!hw_find_reg_array_property (me, \"reg\", 0, &reg))\n    hw_abort (me, \"\\\"reg\\\" property must contain three addr/size entries\");\n\n  hw_unit_address_to_attach_address (hw_parent (me),\n\t\t\t\t     &reg.address,\n\t\t\t\t     &attach_space, &attach_address, me);\n  hw_unit_size_to_attach_size (hw_parent (me), &reg.size, &attach_size, me);\n\n  hw_attach_address (hw_parent (me),\n\t\t     0, attach_space, attach_address, attach_size, me);\n\n  /* Extract the desired flash command set.  */\n  ret = hw_find_integer_array_property (me, \"cmdset\", 0, &ival);\n  if (ret != 1 && ret != 2)\n    hw_abort (me, \"\\\"cmdset\\\" property takes 1 or 2 entries\");\n  cfi_encode_16bit (cfi->query.p_id, ival);\n\n  for (i = 0; i < ARRAY_SIZE (cfi_cmdsets); ++i)\n    if (cfi_cmdsets[i]->id == ival)\n      cfi->cmdset = cfi_cmdsets[i];\n  if (cfi->cmdset == NULL)\n    hw_abort (me, \"cmdset %u not supported\", ival);\n\n  if (ret == 2)\n    {\n      hw_find_integer_array_property (me, \"cmdset\", 1, &ival);\n      cfi_encode_16bit (cfi->query.a_id, ival);\n    }\n\n  /* Extract the desired device size.  */\n  if (hw_find_property (me, \"size\"))\n    cfi->dev_size = hw_find_integer_property (me, \"size\");\n  else\n    cfi->dev_size = attach_size;\n  cfi->query.dev_size = log2 (cfi->dev_size);\n\n  /* Extract the desired flash width.  */\n  if (hw_find_property (me, \"width\"))\n    {\n      cfi->width = hw_find_integer_property (me, \"width\");\n      if (cfi->width != 8 && cfi->width != 16 && cfi->width != 32)\n\thw_abort (me, \"\\\"width\\\" must be 8 or 16 or 32, not %u\", cfi->width);\n    }\n  else\n    /* Default to 8 bit.  */\n    cfi->width = 8;\n  /* Turn 8/16/32 into 1/2/4.  */\n  cfi->width /= 8;\n\n  /* Extract optional write buffer size.  */\n  if (hw_find_property (me, \"write_size\"))\n    {\n      ival = hw_find_integer_property (me, \"write_size\");\n      cfi_encode_16bit (cfi->query.max_buf_write_len, log2 (ival));\n    }\n\n  /* Extract optional erase regions.  */\n  if (hw_find_property (me, \"erase_regions\"))\n    {\n      ret = hw_find_integer_array_property (me, \"erase_regions\", 0, &ival);\n      if (ret % 2)\n\thw_abort (me, \"\\\"erase_regions\\\" must be specified in sets of 2\");\n\n      cfi->erase_region_info = HW_NALLOC (me, unsigned char, ret / 2);\n      cfi->erase_regions = HW_NALLOC (me, struct cfi_erase_region, ret / 2);\n\n      for (i = 0; i < ret; i += 2)\n\t{\n\t  unsigned blocks, size;\n\n\t  hw_find_integer_array_property (me, \"erase_regions\", i, &ival);\n\t  blocks = ival;\n\n\t  hw_find_integer_array_property (me, \"erase_regions\", i + 1, &ival);\n\t  size = ival;\n\n\t  cfi_add_erase_region (me, cfi, blocks, size);\n\t}\n    }\n\n  /* Extract optional voltages.  */\n  if (hw_find_property (me, \"voltage\"))\n    {\n      unsigned num = ARRAY_SIZE (cfi->query.voltages);\n\n      ret = hw_find_integer_array_property (me, \"voltage\", 0, &ival);\n      if (ret > num)\n\thw_abort (me, \"\\\"voltage\\\" may have only %u arguments\", num);\n\n      for (i = 0; i < ret; ++i)\n\t{\n\t  hw_find_integer_array_property (me, \"voltage\", i, &ival);\n\t  cfi->query.voltages[i] = ival;\n\t}\n    }\n\n  /* Extract optional timeouts.  */\n  if (hw_find_property (me, \"timeout\"))\n    {\n      unsigned num = ARRAY_SIZE (cfi->query.timeouts);\n\n      ret = hw_find_integer_array_property (me, \"timeout\", 0, &ival);\n      if (ret > num)\n\thw_abort (me, \"\\\"timeout\\\" may have only %u arguments\", num);\n\n      for (i = 0; i < ret; ++i)\n\t{\n\t  hw_find_integer_array_property (me, \"timeout\", i, &ival);\n\t  cfi->query.timeouts[i] = ival;\n\t}\n    }\n\n  /* Extract optional file.  */\n  fd = -1;\n  fd_writable = false;\n  if (hw_find_property (me, \"file\"))\n    {\n      const char *file;\n\n      ret = hw_find_string_array_property (me, \"file\", 0, &file);\n      if (ret > 2)\n\thw_abort (me, \"\\\"file\\\" may take only one argument\");\n      if (ret == 2)\n\t{\n\t  const char *writable;\n\n\t  hw_find_string_array_property (me, \"file\", 1, &writable);\n\t  fd_writable = !strcmp (writable, \"rw\");\n\t}\n\n      fd = open (file, fd_writable ? O_RDWR : O_RDONLY);\n      if (fd < 0)\n\thw_abort (me, \"unable to read file `%s': %s\", file, strerror (errno));\n    }\n\n  /* Figure out where our initial flash data is coming from.  */\n  if (fd != -1 && fd_writable)\n    {\n#if defined (HAVE_MMAP) && defined (HAVE_POSIX_FALLOCATE)\n      posix_fallocate (fd, 0, cfi->dev_size);\n\n      cfi->mmap = mmap (NULL, cfi->dev_size,\n\t\t\tPROT_READ | (fd_writable ? PROT_WRITE : 0),\n\t\t\tMAP_SHARED, fd, 0);\n\n      if (cfi->mmap == MAP_FAILED)\n\tcfi->mmap = NULL;\n      else\n\tcfi->data = cfi->mmap;\n#else\n      sim_io_eprintf (hw_system (me),\n\t\t      \"cfi: sorry, file write support requires mmap()\\n\");\n#endif\n    }\n  if (!cfi->data)\n    {\n      size_t read_len;\n\n      cfi->data = HW_NALLOC (me, unsigned char, cfi->dev_size);\n\n      if (fd != -1)\n\t{\n\t  /* Use stdio to avoid EINTR issues with read().  */\n\t  FILE *fp = fdopen (fd, \"r\");\n\n\t  if (fp)\n\t    read_len = fread (cfi->data, 1, cfi->dev_size, fp);\n\t  else\n\t    read_len = 0;\n\n\t  /* Don't need to fclose() with fdopen(\"r\").  */\n\t}\n      else\n\tread_len = 0;\n\n      memset (cfi->data, 0xff, cfi->dev_size - read_len);\n    }\n\n  close (fd);\n}",
+      "fn_code_pos": [
+        [
+          575,
+          0
+        ],
+        [
+          770,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_cfi_regs",
+        "parameters": {
+          "me": "struct hw",
+          "cfi": "struct cfi"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncfi_finish (struct hw *me)\n{\n  struct cfi *cfi;\n\n  cfi = HW_ZALLOC (me, struct cfi);\n\n  set_hw_data (me, cfi);\n  set_hw_io_read_buffer (me, cfi_io_read_buffer);\n  set_hw_io_write_buffer (me, cfi_io_write_buffer);\n  set_hw_delete (me, cfi_delete_callback);\n\n  attach_cfi_regs (me, cfi);\n\n  /* Initialize the CFI.  */\n  cfi->state = CFI_STATE_READ;\n  memcpy (cfi->query.qry, \"QRY\", 3);\n  cfi->cmdset->setup (me, cfi);\n}",
+      "fn_code_pos": [
+        [
+          775,
+          0
+        ],
+        [
+          793,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cfi_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "(*setup) (struct hw *me, struct cfi *cfi)",
+      "fn_dec_pos": [
+        [
+          146,
+          7
+        ],
+        [
+          146,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "me": "struct hw",
+          "cfi": "struct cfi"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "(*write) (struct hw *me, struct cfi *cfi, const void *source,\n\t\t unsigned offset, unsigned value, unsigned nr_bytes)",
+      "fn_dec_pos": [
+        [
+          147,
+          7
+        ],
+        [
+          148,
+          54
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "me": "struct hw",
+          "cfi": "struct cfi",
+          "source": "void",
+          "offset": "unsigned",
+          "value": "unsigned",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "(*read) (struct hw *me, struct cfi *cfi, void *dest,\n\t\tunsigned offset, unsigned shifted_offset, unsigned nr_bytes)",
+      "fn_dec_pos": [
+        [
+          149,
+          7
+        ],
+        [
+          150,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "me": "struct hw",
+          "cfi": "struct cfi",
+          "dest": "void",
+          "offset": "unsigned",
+          "shifted_offset": "unsigned",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "bool"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct cfi_query\n{\n  /* This is always 'Q' 'R' 'Y'.  */\n  unsigned char qry[3];\n  /* Primary vendor ID.  */\n  unsigned char p_id[2];\n  /* Primary query table address.  */\n  unsigned char p_adr[2];\n  /* Alternate vendor ID.  */\n  unsigned char a_id[2];\n  /* Alternate query table address.  */\n  unsigned char a_adr[2];\n  union\n  {\n    /* Voltage levels.  */\n    unsigned char voltages[4];\n    struct\n    {\n      /* Normal min voltage level.  */\n      unsigned char vcc_min;\n      /* Normal max voltage level.  */\n      unsigned char vcc_max;\n      /* Programming min volage level.  */\n      unsigned char vpp_min;\n      /* Programming max volage level.  */\n      unsigned char vpp_max;\n    };\n  };\n  union\n  {\n    /* Operational timeouts.  */\n    unsigned char timeouts[8];\n    struct\n    {\n      /* Typical timeout for writing a single \"unit\".  */\n      unsigned char timeout_typ_unit_write;\n      /* Typical timeout for writing a single \"buffer\".  */\n      unsigned char timeout_typ_buf_write;\n      /* Typical timeout for erasing a block.  */\n      unsigned char timeout_typ_block_erase;\n      /* Typical timeout for erasing the chip.  */\n      unsigned char timeout_typ_chip_erase;\n      /* Max timeout for writing a single \"unit\".  */\n      unsigned char timeout_max_unit_write;\n      /* Max timeout for writing a single \"buffer\".  */\n      unsigned char timeout_max_buf_write;\n      /* Max timeout for erasing a block.  */\n      unsigned char timeout_max_block_erase;\n      /* Max timeout for erasing the chip.  */\n      unsigned char timeout_max_chip_erase;\n    };\n  };\n  /* Flash size is 2^dev_size bytes.  */\n  unsigned char dev_size;\n  /* Flash device interface description.  */\n  unsigned char iface_desc[2];\n  /* Max length of a single buffer write is 2^max_buf_write_len bytes.  */\n  unsigned char max_buf_write_len[2];\n  /* Number of erase regions.  */\n  unsigned char num_erase_regions;\n  /* The erase regions would now be an array after this point, but since\n     it is dynamic, we'll provide that from \"struct cfi\" when requested.  */\n  /*unsigned char erase_region_info;*/\n}",
+      {
+        "qry[3]": "unsigned char",
+        "p_id[2]": "unsigned char",
+        "p_adr[2]": "unsigned char",
+        "a_id[2]": "unsigned char",
+        "a_adr[2]": "unsigned char",
+        ";": "struct\n    {\n      /* Typical timeout for writing a single \"unit\".  */\n      unsigned char timeout_typ_unit_write;\n      /* Typical timeout for writing a single \"buffer\".  */\n      unsigned char timeout_typ_buf_write;\n      /* Typical timeout for erasing a block.  */\n      unsigned char timeout_typ_block_erase;\n      /* Typical timeout for erasing the chip.  */\n      unsigned char timeout_typ_chip_erase;\n      /* Max timeout for writing a single \"unit\".  */\n      unsigned char timeout_max_unit_write;\n      /* Max timeout for writing a single \"buffer\".  */\n      unsigned char timeout_max_buf_write;\n      /* Max timeout for erasing a block.  */\n      unsigned char timeout_max_block_erase;\n      /* Max timeout for erasing the chip.  */\n      unsigned char timeout_max_chip_erase;\n    }",
+        "voltages[4]": "unsigned char",
+        "vcc_min": "unsigned char",
+        "vcc_max": "unsigned char",
+        "vpp_min": "unsigned char",
+        "vpp_max": "unsigned char",
+        "timeouts[8]": "unsigned char",
+        "timeout_typ_unit_write": "unsigned char",
+        "timeout_typ_buf_write": "unsigned char",
+        "timeout_typ_block_erase": "unsigned char",
+        "timeout_typ_chip_erase": "unsigned char",
+        "timeout_max_unit_write": "unsigned char",
+        "timeout_max_buf_write": "unsigned char",
+        "timeout_max_block_erase": "unsigned char",
+        "timeout_max_chip_erase": "unsigned char",
+        "dev_size": "unsigned char",
+        "iface_desc[2]": "unsigned char",
+        "max_buf_write_len[2]": "unsigned char",
+        "num_erase_regions": "unsigned char"
+      },
+      "cfi_query",
+      [
+        61,
+        0
+      ],
+      [
+        124,
+        1
+      ]
+    ],
+    [
+      "struct\n    {\n      /* Normal min voltage level.  */\n      unsigned char vcc_min;\n      /* Normal max voltage level.  */\n      unsigned char vcc_max;\n      /* Programming min volage level.  */\n      unsigned char vpp_min;\n      /* Programming max volage level.  */\n      unsigned char vpp_max;\n    }",
+      {
+        "vcc_min": "unsigned char",
+        "vcc_max": "unsigned char",
+        "vpp_min": "unsigned char",
+        "vpp_max": "unsigned char"
+      },
+      "",
+      [
+        77,
+        4
+      ],
+      [
+        87,
+        5
+      ]
+    ],
+    [
+      "struct\n    {\n      /* Typical timeout for writing a single \"unit\".  */\n      unsigned char timeout_typ_unit_write;\n      /* Typical timeout for writing a single \"buffer\".  */\n      unsigned char timeout_typ_buf_write;\n      /* Typical timeout for erasing a block.  */\n      unsigned char timeout_typ_block_erase;\n      /* Typical timeout for erasing the chip.  */\n      unsigned char timeout_typ_chip_erase;\n      /* Max timeout for writing a single \"unit\".  */\n      unsigned char timeout_max_unit_write;\n      /* Max timeout for writing a single \"buffer\".  */\n      unsigned char timeout_max_buf_write;\n      /* Max timeout for erasing a block.  */\n      unsigned char timeout_max_block_erase;\n      /* Max timeout for erasing the chip.  */\n      unsigned char timeout_max_chip_erase;\n    }",
+      {
+        "timeout_typ_unit_write": "unsigned char",
+        "timeout_typ_buf_write": "unsigned char",
+        "timeout_typ_block_erase": "unsigned char",
+        "timeout_typ_chip_erase": "unsigned char",
+        "timeout_max_unit_write": "unsigned char",
+        "timeout_max_buf_write": "unsigned char",
+        "timeout_max_block_erase": "unsigned char",
+        "timeout_max_chip_erase": "unsigned char"
+      },
+      "",
+      [
+        93,
+        4
+      ],
+      [
+        111,
+        5
+      ]
+    ],
+    [
+      "struct cfi_erase_region\n{\n  unsigned blocks;\n  unsigned size;\n  unsigned start;\n  unsigned end;\n}",
+      {
+        "blocks": "unsigned",
+        "size": "unsigned",
+        "start": "unsigned",
+        "end": "unsigned"
+      },
+      "cfi_erase_region",
+      [
+        128,
+        0
+      ],
+      [
+        134,
+        1
+      ]
+    ],
+    [
+      "struct cfi_cmdset\n{\n  unsigned id;\n  void (*setup) (struct hw *me, struct cfi *cfi);\n  bool (*write) (struct hw *me, struct cfi *cfi, const void *source,\n\t\t unsigned offset, unsigned value, unsigned nr_bytes);\n  bool (*read) (struct hw *me, struct cfi *cfi, void *dest,\n\t\tunsigned offset, unsigned shifted_offset, unsigned nr_bytes);\n}",
+      {
+        "id": "unsigned",
+        "(*setup) (struct hw *me, struct cfi *cfi)": "void",
+        "(*write) (struct hw *me, struct cfi *cfi, const void *source,\n\t\t unsigned offset, unsigned value, unsigned nr_bytes)": "bool",
+        "(*read) (struct hw *me, struct cfi *cfi, void *dest,\n\t\tunsigned offset, unsigned shifted_offset, unsigned nr_bytes)": "bool"
+      },
+      "cfi_cmdset",
+      [
+        143,
+        0
+      ],
+      [
+        151,
+        1
+      ]
+    ],
+    [
+      "struct cfi\n{\n  unsigned width, dev_size, status;\n  enum cfi_state state;\n  unsigned char *data, *mmap;\n\n  struct cfi_query query;\n  const struct cfi_cmdset *cmdset;\n\n  unsigned char *erase_region_info;\n  struct cfi_erase_region *erase_regions;\n}",
+      {
+        "width": "unsigned",
+        "state": "enum cfi_state",
+        "*data": "unsigned char",
+        "query": "struct cfi_query",
+        "struct cfi_cmdset": "const",
+        "*erase_region_info": "unsigned char",
+        "*erase_regions": "struct cfi_erase_region"
+      },
+      "cfi",
+      [
+        156,
+        0
+      ],
+      [
+        167,
+        1
+      ]
+    ],
+    [
+      "struct cfi_query\n{\n  /* This is always 'Q' 'R' 'Y'.  */\n  unsigned char qry[3];\n  /* Primary vendor ID.  */\n  unsigned char p_id[2];\n  /* Primary query table address.  */\n  unsigned char p_adr[2];\n  /* Alternate vendor ID.  */\n  unsigned char a_id[2];\n  /* Alternate query table address.  */\n  unsigned char a_adr[2];\n  union\n  {\n    /* Voltage levels.  */\n    unsigned char voltages[4];\n    struct\n    {\n      /* Normal min voltage level.  */\n      unsigned char vcc_min;\n      /* Normal max voltage level.  */\n      unsigned char vcc_max;\n      /* Programming min volage level.  */\n      unsigned char vpp_min;\n      /* Programming max volage level.  */\n      unsigned char vpp_max;\n    };\n  };\n  union\n  {\n    /* Operational timeouts.  */\n    unsigned char timeouts[8];\n    struct\n    {\n      /* Typical timeout for writing a single \"unit\".  */\n      unsigned char timeout_typ_unit_write;\n      /* Typical timeout for writing a single \"buffer\".  */\n      unsigned char timeout_typ_buf_write;\n      /* Typical timeout for erasing a block.  */\n      unsigned char timeout_typ_block_erase;\n      /* Typical timeout for erasing the chip.  */\n      unsigned char timeout_typ_chip_erase;\n      /* Max timeout for writing a single \"unit\".  */\n      unsigned char timeout_max_unit_write;\n      /* Max timeout for writing a single \"buffer\".  */\n      unsigned char timeout_max_buf_write;\n      /* Max timeout for erasing a block.  */\n      unsigned char timeout_max_block_erase;\n      /* Max timeout for erasing the chip.  */\n      unsigned char timeout_max_chip_erase;\n    };\n  };\n  /* Flash size is 2^dev_size bytes.  */\n  unsigned char dev_size;\n  /* Flash device interface description.  */\n  unsigned char iface_desc[2];\n  /* Max length of a single buffer write is 2^max_buf_write_len bytes.  */\n  unsigned char max_buf_write_len[2];\n  /* Number of erase regions.  */\n  unsigned char num_erase_regions;\n  /* The erase regions would now be an array after this point, but since\n     it is dynamic, we'll provide that from \"struct cfi\" when requested.  */\n  /*unsigned char erase_region_info;*/\n}",
+      {
+        "qry[3]": "unsigned char",
+        "p_id[2]": "unsigned char",
+        "p_adr[2]": "unsigned char",
+        "a_id[2]": "unsigned char",
+        "a_adr[2]": "unsigned char",
+        ";": "struct\n    {\n      /* Typical timeout for writing a single \"unit\".  */\n      unsigned char timeout_typ_unit_write;\n      /* Typical timeout for writing a single \"buffer\".  */\n      unsigned char timeout_typ_buf_write;\n      /* Typical timeout for erasing a block.  */\n      unsigned char timeout_typ_block_erase;\n      /* Typical timeout for erasing the chip.  */\n      unsigned char timeout_typ_chip_erase;\n      /* Max timeout for writing a single \"unit\".  */\n      unsigned char timeout_max_unit_write;\n      /* Max timeout for writing a single \"buffer\".  */\n      unsigned char timeout_max_buf_write;\n      /* Max timeout for erasing a block.  */\n      unsigned char timeout_max_block_erase;\n      /* Max timeout for erasing the chip.  */\n      unsigned char timeout_max_chip_erase;\n    }",
+        "voltages[4]": "unsigned char",
+        "vcc_min": "unsigned char",
+        "vcc_max": "unsigned char",
+        "vpp_min": "unsigned char",
+        "vpp_max": "unsigned char",
+        "timeouts[8]": "unsigned char",
+        "timeout_typ_unit_write": "unsigned char",
+        "timeout_typ_buf_write": "unsigned char",
+        "timeout_typ_block_erase": "unsigned char",
+        "timeout_typ_chip_erase": "unsigned char",
+        "timeout_max_unit_write": "unsigned char",
+        "timeout_max_buf_write": "unsigned char",
+        "timeout_max_block_erase": "unsigned char",
+        "timeout_max_chip_erase": "unsigned char",
+        "dev_size": "unsigned char",
+        "iface_desc[2]": "unsigned char",
+        "max_buf_write_len[2]": "unsigned char",
+        "num_erase_regions": "unsigned char"
+      },
+      "cfi_query",
+      [
+        61,
+        0
+      ],
+      [
+        124,
+        1
+      ]
+    ],
+    [
+      "struct\n    {\n      /* Normal min voltage level.  */\n      unsigned char vcc_min;\n      /* Normal max voltage level.  */\n      unsigned char vcc_max;\n      /* Programming min volage level.  */\n      unsigned char vpp_min;\n      /* Programming max volage level.  */\n      unsigned char vpp_max;\n    }",
+      {
+        "vcc_min": "unsigned char",
+        "vcc_max": "unsigned char",
+        "vpp_min": "unsigned char",
+        "vpp_max": "unsigned char"
+      },
+      "",
+      [
+        77,
+        4
+      ],
+      [
+        87,
+        5
+      ]
+    ],
+    [
+      "struct\n    {\n      /* Typical timeout for writing a single \"unit\".  */\n      unsigned char timeout_typ_unit_write;\n      /* Typical timeout for writing a single \"buffer\".  */\n      unsigned char timeout_typ_buf_write;\n      /* Typical timeout for erasing a block.  */\n      unsigned char timeout_typ_block_erase;\n      /* Typical timeout for erasing the chip.  */\n      unsigned char timeout_typ_chip_erase;\n      /* Max timeout for writing a single \"unit\".  */\n      unsigned char timeout_max_unit_write;\n      /* Max timeout for writing a single \"buffer\".  */\n      unsigned char timeout_max_buf_write;\n      /* Max timeout for erasing a block.  */\n      unsigned char timeout_max_block_erase;\n      /* Max timeout for erasing the chip.  */\n      unsigned char timeout_max_chip_erase;\n    }",
+      {
+        "timeout_typ_unit_write": "unsigned char",
+        "timeout_typ_buf_write": "unsigned char",
+        "timeout_typ_block_erase": "unsigned char",
+        "timeout_typ_chip_erase": "unsigned char",
+        "timeout_max_unit_write": "unsigned char",
+        "timeout_max_buf_write": "unsigned char",
+        "timeout_max_block_erase": "unsigned char",
+        "timeout_max_chip_erase": "unsigned char"
+      },
+      "",
+      [
+        93,
+        4
+      ],
+      [
+        111,
+        5
+      ]
+    ],
+    [
+      "struct cfi_erase_region\n{\n  unsigned blocks;\n  unsigned size;\n  unsigned start;\n  unsigned end;\n}",
+      {
+        "blocks": "unsigned",
+        "size": "unsigned",
+        "start": "unsigned",
+        "end": "unsigned"
+      },
+      "cfi_erase_region",
+      [
+        128,
+        0
+      ],
+      [
+        134,
+        1
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        136,
+        0
+      ],
+      [
+        136,
+        10
+      ]
+    ],
+    [
+      "struct cfi_cmdset\n{\n  unsigned id;\n  void (*setup) (struct hw *me, struct cfi *cfi);\n  bool (*write) (struct hw *me, struct cfi *cfi, const void *source,\n\t\t unsigned offset, unsigned value, unsigned nr_bytes);\n  bool (*read) (struct hw *me, struct cfi *cfi, void *dest,\n\t\tunsigned offset, unsigned shifted_offset, unsigned nr_bytes);\n}",
+      {
+        "id": "unsigned",
+        "(*setup) (struct hw *me, struct cfi *cfi)": "void",
+        "(*write) (struct hw *me, struct cfi *cfi, const void *source,\n\t\t unsigned offset, unsigned value, unsigned nr_bytes)": "bool",
+        "(*read) (struct hw *me, struct cfi *cfi, void *dest,\n\t\tunsigned offset, unsigned shifted_offset, unsigned nr_bytes)": "bool"
+      },
+      "cfi_cmdset",
+      [
+        143,
+        0
+      ],
+      [
+        151,
+        1
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        146,
+        17
+      ],
+      [
+        146,
+        26
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        146,
+        32
+      ],
+      [
+        146,
+        42
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        147,
+        17
+      ],
+      [
+        147,
+        26
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        147,
+        32
+      ],
+      [
+        147,
+        42
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        149,
+        16
+      ],
+      [
+        149,
+        25
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        149,
+        31
+      ],
+      [
+        149,
+        41
+      ]
+    ],
+    [
+      "struct cfi\n{\n  unsigned width, dev_size, status;\n  enum cfi_state state;\n  unsigned char *data, *mmap;\n\n  struct cfi_query query;\n  const struct cfi_cmdset *cmdset;\n\n  unsigned char *erase_region_info;\n  struct cfi_erase_region *erase_regions;\n}",
+      {
+        "width": "unsigned",
+        "state": "enum cfi_state",
+        "*data": "unsigned char",
+        "query": "struct cfi_query",
+        "struct cfi_cmdset": "const",
+        "*erase_region_info": "unsigned char",
+        "*erase_regions": "struct cfi_erase_region"
+      },
+      "cfi",
+      [
+        156,
+        0
+      ],
+      [
+        167,
+        1
+      ]
+    ],
+    [
+      "struct cfi_query",
+      {},
+      "",
+      [
+        162,
+        2
+      ],
+      [
+        162,
+        18
+      ]
+    ],
+    [
+      "struct cfi_cmdset",
+      {},
+      "",
+      [
+        163,
+        8
+      ],
+      [
+        163,
+        25
+      ]
+    ],
+    [
+      "struct cfi_erase_region",
+      {},
+      "",
+      [
+        166,
+        2
+      ],
+      [
+        166,
+        25
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        178,
+        17
+      ],
+      [
+        178,
+        26
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        178,
+        32
+      ],
+      [
+        178,
+        42
+      ]
+    ],
+    [
+      "struct cfi_erase_region",
+      {},
+      "",
+      [
+        181,
+        2
+      ],
+      [
+        181,
+        25
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        207,
+        18
+      ],
+      [
+        207,
+        28
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        229,
+        20
+      ],
+      [
+        229,
+        29
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        229,
+        35
+      ],
+      [
+        229,
+        45
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        291,
+        19
+      ],
+      [
+        291,
+        28
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        291,
+        34
+      ],
+      [
+        291,
+        44
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        333,
+        20
+      ],
+      [
+        333,
+        29
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        333,
+        35
+      ],
+      [
+        333,
+        45
+      ]
+    ],
+    [
+      "struct cfi_cmdset",
+      {},
+      "",
+      [
+        338,
+        13
+      ],
+      [
+        338,
+        30
+      ]
+    ],
+    [
+      "struct cfi_cmdset",
+      {},
+      "",
+      [
+        345,
+        13
+      ],
+      [
+        345,
+        30
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        355,
+        21
+      ],
+      [
+        355,
+        30
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        358,
+        2
+      ],
+      [
+        358,
+        12
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        440,
+        20
+      ],
+      [
+        440,
+        29
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        443,
+        2
+      ],
+      [
+        443,
+        12
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        503,
+        21
+      ],
+      [
+        503,
+        30
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        506,
+        2
+      ],
+      [
+        506,
+        12
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        515,
+        22
+      ],
+      [
+        515,
+        31
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        515,
+        37
+      ],
+      [
+        515,
+        47
+      ]
+    ],
+    [
+      "struct cfi_erase_region",
+      {},
+      "",
+      [
+        519,
+        2
+      ],
+      [
+        519,
+        25
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        576,
+        17
+      ],
+      [
+        576,
+        26
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        576,
+        32
+      ],
+      [
+        576,
+        42
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        776,
+        12
+      ],
+      [
+        776,
+        21
+      ]
+    ],
+    [
+      "struct cfi",
+      {},
+      "",
+      [
+        778,
+        2
+      ],
+      [
+        778,
+        12
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        796,
+        6
+      ],
+      [
+        796,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <math.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <stdbool.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <sys/mman.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-base.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"dv-cfi.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum cfi_state\n{\n  CFI_STATE_READ,\n  CFI_STATE_READ_ID,\n  CFI_STATE_CFI_QUERY,\n  CFI_STATE_PROTECT,\n  CFI_STATE_STATUS,\n  CFI_STATE_ERASE,\n  CFI_STATE_WRITE,\n  CFI_STATE_WRITE_BUFFER,\n  CFI_STATE_WRITE_BUFFER_CONFIRM,\n}",
+      {
+        "CFI_STATE_READ": "",
+        "CFI_STATE_READ_ID": "",
+        "CFI_STATE_CFI_QUERY": "",
+        "CFI_STATE_PROTECT": "",
+        "CFI_STATE_STATUS": "",
+        "CFI_STATE_ERASE": "",
+        "CFI_STATE_WRITE": "",
+        "CFI_STATE_WRITE_BUFFER": "",
+        "CFI_STATE_WRITE_BUFFER_CONFIRM": ""
+      },
+      "cfi_state",
+      [
+        42,
+        0
+      ],
+      [
+        53,
+        1
+      ]
+    ],
+    [
+      "enum cfi_state",
+      {},
+      "",
+      [
+        159,
+        2
+      ],
+      [
+        159,
+        16
+      ]
+    ],
+    [
+      "enum cfi_state",
+      {},
+      "",
+      [
+        360,
+        2
+      ],
+      [
+        360,
+        16
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,207 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static enum ia64_insn_type\nunit_to_type (ia64_insn opcode, enum ia64_unit unit)\n{\n  enum ia64_insn_type type;\n  int op;\n\n  op = IA64_OP (opcode);\n\n  if (op >= 8 && (unit == IA64_UNIT_I || unit == IA64_UNIT_M))\n    {\n      type = IA64_TYPE_A;\n    }\n  else\n    {\n      switch (unit)\n\t{\n\tcase IA64_UNIT_I:\n\t  type = IA64_TYPE_I; break;\n\tcase IA64_UNIT_M:\n\t  type = IA64_TYPE_M; break;\n\tcase IA64_UNIT_B:\n\t  type = IA64_TYPE_B; break;\n\tcase IA64_UNIT_F:\n\t  type = IA64_TYPE_F; break;\n        case IA64_UNIT_L:\n\tcase IA64_UNIT_X:\n\t  type = IA64_TYPE_X; break;\n\tdefault:\n\t  type = -1;\n\t}\n    }\n  return type;\n}",
+      "fn_code_pos": [
+        [
+          33,
+          0
+        ],
+        [
+          65,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "unit_to_type",
+        "parameters": {
+          "opcode": "ia64_insn",
+          "unit": "enum ia64_unit"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "int\nprint_insn_ia64 (bfd_vma memaddr, struct disassemble_info *info)\n{\n  ia64_insn t0, t1, slot[3], template_val, s_bit, insn;\n  int slotnum, j, status, need_comma, retval, slot_multiplier;\n  const struct ia64_operand *odesc;\n  const struct ia64_opcode *idesc;\n  const char *err, *str, *tname;\n  BFD_HOST_U_64_BIT value;\n  bfd_byte bundle[16];\n  enum ia64_unit unit;\n  char regname[16];\n\n  if (info->bytes_per_line == 0)\n    info->bytes_per_line = 6;\n  info->display_endian = info->endian;\n\n  slot_multiplier = info->bytes_per_line;\n  retval = slot_multiplier;\n\n  slotnum = (((long) memaddr) & 0xf) / slot_multiplier;\n  if (slotnum > 2)\n    return -1;\n\n  memaddr -= (memaddr & 0xf);\n  status = (*info->read_memory_func) (memaddr, bundle, sizeof (bundle), info);\n  if (status != 0)\n    {\n      (*info->memory_error_func) (status, memaddr, info);\n      return -1;\n    }\n  /* bundles are always in little-endian byte order */\n  t0 = bfd_getl64 (bundle);\n  t1 = bfd_getl64 (bundle + 8);\n  s_bit = t0 & 1;\n  template_val = (t0 >> 1) & 0xf;\n  slot[0] = (t0 >>  5) & 0x1ffffffffffLL;\n  slot[1] = ((t0 >> 46) & 0x3ffff) | ((t1 & 0x7fffff) << 18);\n  slot[2] = (t1 >> 23) & 0x1ffffffffffLL;\n\n  tname = ia64_templ_desc[template_val].name;\n  if (slotnum == 0)\n    (*info->fprintf_func) (info->stream, \"[%s] \", tname);\n  else\n    (*info->fprintf_func) (info->stream, \"      \");\n\n  unit = ia64_templ_desc[template_val].exec_unit[slotnum];\n\n  if (template_val == 2 && slotnum == 1)\n    {\n      /* skip L slot in MLI template: */\n      slotnum = 2;\n      retval += slot_multiplier;\n    }\n\n  insn = slot[slotnum];\n\n  if (unit == IA64_UNIT_NIL)\n    goto decoding_failed;\n\n  idesc = ia64_dis_opcode (insn, unit_to_type (insn, unit));\n  if (idesc == NULL)\n    goto decoding_failed;\n\n  /* print predicate, if any: */\n\n  if ((idesc->flags & IA64_OPCODE_NO_PRED)\n      || (insn & 0x3f) == 0)\n    (*info->fprintf_func) (info->stream, \"      \");\n  else\n    (*info->fprintf_func) (info->stream, \"(p%02d) \", (int)(insn & 0x3f));\n\n  /* now the actual instruction: */\n\n  (*info->fprintf_func) (info->stream, \"%s\", idesc->name);\n  if (idesc->operands[0])\n    (*info->fprintf_func) (info->stream, \" \");\n\n  need_comma = 0;\n  for (j = 0; j < NELEMS (idesc->operands) && idesc->operands[j]; ++j)\n    {\n      odesc = elf64_ia64_operands + idesc->operands[j];\n\n      if (need_comma)\n\t(*info->fprintf_func) (info->stream, \",\");\n\n      if (odesc - elf64_ia64_operands == IA64_OPND_IMMU64)\n\t{\n\t  /* special case of 64 bit immediate load: */\n\t  value = ((insn >> 13) & 0x7f) | (((insn >> 27) & 0x1ff) << 7)\n\t    | (((insn >> 22) & 0x1f) << 16) | (((insn >> 21) & 0x1) << 21)\n\t    | (slot[1] << 22) | (((insn >> 36) & 0x1) << 63);\n\t}\n      else if (odesc - elf64_ia64_operands == IA64_OPND_IMMU62)\n        {\n          /* 62-bit immediate for nop.x/break.x */\n          value = ((slot[1] & 0x1ffffffffffLL) << 21)\n            | (((insn >> 36) & 0x1) << 20)\n            | ((insn >> 6) & 0xfffff);\n        }\n      else if (odesc - elf64_ia64_operands == IA64_OPND_TGT64)\n\t{\n\t  /* 60-bit immediate for long branches. */\n\t  value = (((insn >> 13) & 0xfffff)\n\t\t   | (((insn >> 36) & 1) << 59)\n\t\t   | (((slot[1] >> 2) & 0x7fffffffffLL) << 20)) << 4;\n\t}\n      else\n\t{\n\t  err = (*odesc->extract) (odesc, insn, &value);\n\t  if (err)\n\t    {\n\t      (*info->fprintf_func) (info->stream, \"%s\", err);\n\t      goto done;\n\t    }\n\t}\n\n\tswitch (odesc->op_class)\n\t  {\n\t  case IA64_OPND_CLASS_CST:\n\t    (*info->fprintf_func) (info->stream, \"%s\", odesc->str);\n\t    break;\n\n\t  case IA64_OPND_CLASS_REG:\n\t    if (odesc->str[0] == 'a' && odesc->str[1] == 'r')\n\t      {\n\t\tswitch (value)\n\t\t  {\n\t\t  case 0: case 1: case 2: case 3:\n\t\t  case 4: case 5: case 6: case 7:\n\t\t    sprintf (regname, \"ar.k%u\", (unsigned int) value);\n\t\t    break;\n\t\t  case 16:\tstrcpy (regname, \"ar.rsc\"); break;\n\t\t  case 17:\tstrcpy (regname, \"ar.bsp\"); break;\n\t\t  case 18:\tstrcpy (regname, \"ar.bspstore\"); break;\n\t\t  case 19:\tstrcpy (regname, \"ar.rnat\"); break;\n\t\t  case 21:\tstrcpy (regname, \"ar.fcr\"); break;\n\t\t  case 24:\tstrcpy (regname, \"ar.eflag\"); break;\n\t\t  case 25:\tstrcpy (regname, \"ar.csd\"); break;\n\t\t  case 26:\tstrcpy (regname, \"ar.ssd\"); break;\n\t\t  case 27:\tstrcpy (regname, \"ar.cflg\"); break;\n\t\t  case 28:\tstrcpy (regname, \"ar.fsr\"); break;\n\t\t  case 29:\tstrcpy (regname, \"ar.fir\"); break;\n\t\t  case 30:\tstrcpy (regname, \"ar.fdr\"); break;\n\t\t  case 32:\tstrcpy (regname, \"ar.ccv\"); break;\n\t\t  case 36:\tstrcpy (regname, \"ar.unat\"); break;\n\t\t  case 40:\tstrcpy (regname, \"ar.fpsr\"); break;\n\t\t  case 44:\tstrcpy (regname, \"ar.itc\"); break;\n\t\t  case 45:\tstrcpy (regname, \"ar.ruc\"); break;\n\t\t  case 64:\tstrcpy (regname, \"ar.pfs\"); break;\n\t\t  case 65:\tstrcpy (regname, \"ar.lc\"); break;\n\t\t  case 66:\tstrcpy (regname, \"ar.ec\"); break;\n\t\t  default:\n\t\t    sprintf (regname, \"ar%u\", (unsigned int) value);\n\t\t    break;\n\t\t  }\n\t\t(*info->fprintf_func) (info->stream, \"%s\", regname);\n\t      }\n\t    else if (odesc->str[0] == 'c' && odesc->str[1] == 'r')\n\t      {\n\t\tswitch (value)\n\t\t  {\n\t\t  case 0:       strcpy (regname, \"cr.dcr\"); break;\n\t\t  case 1:       strcpy (regname, \"cr.itm\"); break;\n\t\t  case 2:       strcpy (regname, \"cr.iva\"); break;\n\t\t  case 8:       strcpy (regname, \"cr.pta\"); break;\n\t\t  case 16:      strcpy (regname, \"cr.ipsr\"); break;\n\t\t  case 17:      strcpy (regname, \"cr.isr\"); break;\n\t\t  case 19:      strcpy (regname, \"cr.iip\"); break;\n\t\t  case 20:      strcpy (regname, \"cr.ifa\"); break;\n\t\t  case 21:      strcpy (regname, \"cr.itir\"); break;\n\t\t  case 22:      strcpy (regname, \"cr.iipa\"); break;\n\t\t  case 23:      strcpy (regname, \"cr.ifs\"); break;\n\t\t  case 24:      strcpy (regname, \"cr.iim\"); break;\n\t\t  case 25:      strcpy (regname, \"cr.iha\"); break;\n\t\t  case 26:      strcpy (regname, \"cr.iib0\"); break;\n\t\t  case 27:      strcpy (regname, \"cr.iib1\"); break;\n\t\t  case 64:      strcpy (regname, \"cr.lid\"); break;\n\t\t  case 65:      strcpy (regname, \"cr.ivr\"); break;\n\t\t  case 66:      strcpy (regname, \"cr.tpr\"); break;\n\t\t  case 67:      strcpy (regname, \"cr.eoi\"); break;\n\t\t  case 68:      strcpy (regname, \"cr.irr0\"); break;\n\t\t  case 69:      strcpy (regname, \"cr.irr1\"); break;\n\t\t  case 70:      strcpy (regname, \"cr.irr2\"); break;\n\t\t  case 71:      strcpy (regname, \"cr.irr3\"); break;\n\t\t  case 72:      strcpy (regname, \"cr.itv\"); break;\n\t\t  case 73:      strcpy (regname, \"cr.pmv\"); break;\n\t\t  case 74:      strcpy (regname, \"cr.cmcv\"); break;\n\t\t  case 80:      strcpy (regname, \"cr.lrr0\"); break;\n\t\t  case 81:      strcpy (regname, \"cr.lrr1\"); break;\n\t\t  default:\n\t\t    sprintf (regname, \"cr%u\", (unsigned int) value);\n\t\t    break;\n\t\t  }\n\t\t(*info->fprintf_func) (info->stream, \"%s\", regname);\n\t      }\n\t    else\n\t      (*info->fprintf_func) (info->stream, \"%s%d\", odesc->str, (int)value);\n\t    break;\n\n\t  case IA64_OPND_CLASS_IND:\n\t    (*info->fprintf_func) (info->stream, \"%s[r%d]\", odesc->str, (int)value);\n\t    break;\n\n\t  case IA64_OPND_CLASS_ABS:\n\t    str = 0;\n\t    if (odesc - elf64_ia64_operands == IA64_OPND_MBTYPE4)\n\t      switch (value)\n\t\t{\n\t\tcase 0x0: str = \"@brcst\"; break;\n\t\tcase 0x8: str = \"@mix\"; break;\n\t\tcase 0x9: str = \"@shuf\"; break;\n\t\tcase 0xa: str = \"@alt\"; break;\n\t\tcase 0xb: str = \"@rev\"; break;\n\t\t}\n\n\t    if (str)\n\t      (*info->fprintf_func) (info->stream, \"%s\", str);\n\t    else if (odesc->flags & IA64_OPND_FLAG_DECIMAL_SIGNED)\n\t      (*info->fprintf_func) (info->stream, \"%lld\", (long long) value);\n\t    else if (odesc->flags & IA64_OPND_FLAG_DECIMAL_UNSIGNED)\n\t      (*info->fprintf_func) (info->stream, \"%llu\", (long long) value);\n\t    else\n\t      (*info->fprintf_func) (info->stream, \"0x%llx\", (long long) value);\n\t    break;\n\n\t  case IA64_OPND_CLASS_REL:\n\t    (*info->print_address_func) (memaddr + value, info);\n\t    break;\n\t  }\n\n      need_comma = 1;\n      if (j + 1 == idesc->num_outputs)\n\t{\n\t  (*info->fprintf_func) (info->stream, \"=\");\n\t  need_comma = 0;\n\t}\n    }\n  if (slotnum + 1 == ia64_templ_desc[template_val].group_boundary\n      || ((slotnum == 2) && s_bit))\n    (*info->fprintf_func) (info->stream, \";;\");\n\n done:\n  ia64_free_opcode ((struct ia64_opcode *)idesc);\n failed:\n  if (slotnum == 2)\n    retval += 16 - 3*slot_multiplier;\n  return retval;\n\n decoding_failed:\n  (*info->fprintf_func) (info->stream, \"      data8 %#011llx\", (long long) insn);\n  goto failed;\n}",
+      "fn_code_pos": [
+        [
+          67,
+          0
+        ],
+        [
+          319,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_insn_ia64",
+        "parameters": {
+          "memaddr": "bfd_vma",
+          "info": "struct disassemble_info"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        68,
+        34
+      ],
+      [
+        68,
+        57
+      ]
+    ],
+    [
+      "struct ia64_operand",
+      {},
+      "",
+      [
+        72,
+        8
+      ],
+      [
+        72,
+        27
+      ]
+    ],
+    [
+      "struct ia64_opcode",
+      {},
+      "",
+      [
+        73,
+        8
+      ],
+      [
+        73,
+        26
+      ]
+    ],
+    [
+      "struct ia64_opcode",
+      {},
+      "",
+      [
+        310,
+        21
+      ],
+      [
+        310,
+        39
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <assert.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"disassemble.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"opcode/ia64.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum ia64_insn_type",
+      {},
+      "",
+      [
+        33,
+        7
+      ],
+      [
+        33,
+        26
+      ]
+    ],
+    [
+      "enum ia64_unit",
+      {},
+      "",
+      [
+        34,
+        32
+      ],
+      [
+        34,
+        46
+      ]
+    ],
+    [
+      "enum ia64_insn_type",
+      {},
+      "",
+      [
+        36,
+        2
+      ],
+      [
+        36,
+        21
+      ]
+    ],
+    [
+      "enum ia64_unit",
+      {},
+      "",
+      [
+        77,
+        2
+      ],
+      [
+        77,
+        16
+      ]
+    ]
+  ]
+}

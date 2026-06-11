@@ -1,0 +1,938 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "local int log_lock(struct log *log)\n{\n    int fd;\n    struct stat st;\n\n    strcpy(log->end, \".lock\");\n    while ((fd = open(log->path, O_CREAT | O_EXCL, 0644)) < 0) {\n        if (errno != EEXIST)\n            return -1;\n        if (stat(log->path, &st) == 0 && time(NULL) - st.st_mtime > PATIENCE) {\n            unlink(log->path);\n            continue;\n        }\n        sleep(2);       /* relinquish the CPU for two seconds while waiting */\n    }\n    close(fd);\n    if (stat(log->path, &st) == 0)\n        log->lock = st.st_mtime;\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          347,
+          0
+        ],
+        [
+          366,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_lock",
+        "parameters": {
+          "log": "struct log"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local void log_touch(struct log *log)\n{\n    struct stat st;\n\n    strcpy(log->end, \".lock\");\n    utimes(log->path, NULL);\n    if (stat(log->path, &st) == 0)\n        log->lock = st.st_mtime;\n}",
+      "fn_code_pos": [
+        [
+          371,
+          0
+        ],
+        [
+          379,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_touch",
+        "parameters": {
+          "log": "struct log"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int log_check(struct log *log)\n{\n    struct stat st;\n\n    strcpy(log->end, \".lock\");\n    if (stat(log->path, &st) || st.st_mtime != log->lock)\n        return 1;\n    log_touch(log);\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          383,
+          0
+        ],
+        [
+          392,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_check",
+        "parameters": {
+          "log": "struct log"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local void log_unlock(struct log *log)\n{\n    if (log_check(log))\n        return;\n    strcpy(log->end, \".lock\");\n    unlink(log->path);\n    log->lock = 0;\n}",
+      "fn_code_pos": [
+        [
+          395,
+          0
+        ],
+        [
+          402,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_unlock",
+        "parameters": {
+          "log": "struct log"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int log_head(struct log *log)\n{\n    int op;\n    unsigned char buf[HEAD + EXTRA];\n\n    if (lseek(log->fd, 0, SEEK_SET) < 0 ||\n        read(log->fd, buf, HEAD + EXTRA) != HEAD + EXTRA ||\n        memcmp(buf, log_gzhead, HEAD)) {\n        return -1;\n    }\n    log->first = PULL8(buf + HEAD);\n    log->last = PULL8(buf + HEAD + 8);\n    log->ccrc = PULL4(buf + HEAD + 16);\n    log->clen = PULL4(buf + HEAD + 20);\n    log->tcrc = PULL4(buf + HEAD + 24);\n    log->tlen = PULL4(buf + HEAD + 28);\n    log->stored = PULL2(buf + HEAD + 32);\n    log->back = 3 + (buf[HEAD + 34] & 7);\n    op = (buf[HEAD + 34] >> 3) & 3;\n    return op;\n}",
+      "fn_code_pos": [
+        [
+          409,
+          0
+        ],
+        [
+          429,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_head",
+        "parameters": {
+          "log": "struct log"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int log_mark(struct log *log, int op)\n{\n    int ret;\n    unsigned char ext[EXTRA];\n\n    PUT8(ext, log->first);\n    PUT8(ext + 8, log->last);\n    PUT4(ext + 16, log->ccrc);\n    PUT4(ext + 20, log->clen);\n    PUT4(ext + 24, log->tcrc);\n    PUT4(ext + 28, log->tlen);\n    PUT2(ext + 32, log->stored);\n    ext[34] = log->back - 3 + (op << 3);\n    fsync(log->fd);\n    ret = lseek(log->fd, HEAD, SEEK_SET) < 0 ||\n          write(log->fd, ext, EXTRA) != EXTRA ? -1 : 0;\n    fsync(log->fd);\n    return ret;\n}",
+      "fn_code_pos": [
+        [
+          436,
+          0
+        ],
+        [
+          454,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_mark",
+        "parameters": {
+          "log": "struct log",
+          "op": "int"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int log_last(struct log *log, int last)\n{\n    int back, len, mask;\n    unsigned char buf[6];\n\n    /* determine the locations of the bytes and bits to modify */\n    back = log->last == log->first ? log->back : 8;\n    len = back > 8 ? 2 : 1;                 /* bytes back from log->last */\n    mask = 0x80 >> ((back - 1) & 7);        /* mask for block last-bit */\n\n    /* get the byte to modify (one or two back) into buf[0] -- don't need to\n       read the byte if the last-bit is eight bits back, since in that case\n       the entire byte will be modified */\n    buf[0] = 0;\n    if (back != 8 && (lseek(log->fd, log->last - len, SEEK_SET) < 0 ||\n                      read(log->fd, buf, 1) != 1))\n        return -1;\n\n    /* change the last-bit of the last stored block as requested -- note\n       that all bits above the last-bit are set to zero, per the type bits\n       of a stored block being 00 and per the convention that the bits to\n       bring the stream to a byte boundary are also zeros */\n    buf[1] = 0;\n    buf[2 - len] = (*buf & (mask - 1)) + (last ? mask : 0);\n\n    /* write the modified stored block header and lengths, move the file\n       pointer to after the last stored block data */\n    PUT2(buf + 2, log->stored);\n    PUT2(buf + 4, log->stored ^ 0xffff);\n    return lseek(log->fd, log->last - len, SEEK_SET) < 0 ||\n           write(log->fd, buf + 2 - len, len + 4) != len + 4 ||\n           lseek(log->fd, log->stored, SEEK_CUR) < 0 ? -1 : 0;\n}",
+      "fn_code_pos": [
+        [
+          461,
+          0
+        ],
+        [
+          493,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_last",
+        "parameters": {
+          "log": "struct log",
+          "last": "int"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int log_append(struct log *log, unsigned char *data, size_t len)\n{\n    uint put;\n    off_t end;\n    unsigned char buf[8];\n\n    /* set the last block last-bit and length, in case recovering an\n       interrupted append, then position the file pointer to append to the\n       block */\n    if (log_last(log, 1))\n        return -1;\n\n    /* append, adding stored blocks and updating the offset of the last stored\n       block as needed, and update the total crc and length */\n    while (len) {\n        /* append as much as we can to the last block */\n        put = (MAX_STORE << 10) - log->stored;\n        if (put > len)\n            put = (uint)len;\n        if (put) {\n            if (write(log->fd, data, put) != put)\n                return -1;\n            BAIL(1);\n            log->tcrc = crc32(log->tcrc, data, put);\n            log->tlen += put;\n            log->stored += put;\n            data += put;\n            len -= put;\n        }\n\n        /* if we need to, add a new empty stored block */\n        if (len) {\n            /* mark current block as not last */\n            if (log_last(log, 0))\n                return -1;\n\n            /* point to new, empty stored block */\n            log->last += 4 + log->stored + 1;\n            log->stored = 0;\n        }\n\n        /* mark last block as last, update its length */\n        if (log_last(log, 1))\n            return -1;\n        BAIL(2);\n    }\n\n    /* write the new crc and length trailer, and truncate just in case (could\n       be recovering from partial append with a missing foo.add file) */\n    PUT4(buf, log->tcrc);\n    PUT4(buf + 4, log->tlen);\n    if (write(log->fd, buf, 8) != 8 ||\n        (end = lseek(log->fd, 0, SEEK_CUR)) < 0 || ftruncate(log->fd, end))\n        return -1;\n\n    /* write the extra field, marking the log file as done, delete .add file */\n    if (log_mark(log, NO_OP))\n        return -1;\n    strcpy(log->end, \".add\");\n    unlink(log->path);          /* ignore error, since may not exist */\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          500,
+          0
+        ],
+        [
+          561,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_append",
+        "parameters": {
+          "log": "struct log",
+          "data": "unsigned char",
+          "len": "size_t"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int log_replace(struct log *log)\n{\n    int ret;\n    char *dest;\n\n    /* delete foo.add file */\n    strcpy(log->end, \".add\");\n    unlink(log->path);         /* ignore error, since may not exist */\n    BAIL(3);\n\n    /* rename foo.name to foo.dict, replacing foo.dict if it exists */\n    strcpy(log->end, \".dict\");\n    dest = malloc(strlen(log->path) + 1);\n    if (dest == NULL)\n        return -2;\n    strcpy(dest, log->path);\n    strcpy(log->end, \".temp\");\n    ret = rename(log->path, dest);\n    free(dest);\n    if (ret && errno != ENOENT)\n        return -1;\n    BAIL(4);\n\n    /* mark the foo.gz file as done */\n    return log_mark(log, NO_OP);\n}",
+      "fn_code_pos": [
+        [
+          570,
+          0
+        ],
+        [
+          595,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_replace",
+        "parameters": {
+          "log": "struct log"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int log_compress(struct log *log, unsigned char *data, size_t len)\n{\n    int fd;\n    uint got, max;\n    ssize_t dict;\n    off_t end;\n    z_stream strm;\n    unsigned char buf[DICT];\n\n    /* compress and append compressed data */\n    if (len) {\n        /* set up for deflate, allocating memory */\n        strm.zalloc = Z_NULL;\n        strm.zfree = Z_NULL;\n        strm.opaque = Z_NULL;\n        if (deflateInit2(&strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8,\n                         Z_DEFAULT_STRATEGY) != Z_OK)\n            return -2;\n\n        /* read in dictionary (last 32K of data that was compressed) */\n        strcpy(log->end, \".dict\");\n        fd = open(log->path, O_RDONLY, 0);\n        if (fd >= 0) {\n            dict = read(fd, buf, DICT);\n            close(fd);\n            if (dict < 0) {\n                deflateEnd(&strm);\n                return -1;\n            }\n            if (dict)\n                deflateSetDictionary(&strm, buf, (uint)dict);\n        }\n        log_touch(log);\n\n        /* prime deflate with last bits of previous block, position write\n           pointer to write those bits and overwrite what follows */\n        if (lseek(log->fd, log->first - (log->back > 8 ? 2 : 1),\n                SEEK_SET) < 0 ||\n            read(log->fd, buf, 1) != 1 || lseek(log->fd, -1, SEEK_CUR) < 0) {\n            deflateEnd(&strm);\n            return -1;\n        }\n        deflatePrime(&strm, (8 - log->back) & 7, *buf);\n\n        /* compress, finishing with a partial non-last empty static block */\n        strm.next_in = data;\n        max = (((uint)0 - 1) >> 1) + 1; /* in case int smaller than size_t */\n        do {\n            strm.avail_in = len > max ? max : (uint)len;\n            len -= strm.avail_in;\n            do {\n                strm.avail_out = DICT;\n                strm.next_out = buf;\n                deflate(&strm, len ? Z_NO_FLUSH : Z_PARTIAL_FLUSH);\n                got = DICT - strm.avail_out;\n                if (got && write(log->fd, buf, got) != got) {\n                    deflateEnd(&strm);\n                    return -1;\n                }\n                log_touch(log);\n            } while (strm.avail_out == 0);\n        } while (len);\n        deflateEnd(&strm);\n        BAIL(5);\n\n        /* find start of empty static block -- scanning backwards the first one\n           bit is the second bit of the block, if the last byte is zero, then\n           we know the byte before that has a one in the top bit, since an\n           empty static block is ten bits long */\n        if ((log->first = lseek(log->fd, -1, SEEK_CUR)) < 0 ||\n            read(log->fd, buf, 1) != 1)\n            return -1;\n        log->first++;\n        if (*buf) {\n            log->back = 1;\n            while ((*buf & ((uint)1 << (8 - log->back++))) == 0)\n                ;       /* guaranteed to terminate, since *buf != 0 */\n        }\n        else\n            log->back = 10;\n\n        /* update compressed crc and length */\n        log->ccrc = log->tcrc;\n        log->clen = log->tlen;\n    }\n    else {\n        /* no data to compress -- fix up existing gzip stream */\n        log->tcrc = log->ccrc;\n        log->tlen = log->clen;\n    }\n\n    /* complete and truncate gzip stream */\n    log->last = log->first;\n    log->stored = 0;\n    PUT4(buf, log->tcrc);\n    PUT4(buf + 4, log->tlen);\n    if (log_last(log, 1) || write(log->fd, buf, 8) != 8 ||\n        (end = lseek(log->fd, 0, SEEK_CUR)) < 0 || ftruncate(log->fd, end))\n        return -1;\n    BAIL(6);\n\n    /* mark as being in the replace operation */\n    if (log_mark(log, REPLACE_OP))\n        return -1;\n\n    /* execute the replace operation and mark the file as done */\n    return log_replace(log);\n}",
+      "fn_code_pos": [
+        [
+          607,
+          0
+        ],
+        [
+          714,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_compress",
+        "parameters": {
+          "log": "struct log",
+          "data": "unsigned char",
+          "len": "size_t"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local void log_log(struct log *log, int op, char *record)\n{\n    time_t now;\n    FILE *rec;\n\n    now = time(NULL);\n    strcpy(log->end, \".repairs\");\n    rec = fopen(log->path, \"a\");\n    if (rec == NULL)\n        return;\n    fprintf(rec, \"%.24s %s recovery: %s\\n\", ctime(&now), op == APPEND_OP ?\n            \"append\" : (op == COMPRESS_OP ? \"compress\" : \"replace\"), record);\n    fclose(rec);\n    return;\n}",
+      "fn_code_pos": [
+        [
+          717,
+          0
+        ],
+        [
+          731,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_log",
+        "parameters": {
+          "log": "struct log",
+          "op": "int",
+          "record": "char"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int log_recover(struct log *log, int op)\n{\n    int fd, ret = 0;\n    unsigned char *data = NULL;\n    size_t len = 0;\n    struct stat st;\n\n    /* log recovery */\n    log_log(log, op, \"start\");\n\n    /* load foo.add file if expected and present */\n    if (op == APPEND_OP || op == COMPRESS_OP) {\n        strcpy(log->end, \".add\");\n        if (stat(log->path, &st) == 0 && st.st_size) {\n            len = (size_t)(st.st_size);\n            if ((off_t)len != st.st_size ||\n                    (data = malloc(st.st_size)) == NULL) {\n                log_log(log, op, \"allocation failure\");\n                return -2;\n            }\n            if ((fd = open(log->path, O_RDONLY, 0)) < 0) {\n                log_log(log, op, \".add file read failure\");\n                return -1;\n            }\n            ret = (size_t)read(fd, data, len) != len;\n            close(fd);\n            if (ret) {\n                log_log(log, op, \".add file read failure\");\n                return -1;\n            }\n            log_log(log, op, \"loaded .add file\");\n        }\n        else\n            log_log(log, op, \"missing .add file!\");\n    }\n\n    /* recover the interrupted operation */\n    switch (op) {\n    case APPEND_OP:\n        ret = log_append(log, data, len);\n        break;\n    case COMPRESS_OP:\n        ret = log_compress(log, data, len);\n        break;\n    case REPLACE_OP:\n        ret = log_replace(log);\n    }\n\n    /* log status */\n    log_log(log, op, ret ? \"failure\" : \"complete\");\n\n    /* clean up */\n    if (data != NULL)\n        free(data);\n    return ret;\n}",
+      "fn_code_pos": [
+        [
+          737,
+          0
+        ],
+        [
+          792,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_recover",
+        "parameters": {
+          "log": "struct log",
+          "op": "int"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local void log_close(struct log *log)\n{\n    if (log->fd >= 0)\n        close(log->fd);\n    log->fd = -1;\n    log_unlock(log);\n}",
+      "fn_code_pos": [
+        [
+          795,
+          0
+        ],
+        [
+          801,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_close",
+        "parameters": {
+          "log": "struct log"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int log_open(struct log *log)\n{\n    int op;\n\n    /* release open file resource if left over -- can occur if lock lost\n       between gzlog_open() and gzlog_write() */\n    if (log->fd >= 0)\n        close(log->fd);\n    log->fd = -1;\n\n    /* negotiate exclusive access */\n    if (log_lock(log) < 0)\n        return -1;\n\n    /* open the log file, foo.gz */\n    strcpy(log->end, \".gz\");\n    log->fd = open(log->path, O_RDWR | O_CREAT, 0644);\n    if (log->fd < 0) {\n        log_close(log);\n        return -1;\n    }\n\n    /* if new, initialize foo.gz with an empty log, delete old dictionary */\n    if (lseek(log->fd, 0, SEEK_END) == 0) {\n        if (write(log->fd, log_gzhead, HEAD) != HEAD ||\n            write(log->fd, log_gzext, EXTRA) != EXTRA ||\n            write(log->fd, log_gzbody, BODY) != BODY) {\n            log_close(log);\n            return -1;\n        }\n        strcpy(log->end, \".dict\");\n        unlink(log->path);\n    }\n\n    /* verify log file and load extra field information */\n    if ((op = log_head(log)) < 0) {\n        log_close(log);\n        return -1;\n    }\n\n    /* check for interrupted process and if so, recover */\n    if (op != NO_OP && log_recover(log, op)) {\n        log_close(log);\n        return -1;\n    }\n\n    /* touch the lock file to prevent another process from grabbing it */\n    log_touch(log);\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          812,
+          0
+        ],
+        [
+          861,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "log_open",
+        "parameters": {
+          "log": "struct log"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "gzlog *gzlog_open(char *path)\n{\n    size_t n;\n    struct log *log;\n\n    /* check arguments */\n    if (path == NULL || *path == 0)\n        return NULL;\n\n    /* allocate and initialize log structure */\n    log = malloc(sizeof(struct log));\n    if (log == NULL)\n        return NULL;\n    strcpy(log->id, LOGID);\n    log->fd = -1;\n\n    /* save path and end of path for name construction */\n    n = strlen(path);\n    log->path = malloc(n + 9);              /* allow for \".repairs\" */\n    if (log->path == NULL) {\n        free(log);\n        return NULL;\n    }\n    strcpy(log->path, path);\n    log->end = log->path + n;\n\n    /* gain exclusive access and verify log file -- may perform a\n       recovery operation if needed */\n    if (log_open(log)) {\n        free(log->path);\n        free(log);\n        return NULL;\n    }\n\n    /* return pointer to log structure */\n    return log;\n}",
+      "fn_code_pos": [
+        [
+          864,
+          0
+        ],
+        [
+          900,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gzlog_open",
+        "parameters": {
+          "path": "char"
+        },
+        "return_type": "gzlog"
+      }
+    },
+    {
+      "fn_code": "int gzlog_compress(gzlog *logd)\n{\n    int fd, ret;\n    uint block;\n    size_t len, next;\n    unsigned char *data, buf[5];\n    struct log *log = logd;\n\n    /* check arguments */\n    if (log == NULL || strcmp(log->id, LOGID))\n        return -3;\n\n    /* see if we lost the lock -- if so get it again and reload the extra\n       field information (it probably changed), recover last operation if\n       necessary */\n    if (log_check(log) && log_open(log))\n        return -1;\n\n    /* create space for uncompressed data */\n    len = ((size_t)(log->last - log->first) & ~(((size_t)1 << 10) - 1)) +\n          log->stored;\n    if ((data = malloc(len)) == NULL)\n        return -2;\n\n    /* do statement here is just a cheap trick for error handling */\n    do {\n        /* read in the uncompressed data */\n        if (lseek(log->fd, log->first - 1, SEEK_SET) < 0)\n            break;\n        next = 0;\n        while (next < len) {\n            if (read(log->fd, buf, 5) != 5)\n                break;\n            block = PULL2(buf + 1);\n            if (next + block > len ||\n                read(log->fd, (char *)data + next, block) != block)\n                break;\n            next += block;\n        }\n        if (lseek(log->fd, 0, SEEK_CUR) != log->last + 4 + log->stored)\n            break;\n        log_touch(log);\n\n        /* write the uncompressed data to the .add file */\n        strcpy(log->end, \".add\");\n        fd = open(log->path, O_WRONLY | O_CREAT | O_TRUNC, 0644);\n        if (fd < 0)\n            break;\n        ret = (size_t)write(fd, data, len) != len;\n        if (ret | close(fd))\n            break;\n        log_touch(log);\n\n        /* write the dictionary for the next compress to the .temp file */\n        strcpy(log->end, \".temp\");\n        fd = open(log->path, O_WRONLY | O_CREAT | O_TRUNC, 0644);\n        if (fd < 0)\n            break;\n        next = DICT > len ? len : DICT;\n        ret = (size_t)write(fd, (char *)data + len - next, next) != next;\n        if (ret | close(fd))\n            break;\n        log_touch(log);\n\n        /* roll back to compressed data, mark the compress in progress */\n        log->last = log->first;\n        log->stored = 0;\n        if (log_mark(log, COMPRESS_OP))\n            break;\n        BAIL(7);\n\n        /* compress and append the data (clears mark) */\n        ret = log_compress(log, data, len);\n        free(data);\n        return ret;\n    } while (0);\n\n    /* broke out of do above on i/o error */\n    free(data);\n    return -1;\n}",
+      "fn_code_pos": [
+        [
+          907,
+          0
+        ],
+        [
+          987,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gzlog_compress",
+        "parameters": {
+          "logd": "gzlog"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int gzlog_write(gzlog *logd, void *data, size_t len)\n{\n    int fd, ret;\n    struct log *log = logd;\n\n    /* check arguments */\n    if (log == NULL || strcmp(log->id, LOGID))\n        return -3;\n    if (data == NULL || len <= 0)\n        return 0;\n\n    /* see if we lost the lock -- if so get it again and reload the extra\n       field information (it probably changed), recover last operation if\n       necessary */\n    if (log_check(log) && log_open(log))\n        return -1;\n\n    /* create and write .add file */\n    strcpy(log->end, \".add\");\n    fd = open(log->path, O_WRONLY | O_CREAT | O_TRUNC, 0644);\n    if (fd < 0)\n        return -1;\n    ret = (size_t)write(fd, data, len) != len;\n    if (ret | close(fd))\n        return -1;\n    log_touch(log);\n\n    /* mark log file with append in progress */\n    if (log_mark(log, APPEND_OP))\n        return -1;\n    BAIL(8);\n\n    /* append data (clears mark) */\n    if (log_append(log, data, len))\n        return -1;\n\n    /* check to see if it's time to compress -- if not, then done */\n    if (((log->last - log->first) >> 10) + (log->stored >> 10) < TRIGGER)\n        return 0;\n\n    /* time to compress */\n    return gzlog_compress(log);\n}",
+      "fn_code_pos": [
+        [
+          994,
+          0
+        ],
+        [
+          1036,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gzlog_write",
+        "parameters": {
+          "logd": "gzlog",
+          "data": "void",
+          "len": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int gzlog_close(gzlog *logd)\n{\n    struct log *log = logd;\n\n    /* check arguments */\n    if (log == NULL || strcmp(log->id, LOGID))\n        return -3;\n\n    /* close the log file and release the lock */\n    log_close(log);\n\n    /* free structure and return */\n    if (log->path != NULL)\n        free(log->path);\n    strcpy(log->id, \"bad\");\n    free(log);\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          1041,
+          0
+        ],
+        [
+          1058,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gzlog_close",
+        "parameters": {
+          "logd": "gzlog"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "gzlog_open(char *path)",
+      "fn_dec_pos": [
+        [
+          864,
+          7
+        ],
+        [
+          864,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gzlog_open",
+        "parameters": {
+          "path": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct log {\n    char id[4];     /* contains LOGID to detect inadvertent overwrites */\n    int fd;         /* file descriptor for .gz file, opened read/write */\n    char *path;     /* allocated path, e.g. \"/var/log/foo\" or \"foo\" */\n    char *end;      /* end of path, for appending suffices such as \".gz\" */\n    off_t first;    /* offset of first stored block first length byte */\n    int back;       /* location of first block id in bits back from first */\n    uint stored;    /* bytes currently in last stored block */\n    off_t last;     /* offset of last stored block first length byte */\n    ulong ccrc;     /* crc of compressed data */\n    ulong clen;     /* length (modulo 2^32) of compressed data */\n    ulong tcrc;     /* crc of total data */\n    ulong tlen;     /* length (modulo 2^32) of total data */\n    time_t lock;    /* last modify time of our lock file */\n}",
+      {
+        "id[4]": "char",
+        "fd": "int",
+        "*path": "char",
+        "*end": "char",
+        "first": "off_t",
+        "back": "int",
+        "stored": "uint",
+        "last": "off_t",
+        "ccrc": "ulong",
+        "clen": "ulong",
+        "tcrc": "ulong",
+        "tlen": "ulong",
+        "lock": "time_t"
+      },
+      "log",
+      [
+        288,
+        0
+      ],
+      [
+        302,
+        1
+      ]
+    ],
+    [
+      "struct log {\n    char id[4];     /* contains LOGID to detect inadvertent overwrites */\n    int fd;         /* file descriptor for .gz file, opened read/write */\n    char *path;     /* allocated path, e.g. \"/var/log/foo\" or \"foo\" */\n    char *end;      /* end of path, for appending suffices such as \".gz\" */\n    off_t first;    /* offset of first stored block first length byte */\n    int back;       /* location of first block id in bits back from first */\n    uint stored;    /* bytes currently in last stored block */\n    off_t last;     /* offset of last stored block first length byte */\n    ulong ccrc;     /* crc of compressed data */\n    ulong clen;     /* length (modulo 2^32) of compressed data */\n    ulong tcrc;     /* crc of total data */\n    ulong tlen;     /* length (modulo 2^32) of total data */\n    time_t lock;    /* last modify time of our lock file */\n}",
+      {
+        "id[4]": "char",
+        "fd": "int",
+        "*path": "char",
+        "*end": "char",
+        "first": "off_t",
+        "back": "int",
+        "stored": "uint",
+        "last": "off_t",
+        "ccrc": "ulong",
+        "clen": "ulong",
+        "tcrc": "ulong",
+        "tlen": "ulong",
+        "lock": "time_t"
+      },
+      "log",
+      [
+        288,
+        0
+      ],
+      [
+        302,
+        1
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        347,
+        19
+      ],
+      [
+        347,
+        29
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        350,
+        4
+      ],
+      [
+        350,
+        15
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        371,
+        21
+      ],
+      [
+        371,
+        31
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        373,
+        4
+      ],
+      [
+        373,
+        15
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        383,
+        20
+      ],
+      [
+        383,
+        30
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        385,
+        4
+      ],
+      [
+        385,
+        15
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        395,
+        22
+      ],
+      [
+        395,
+        32
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        409,
+        19
+      ],
+      [
+        409,
+        29
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        436,
+        19
+      ],
+      [
+        436,
+        29
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        461,
+        19
+      ],
+      [
+        461,
+        29
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        500,
+        21
+      ],
+      [
+        500,
+        31
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        570,
+        22
+      ],
+      [
+        570,
+        32
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        607,
+        23
+      ],
+      [
+        607,
+        33
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        717,
+        19
+      ],
+      [
+        717,
+        29
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        737,
+        22
+      ],
+      [
+        737,
+        32
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        742,
+        4
+      ],
+      [
+        742,
+        15
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        795,
+        21
+      ],
+      [
+        795,
+        31
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        812,
+        19
+      ],
+      [
+        812,
+        29
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        867,
+        4
+      ],
+      [
+        867,
+        14
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        874,
+        24
+      ],
+      [
+        874,
+        34
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        913,
+        4
+      ],
+      [
+        913,
+        14
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        997,
+        4
+      ],
+      [
+        997,
+        14
+      ]
+    ],
+    [
+      "struct log",
+      {},
+      "",
+      [
+        1043,
+        4
+      ],
+      [
+        1043,
+        14
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <sys/types.h>\n",
+      [
+        225,
+        0
+      ],
+      [
+        226,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>      /* rename, fopen, fprintf, fclose */\n",
+      [
+        226,
+        0
+      ],
+      [
+        227,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>     /* malloc, free */\n",
+      [
+        227,
+        0
+      ],
+      [
+        228,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>     /* strlen, strrchr, strcpy, strncpy, strcmp */\n",
+      [
+        228,
+        0
+      ],
+      [
+        229,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>      /* open */\n",
+      [
+        229,
+        0
+      ],
+      [
+        230,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>     /* lseek, read, write, close, unlink, sleep, */\n",
+      [
+        230,
+        0
+      ],
+      [
+        231,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>      /* errno */\n",
+      [
+        232,
+        0
+      ],
+      [
+        233,
+        0
+      ]
+    ],
+    [
+      "#include <time.h>       /* time, ctime */\n",
+      [
+        233,
+        0
+      ],
+      [
+        234,
+        0
+      ]
+    ],
+    [
+      "#include <sys/stat.h>   /* stat */\n",
+      [
+        234,
+        0
+      ],
+      [
+        235,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>   /* utimes */\n",
+      [
+        235,
+        0
+      ],
+      [
+        236,
+        0
+      ]
+    ],
+    [
+      "#include \"zlib.h\"       /* crc32 */\n",
+      [
+        236,
+        0
+      ],
+      [
+        237,
+        0
+      ]
+    ],
+    [
+      "#include \"gzlog.h\"      /* header for external access */\n",
+      [
+        238,
+        0
+      ],
+      [
+        239,
+        0
+      ]
+    ],
+    [
+      "#include <setjmp.h>         /* longjmp */\n",
+      [
+        246,
+        4
+      ],
+      [
+        247,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

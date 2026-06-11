@@ -1,0 +1,390 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\npreprocess_for_unique_sections(const std::vector<Section_id>& id_section,\n                               std::vector<bool>* is_secn_or_group_unique,\n                               std::vector<std::string>* section_contents)\n{\n  Unordered_map<uint32_t, unsigned int> uniq_map;\n  std::pair<Unordered_map<uint32_t, unsigned int>::iterator, bool>\n    uniq_map_insert;\n\n  for (unsigned int i = 0; i < id_section.size(); i++)\n    {\n      if ((*is_secn_or_group_unique)[i])\n        continue;\n\n      uint32_t cksum;\n      Section_id secn = id_section[i];\n      section_size_type plen;\n      if (section_contents == NULL)\n        {\n          // Lock the object so we can read from it.  This is only called\n          // single-threaded from queue_middle_tasks, so it is OK to lock.\n          // Unfortunately we have no way to pass in a Task token.\n          const Task* dummy_task = reinterpret_cast<const Task*>(-1);\n          Task_lock_obj<Object> tl(dummy_task, secn.first);\n          const unsigned char* contents;\n          contents = secn.first->section_contents(secn.second,\n                                                  &plen,\n                                                  false);\n          cksum = xcrc32(contents, plen, 0xffffffff);\n        }\n      else\n        {\n          const unsigned char* contents_array = reinterpret_cast\n            <const unsigned char*>((*section_contents)[i].c_str());\n          cksum = xcrc32(contents_array, (*section_contents)[i].length(),\n                         0xffffffff);\n        }\n      uniq_map_insert = uniq_map.insert(std::make_pair(cksum, i));\n      if (uniq_map_insert.second)\n        {\n          (*is_secn_or_group_unique)[i] = true;\n        }\n      else\n        {\n          (*is_secn_or_group_unique)[i] = false;\n          (*is_secn_or_group_unique)[uniq_map_insert.first->second] = false;\n        }\n    }\n}",
+      "fn_code_pos": [
+        [
+          165,
+          0
+        ],
+        [
+          213,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "preprocess_for_unique_sections",
+        "parameters": {
+          "id_section": "std::vector<Section_id>",
+          "is_secn_or_group_unique": "std::vector<bool>",
+          "section_contents": "std::vector<std::string>"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "inline void\nget_rel_addend(const unsigned char* reloc_addend_ptr,\n\t       const unsigned int addend_size,\n\t       uint64_t* reloc_addend_value)\n{\n  switch (addend_size)\n    {\n    case 0:\n      break;\n    case 1:\n      *reloc_addend_value =\n        read_from_pointer<8>(reloc_addend_ptr);\n      break;\n    case 2:\n      *reloc_addend_value =\n          read_from_pointer<16>(reloc_addend_ptr);\n      break;\n    case 4:\n      *reloc_addend_value =\n        read_from_pointer<32>(reloc_addend_ptr);\n      break;\n    case 8:\n      *reloc_addend_value =\n        read_from_pointer<64>(reloc_addend_ptr);\n      break;\n    default:\n      gold_unreachable();\n    }\n}",
+      "fn_code_pos": [
+        [
+          224,
+          0
+        ],
+        [
+          252,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_rel_addend",
+        "parameters": {
+          "reloc_addend_ptr": "unsigned char",
+          "addend_size": "unsigned int",
+          "reloc_addend_value": "uint64_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static std::string\nget_section_contents(bool first_iteration,\n                     const Section_id& secn,\n                     unsigned int section_num,\n                     unsigned int* num_tracked_relocs,\n                     Symbol_table* symtab,\n                     const std::vector<unsigned int>& kept_section_id,\n                     std::vector<std::string>* section_contents)\n{\n  // Lock the object so we can read from it.  This is only called\n  // single-threaded from queue_middle_tasks, so it is OK to lock.\n  // Unfortunately we have no way to pass in a Task token.\n  const Task* dummy_task = reinterpret_cast<const Task*>(-1);\n  Task_lock_obj<Object> tl(dummy_task, secn.first);\n\n  section_size_type plen;\n  const unsigned char* contents = NULL;\n  if (first_iteration)\n    contents = secn.first->section_contents(secn.second, &plen, false);\n\n  // The buffer to hold all the contents including relocs.  A checksum\n  // is then computed on this buffer.\n  std::string buffer;\n  std::string icf_reloc_buffer;\n\n  if (num_tracked_relocs)\n    *num_tracked_relocs = 0;\n\n  Icf::Reloc_info_list& reloc_info_list = \n    symtab->icf()->reloc_info_list();\n\n  Icf::Reloc_info_list::iterator it_reloc_info_list =\n    reloc_info_list.find(secn);\n\n  buffer.clear();\n  icf_reloc_buffer.clear();\n\n  // Process relocs and put them into the buffer.\n\n  if (it_reloc_info_list != reloc_info_list.end())\n    {\n      Icf::Sections_reachable_info &v =\n        (it_reloc_info_list->second).section_info;\n      // Stores the information of the symbol pointed to by the reloc.\n      const Icf::Symbol_info &s = (it_reloc_info_list->second).symbol_info;\n      // Stores the addend and the symbol value.\n      Icf::Addend_info &a = (it_reloc_info_list->second).addend_info;\n      // Stores the offset of the reloc.\n      const Icf::Offset_info &o = (it_reloc_info_list->second).offset_info;\n      const Icf::Reloc_addend_size_info &reloc_addend_size_info =\n        (it_reloc_info_list->second).reloc_addend_size_info;\n      Icf::Sections_reachable_info::iterator it_v = v.begin();\n      Icf::Symbol_info::const_iterator it_s = s.begin();\n      Icf::Addend_info::iterator it_a = a.begin();\n      Icf::Offset_info::const_iterator it_o = o.begin();\n      Icf::Reloc_addend_size_info::const_iterator it_addend_size =\n        reloc_addend_size_info.begin();\n\n      for (; it_v != v.end(); ++it_v, ++it_s, ++it_a, ++it_o, ++it_addend_size)\n        {\n\t  if (first_iteration\n\t      && it_v->first != NULL)\n\t    {\n\t      Symbol_location loc;\n\t      loc.object = it_v->first;\n\t      loc.shndx = it_v->second;\n\t      loc.offset = convert_types<off_t, long long>(it_a->first\n\t\t\t\t\t\t\t   + it_a->second);\n\t      // Look through function descriptors\n\t      parameters->target().function_location(&loc);\n\t      if (loc.shndx != it_v->second)\n\t\t{\n\t\t  it_v->second = loc.shndx;\n\t\t  // Modify symvalue/addend to the code entry.\n\t\t  it_a->first = loc.offset;\n\t\t  it_a->second = 0;\n\t\t}\n\t    }\n\n          // ADDEND_STR stores the symbol value and addend and offset,\n          // each at most 16 hex digits long.  it_a points to a pair\n          // where first is the symbol value and second is the\n          // addend.\n          char addend_str[50];\n\n\t  // It would be nice if we could use format macros in inttypes.h\n\t  // here but there are not in ISO/IEC C++ 1998.\n          snprintf(addend_str, sizeof(addend_str), \"%llx %llx %llux\",\n                   static_cast<long long>((*it_a).first),\n\t\t   static_cast<long long>((*it_a).second),\n\t\t   static_cast<unsigned long long>(*it_o));\n\n\t  // If the symbol pointed to by the reloc is not in an ordinary\n\t  // section or if the symbol type is not FROM_OBJECT, then the\n\t  // object is NULL.\n\t  if (it_v->first == NULL)\n            {\n\t      if (first_iteration)\n                {\n\t\t  // If the symbol name is available, use it.\n                  if ((*it_s) != NULL)\n                      buffer.append((*it_s)->name());\n                  // Append the addend.\n                  buffer.append(addend_str);\n                  buffer.append(\"@\");\n\t\t}\n\t      continue;\n\t    }\n\n          Section_id reloc_secn(it_v->first, it_v->second);\n\n          // If this reloc turns back and points to the same section,\n          // like a recursive call, use a special symbol to mark this.\n          if (reloc_secn.first == secn.first\n              && reloc_secn.second == secn.second)\n            {\n              if (first_iteration)\n                {\n                  buffer.append(\"R\");\n                  buffer.append(addend_str);\n                  buffer.append(\"@\");\n                }\n              continue;\n            }\n          Icf::Uniq_secn_id_map& section_id_map =\n            symtab->icf()->section_to_int_map();\n          Icf::Uniq_secn_id_map::iterator section_id_map_it =\n            section_id_map.find(reloc_secn);\n          bool is_sym_preemptible = (*it_s != NULL\n\t\t\t\t     && !(*it_s)->is_from_dynobj()\n\t\t\t\t     && !(*it_s)->is_undefined()\n\t\t\t\t     && (*it_s)->is_preemptible());\n          if (!is_sym_preemptible\n              && section_id_map_it != section_id_map.end())\n            {\n              // This is a reloc to a section that might be folded.\n              if (num_tracked_relocs)\n                (*num_tracked_relocs)++;\n\n              char kept_section_str[10];\n              unsigned int secn_id = section_id_map_it->second;\n              snprintf(kept_section_str, sizeof(kept_section_str), \"%u\",\n                       kept_section_id[secn_id]);\n              if (first_iteration)\n                {\n                  buffer.append(\"ICF_R\");\n                  buffer.append(addend_str);\n                }\n              icf_reloc_buffer.append(kept_section_str);\n              // Append the addend.\n              icf_reloc_buffer.append(addend_str);\n              icf_reloc_buffer.append(\"@\");\n            }\n          else\n            {\n              // This is a reloc to a section that cannot be folded.\n              // Process it only in the first iteration.\n              if (!first_iteration)\n                continue;\n\n              uint64_t secn_flags = (it_v->first)->section_flags(it_v->second);\n              // This reloc points to a merge section.  Hash the\n              // contents of this section.\n              if ((secn_flags & elfcpp::SHF_MERGE) != 0\n\t\t  && parameters->target().can_icf_inline_merge_sections())\n                {\n                  uint64_t entsize =\n                    (it_v->first)->section_entsize(it_v->second);\n\t\t  long long offset = it_a->first;\n\t\t  // Handle SHT_RELA and SHT_REL addends, only one of these\n\t\t  // addends exists.\n\t\t  // Get the SHT_RELA addend.  For RELA relocations, we have\n\t\t  // the addend from the relocation.\n\t\t  uint64_t reloc_addend_value = it_a->second;\n\n\t\t  // Handle SHT_REL addends.\n\t\t  // For REL relocations, we need to fetch the addend from the\n\t\t  // section contents.\n                  const unsigned char* reloc_addend_ptr =\n\t\t    contents + static_cast<unsigned long long>(*it_o);\n\n\t\t  // Update the addend value with the SHT_REL addend if\n\t\t  // available.\n\t\t  get_rel_addend(reloc_addend_ptr, *it_addend_size,\n\t\t\t\t &reloc_addend_value);\n\n\t\t  // Ignore the addend when it is a negative value.  See the\n\t\t  // comments in Merged_symbol_value::value in object.h.\n\t\t  if (reloc_addend_value < 0xffffff00)\n\t\t    offset = offset + reloc_addend_value;\n\n                  section_size_type secn_len;\n\n                  const unsigned char* str_contents =\n                  (it_v->first)->section_contents(it_v->second,\n                                                  &secn_len,\n                                                  false) + offset;\n\t\t  gold_assert (offset < (long long) secn_len);\n\n                  if ((secn_flags & elfcpp::SHF_STRINGS) != 0)\n                    {\n                      // String merge section.\n                      const char* str_char =\n                        reinterpret_cast<const char*>(str_contents);\n                      switch(entsize)\n                        {\n                        case 1:\n                          {\n                            buffer.append(str_char);\n                            break;\n                          }\n                        case 2:\n                          {\n                            const uint16_t* ptr_16 =\n                              reinterpret_cast<const uint16_t*>(str_char);\n                            unsigned int strlen_16 = 0;\n                            // Find the NULL character.\n                            while(*(ptr_16 + strlen_16) != 0)\n                                strlen_16++;\n                            buffer.append(str_char, strlen_16 * 2);\n                          }\n                          break;\n                        case 4:\n                          {\n                            const uint32_t* ptr_32 =\n                              reinterpret_cast<const uint32_t*>(str_char);\n                            unsigned int strlen_32 = 0;\n                            // Find the NULL character.\n                            while(*(ptr_32 + strlen_32) != 0)\n                                strlen_32++;\n                            buffer.append(str_char, strlen_32 * 4);\n                          }\n                          break;\n                        default:\n                          gold_unreachable();\n                        }\n                    }\n                  else\n                    {\n                      // Use the entsize to determine the length to copy.\n\t\t      uint64_t bufsize = entsize;\n\t\t      // If entsize is too big, copy all the remaining bytes.\n\t\t      if ((offset + entsize) > secn_len)\n\t\t\tbufsize = secn_len - offset;\n                      buffer.append(reinterpret_cast<const\n                                                     char*>(str_contents),\n                                    bufsize);\n                    }\n\t\t  buffer.append(\"@\");\n                }\n              else if ((*it_s) != NULL)\n                {\n                  // If symbol name is available use that.\n                  buffer.append((*it_s)->name());\n                  // Append the addend.\n                  buffer.append(addend_str);\n                  buffer.append(\"@\");\n                }\n              else\n                {\n                  // Symbol name is not available, like for a local symbol,\n                  // use object and section id.\n                  buffer.append(it_v->first->name());\n                  char secn_id[10];\n                  snprintf(secn_id, sizeof(secn_id), \"%u\",it_v->second);\n                  buffer.append(secn_id);\n                  // Append the addend.\n                  buffer.append(addend_str);\n                  buffer.append(\"@\");\n                }\n            }\n        }\n    }\n\n  if (first_iteration)\n    {\n      buffer.append(\"Contents = \");\n      buffer.append(reinterpret_cast<const char*>(contents), plen);\n      // Store the section contents that don't change to avoid recomputing\n      // during the next call to this function.\n      (*section_contents)[section_num] = buffer;\n    }\n  else\n    {\n      gold_assert(buffer.empty());\n      // Reuse the contents computed in the previous iteration.\n      buffer.append((*section_contents)[section_num]);\n    }\n\n  buffer.append(icf_reloc_buffer);\n  return buffer;\n}",
+      "fn_code_pos": [
+        [
+          269,
+          0
+        ],
+        [
+          560,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_section_contents",
+        "parameters": {
+          "first_iteration": "bool",
+          "secn": "Section_id",
+          "section_num": "unsigned int",
+          "num_tracked_relocs": "unsigned int",
+          "symtab": "Symbol_table",
+          "kept_section_id": "std::vector<unsigned int>",
+          "section_contents": "std::vector<std::string>"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static bool\nmatch_sections(unsigned int iteration_num,\n               Symbol_table* symtab,\n               std::vector<unsigned int>* num_tracked_relocs,\n               std::vector<unsigned int>* kept_section_id,\n               const std::vector<Section_id>& id_section,\n\t       const std::vector<uint64_t>& section_addraligns,\n               std::vector<bool>* is_secn_or_group_unique,\n               std::vector<std::string>* section_contents)\n{\n  Unordered_multimap<uint32_t, unsigned int> section_cksum;\n  std::pair<Unordered_multimap<uint32_t, unsigned int>::iterator,\n            Unordered_multimap<uint32_t, unsigned int>::iterator> key_range;\n  bool converged = true;\n\n  if (iteration_num == 1)\n    preprocess_for_unique_sections(id_section,\n                                   is_secn_or_group_unique,\n                                   NULL);\n  else\n    preprocess_for_unique_sections(id_section,\n                                   is_secn_or_group_unique,\n                                   section_contents);\n\n  std::vector<std::string> full_section_contents;\n\n  for (unsigned int i = 0; i < id_section.size(); i++)\n    {\n      full_section_contents.push_back(\"\");\n      if ((*is_secn_or_group_unique)[i])\n        continue;\n\n      Section_id secn = id_section[i];\n      std::string this_secn_contents;\n      uint32_t cksum;\n      if (iteration_num == 1)\n        {\n          unsigned int num_relocs = 0;\n          this_secn_contents = get_section_contents(true, secn, i, &num_relocs,\n                                                    symtab, (*kept_section_id),\n                                                    section_contents);\n          (*num_tracked_relocs)[i] = num_relocs;\n        }\n      else\n        {\n          if ((*kept_section_id)[i] != i)\n            {\n              // This section is already folded into something.\n              continue;\n            }\n          this_secn_contents = get_section_contents(false, secn, i, NULL,\n                                                    symtab, (*kept_section_id),\n                                                    section_contents);\n        }\n\n      const unsigned char* this_secn_contents_array =\n            reinterpret_cast<const unsigned char*>(this_secn_contents.c_str());\n      cksum = xcrc32(this_secn_contents_array, this_secn_contents.length(),\n                     0xffffffff);\n      size_t count = section_cksum.count(cksum);\n\n      if (count == 0)\n        {\n          // Start a group with this cksum.\n          section_cksum.insert(std::make_pair(cksum, i));\n          full_section_contents[i] = this_secn_contents;\n        }\n      else\n        {\n          key_range = section_cksum.equal_range(cksum);\n          Unordered_multimap<uint32_t, unsigned int>::iterator it;\n          // Search all the groups with this cksum for a match.\n          for (it = key_range.first; it != key_range.second; ++it)\n            {\n              unsigned int kept_section = it->second;\n              if (full_section_contents[kept_section].length()\n                  != this_secn_contents.length())\n                  continue;\n              if (memcmp(full_section_contents[kept_section].c_str(),\n                         this_secn_contents.c_str(),\n                         this_secn_contents.length()) != 0)\n                  continue;\n\n\t      // Check section alignment here.\n\t      // The section with the larger alignment requirement\n\t      // should be kept.  We assume alignment can only be \n\t      // zero or positive integral powers of two.\n\t      uint64_t align_i = section_addraligns[i];\n\t      uint64_t align_kept = section_addraligns[kept_section];\n\t      if (align_i <= align_kept)\n\t\t{\n\t\t  (*kept_section_id)[i] = kept_section;\n\t\t}\n\t      else\n\t\t{\n\t\t  (*kept_section_id)[kept_section] = i;\n\t\t  it->second = i;\n\t\t  full_section_contents[kept_section].swap(\n\t\t      full_section_contents[i]);\n\t\t}\n\n              converged = false;\n              break;\n            }\n          if (it == key_range.second)\n            {\n              // Create a new group for this cksum.\n              section_cksum.insert(std::make_pair(cksum, i));\n              full_section_contents[i] = this_secn_contents;\n            }\n        }\n      // If there are no relocs to foldable sections do not process\n      // this section any further.\n      if (iteration_num == 1 && (*num_tracked_relocs)[i] == 0)\n        (*is_secn_or_group_unique)[i] = true;\n    }\n\n  // If a section was folded into another section that was later folded\n  // again then the former has to be updated.\n  for (unsigned int i = 0; i < id_section.size(); i++)\n    {\n      // Find the end of the folding chain\n      unsigned int kept = i;\n      while ((*kept_section_id)[kept] != kept)\n        {\n          kept = (*kept_section_id)[kept];\n        }\n      // Update every element of the chain\n      unsigned int current = i;\n      while ((*kept_section_id)[current] != kept)\n        {\n          unsigned int next = (*kept_section_id)[current];\n          (*kept_section_id)[current] = kept;\n          current = next;\n        }\n    }\n\n  return converged;\n}",
+      "fn_code_pos": [
+        [
+          586,
+          0
+        ],
+        [
+          724,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "match_sections",
+        "parameters": {
+          "iteration_num": "unsigned int",
+          "symtab": "Symbol_table",
+          "num_tracked_relocs": "std::vector<unsigned int>",
+          "kept_section_id": "std::vector<unsigned int>",
+          "id_section": "std::vector<Section_id>",
+          "section_addraligns": "std::vector<uint64_t>",
+          "is_secn_or_group_unique": "std::vector<bool>",
+          "section_contents": "std::vector<std::string>"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "static bool\nis_function_ctor_or_dtor(const std::string& section_name)\n{\n  const char* mangled_func_name = strrchr(section_name.c_str(), '.');\n  gold_assert(mangled_func_name != NULL);\n  if ((is_prefix_of(\"._ZN\", mangled_func_name)\n       || is_prefix_of(\"._ZZ\", mangled_func_name))\n      && (is_gnu_v3_mangled_ctor(mangled_func_name + 1)\n          || is_gnu_v3_mangled_dtor(mangled_func_name + 1)))\n    {\n      return true;\n    }\n  return false;\n}",
+      "fn_code_pos": [
+        [
+          729,
+          0
+        ],
+        [
+          742,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "is_function_ctor_or_dtor",
+        "parameters": {
+          "section_name": "std::string"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "void\nIcf::find_identical_sections(const Input_objects* input_objects,\n                             Symbol_table* symtab)\n{\n  unsigned int section_num = 0;\n  std::vector<unsigned int> num_tracked_relocs;\n  std::vector<uint64_t> section_addraligns;\n  std::vector<bool> is_secn_or_group_unique;\n  std::vector<std::string> section_contents;\n  const Target& target = parameters->target();\n\n  // Decide which sections are possible candidates first.\n\n  for (Input_objects::Relobj_iterator p = input_objects->relobj_begin();\n       p != input_objects->relobj_end();\n       ++p)\n    {\n      // Lock the object so we can read from it.  This is only called\n      // single-threaded from queue_middle_tasks, so it is OK to lock.\n      // Unfortunately we have no way to pass in a Task token.\n      const Task* dummy_task = reinterpret_cast<const Task*>(-1);\n      Task_lock_obj<Object> tl(dummy_task, *p);\n\n      for (unsigned int i = 0;i < (*p)->shnum(); ++i)\n        {\n\t  const std::string section_name = (*p)->section_name(i);\n          if (!is_section_foldable_candidate(section_name))\n            continue;\n          if (!(*p)->is_section_included(i))\n            continue;\n          if (parameters->options().gc_sections()\n              && symtab->gc()->is_section_garbage(*p, i))\n              continue;\n\t  // With --icf=safe, check if the mangled function name is a ctor\n\t  // or a dtor.  The mangled function name can be obtained from the\n\t  // section name by stripping the section prefix.\n\t  if (parameters->options().icf_safe_folding()\n              && !is_function_ctor_or_dtor(section_name)\n\t      && (!target.can_check_for_function_pointers()\n                  || section_has_function_pointers(*p, i)))\n            {\n\t      continue;\n            }\n          this->id_section_.push_back(Section_id(*p, i));\n          this->section_id_[Section_id(*p, i)] = section_num;\n          this->kept_section_id_.push_back(section_num);\n          num_tracked_relocs.push_back(0);\n\t  section_addraligns.push_back((*p)->section_addralign(i));\n          is_secn_or_group_unique.push_back(false);\n          section_contents.push_back(\"\");\n          section_num++;\n        }\n    }\n\n  unsigned int num_iterations = 0;\n\n  // Default number of iterations to run ICF is 2.\n  unsigned int max_iterations = (parameters->options().icf_iterations() > 0)\n                            ? parameters->options().icf_iterations()\n                            : 2;\n\n  bool converged = false;\n\n  while (!converged && (num_iterations < max_iterations))\n    {\n      num_iterations++;\n      converged = match_sections(num_iterations, symtab,\n                                 &num_tracked_relocs, &this->kept_section_id_,\n                                 this->id_section_, section_addraligns,\n                                 &is_secn_or_group_unique, &section_contents);\n    }\n\n  if (parameters->options().print_icf_sections())\n    {\n      if (converged)\n        gold_info(_(\"%s: ICF Converged after %u iteration(s)\"),\n                  program_name, num_iterations);\n      else\n        gold_info(_(\"%s: ICF stopped after %u iteration(s)\"),\n                  program_name, num_iterations);\n    }\n\n  // Unfold --keep-unique symbols.\n  for (options::String_set::const_iterator p =\n\t parameters->options().keep_unique_begin();\n       p != parameters->options().keep_unique_end();\n       ++p)\n    {\n      const char* name = p->c_str();\n      Symbol* sym = symtab->lookup(name);\n      if (sym == NULL)\n\t{\n\t  gold_warning(_(\"Could not find symbol %s to unfold\\n\"), name);\n\t}\n      else if (sym->source() == Symbol::FROM_OBJECT \n               && !sym->object()->is_dynamic())\n        {\n          Relobj* obj = static_cast<Relobj*>(sym->object());\n          bool is_ordinary;\n          unsigned int shndx = sym->shndx(&is_ordinary);\n          if (is_ordinary)\n            {\n\t      this->unfold_section(obj, shndx);\n            }\n        }\n\n    }\n\n  this->icf_ready();\n}",
+      "fn_code_pos": [
+        [
+          748,
+          0
+        ],
+        [
+          857,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Icf::find_identical_sections",
+        "parameters": {
+          "input_objects": "Input_objects",
+          "symtab": "Symbol_table"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nIcf::unfold_section(Relobj* obj, unsigned int shndx)\n{\n  Section_id secn(obj, shndx);\n  Uniq_secn_id_map::iterator it = this->section_id_.find(secn);\n  if (it == this->section_id_.end())\n    return;\n  unsigned int section_num = it->second;\n  unsigned int kept_section_id = this->kept_section_id_[section_num];\n  if (kept_section_id != section_num)\n    this->kept_section_id_[section_num] = section_num;\n}",
+      "fn_code_pos": [
+        [
+          861,
+          0
+        ],
+        [
+          872,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Icf::unfold_section",
+        "parameters": {
+          "obj": "Relobj",
+          "shndx": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "bool\nIcf::is_section_folded(Relobj* obj, unsigned int shndx)\n{\n  Section_id secn(obj, shndx);\n  Uniq_secn_id_map::iterator it = this->section_id_.find(secn);\n  if (it == this->section_id_.end())\n    return false;\n  unsigned int section_num = it->second;\n  unsigned int kept_section_id = this->kept_section_id_[section_num];\n  return kept_section_id != section_num;\n}",
+      "fn_code_pos": [
+        [
+          878,
+          0
+        ],
+        [
+          888,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Icf::is_section_folded",
+        "parameters": {
+          "obj": "Relobj",
+          "shndx": "unsigned int"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "Section_id\nIcf::get_folded_section(Relobj* dup_obj, unsigned int dup_shndx)\n{\n  Section_id dup_secn(dup_obj, dup_shndx);\n  Uniq_secn_id_map::iterator it = this->section_id_.find(dup_secn);\n  gold_assert(it != this->section_id_.end());\n  unsigned int section_num = it->second;\n  unsigned int kept_section_id = this->kept_section_id_[section_num];\n  Section_id folded_section = this->id_section_[kept_section_id];\n  return folded_section;\n}",
+      "fn_code_pos": [
+        [
+          892,
+          0
+        ],
+        [
+          902,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Icf::get_folded_section",
+        "parameters": {
+          "dup_obj": "Relobj",
+          "dup_shndx": "unsigned int"
+        },
+        "return_type": "Section_id"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "secn(obj, shndx)",
+      "fn_dec_pos": [
+        [
+          864,
+          13
+        ],
+        [
+          864,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "secn",
+        "parameters": {},
+        "return_type": "Section_id"
+      }
+    },
+    {
+      "fn_code": "secn(obj, shndx)",
+      "fn_dec_pos": [
+        [
+          881,
+          13
+        ],
+        [
+          881,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "secn",
+        "parameters": {},
+        "return_type": "Section_id"
+      }
+    },
+    {
+      "fn_code": "dup_secn(dup_obj, dup_shndx)",
+      "fn_dec_pos": [
+        [
+          895,
+          13
+        ],
+        [
+          895,
+          41
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dup_secn",
+        "parameters": {},
+        "return_type": "Section_id"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"gold.h\"\n",
+      [
+        140,
+        0
+      ],
+      [
+        141,
+        0
+      ]
+    ],
+    [
+      "#include \"object.h\"\n",
+      [
+        141,
+        0
+      ],
+      [
+        142,
+        0
+      ]
+    ],
+    [
+      "#include \"gc.h\"\n",
+      [
+        142,
+        0
+      ],
+      [
+        143,
+        0
+      ]
+    ],
+    [
+      "#include \"icf.h\"\n",
+      [
+        143,
+        0
+      ],
+      [
+        144,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        144,
+        0
+      ],
+      [
+        145,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        145,
+        0
+      ],
+      [
+        146,
+        0
+      ]
+    ],
+    [
+      "#include \"demangle.h\"\n",
+      [
+        146,
+        0
+      ],
+      [
+        147,
+        0
+      ]
+    ],
+    [
+      "#include \"elfcpp.h\"\n",
+      [
+        147,
+        0
+      ],
+      [
+        148,
+        0
+      ]
+    ],
+    [
+      "#include \"int_encoding.h\"\n",
+      [
+        148,
+        0
+      ],
+      [
+        149,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

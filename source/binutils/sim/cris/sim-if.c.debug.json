@@ -1,0 +1,993 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static SIM_RC\ncris_option_handler (SIM_DESC sd, sim_cpu *cpu ATTRIBUTE_UNUSED, int opt,\n\t\t     char *arg, int is_command ATTRIBUTE_UNUSED)\n{\n  /* The options are CRIS-specific, but cpu-specific option-handling is\n     broken; required to being with \"--cpu0-\".  We store the flags in an\n     unused field in the global state structure and move the flags over\n     to the module-specific CPU data when we store things in the\n     cpu-specific structure.  */\n  char *tracefp = STATE_TRACE_FLAGS (sd);\n  char *chp = arg;\n\n  switch ((CRIS_OPTIONS) opt)\n    {\n      case OPTION_CRIS_STATS:\n\tif (strcmp (arg, \"basic\") == 0)\n\t  *tracefp = FLAG_CRIS_MISC_PROFILE_SIMPLE;\n\telse if (strcmp (arg, \"unaligned\") == 0)\n\t  *tracefp\n\t    = (FLAG_CRIS_MISC_PROFILE_UNALIGNED\n\t       | FLAG_CRIS_MISC_PROFILE_SIMPLE);\n\telse if (strcmp (arg, \"schedulable\") == 0)\n\t  *tracefp\n\t    = (FLAG_CRIS_MISC_PROFILE_SCHEDULABLE\n\t       | FLAG_CRIS_MISC_PROFILE_SIMPLE);\n\telse if (strcmp (arg, \"all\") == 0)\n\t  *tracefp = FLAG_CRIS_MISC_PROFILE_ALL;\n\telse\n\t  {\n\t    /* Beware; the framework does not handle the error case;\n\t       we have to do it ourselves.  */\n\t    sim_io_eprintf (sd, \"Unknown option `--cris-cycles=%s'\\n\", arg);\n\t    return SIM_RC_FAIL;\n\t  }\n\tbreak;\n\n      case OPTION_CRIS_TRACE:\n\tif (strcmp (arg, \"basic\") == 0)\n\t  *tracefp |= FLAG_CRIS_MISC_PROFILE_XSIM_TRACE;\n\telse\n\t  {\n\t    sim_io_eprintf (sd, \"Unknown option `--cris-trace=%s'\\n\", arg);\n\t    return SIM_RC_FAIL;\n\t  }\n\tbreak;\n\n      case OPTION_CRIS_NAKED:\n\tcris_bare_iron = 1;\n\tbreak;\n\n      case OPTION_CRIS_900000XXIF:\n\tcris_have_900000xxif = 1;\n\tbreak;\n\n      case OPTION_CRIS_STARTADDR:\n\terrno = 0;\n\tcris_start_address = (USI) strtoul (chp, &chp, 0);\n\n\tif (errno != 0 || *chp != 0)\n\t  {\n\t    sim_io_eprintf (sd, \"Invalid option `--cris-start-address=%s'\\n\",\n\t\t\t    arg);\n\t    return SIM_RC_FAIL;\n\t  }\n\tbreak;\n\n      case OPTION_CRIS_PROGRAM_OFFSET:\n\terrno = 0;\n\tcris_program_offset = (int) strtol (chp, &chp, 0);\n\n\tif (errno != 0 || *chp != 0)\n\t  {\n\t    sim_io_eprintf (sd, \"Invalid option `--cris-program-offset=%s'\\n\",\n\t\t\t    arg);\n\t    return SIM_RC_FAIL;\n\t  }\n\tbreak;\n\n      case OPTION_CRIS_UNKNOWN_SYSCALL:\n\tif (strcmp (arg, \"enosys\") == 0)\n\t  cris_unknown_syscall_action = CRIS_USYSC_MSG_ENOSYS;\n\telse if (strcmp (arg, \"enosys-quiet\") == 0)\n\t  cris_unknown_syscall_action = CRIS_USYSC_QUIET_ENOSYS;\n\telse if (strcmp (arg, \"stop\") == 0)\n\t  cris_unknown_syscall_action = CRIS_USYSC_MSG_STOP;\n\telse\n\t  {\n\t    sim_io_eprintf (sd, \"Unknown option `--cris-unknown-syscall=%s'\\n\",\n\t\t\t    arg);\n\t    return SIM_RC_FAIL;\n\t  }\n\tbreak;\n\n      default:\n\t/* We'll actually never get here; the caller handles the error\n\t   case.  */\n\tsim_io_eprintf (sd, \"Unknown option `%s'\\n\", arg);\n\treturn SIM_RC_FAIL;\n    }\n\n  /* Imply --profile-model=on.  */\n  return sim_profile_set_option (sd, \"-model\", PROFILE_MODEL_IDX, \"on\");\n}",
+      "fn_code_pos": [
+        [
+          127,
+          0
+        ],
+        [
+          229,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cris_option_handler",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "cpu": "sim_cpu",
+          "opt": "int",
+          "arg": "char",
+          "ATTRIBUTE_UNUSED": "int"
+        },
+        "return_type": "SIM_RC"
+      }
+    },
+    {
+      "fn_code": "static bfd_boolean\ncris_load_elf_file (SIM_DESC sd, struct bfd *abfd, sim_write_fn do_write)\n{\n  Elf_Internal_Phdr *phdr;\n  int n_hdrs;\n  int i;\n  bfd_boolean verbose = STATE_OPEN_KIND (sd) == SIM_OPEN_DEBUG;\n\n  phdr = elf_tdata (abfd)->phdr;\n  n_hdrs = elf_elfheader (abfd)->e_phnum;\n\n  /* We're only interested in PT_LOAD; all necessary information\n     should be covered by that.  */\n  for (i = 0; i < n_hdrs; i++)\n    {\n      bfd_byte *buf;\n      bfd_vma lma = STATE_LOAD_AT_LMA_P (sd)\n\t? phdr[i].p_paddr : phdr[i].p_vaddr;\n\n      if (phdr[i].p_type != PT_LOAD)\n\tcontinue;\n\n      buf = xmalloc (phdr[i].p_filesz);\n\n      if (verbose)\n\tsim_io_printf (sd, \"Loading segment at 0x%lx, size 0x%lx\\n\",\n\t\t       lma, phdr[i].p_filesz);\n\n      if (bfd_seek (abfd, phdr[i].p_offset, SEEK_SET) != 0\n\t  || (bfd_bread (buf, phdr[i].p_filesz, abfd) != phdr[i].p_filesz))\n\t{\n\t  sim_io_eprintf (sd,\n\t\t\t  \"%s: could not read segment at 0x%lx, size 0x%lx\\n\",\n\t\t\t  STATE_MY_NAME (sd), lma, phdr[i].p_filesz);\n\t  free (buf);\n\t  return FALSE;\n\t}\n\n      if (do_write (sd, lma, buf, phdr[i].p_filesz) != phdr[i].p_filesz)\n\t{\n\t  sim_io_eprintf (sd,\n\t\t\t  \"%s: could not load segment at 0x%lx, size 0x%lx\\n\",\n\t\t\t  STATE_MY_NAME (sd), lma, phdr[i].p_filesz);\n\t  free (buf);\n\t  return FALSE;\n\t}\n\n      free (buf);\n    }\n\n  return TRUE;\n}",
+      "fn_code_pos": [
+        [
+          236,
+          0
+        ],
+        [
+          287,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cris_load_elf_file",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "abfd": "struct bfd",
+          "do_write": "sim_write_fn"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "static void\nfree_state (SIM_DESC sd)\n{\n  if (STATE_MODULES (sd) != NULL)\n    sim_module_uninstall (sd);\n  sim_cpu_free_all (sd);\n  sim_state_free (sd);\n}",
+      "fn_code_pos": [
+        [
+          291,
+          0
+        ],
+        [
+          298,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "free_state",
+        "parameters": {
+          "sd": "SIM_DESC"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncris_set_section_offset_iterator (bfd *abfd, asection *s, void *vp)\n{\n  struct offsetinfo *p = (struct offsetinfo *) vp;\n  SIM_DESC sd = p->sd;\n  int offset = p->offset;\n\n  if ((bfd_get_section_flags (abfd, s) & SEC_ALLOC))\n    {\n      bfd_vma vma = bfd_get_section_vma (abfd, s);\n      \n      bfd_set_section_vma (abfd, s, vma + offset);\n    }\n\n  /* This seems clumsy and inaccurate, but let's stick to doing it the\n     same way as sim_analyze_program for consistency.  */\n  if (strcmp (bfd_get_section_name (abfd, s), \".text\") == 0)\n    STATE_TEXT_START (sd) = bfd_get_section_vma (abfd, s);\n}",
+      "fn_code_pos": [
+        [
+          310,
+          0
+        ],
+        [
+          328,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cris_set_section_offset_iterator",
+        "parameters": {
+          "abfd": "bfd",
+          "s": "asection",
+          "vp": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncris_offset_sections (SIM_DESC sd, int offset)\n{\n  bfd_boolean ret;\n  struct bfd *abfd = STATE_PROG_BFD (sd);\n  asection *text;\n  struct offsetinfo oi;\n\n  /* Only happens for usage error.  */\n  if (abfd == NULL)\n    return;\n\n  oi.sd = sd;\n  oi.offset = offset;\n\n  bfd_map_over_sections (abfd, cris_set_section_offset_iterator, &oi);\n  ret = bfd_set_start_address (abfd, bfd_get_start_address (abfd) + offset);\n\n  STATE_START_ADDR (sd) = bfd_get_start_address (abfd);\n}",
+      "fn_code_pos": [
+        [
+          333,
+          0
+        ],
+        [
+          352,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cris_offset_sections",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "offset": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ncris_get_progbounds (struct bfd *abfd, struct progbounds *pbp)\n{\n  Elf_Internal_Phdr *phdr;\n  int n_hdrs;\n  int i;\n\n  pbp->startmem = 0xffffffff;\n  pbp->endmem = 0;\n  pbp->end_loadmem = 0;\n  pbp->start_nonloadmem = 0xffffffff;\n\n  /* In case we're ever used for something other than ELF, use the\n     generic method.  */\n  if (bfd_get_flavour (abfd) != bfd_target_elf_flavour)\n    {\n      bfd_map_over_sections (abfd, get_progbounds_iterator, pbp);\n      return;\n    }\n\n  phdr = elf_tdata (abfd)->phdr;\n  n_hdrs = elf_elfheader (abfd)->e_phnum;\n\n  /* We're only interested in PT_LOAD; all necessary information\n     should be covered by that.  */\n  for (i = 0; i < n_hdrs; i++)\n    {\n      if (phdr[i].p_type != PT_LOAD)\n\tcontinue;\n\n      if (phdr[i].p_paddr < pbp->startmem)\n\tpbp->startmem = phdr[i].p_paddr;\n\n      if (phdr[i].p_paddr + phdr[i].p_memsz > pbp->endmem)\n\tpbp->endmem = phdr[i].p_paddr + phdr[i].p_memsz;\n\n      if (phdr[i].p_paddr + phdr[i].p_filesz > pbp->end_loadmem)\n\tpbp->end_loadmem = phdr[i].p_paddr + phdr[i].p_filesz;\n\n      if (phdr[i].p_memsz > phdr[i].p_filesz\n\t  && phdr[i].p_paddr + phdr[i].p_filesz < pbp->start_nonloadmem)\n\tpbp->start_nonloadmem = phdr[i].p_paddr + phdr[i].p_filesz;\n    }  \n}",
+      "fn_code_pos": [
+        [
+          388,
+          0
+        ],
+        [
+          431,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cris_get_progbounds",
+        "parameters": {
+          "abfd": "struct bfd",
+          "pbp": "struct progbounds"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static USI\naux_ent_phdr (struct bfd *ebfd)\n{\n  return elf_elfheader (ebfd)->e_phoff + exec_load_addr;\n}",
+      "fn_code_pos": [
+        [
+          441,
+          0
+        ],
+        [
+          445,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "aux_ent_phdr",
+        "parameters": {
+          "ebfd": "struct bfd"
+        },
+        "return_type": "USI"
+      }
+    },
+    {
+      "fn_code": "static USI\naux_ent_phent (struct bfd *ebfd)\n{\n  return elf_elfheader (ebfd)->e_phentsize;\n}",
+      "fn_code_pos": [
+        [
+          450,
+          0
+        ],
+        [
+          454,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "aux_ent_phent",
+        "parameters": {
+          "ebfd": "struct bfd"
+        },
+        "return_type": "USI"
+      }
+    },
+    {
+      "fn_code": "static USI\naux_ent_phnum (struct bfd *ebfd)\n{\n  return elf_elfheader (ebfd)->e_phnum;\n}",
+      "fn_code_pos": [
+        [
+          458,
+          0
+        ],
+        [
+          462,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "aux_ent_phnum",
+        "parameters": {
+          "ebfd": "struct bfd"
+        },
+        "return_type": "USI"
+      }
+    },
+    {
+      "fn_code": "static USI\naux_ent_base (struct bfd *ebfd)\n{\n  return interp_load_addr;\n}",
+      "fn_code_pos": [
+        [
+          466,
+          0
+        ],
+        [
+          470,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "aux_ent_base",
+        "parameters": {
+          "ebfd": "struct bfd"
+        },
+        "return_type": "USI"
+      }
+    },
+    {
+      "fn_code": "static USI\naux_ent_entry (struct bfd *ebfd)\n{\n  ASSERT (elf_elfheader (ebfd)->e_entry == bfd_get_start_address (ebfd));\n  return elf_elfheader (ebfd)->e_entry;\n}",
+      "fn_code_pos": [
+        [
+          474,
+          0
+        ],
+        [
+          479,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "aux_ent_entry",
+        "parameters": {
+          "ebfd": "struct bfd"
+        },
+        "return_type": "USI"
+      }
+    },
+    {
+      "fn_code": "static int\ncris_write_interp (SIM_DESC sd, SIM_ADDR mem, unsigned char *buf, int length)\n{\n  return sim_write (sd, mem + interp_load_addr, buf, length);\n}",
+      "fn_code_pos": [
+        [
+          484,
+          0
+        ],
+        [
+          488,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cris_write_interp",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "mem": "SIM_ADDR",
+          "buf": "unsigned char",
+          "length": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static bfd_boolean\ncris_handle_interpreter (SIM_DESC sd, struct bfd *abfd)\n{\n  int i, n_hdrs;\n  bfd_vma phaddr;\n  bfd_byte buf[4];\n  char *interp = NULL;\n  struct bfd *ibfd;\n  bfd_boolean ok = FALSE;\n  Elf_Internal_Phdr *phdr;\n\n  if (bfd_get_flavour (abfd) != bfd_target_elf_flavour)\n    return TRUE;\n\n  phdr = elf_tdata (abfd)->phdr;\n  n_hdrs = aux_ent_phnum (abfd);\n\n  /* Check the program headers for presence of an interpreter.  */\n  for (i = 0; i < n_hdrs; i++)\n    {\n      int interplen;\n      bfd_size_type interpsiz, interp_filesiz;\n      struct progbounds interp_bounds;\n\n      if (phdr[i].p_type != PT_INTERP)\n\tcontinue;\n\n      /* Get the name of the interpreter, prepended with the sysroot\n\t (empty if absent).  */\n      interplen = phdr[i].p_filesz;\n      interp = xmalloc (interplen + strlen (simulator_sysroot));\n      strcpy (interp, simulator_sysroot);\n\n      /* Read in the name.  */\n      if (bfd_seek (abfd, phdr[i].p_offset, SEEK_SET) != 0\n\t  || (bfd_bread (interp + strlen (simulator_sysroot), interplen, abfd)\n\t      != interplen))\n\tgoto interpname_failed;\n\n      /* Like Linux, require the string to be 0-terminated.  */\n      if (interp[interplen + strlen (simulator_sysroot) - 1] != 0)\n\tgoto interpname_failed;\n\n      /* Inspect the interpreter.  */\n      ibfd = bfd_openr (interp, STATE_TARGET (sd));\n      if (ibfd == NULL)\n\tgoto interpname_failed;\n\n      /* The interpreter is at least something readable to BFD; make\n\t sure it's an ELF non-archive file.  */\n      if (!bfd_check_format (ibfd, bfd_object)\n\t  || bfd_get_flavour (ibfd) != bfd_target_elf_flavour)\n\tgoto interp_failed;\n\n      /* Check the layout of the interpreter.  */\n      cris_get_progbounds (ibfd, &interp_bounds);\n\n      /* Round down to pagesize the start page and up the endpage.\n\t Don't round the *load and *nonload members.  */\n      interp_bounds.startmem &= ~8191;\n      interp_bounds.endmem = (interp_bounds.endmem + 8191) & ~8191;\n\n      /* Until we need a more dynamic solution, assume we can put the\n\t interpreter at this fixed location.  NB: this is not what\n\t happens for Linux 2008-12-28, but it could and might and\n\t perhaps should.  */\n      interp_load_addr = 0x40000;\n      interpsiz = interp_bounds.endmem - interp_bounds.startmem;\n      interp_filesiz = interp_bounds.end_loadmem - interp_bounds.startmem;\n\n      /* If we have a non-DSO or interpreter starting at the wrong\n\t address, bail.  */\n      if (interp_bounds.startmem != 0\n\t  || interpsiz + interp_load_addr >= exec_load_addr)\n\tgoto interp_failed;\n\n      /* We don't have the API to get the address of a simulator\n\t memory area, so we go via a temporary area.  Luckily, the\n\t interpreter is supposed to be small, less than 0x40000\n\t bytes.  */\n      sim_do_commandf (sd, \"memory region 0x%lx,0x%lx\",\n\t\t       interp_load_addr, interpsiz);\n\n      /* Now that memory for the interpreter is defined, load it.  */\n      if (!cris_load_elf_file (sd, ibfd, cris_write_interp))\n\tgoto interp_failed;\n\n      /* It's no use setting STATE_START_ADDR, because it gets\n\t overwritten by a sim_analyze_program call in sim_load.  Let's\n\t just store it locally.  */\n      interp_start_addr\n\t= (bfd_get_start_address (ibfd)\n\t   - interp_bounds.startmem + interp_load_addr);\n\n      /* Linux cares only about the first PT_INTERP, so let's ignore\n\t the rest.  */\n      goto all_done;\n    }\n\n  /* Register R10 should hold 0 at static start (no finifunc), but\n     that's the default, so don't bother.  */\n  return TRUE;\n\n all_done:\n  ok = TRUE;\n\n interp_failed:\n  bfd_close (ibfd);\n\n interpname_failed:\n  if (!ok)\n    sim_io_eprintf (sd,\n\t\t    \"%s: could not load ELF interpreter `%s' for program `%s'\\n\",\n\t\t    STATE_MY_NAME (sd),\n\t\t    interp == NULL ? \"(what's-its-name)\" : interp,\n\t\t    bfd_get_filename (abfd));\n  free (interp);\n  return ok;\n}",
+      "fn_code_pos": [
+        [
+          495,
+          0
+        ],
+        [
+          613,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cris_handle_interpreter",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "abfd": "struct bfd"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "SIM_DESC\nsim_open (SIM_OPEN_KIND kind, host_callback *callback, struct bfd *abfd,\n\t  char * const *argv)\n{\n  char c;\n  int i;\n  USI startmem = 0;\n  USI endmem = CRIS_DEFAULT_MEM_SIZE;\n  USI endbrk = endmem;\n  USI stack_low = 0;\n  SIM_DESC sd = sim_state_alloc (kind, callback);\n\n  static const struct auxv_entries_s\n  {\n    bfd_byte id;\n    USI (*efn) (struct bfd *ebfd);\n    USI val;\n  } auxv_entries[] =\n    {\n#define AUX_ENT(a, b) {a, NULL, b}\n#define AUX_ENTF(a, f) {a, f, 0}\n      AUX_ENT (AT_HWCAP, 0),\n      AUX_ENT (AT_PAGESZ, 8192),\n      AUX_ENT (AT_CLKTCK, 100),\n      AUX_ENTF (AT_PHDR, aux_ent_phdr),\n      AUX_ENTF (AT_PHENT, aux_ent_phent),\n      AUX_ENTF (AT_PHNUM, aux_ent_phnum),\n      AUX_ENTF (AT_BASE, aux_ent_base),\n      AUX_ENT (AT_FLAGS, 0),\n      AUX_ENTF (AT_ENTRY, aux_ent_entry),\n\n      /* Or is root better?  Maybe have it settable?  */\n      AUX_ENT (AT_UID, 500),\n      AUX_ENT (AT_EUID, 500),\n      AUX_ENT (AT_GID, 500),\n      AUX_ENT (AT_EGID, 500),\n      AUX_ENT (AT_SECURE, 0),\n      AUX_ENT (AT_NULL, 0)\n    };\n\n  /* Can't initialize to \"\" below.  It's either a GCC bug in old\n     releases (up to and including 2.95.3 (.4 in debian) or a bug in the\n     standard ;-) that the rest of the elements won't be initialized.  */\n  bfd_byte sp_init[4] = {0, 0, 0, 0};\n\n  /* The cpu data is kept in a separately allocated chunk of memory.  */\n  if (sim_cpu_alloc_all (sd, 1, cgen_cpu_max_extra_bytes ()) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  if (sim_pre_argv_init (sd, argv[0]) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  /* Add the CRIS-specific option list to the simulator.  */\n  if (sim_add_option_table (sd, NULL, cris_options) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  /* The parser will print an error message for us, so we silently return.  */\n  if (sim_parse_args (sd, argv) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  /* check for/establish the reference program image */\n  if (sim_analyze_program (sd,\n\t\t\t   (STATE_PROG_ARGV (sd) != NULL\n\t\t\t    ? *STATE_PROG_ARGV (sd)\n\t\t\t    : NULL),\n\t\t\t   abfd) != SIM_RC_OK)\n    {\n      /* When there's an error, sim_analyze_program has already output\n\t a message.  Let's just clarify it, as \"not an object file\"\n\t perhaps doesn't ring a bell.  */\n      sim_io_eprintf (sd, \"(not a CRIS program)\\n\");\n      free_state (sd);\n      return 0;\n    }\n\n  /* We might get called with the caller expecting us to get hold of\n     the bfd for ourselves, which would happen at the\n     sim_analyze_program call above.  */\n  if (abfd == NULL)\n    abfd = STATE_PROG_BFD (sd);\n\n  /* Adjust the addresses of the program at this point.  Unfortunately\n     this does not affect ELF program headers, so we have to handle\n     that separately.  */\n  cris_offset_sections (sd, cris_program_offset);\n\n  if (abfd != NULL && bfd_get_arch (abfd) == bfd_arch_unknown)\n    {\n      if (STATE_PROG_ARGV (sd) != NULL)\n\tsim_io_eprintf (sd, \"%s: `%s' is not a CRIS program\\n\",\n\t\t\tSTATE_MY_NAME (sd), *STATE_PROG_ARGV (sd));\n      else\n\tsim_io_eprintf (sd, \"%s: program to be run is not a CRIS program\\n\",\n\t\t\tSTATE_MY_NAME (sd));\n      free_state (sd);\n      return 0;\n    }\n\n  /* For CRIS simulator-specific use, we need to find out the bounds of\n     the program as well, which is not done by sim_analyze_program\n     above.  */\n  if (abfd != NULL)\n    {\n      struct progbounds pb;\n\n      /* The sections should now be accessible using bfd functions.  */\n      cris_get_progbounds (abfd, &pb);\n\n      /* We align the area that the program uses to page boundaries.  */\n      startmem = pb.startmem & ~8191;\n      endbrk = pb.endmem;\n      endmem = (endbrk + 8191) & ~8191;\n    }\n\n  /* Find out how much room is needed for the environment and argv, create\n     that memory and fill it.  Only do this when there's a program\n     specified.  */\n  if (abfd != NULL && !cris_bare_iron)\n    {\n      char *name = bfd_get_filename (abfd);\n      char **my_environ = GET_ENVIRON ();\n      /* We use these maps to give the same behavior as the old xsim\n\t simulator.  */\n      USI envtop = 0x40000000;\n      USI stacktop = 0x3e000000;\n      USI envstart;\n      int envc;\n      int len = strlen (name) + 1;\n      USI epp, epp0;\n      USI stacklen;\n      int i;\n      char **prog_argv = STATE_PROG_ARGV (sd);\n      int my_argc = 0;\n      USI csp;\n      bfd_byte buf[4];\n\n      /* Count in the environment as well. */\n      for (envc = 0; my_environ[envc] != NULL; envc++)\n\tlen += strlen (my_environ[envc]) + 1;\n\n      for (i = 0; prog_argv[i] != NULL; my_argc++, i++)\n\tlen += strlen (prog_argv[i]) + 1;\n\n      envstart = (envtop - len) & ~8191;\n\n      /* Create read-only block for the environment strings.  */\n      sim_core_attach (sd, NULL, 0, access_read, 0,\n\t\t       envstart, (len + 8191) & ~8191,\n\t\t       0, NULL, NULL);\n\n      /* This shouldn't happen.  */\n      if (envstart < stacktop)\n\tstacktop = envstart - 64 * 8192;\n\n      csp = stacktop;\n\n      /* Note that the linux kernel does not correctly compute the storage\n\t needs for the static-exe AUX vector.  */\n\n      csp -= ARRAY_SIZE (auxv_entries) * 4 * 2;\n\n      csp -= (envc + 1) * 4;\n      csp -= (my_argc + 1) * 4;\n      csp -= 4;\n\n      /* Write the target representation of the start-up-value for the\n\t stack-pointer suitable for register initialization below.  */\n      bfd_putl32 (csp, sp_init);\n\n      /* If we make this 1M higher; say 8192*1024, we have to take\n\t special precautions for pthreads, because pthreads assumes that\n\t the memory that low isn't mmapped, and that it can mmap it\n\t without fallback in case of failure (and we fail ungracefully\n\t long before *that*: the memory isn't accounted for in our mmap\n\t list).  */\n      stack_low = (csp - (7168*1024)) & ~8191;\n\n      stacklen = stacktop - stack_low;\n\n      /* Tee hee, we have an executable stack.  Well, it's necessary to\n\t test GCC trampolines...  */\n      sim_core_attach (sd, NULL, 0, access_read_write_exec, 0,\n\t\t       stack_low, stacklen,\n\t\t       0, NULL, NULL);\n\n      epp = epp0 = envstart;\n\n      /* Can't use sim_core_write_unaligned_4 without everything\n\t initialized when tracing, and then these writes would get into\n\t the trace.  */\n#define write_dword(addr, data)\t\t\t\t\t\t\\\n do\t\t\t\t\t\t\t\t\t\\\n   {\t\t\t\t\t\t\t\t\t\\\n     USI data_ = data;\t\t\t\t\t\t\t\\\n     USI addr_ = addr;\t\t\t\t\t\t\t\\\n     bfd_putl32 (data_, buf);\t\t\t\t\t\t\\\n     if (sim_core_write_buffer (sd, NULL, NULL_CIA, buf, addr_, 4) != 4)\\\n\tgoto abandon_chip;\t\t\t\t\t\t\\\n   }\t\t\t\t\t\t\t\t\t\\\n while (0)\n\n      write_dword (csp, my_argc);\n      csp += 4;\n\n      for (i = 0; i < my_argc; i++, csp += 4)\n\t{\n\t  size_t strln = strlen (prog_argv[i]) + 1;\n\n\t  if (sim_core_write_buffer (sd, NULL, NULL_CIA, prog_argv[i], epp,\n\t\t\t\t     strln)\n\t      != strln)\n\t  goto abandon_chip;\n\n\t  write_dword (csp, envstart + epp - epp0);\n\t  epp += strln;\n\t}\n\n      write_dword (csp, 0);\n      csp += 4;\n\n      for (i = 0; i < envc; i++, csp += 4)\n\t{\n\t  unsigned int strln = strlen (my_environ[i]) + 1;\n\n\t  if (sim_core_write_buffer (sd, NULL, NULL_CIA, my_environ[i], epp,\n\t\t\t\t     strln)\n\t      != strln)\n\t    goto abandon_chip;\n\n\t  write_dword (csp, envstart + epp - epp0);\n\t  epp += strln;\n\t}\n\n      write_dword (csp, 0);\n      csp += 4;\n\n      /* The load address of the executable could presumably be\n\t different than the lowest used memory address, but let's\n\t stick to simplicity until needed.  And\n\t cris_handle_interpreter might change startmem and endmem, so\n\t let's set it now.  */\n      exec_load_addr = startmem;\n\n      if (!cris_handle_interpreter (sd, abfd))\n\tgoto abandon_chip;\n\n      if (bfd_get_flavour (abfd) == bfd_target_elf_flavour)\n\tfor (i = 0; i < ARRAY_SIZE (auxv_entries); i++)\n\t  {\n\t    write_dword (csp, auxv_entries[i].id);\n\t    write_dword (csp + 4,\n\t\t\t auxv_entries[i].efn != NULL\n\t\t\t ? (*auxv_entries[i].efn) (abfd)\n\t\t\t : auxv_entries[i].val);\n\t    csp += 4 + 4;\n\t  }\n    }\n\n  /* Allocate core managed memory if none specified by user.  */\n  if (sim_core_read_buffer (sd, NULL, read_map, &c, startmem, 1) == 0)\n    sim_do_commandf (sd, \"memory region 0x%lx,0x%lx\", startmem,\n\t\t     endmem - startmem);\n\n  /* Allocate simulator I/O managed memory if none specified by user.  */\n  if (cris_have_900000xxif)\n    sim_hw_parse (sd, \"/core/%s/reg %#x %i\", \"cris_900000xx\", 0x90000000, 0x100);\n\n  /* Establish any remaining configuration options.  */\n  if (sim_config (sd) != SIM_RC_OK)\n    {\n    abandon_chip:\n      free_state (sd);\n      return 0;\n    }\n\n  if (sim_post_argv_init (sd) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  /* Open a copy of the cpu descriptor table.  */\n  {\n    CGEN_CPU_DESC cd = cris_cgen_cpu_open_1 (STATE_ARCHITECTURE (sd)->printable_name,\n\t\t\t\t\t     CGEN_ENDIAN_LITTLE);\n    for (i = 0; i < MAX_NR_PROCESSORS; ++i)\n      {\n\tSIM_CPU *cpu = STATE_CPU (sd, i);\n\tCPU_CPU_DESC (cpu) = cd;\n\tCPU_DISASSEMBLER (cpu) = cris_disassemble_insn;\n\n\t/* See cris_option_handler for the reason why this is needed.  */\n\tCPU_CRIS_MISC_PROFILE (cpu)->flags = STATE_TRACE_FLAGS (sd)[0];\n\n\t/* Set SP to the stack we allocated above.  */\n\t(* CPU_REG_STORE (cpu)) (cpu, H_GR_SP, (char *) sp_init, 4);\n\n\t/* Set the simulator environment data.  */\n\tcpu->highest_mmapped_page = NULL;\n\tcpu->endmem = endmem;\n\tcpu->endbrk = endbrk;\n\tcpu->stack_low = stack_low;\n\tcpu->syscalls = 0;\n\tcpu->m1threads = 0;\n\tcpu->threadno = 0;\n\tcpu->max_threadid = 0;\n\tcpu->thread_data = NULL;\n\tmemset (cpu->sighandler, 0, sizeof (cpu->sighandler));\n\tcpu->make_thread_cpu_data = NULL;\n\tcpu->thread_cpu_data_size = 0;\n#if WITH_HW\n\tcpu->deliver_interrupt = NULL;\n#endif\n      }\n#if WITH_HW\n    /* Always be cycle-accurate and call before/after functions if\n       with-hardware.  */\n    sim_profile_set_option (sd, \"-model\", PROFILE_MODEL_IDX, \"on\");\n#endif\n  }\n\n  /* Initialize various cgen things not done by common framework.\n     Must be done after cris_cgen_cpu_open.  */\n  cgen_init (sd);\n\n  cris_set_callbacks (callback);\n\n  return sd;\n}",
+      "fn_code_pos": [
+        [
+          617,
+          0
+        ],
+        [
+          957,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_open",
+        "parameters": {
+          "kind": "SIM_OPEN_KIND",
+          "callback": "host_callback",
+          "abfd": "struct bfd",
+          "argv": "char"
+        },
+        "return_type": "SIM_DESC"
+      }
+    },
+    {
+      "fn_code": "SIM_RC\nsim_create_inferior (SIM_DESC sd, struct bfd *abfd,\n\t\t     char * const *argv ATTRIBUTE_UNUSED,\n\t\t     char * const *envp ATTRIBUTE_UNUSED)\n{\n  SIM_CPU *current_cpu = STATE_CPU (sd, 0);\n  SIM_ADDR addr;\n\n  if (sd != NULL)\n    addr = cris_start_address != (SIM_ADDR) -1\n      ? cris_start_address\n      : (interp_start_addr != 0\n\t ? interp_start_addr\n\t : bfd_get_start_address (abfd));\n  else\n    addr = 0;\n  sim_pc_set (current_cpu, addr);\n\n  /* Standalone mode (i.e. `run`) will take care of the argv for us in\n     sim_open() -> sim_parse_args().  But in debug mode (i.e. 'target sim'\n     with `gdb`), we need to handle it because the user can change the\n     argv on the fly via gdb's 'run'.  */\n  if (STATE_PROG_ARGV (sd) != argv)\n    {\n      freeargv (STATE_PROG_ARGV (sd));\n      STATE_PROG_ARGV (sd) = dupargv (argv);\n    }\n\n  return SIM_RC_OK;\n}",
+      "fn_code_pos": [
+        [
+          959,
+          0
+        ],
+        [
+          988,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_create_inferior",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "abfd": "struct bfd",
+          "argv": "char",
+          "envp": "char"
+        },
+        "return_type": "SIM_RC"
+      }
+    },
+    {
+      "fn_code": "static void\ncris_disassemble_insn (SIM_CPU *cpu,\n\t\t       const CGEN_INSN *insn ATTRIBUTE_UNUSED,\n\t\t       const ARGBUF *abuf ATTRIBUTE_UNUSED,\n\t\t       IADDR pc, char *buf)\n{\n  disassembler_ftype pinsn;\n  struct disassemble_info disasm_info;\n  SFILE sfile;\n  SIM_DESC sd = CPU_STATE (cpu);\n\n  sfile.buffer = sfile.current = buf;\n  INIT_DISASSEMBLE_INFO (disasm_info, (FILE *) &sfile,\n\t\t\t (fprintf_ftype) sim_disasm_sprintf);\n  disasm_info.endian = BFD_ENDIAN_LITTLE;\n  disasm_info.read_memory_func = sim_disasm_read_memory;\n  disasm_info.memory_error_func = sim_disasm_perror_memory;\n  disasm_info.application_data = (PTR) cpu;\n  pinsn = cris_get_disassembler (STATE_PROG_BFD (sd));\n  (*pinsn) (pc, &disasm_info);\n}",
+      "fn_code_pos": [
+        [
+          992,
+          0
+        ],
+        [
+          1012,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cris_disassemble_insn",
+        "parameters": {
+          "cpu": "SIM_CPU",
+          "insn": "CGEN_INSN",
+          "abuf": "ARGBUF",
+          "pc": "IADDR",
+          "buf": "char"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "free_state (SIM_DESC)",
+      "fn_dec_pos": [
+        [
+          55,
+          12
+        ],
+        [
+          55,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "free_state",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "get_progbounds_iterator (bfd *, asection *, void *)",
+      "fn_dec_pos": [
+        [
+          56,
+          12
+        ],
+        [
+          56,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_progbounds_iterator",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "cris_option_handler (SIM_DESC, sim_cpu *, int, char *, int)",
+      "fn_dec_pos": [
+        [
+          57,
+          14
+        ],
+        [
+          57,
+          73
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cris_option_handler",
+        "parameters": {},
+        "return_type": "SIM_RC"
+      }
+    },
+    {
+      "fn_code": "(*efn) (struct bfd *ebfd)",
+      "fn_dec_pos": [
+        [
+          632,
+          8
+        ],
+        [
+          632,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "ebfd": "struct bfd"
+        },
+        "return_type": "USI"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct progbounds {\n  USI startmem;\n  USI endmem;\n  USI end_loadmem;\n  USI start_nonloadmem;\n}",
+      {
+        "startmem": "USI",
+        "endmem": "USI",
+        "end_loadmem": "USI",
+        "start_nonloadmem": "USI"
+      },
+      "progbounds",
+      [
+        48,
+        0
+      ],
+      [
+        53,
+        1
+      ]
+    ],
+    [
+      "struct offsetinfo\n{\n  SIM_DESC sd;\n  int offset;\n}",
+      {
+        "sd": "SIM_DESC",
+        "offset": "int"
+      },
+      "offsetinfo",
+      [
+        302,
+        0
+      ],
+      [
+        306,
+        1
+      ]
+    ],
+    [
+      "struct auxv_entries_s\n  {\n    bfd_byte id;\n    USI (*efn) (struct bfd *ebfd);\n    USI val;\n  }",
+      {
+        "id": "bfd_byte",
+        "(*efn) (struct bfd *ebfd)": "USI",
+        "val": "USI"
+      },
+      "auxv_entries_s",
+      [
+        629,
+        15
+      ],
+      [
+        634,
+        3
+      ]
+    ],
+    [
+      "struct progbounds {\n  USI startmem;\n  USI endmem;\n  USI end_loadmem;\n  USI start_nonloadmem;\n}",
+      {
+        "startmem": "USI",
+        "endmem": "USI",
+        "end_loadmem": "USI",
+        "start_nonloadmem": "USI"
+      },
+      "progbounds",
+      [
+        48,
+        0
+      ],
+      [
+        53,
+        1
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        237,
+        33
+      ],
+      [
+        237,
+        43
+      ]
+    ],
+    [
+      "struct offsetinfo\n{\n  SIM_DESC sd;\n  int offset;\n}",
+      {
+        "sd": "SIM_DESC",
+        "offset": "int"
+      },
+      "offsetinfo",
+      [
+        302,
+        0
+      ],
+      [
+        306,
+        1
+      ]
+    ],
+    [
+      "struct offsetinfo",
+      {},
+      "",
+      [
+        313,
+        2
+      ],
+      [
+        313,
+        19
+      ]
+    ],
+    [
+      "struct offsetinfo",
+      {},
+      "",
+      [
+        313,
+        26
+      ],
+      [
+        313,
+        43
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        337,
+        2
+      ],
+      [
+        337,
+        12
+      ]
+    ],
+    [
+      "struct offsetinfo",
+      {},
+      "",
+      [
+        339,
+        2
+      ],
+      [
+        339,
+        19
+      ]
+    ],
+    [
+      "struct progbounds",
+      {},
+      "",
+      [
+        360,
+        2
+      ],
+      [
+        360,
+        19
+      ]
+    ],
+    [
+      "struct progbounds",
+      {},
+      "",
+      [
+        360,
+        28
+      ],
+      [
+        360,
+        45
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        389,
+        21
+      ],
+      [
+        389,
+        31
+      ]
+    ],
+    [
+      "struct progbounds",
+      {},
+      "",
+      [
+        389,
+        39
+      ],
+      [
+        389,
+        56
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        442,
+        14
+      ],
+      [
+        442,
+        24
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        451,
+        15
+      ],
+      [
+        451,
+        25
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        459,
+        15
+      ],
+      [
+        459,
+        25
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        467,
+        14
+      ],
+      [
+        467,
+        24
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        475,
+        15
+      ],
+      [
+        475,
+        25
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        496,
+        38
+      ],
+      [
+        496,
+        48
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        502,
+        2
+      ],
+      [
+        502,
+        12
+      ]
+    ],
+    [
+      "struct progbounds",
+      {},
+      "",
+      [
+        517,
+        6
+      ],
+      [
+        517,
+        23
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        618,
+        55
+      ],
+      [
+        618,
+        65
+      ]
+    ],
+    [
+      "struct auxv_entries_s\n  {\n    bfd_byte id;\n    USI (*efn) (struct bfd *ebfd);\n    USI val;\n  }",
+      {
+        "id": "bfd_byte",
+        "(*efn) (struct bfd *ebfd)": "USI",
+        "val": "USI"
+      },
+      "auxv_entries_s",
+      [
+        629,
+        15
+      ],
+      [
+        634,
+        3
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        632,
+        16
+      ],
+      [
+        632,
+        26
+      ]
+    ],
+    [
+      "struct progbounds",
+      {},
+      "",
+      [
+        732,
+        6
+      ],
+      [
+        732,
+        23
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        960,
+        34
+      ],
+      [
+        960,
+        44
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        999,
+        2
+      ],
+      [
+        999,
+        25
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"elf-bfd.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-options.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"dis-asm.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum cris_unknown_syscall_action_type",
+      {},
+      "",
+      [
+        80,
+        0
+      ],
+      [
+        80,
+        37
+      ]
+    ],
+    [
+      "typedef enum {\n  OPTION_CRIS_STATS = OPTION_START,\n  OPTION_CRIS_TRACE,\n  OPTION_CRIS_NAKED,\n  OPTION_CRIS_PROGRAM_OFFSET,\n  OPTION_CRIS_STARTADDR,\n  OPTION_CRIS_900000XXIF,\n  OPTION_CRIS_UNKNOWN_SYSCALL\n} CRIS_OPTIONS;",
+      {
+        "OPTION_CRIS_STATS": "",
+        "OPTION_CRIS_TRACE": "",
+        "OPTION_CRIS_NAKED": "",
+        "OPTION_CRIS_PROGRAM_OFFSET": "",
+        "OPTION_CRIS_STARTADDR": "",
+        "OPTION_CRIS_900000XXIF": "",
+        "OPTION_CRIS_UNKNOWN_SYSCALL": ""
+      },
+      "CRIS_OPTIONS",
+      [
+        84,
+        0
+      ],
+      [
+        92,
+        15
+      ]
+    ]
+  ]
+}

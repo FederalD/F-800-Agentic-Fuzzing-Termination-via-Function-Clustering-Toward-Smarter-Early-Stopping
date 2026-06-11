@@ -1,0 +1,813 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "struct pcap_septel {\n\tstruct pcap_stat stat;\n}\n\n/*\n *  Read at most max_packets from the capture queue and call the callback\n *  for each of them. Returns the number of packets handled, -1 if an\n *  error occured, or -2 if we were told to break out of the loop.\n */\nstatic int septel_read(pcap_t *p, int cnt, pcap_handler callback, u_char *user) {\n\n  struct pcap_septel *ps = p->priv;\n  HDR *h;\n  MSG *m;\n  int processed = 0 ;\n  int t = 0 ;\n\n  /* identifier for the message queue of the module(upe) from which we are capturing\n   * packets.These IDs are defined in system.txt . By default it is set to 0x2d\n   * so change it to 0xdd for technical reason and therefore the module id for upe becomes:\n   * LOCAL        0xdd           * upe - Example user part task */\n  unsigned int id = 0xdd;\n\n  /* process the packets */\n  do  {\n\n    unsigned short packet_len = 0;\n    int caplen = 0;\n    int counter = 0;\n    struct pcap_pkthdr   pcap_header;\n    u_char *dp ;\n\n    /*\n     * Has \"pcap_breakloop()\" been called?\n     */\nloop:\n    if (p->break_loop) {\n      /*\n       * Yes - clear the flag that indicates that\n       * it has, and return -2 to indicate that\n       * we were told to break out of the loop.\n       */\n      p->break_loop = 0;\n      return -2;\n    }\n\n    /*repeat until a packet is read\n     *a NULL message means :\n     * when no packet is in queue or all packets in queue already read */\n    do  {\n      /* receive packet in non-blocking mode\n       * GCT_grab is defined in the septel library software */\n      h = GCT_grab(id);\n\n      m = (MSG*)h;\n      /* a couter is added here to avoid an infinite loop\n       * that will cause our capture program GUI to freeze while waiting\n       * for a packet*/\n      counter++ ;\n\n    }\n    while  ((m == NULL)&& (counter< 100)) ;\n\n    if (m != NULL) {\n\n      t = h->type ;\n\n      /* catch only messages with type = 0xcf00 or 0x8f01 corrsponding to ss7 messages*/\n      /* XXX = why not use API_MSG_TX_REQ for 0xcf00 and API_MSG_RX_IND\n       * for 0x8f01? */\n      if ((t != 0xcf00) && (t != 0x8f01)) {\n        relm(h);\n        goto loop ;\n      }\n\n      /* XXX - is API_MSG_RX_IND for an MTP2 or MTP3 message? */\n      dp = get_param(m);/* get pointer to MSG parameter area (m->param) */\n      packet_len = m->len;\n      caplen =  p->snapshot ;\n\n\n      if (caplen > packet_len) {\n\n        caplen = packet_len;\n      }\n      /* Run the packet filter if there is one. */\n      if ((p->fcode.bf_insns == NULL) || bpf_filter(p->fcode.bf_insns, dp, packet_len, caplen)) {\n\n\n        /*  get a time stamp , consisting of :\n         *\n         *  pcap_header.ts.tv_sec:\n         *  ----------------------\n         *   a UNIX format time-in-seconds when he packet was captured,\n         *   i.e. the number of seconds since Epoch time (January 1,1970, 00:00:00 GMT)\n         *\n         *  pcap_header.ts.tv_usec :\n         *  ------------------------\n         *   the number of microseconds since that second\n         *   when the packet was captured\n         */\n\n        (void)gettimeofday(&pcap_header.ts, NULL);\n\n        /* Fill in our own header data */\n        pcap_header.caplen = caplen;\n        pcap_header.len = packet_len;\n\n        /* Count the packet. */\n        ps->stat.ps_recv++;\n\n        /* Call the user supplied callback function */\n        callback(user, &pcap_header, dp);\n\n        processed++ ;\n\n      }\n      /* after being processed the packet must be\n       *released in order to receive another one */\n      relm(h);\n    }else\n      processed++;\n\n  }\n  while (processed < cnt) ;\n\n  return processed ;\n}",
+      "fn_code_pos": [
+        [
+          51,
+          0
+        ],
+        [
+          178,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_read",
+        "parameters": {
+          "p": "pcap_t",
+          "cnt": "int",
+          "callback": "pcap_handler",
+          "user": "u_char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nseptel_inject(pcap_t *handle, const void *buf _U_, size_t size _U_)\n{\n  strlcpy(handle->errbuf, \"Sending packets isn't supported on Septel cards\",\n          PCAP_ERRBUF_SIZE);\n  return (-1);\n}",
+      "fn_code_pos": [
+        [
+          181,
+          0
+        ],
+        [
+          187,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_inject",
+        "parameters": {
+          "handle": "pcap_t",
+          "buf": "void",
+          "size": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static pcap_t *septel_activate(pcap_t* handle) {\n  /* Initialize some components of the pcap structure. */\n  handle->linktype = DLT_MTP2;\n\n  /*\n   * Turn a negative snapshot value (invalid), a snapshot value of\n   * 0 (unspecified), or a value bigger than the normal maximum\n   * value, into the maximum allowed value.\n   *\n   * If some application really *needs* a bigger snapshot\n   * length, we should just increase MAXIMUM_SNAPLEN.\n   */\n  if (handle->snapshot <= 0 || handle->snapshot > MAXIMUM_SNAPLEN)\n    handle->snapshot = MAXIMUM_SNAPLEN;\n\n  handle->bufsize = 0;\n\n  /*\n   * \"select()\" and \"poll()\" don't work on Septel queues\n   */\n  handle->selectable_fd = -1;\n\n  handle->read_op = septel_read;\n  handle->inject_op = septel_inject;\n  handle->setfilter_op = septel_setfilter;\n  handle->set_datalink_op = NULL; /* can't change data link type */\n  handle->getnonblock_op = septel_getnonblock;\n  handle->setnonblock_op = septel_setnonblock;\n  handle->stats_op = septel_stats;\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          196,
+          0
+        ],
+        [
+          227,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_activate",
+        "parameters": {
+          "handle": "pcap_t"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "pcap_t *septel_create(const char *device, char *ebuf, int *is_ours) {\n\tconst char *cp;\n\tpcap_t *p;\n\n\t/* Does this look like the Septel device? */\n\tcp = strrchr(device, '/');\n\tif (cp == NULL)\n\t\tcp = device;\n\tif (strcmp(cp, \"septel\") != 0) {\n\t\t/* Nope, it's not \"septel\" */\n\t\t*is_ours = 0;\n\t\treturn NULL;\n\t}\n\n\t/* OK, it's probably ours. */\n\t*is_ours = 1;\n\n\tp = pcap_create_common(ebuf, sizeof (struct pcap_septel));\n\tif (p == NULL)\n\t\treturn NULL;\n\n\tp->activate_op = septel_activate;\n\t/*\n\t * Set these up front, so that, even if our client tries\n\t * to set non-blocking mode before we're activated, or\n\t * query the state of non-blocking mode, they get an error,\n\t * rather than having the non-blocking mode option set\n\t * for use later.\n\t */\n\tp->getnonblock_op = septel_getnonblock;\n\tp->setnonblock_op = septel_setnonblock;\n\treturn p;\n}",
+      "fn_code_pos": [
+        [
+          229,
+          0
+        ],
+        [
+          261,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "static int septel_stats(pcap_t *p, struct pcap_stat *ps) {\n  struct pcap_septel *handlep = p->priv;\n  /*handlep->stat.ps_recv = 0;*/\n  /*handlep->stat.ps_drop = 0;*/\n\n  *ps = handlep->stat;\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          263,
+          0
+        ],
+        [
+          271,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_stats",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nseptel_findalldevs(pcap_if_list_t *devlistp, char *errbuf)\n{\n  /*\n   * XXX - do the notions of \"up\", \"running\", or \"connected\" apply here?\n   */\n  if (add_dev(devlistp,\"septel\",0,\"Intel/Septel device\",errbuf) == NULL)\n    return -1;\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          274,
+          0
+        ],
+        [
+          283,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_findalldevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int septel_setfilter(pcap_t *p, struct bpf_program *fp) {\n  if (!p)\n    return -1;\n  if (!fp) {\n    strncpy(p->errbuf, \"setfilter: No filter specified\",\n\t    sizeof(p->errbuf));\n    return -1;\n  }\n\n  /* Make our private copy of the filter */\n\n  if (install_bpf_program(p, fp) < 0)\n    return -1;\n\n  return (0);\n}",
+      "fn_code_pos": [
+        [
+          291,
+          0
+        ],
+        [
+          306,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_setfilter",
+        "parameters": {
+          "p": "pcap_t",
+          "fp": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nseptel_getnonblock(pcap_t *p)\n{\n  fprintf(p->errbuf, PCAP_ERRBUF_SIZE, \"Non-blocking mode not supported on Septel devices\");\n  return (-1);\n}",
+      "fn_code_pos": [
+        [
+          314,
+          0
+        ],
+        [
+          319,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_getnonblock",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nseptel_setnonblock(pcap_t *p, int nonblock _U_)\n{\n  fprintf(p->errbuf, PCAP_ERRBUF_SIZE, \"Non-blocking mode not supported on Septel devices\");\n  return (-1);\n}",
+      "fn_code_pos": [
+        [
+          321,
+          0
+        ],
+        [
+          326,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_setnonblock",
+        "parameters": {
+          "p": "pcap_t",
+          "nonblock": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\npcap_platform_finddevs(pcap_if_list_t *devlistp, char *errbuf)\n{\n  return (0);\n}",
+      "fn_code_pos": [
+        [
+          337,
+          0
+        ],
+        [
+          341,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_platform_finddevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_t *\npcap_create_interface(const char *device, char *errbuf)\n{\n  pcap_snprintf(errbuf, PCAP_ERRBUF_SIZE,\n                \"This version of libpcap only supports Septel cards\");\n  return (NULL);\n}",
+      "fn_code_pos": [
+        [
+          346,
+          0
+        ],
+        [
+          352,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "errbuf": "char"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "const char *\npcap_lib_version(void)\n{\n  return (PCAP_VERSION_STRING \" (Septel-only)\");\n}",
+      "fn_code_pos": [
+        [
+          357,
+          0
+        ],
+        [
+          361,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "septel_setfilter(pcap_t *p, struct bpf_program *fp)",
+      "fn_dec_pos": [
+        [
+          43,
+          11
+        ],
+        [
+          43,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_setfilter",
+        "parameters": {
+          "p": "pcap_t",
+          "fp": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "septel_stats(pcap_t *p, struct pcap_stat *ps)",
+      "fn_dec_pos": [
+        [
+          44,
+          11
+        ],
+        [
+          44,
+          56
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_stats",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "septel_getnonblock(pcap_t *p)",
+      "fn_dec_pos": [
+        [
+          45,
+          11
+        ],
+        [
+          45,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_getnonblock",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "septel_setnonblock(pcap_t *p, int nonblock)",
+      "fn_dec_pos": [
+        [
+          46,
+          11
+        ],
+        [
+          46,
+          54
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_setnonblock",
+        "parameters": {
+          "p": "pcap_t",
+          "nonblock": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "septel_activate(pcap_t* handle)",
+      "fn_dec_pos": [
+        [
+          196,
+          15
+        ],
+        [
+          196,
+          46
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_activate",
+        "parameters": {
+          "handle": "pcap_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "septel_create(const char *device, char *ebuf, int *is_ours)",
+      "fn_dec_pos": [
+        [
+          229,
+          8
+        ],
+        [
+          229,
+          67
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "septel_create",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char",
+          "is_ours": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_create_interface(const char *device, char *errbuf)",
+      "fn_dec_pos": [
+        [
+          347,
+          0
+        ],
+        [
+          347,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "errbuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_lib_version(void)",
+      "fn_dec_pos": [
+        [
+          358,
+          0
+        ],
+        [
+          358,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_septel {\n\tstruct pcap_stat stat;\n}",
+      {
+        "stat": "struct pcap_stat"
+      },
+      "pcap_septel",
+      [
+        51,
+        0
+      ],
+      [
+        53,
+        1
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        43,
+        39
+      ],
+      [
+        43,
+        57
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        44,
+        35
+      ],
+      [
+        44,
+        51
+      ]
+    ],
+    [
+      "struct pcap_septel {\n\tstruct pcap_stat stat;\n}",
+      {
+        "stat": "struct pcap_stat"
+      },
+      "pcap_septel",
+      [
+        51,
+        0
+      ],
+      [
+        53,
+        1
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        52,
+        1
+      ],
+      [
+        52,
+        17
+      ]
+    ],
+    [
+      "struct pcap_septel",
+      {},
+      "",
+      [
+        62,
+        2
+      ],
+      [
+        62,
+        20
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        80,
+        4
+      ],
+      [
+        80,
+        22
+      ]
+    ],
+    [
+      "struct pcap_septel",
+      {},
+      "",
+      [
+        246,
+        38
+      ],
+      [
+        246,
+        56
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        263,
+        35
+      ],
+      [
+        263,
+        51
+      ]
+    ],
+    [
+      "struct pcap_septel",
+      {},
+      "",
+      [
+        264,
+        2
+      ],
+      [
+        264,
+        20
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        291,
+        39
+      ],
+      [
+        291,
+        57
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        17,
+        0
+      ],
+      [
+        18,
+        0
+      ]
+    ],
+    [
+      "#include <sys/param.h>\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <sys/mman.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <msg.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <ss7_inc.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <sysgct.h>\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include <pack.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <system.h>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-septel.h\"\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

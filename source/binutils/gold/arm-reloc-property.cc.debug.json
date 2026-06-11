@@ -1,0 +1,271 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "Arm_reloc_property::Tree_node*\nArm_reloc_property::Tree_node::make_tree(const std::string& s)\n{\n  std::stack<size_t> size_stack;\n  Tree_node_vector node_stack;\n\n  // strtok needs a non-const string pointer.\n  char* buffer = new char[s.size() + 1];\n  memcpy(buffer, s.data(), s.size());\n  buffer[s.size()] = '\\0';\n  char* token = strtok(buffer, \" \");\n\n  while (token != NULL)\n    {\n      if (strcmp(token, \"(\") == 0)\n\t// Remember the node stack position for start of a new internal node.\n\tsize_stack.push(node_stack.size());\n      else if (strcmp(token, \")\") == 0)\n\t{\n\t  // Pop all tree nodes after the previous '(' and use them as\n\t  // children to build a new internal node.  Push internal node back.\n\t  size_t current_size = node_stack.size();\n\t  size_t prev_size = size_stack.top();\n\t  size_stack.pop();\n\t  Tree_node* node =\n\t    new Tree_node(node_stack.begin() + prev_size,\n\t\t\t  node_stack.begin() + current_size); \n\t  node_stack.resize(prev_size);\n\t  node_stack.push_back(node);\n\t}\n      else\n\t// Just push a leaf node to node_stack.\n\tnode_stack.push_back(new Tree_node(token));\n\n      token = strtok(NULL, \" \");\n    }\n\n  delete[] buffer;\n\n  // At this point, size_stack should be empty and node_stack should only\n  // contain the root node.\n  gold_assert(size_stack.empty() && node_stack.size() == 1);\n  return node_stack[0];\n}",
+      "fn_code_pos": [
+        [
+          42,
+          0
+        ],
+        [
+          85,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Arm_reloc_property::Tree_node::make_tree",
+        "parameters": {
+          "s": "std::string"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Arm_reloc_property::Arm_reloc_property(\n    unsigned int code,\n    const char* name,\n    Reloc_type rtype,\n    bool is_deprecated,\n    Reloc_class rclass,\n    const std::string& operation,\n    bool is_implemented,\n    int group_index,\n    bool checks_overflow)\n  : code_(code), name_(name), reloc_type_(rtype), reloc_class_(rclass),\n    group_index_(group_index), size_(0), align_(1),\n    relative_address_base_(RAB_NONE), is_deprecated_(is_deprecated),\n    is_implemented_(is_implemented), checks_overflow_(checks_overflow),\n    uses_got_entry_(false), uses_got_origin_(false), uses_plt_entry_(false),\n    uses_thumb_bit_(false), uses_symbol_base_(false), uses_addend_(false),\n    uses_symbol_(false)\n{\n  // Set size and alignment of static and dynamic relocations.\n  if (rtype == RT_STATIC)\n    {\n      switch (rclass)\n\t{\n\tcase RC_DATA:\n\t  // Except for R_ARM_ABS16 and R_ARM_ABS8, all static data relocations\n\t  // have size 4.  All static data relocations have alignment of 1.\n\t  if (code == elfcpp::R_ARM_ABS8)\n\t    this->size_ = 1;\n\t  else if (code == elfcpp::R_ARM_ABS16)\n\t    this->size_ = 2;\n\t  else\n\t    this->size_ = 4;\n\t  this->align_ = 1;\n\t  break;\n\tcase RC_MISC:\n\t  // R_ARM_V4BX should be treated as an ARM relocation.  For all\n\t  // others, just use defaults.\n\t  if (code != elfcpp::R_ARM_V4BX)\n\t    break;\n\t  // Fall through.\n\tcase RC_ARM:\n\t  this->size_ = 4;\n\t  this->align_ = 4;\n\t  break;\n\tcase RC_THM16:\n\t  this->size_ = 2;\n\t  this->align_ = 2;\n\t  break;\n\tcase RC_THM32:\n\t  this->size_ = 4;\n\t  this->align_ = 2;\n\t  break;\n\tdefault:\n\t  gold_unreachable();\n\t}\n    }\n  else if (rtype == RT_DYNAMIC)\n    {\n      // With the exception of R_ARM_COPY, all dynamic relocations requires\n      // that the place being relocated is a word-aligned 32-bit object.\n      if (code != elfcpp::R_ARM_COPY)\n\t{\n\t  this->size_ = 4;\n\t  this->align_ = 4;\n\t}\n    }\n\n  // If no relocation operation is specified, we are done.\n  if (operation == \"NONE\")\n    return;\n\n  // Extract information from relocation operation.\n  Tree_node* root_node = Tree_node::make_tree(operation);\n  Tree_node* node = root_node;\n\n  // Check for an expression of the form XXX - YYY.\n  if (!node->is_leaf()\n      && node->child(0)->is_leaf()\n      && node->child(0)->name() == \"-\")\n    {\n      struct RAB_table_entry\n      {\n\tRelative_address_base rab;\n\tconst char* name;\n      };\n\n      static const RAB_table_entry rab_table[] =\n      {\n\t{ RAB_B_S, \"( B S )\" },\n\t{ RAB_DELTA_B_S, \"( DELTA_B ( S ) )\" },\n      \t{ RAB_GOT_ORG, \"GOT_ORG\" },\n      \t{ RAB_P, \"P\" },\n      \t{ RAB_Pa, \"Pa\" },\n      \t{ RAB_TLS, \"TLS\" },\n      \t{ RAB_tp, \"tp\" }\n      };\n\n      static size_t rab_table_size = sizeof(rab_table) / sizeof(rab_table[0]);\n      const std::string rhs(node->child(2)->s_expression());\n      for (size_t i = 0; i < rab_table_size; ++i)\n\tif (rhs == rab_table[i].name)\n\t  {\n\t    this->relative_address_base_ = rab_table[i].rab;\n\t    break;\n\t  }\n\n      gold_assert(this->relative_address_base_ != RAB_NONE);\n      if (this->relative_address_base_ == RAB_B_S)\n\tthis->uses_symbol_base_ = true;\n      node = node->child(1);\n    }\n\n  // Check for an expression of the form XXX | T.\n  if (!node->is_leaf()\n      && node->child(0)->is_leaf()\n      && node->child(0)->name() == \"|\")\n    {\n      gold_assert(node->number_of_children() == 3\n\t\t  && node->child(2)->is_leaf()\n\t\t  && node->child(2)->name() == \"T\");\n      this->uses_thumb_bit_ = true;\n      node = node->child(1);\n    }\n\n  // Check for an expression of the form XXX + A.\n  if (!node->is_leaf()\n      && node->child(0)->is_leaf()\n      && node->child(0)->name() == \"+\")\n    {\n      gold_assert(node->number_of_children() == 3\n\t\t  && node->child(2)->is_leaf()\n\t\t  && node->child(2)->name() == \"A\");\n      this->uses_addend_ = true;\n      node = node->child(1);\n    }\n\n  // Check for an expression of the form XXX(S).\n  if (!node->is_leaf() && node->child(0)->is_leaf())\n    {\n      gold_assert(node->number_of_children() == 2\n\t\t  && node->child(1)->is_leaf()\n\t\t  && node->child(1)->name() == \"S\");\n      const std::string func(node->child(0)->name());\n      if (func == \"B\")\n\tthis->uses_symbol_base_ = true;\n      else if (func == \"GOT\")\n\tthis->uses_got_entry_ = true;\n      else if (func == \"PLT\")\n\tthis->uses_plt_entry_ = true;\n      else if (func == \"Module\" || func == \"DELTA_B\")\n\t// These are used in dynamic relocations.\n\t;\n      else\n\tgold_unreachable();\n      node = node->child(1);\n    }\n\n  gold_assert(node->is_leaf() && node->name() == \"S\");\n  this->uses_symbol_ = true;\n\n  delete root_node;\n}",
+      "fn_code_pos": [
+        [
+          91,
+          0
+        ],
+        [
+          252,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Arm_reloc_property::Arm_reloc_property",
+        "parameters": {
+          "code": "unsigned int",
+          "name": "char",
+          "rtype": "Reloc_type",
+          "is_deprecated": "bool",
+          "rclass": "Reloc_class",
+          "operation": "std::string",
+          "is_implemented": "bool",
+          "group_index": "int",
+          "checks_overflow": "bool"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Arm_reloc_property_table::Arm_reloc_property_table()\n{\n  // These appear in arm-reloc.def.  Do not rename them.\n  Parse_expression A(\"A\"), GOT_ORG(\"GOT_ORG\"), NONE(\"NONE\"), P(\"P\"),\n\t\t   Pa(\"Pa\"), S(\"S\"), T(\"T\"), TLS(\"TLS\"), tp(\"tp\");\n  const bool Y(true), N(false);\n\n  for (unsigned int i = 0; i < Property_table_size; ++i)\n    this->table_[i] = NULL;\n\n#undef RD\n#define RD(name, type, deprecated, class, operation, is_implemented, \\\n\t   group_index, checks_oveflow) \\\n  do \\\n    { \\\n      unsigned int code = elfcpp::R_ARM_##name; \\\n      gold_assert(code < Property_table_size); \\\n      this->table_[code] = \\\n\tnew Arm_reloc_property(elfcpp::R_ARM_##name, \"R_ARM_\" #name, \\\n\t\t\t       Arm_reloc_property::RT_##type, deprecated, \\\n\t\t\t       Arm_reloc_property::RC_##class, \\\n\t\t\t       (operation).s_expression(), is_implemented, \\\n\t\t\t       group_index, checks_oveflow); \\\n    } \\\n  while(0);\n\n#include \"arm-reloc.def\"\n#undef RD\n}",
+      "fn_code_pos": [
+        [
+          259,
+          0
+        ],
+        [
+          287,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Arm_reloc_property_table::Arm_reloc_property_table",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "std::string\nArm_reloc_property_table::reloc_name_in_error_message(unsigned int code)\n{\n  gold_assert(code < Property_table_size);\n\n  const Arm_reloc_property* arp = this->table_[code];\n\n  if (arp == NULL)\n    {\n      char buffer[100];\n      sprintf(buffer, _(\"invalid reloc %u\"), code);\n      return std::string(buffer);\n    }\n  \n  // gold only implements static relocation codes.\n  Arm_reloc_property::Reloc_type reloc_type = arp->reloc_type();\n  gold_assert(reloc_type == Arm_reloc_property::RT_STATIC\n\t      || !arp->is_implemented());\n\n  const char* prefix = NULL;\n  switch (reloc_type)\n    {\n    case Arm_reloc_property::RT_STATIC:\n      prefix = arp->is_implemented() ? _(\"reloc \") : _(\"unimplemented reloc \");\n      break;\n    case Arm_reloc_property::RT_DYNAMIC:\n      prefix = _(\"dynamic reloc \");\n      break;\n    case Arm_reloc_property::RT_PRIVATE:\n      prefix = _(\"private reloc \");\n      break;\n    case Arm_reloc_property::RT_OBSOLETE:\n      prefix = _(\"obsolete reloc \");\n      break;\n    default:\n      gold_unreachable();\n    }\n  return std::string(prefix) + arp->name();\n}",
+      "fn_code_pos": [
+        [
+          292,
+          0
+        ],
+        [
+          330,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Arm_reloc_property_table::reloc_name_in_error_message",
+        "parameters": {
+          "code": "unsigned int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "Arm_reloc_property::Tree_node::make_tree(const std::string& s)",
+      "fn_dec_pos": [
+        [
+          43,
+          0
+        ],
+        [
+          43,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Arm_reloc_property::Tree_node::make_tree",
+        "parameters": {
+          "s": "std::string"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct RAB_table_entry\n      {\n\tRelative_address_base rab;\n\tconst char* name;\n      }",
+      {
+        "rab": "Relative_address_base",
+        "char": "const"
+      },
+      "RAB_table_entry",
+      [
+        171,
+        6
+      ],
+      [
+        175,
+        7
+      ]
+    ],
+    [
+      "struct RAB_table_entry\n      {\n\tRelative_address_base rab;\n\tconst char* name;\n      }",
+      {
+        "rab": "Relative_address_base",
+        "char": "const"
+      },
+      "RAB_table_entry",
+      [
+        171,
+        6
+      ],
+      [
+        175,
+        7
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"gold.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <cstdio>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <cstring>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <stack>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <string>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <vector>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"elfcpp.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"arm.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"arm-reloc-property.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"arm-reloc.def\"\n",
+      [
+        285,
+        0
+      ],
+      [
+        286,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

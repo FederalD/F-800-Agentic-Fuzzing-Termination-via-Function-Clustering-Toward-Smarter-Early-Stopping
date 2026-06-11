@@ -1,0 +1,1169 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nhw_rv_write (struct hw *me,\n\t     void *buf,\n\t     unsigned int len)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  unsigned8 *bufp = buf;\n\n  /* If we don't have a valid fd here, it's because we got an error\n     initially, and we suppressed that error.  */\n  if (rv->fd == -1)\n    hw_abort (me, \"couldn't open a connection to %s:%d because: %s\",\n\t      rv->host, rv->port, strerror (rv->saved_errno));\n\n  while (len > 0)\n    {\n      ssize_t ret = write (rv->fd, bufp, len);\n      if (ret < 0)\n\t/* FIXME: More graceful exit.  */\n\thw_abort (me, \"write to %s:%d failed: %s\\n\", rv->host, rv->port,\n\t\t  strerror (errno));\n\n      len -= ret;\n      bufp += ret;\n    }\n}",
+      "fn_code_pos": [
+        [
+          396,
+          0
+        ],
+        [
+          421,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_write",
+        "parameters": {
+          "me": "struct hw",
+          "buf": "void",
+          "len": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_read (struct hw *me,\n\t    void *buf,\n\t    unsigned int len)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  unsigned8 *bufp = buf;\n\n  while (len > 0)\n    {\n      ssize_t ret = read (rv->fd, bufp, len);\n\n      /* We get all zero if the remote end quits, but no error\n\t indication; even select says there's data active.  */\n      if (ret <= 0)\n\t{\n\t  if (close (rv->fd) != 0)\n\t    /* FIXME: More graceful exit.  */\n\t    hw_abort (me, \"read from %s:%d failed: %d\\n\", rv->host, rv->port, errno);\n\t  rv->fd = -1;\n\t  return;\n\t}\n\n      len -= ret;\n      bufp += ret;\n    }\n}",
+      "fn_code_pos": [
+        [
+          426,
+          0
+        ],
+        [
+          452,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_read",
+        "parameters": {
+          "me": "struct hw",
+          "buf": "void",
+          "len": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_send (struct hw *me,\n\t    unsigned int cmd,\n\t    void *msg,\n\t    unsigned int len_noheader)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  unsigned8 buf[32+3];\n  unsigned8 *bufp;\n  unsigned int len = len_noheader + 3;\n  int ret;\n\n  buf[0] = len & 255;\n  buf[1] = (len >> 8) & 255;\n  buf[2] = cmd;\n\n  if (len > sizeof (buf))\n    {\n      hw_rv_write (me, buf, 3);\n      len = len_noheader;\n      bufp = msg;\n    }\n  else\n    {\n      memcpy (buf + 3, msg, len_noheader);\n      bufp = buf;\n    }\n\n  hw_rv_write (me, bufp, len);\n}",
+      "fn_code_pos": [
+        [
+          457,
+          0
+        ],
+        [
+          486,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_send",
+        "parameters": {
+          "me": "struct hw",
+          "cmd": "unsigned int",
+          "msg": "void",
+          "len_noheader": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_read_mem (struct hw *me, unsigned int len)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  /* If you change this size, please adjust the mem2 testcase.  */\n  unsigned8 buf[32+8];\n  unsigned8 *bufp = buf;\n  unsigned32 leaddr;\n  unsigned32 addr;\n  unsigned32 lelen;\n  unsigned32 i;\n\n  if (len != 8)\n    hw_abort (me, \"expected DMA read request len 8+3, got %d+3\", len);\n\n  hw_rv_read (me, &leaddr, 4);\n  hw_rv_read (me, &lelen, 4);\n  len = LE2H_4 (lelen);\n  addr = LE2H_4 (leaddr);\n\n  if (addr < rv->remote_mem_address\n      || addr >= rv->remote_mem_address + rv->mem_size)\n    hw_abort (me, \"DMA read at remote 0x%x; outside [0x%x..0x%x-1]\",\n\t      (unsigned) addr, (unsigned) rv->remote_mem_address,\n\t      (unsigned) (rv->remote_mem_address + rv->mem_size));\n  addr = addr - rv->remote_mem_address + rv->mem_address;\n\n  if (len == 0)\n    hw_abort (me, \"DMA read request for 0 bytes isn't supported\");\n\n  if (len & ~rv->mem_burst_mask)\n    hw_abort (me, \"DMA trying to read %d bytes; not matching mask of 0x%x\",\n\t      len, rv->mem_burst_mask);\n  if (len + 8 > sizeof (buf))\n    bufp = hw_malloc (me, len + 8);\n\n  HW_TRACE ((me, \"DMA R 0x%x..0x%x\", addr, addr + len -1));\n  hw_dma_read_buffer (me, bufp + 8, 0, addr, len);\n  if (hw_trace_p (me))\n    for (i = 0; i < len; i += 4)\n      HW_TRACE ((me, \"0x%x: %02x %02x %02x %02x\",\n\t\t addr + i,\n\t\t bufp[i+8], bufp[i+9], bufp[i+10], bufp[i+11]));\n\n  memcpy (bufp, &leaddr, 4);\n  memcpy (bufp + 4, &lelen, 4);\n  hw_rv_send (me, RV_MEM_RD_CMD, bufp, len + 8);\n  if (bufp != buf)\n    hw_free (me, bufp);\n}",
+      "fn_code_pos": [
+        [
+          491,
+          0
+        ],
+        [
+          540,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_read_mem",
+        "parameters": {
+          "me": "struct hw",
+          "len": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_write_mem (struct hw *me, unsigned int plen)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  /* If you change this size, please adjust the mem2 testcase.  */\n  unsigned8 buf[32+8];\n  unsigned8 *bufp = buf;\n  unsigned32 leaddr;\n  unsigned32 addr;\n  unsigned32 lelen;\n  unsigned32 len;\n  unsigned32 i;\n\n  hw_rv_read (me, &leaddr, 4);\n  hw_rv_read (me, &lelen, 4);\n  len = LE2H_4 (lelen);\n  addr = LE2H_4 (leaddr);\n\n  if (len != plen - 8)\n    hw_abort (me,\n\t      \"inconsistency in DMA write request packet: \"\n\t      \"envelope %d+3, inner %d bytes\", plen, len);\n\n  if (addr < rv->remote_mem_address\n      || addr >= rv->remote_mem_address + rv->mem_size)\n    hw_abort (me, \"DMA write at remote 0x%x; outside [0x%x..0x%x-1]\",\n\t      (unsigned) addr, (unsigned) rv->remote_mem_address,\n\t      (unsigned) (rv->remote_mem_address + rv->mem_size));\n\n  addr = addr - rv->remote_mem_address + rv->mem_address;\n  if (len == 0)\n    hw_abort (me, \"DMA write request for 0 bytes isn't supported\");\n\n  if (len & ~rv->mem_burst_mask)\n    hw_abort (me, \"DMA trying to write %d bytes; not matching mask of 0x%x\",\n\t      len, rv->mem_burst_mask);\n  if (len + 8 > sizeof (buf))\n    bufp = hw_malloc (me, len + 8);\n\n  hw_rv_read (me, bufp + 8, len);\n  HW_TRACE ((me, \"DMA W 0x%x..0x%x\", addr, addr + len - 1));\n  hw_dma_write_buffer (me, bufp + 8, 0, addr, len, 0);\n  if (hw_trace_p (me))\n    for (i = 0; i < len; i += 4)\n      HW_TRACE ((me, \"0x%x: %02x %02x %02x %02x\",\n\t\t addr + i,\n\t\t bufp[i+8], bufp[i+9], bufp[i+10], bufp[i+11]));\n  if (bufp != buf)\n    hw_free (me, bufp);\n}",
+      "fn_code_pos": [
+        [
+          545,
+          0
+        ],
+        [
+          594,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_write_mem",
+        "parameters": {
+          "me": "struct hw",
+          "plen": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_irq (struct hw *me, unsigned int len)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  unsigned32 intbitsle;\n  unsigned32 intbits_ext;\n  unsigned32 intval = 0;\n  int i;\n\n  if (len != 4)\n    hw_abort (me, \"IRQ with %d data not supported\", len);\n\n  hw_rv_read (me, &intbitsle, 4);\n  intbits_ext = LE2H_4 (intbitsle);\n  for (i = 0; i < 32; i++)\n    if ((intbits_ext & (1 << i)) != 0)\n      intval |= rv->remote_to_local_int[i];\n  if ((intbits_ext & ~(intbits_ext - 1)) != intbits_ext\n      && rv->intmultiple != 0)\n    intval = rv->intmultiple;\n\n  HW_TRACE ((me, \"IRQ 0x%x\", intval));\n  hw_port_event (me, INT_PORT, intval);\n}",
+      "fn_code_pos": [
+        [
+          596,
+          0
+        ],
+        [
+          619,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_irq",
+        "parameters": {
+          "me": "struct hw",
+          "len": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_handle_incoming (struct hw *me,\n\t\t       int expected_type,\n\t\t       unsigned8 *buf,\n\t\t       unsigned int *return_len)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  unsigned8 cbuf[32];\n  unsigned int len;\n  unsigned int cmd;\n\n  while (1)\n    {\n      hw_rv_read (me, cbuf, 3);\n\n      if (rv->fd == -1)\n\treturn;\n\n      len = cbuf[0] + cbuf[1] * 256 - 3;\n      cmd = cbuf[2];\n\n      /* These come in \"asynchronously\"; not as a reply.  */\n      switch (cmd)\n\t{\n\tcase RV_IRQ_CMD:\n\t  hw_rv_irq (me, len);\n\t  break;\n\n\tcase RV_MEM_RD_CMD:\n\t  hw_rv_read_mem (me, len);\n\t  break;\n\n\tcase RV_MEM_WR_CMD:\n\t  hw_rv_write_mem (me, len);\n\t  break;\n\t}\n\n      /* Something is incoming from the other side, so tighten up all\n\t slack at the next wait.  */\n      rv->next_period = 1;\n\n      switch (cmd)\n\t{\n\tcase RV_MEM_RD_CMD:\n\tcase RV_MEM_WR_CMD:\n\tcase RV_IRQ_CMD:\n\t  /* Don't try to handle more than one of these if we were'nt\n\t     expecting a reply.  */\n\t  if (expected_type == -1)\n\t    return;\n\t  continue;\n\t}\n\n      /* Require a match between this supposed-reply and the command\n\t for the rest.  */\n      if (cmd != expected_type)\n\thw_abort (me, \"unexpected reply, expected command %d, got %d\",\n\t\t  expected_type, cmd);\n\n      switch (cmd)\n\t{\n\tcase RV_MBOX_PUT_CMD:\n\tcase RV_MBOX_HANDLE_CMD:\n\tcase RV_WRITE_CMD:\n\tcase RV_READ_CMD:\n\t  hw_rv_read (me, buf, len <= *return_len ? len : *return_len);\n\t  *return_len = len;\n\t  break;\n\t}\n      break;\n    }\n}",
+      "fn_code_pos": [
+        [
+          624,
+          0
+        ],
+        [
+          695,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_handle_incoming",
+        "parameters": {
+          "me": "struct hw",
+          "expected_type": "int",
+          "buf": "unsigned8",
+          "return_len": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_send_wdog (struct hw *me)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  HW_TRACE ((me, \"WD\"));\n  gettimeofday (&rv->last_wdog_time, NULL);\n  hw_rv_send (me, RV_WATCHDOG_CMD, \"\", 0);\n}",
+      "fn_code_pos": [
+        [
+          699,
+          0
+        ],
+        [
+          706,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_send_wdog",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_poll_once (struct hw *me)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  fd_set rfds;\n  fd_set efds;\n  struct timeval now;\n  int ret;\n  struct timeval tv;\n\n  if (rv->fd == -1)\n    /* Connection has died or was never initiated.  */\n    return;\n\n  FD_ZERO (&rfds);\n  FD_SET (rv->fd, &rfds);\n  FD_ZERO (&efds);\n  FD_SET (rv->fd, &efds);\n  tv.tv_sec = 0;\n  tv.tv_usec = 0;\n\n  ret = select (rv->fd + 1, &rfds, NULL, &efds, &tv);\n  gettimeofday (&now, NULL);\n\n  if (ret < 0)\n    hw_abort (me, \"select failed: %d\\n\", errno);\n\n  if (rv->watchdog_interval != 0\n      && now.tv_sec - rv->last_wdog_time.tv_sec >= rv->watchdog_interval)\n    hw_rv_send_wdog (me);\n\n  if (FD_ISSET (rv->fd, &rfds))\n    hw_rv_handle_incoming (me, -1, NULL, NULL);\n}",
+      "fn_code_pos": [
+        [
+          715,
+          0
+        ],
+        [
+          748,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_poll_once",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_map_ints (struct hw *me)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  int i;\n\n  for (i = 0; i < 32; i++)\n    rv->remote_to_local_int[i] = 1 << i;\n\n  if (hw_find_property (me, \"intnum\") != NULL)\n    for (i = 0; i < 32; i++)\n      {\n\tsigned_cell val = -1;\n\tif (hw_find_integer_array_property (me, \"intnum\", i, &val) > 0)\n\t  {\n\t    if (val > 0)\n\t      rv->remote_to_local_int[i] = val;\n\t    else\n\t      hw_abort (me, \"property \\\"intnum@%d\\\" must be > 0; is %d\",\n\t\t\ti, (int) val);\n\t  }\n      }\n}",
+      "fn_code_pos": [
+        [
+          752,
+          0
+        ],
+        [
+          774,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_map_ints",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_poll_event (struct hw *me, void *data)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  unsigned32 new_period;\n\n  if (rv->dummy != NULL)\n    return;\n\n  hw_rv_poll_once (me);\n  if (rv->fd >= 0)\n    rv->poll_callback\n      = hw_event_queue_schedule (me, rv->next_period, do_poll_event, NULL);\n\n  new_period = rv->next_period * 2;\n  if (new_period <= rv->max_tick_poll_interval)\n    rv->next_period = new_period;\n}",
+      "fn_code_pos": [
+        [
+          779,
+          0
+        ],
+        [
+          796,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_poll_event",
+        "parameters": {
+          "me": "struct hw",
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_add_poller (struct hw *me, void *data)\n{\n  hw_rv_device *rv;\n\n  if (hw_family (me) == NULL\n      || strcmp (hw_family (me), RV_FAMILY_NAME) != 0)\n    return;\n\n  rv = (hw_rv_device *) hw_data (me);\n  if (rv->poll_callback != NULL)\n    return;\n\n  rv->poll_callback\n    = hw_event_queue_schedule (me, 1, do_poll_event, NULL);\n}",
+      "fn_code_pos": [
+        [
+          800,
+          0
+        ],
+        [
+          815,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_add_poller",
+        "parameters": {
+          "me": "struct hw",
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static SIM_RC\nhw_rv_add_rv_pollers (SIM_DESC sd)\n{\n  hw_tree_traverse (STATE_HW (sd)->tree, hw_rv_add_poller, NULL, NULL);\n  return SIM_RC_OK;\n}",
+      "fn_code_pos": [
+        [
+          826,
+          0
+        ],
+        [
+          831,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_add_rv_pollers",
+        "parameters": {
+          "sd": "SIM_DESC"
+        },
+        "return_type": "SIM_RC"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_add_init (struct hw *me)\n{\n  sim_module_add_init_fn (hw_system (me), hw_rv_add_rv_pollers);\n}",
+      "fn_code_pos": [
+        [
+          844,
+          0
+        ],
+        [
+          848,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_add_init",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_init_socket (struct hw *me)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  int sock;\n  struct sockaddr_in server;\n\n  rv->fd = -1;\n\n  if (rv->dummy != NULL)\n    return;\n\n  memset (&server, 0, sizeof (server));\n  server.sin_family = AF_INET;\n  server.sin_addr.s_addr = inet_addr (rv->host);\n\n  /* Solaris 2.7 lacks this macro.  */\n#ifndef INADDR_NONE\n#define INADDR_NONE -1\n#endif\n\n  if (server.sin_addr.s_addr == INADDR_NONE)\n    {\n      struct hostent *h;\n      h = gethostbyname (rv->host);\n      if (h != NULL)\n\t{\n\t  memcpy (&server.sin_addr, h->h_addr, h->h_length);\n\t  server.sin_family = h->h_addrtype;\n\t}\n      else\n\thw_abort (me, \"can't resolve host %s\", rv->host);\n    }\n\n  server.sin_port = htons (rv->port);\n  sock = socket (AF_INET, SOCK_STREAM, 0);\n\n  if (sock == -1)\n    hw_abort (me, \"can't get a socket for %s:%d connection\",\n\t      rv->host, rv->port);\n\n  if (connect (sock, (struct sockaddr *) &server, sizeof server) >= 0)\n    {\n      rv->fd = sock;\n\n      /* FIXME: init packet here.  Maybe start packet too.  */\n      if (rv->watchdog_interval != 0)\n\thw_rv_send_wdog (me);\n    }\n  else\n    /* Stash the errno for later display, if some connection activity\n       is requested.  Don't emit an error here; we might have been\n       called just for test purposes.  */\n    rv->saved_errno = errno;\n}",
+      "fn_code_pos": [
+        [
+          852,
+          0
+        ],
+        [
+          906,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_init_socket",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned int\nhw_rv_reg_read (struct hw *me,\n\t\tvoid *dest,\n\t\tint space,\n\t\tunsigned_word addr,\n\t\tunsigned int nr_bytes)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n  unsigned8 addr_data[8] = \"\";\n  unsigned32 a_l = H2LE_4 (addr - rv->reg_address + rv->remote_reg_address);\n  unsigned int len = 8;\n\n  if (nr_bytes != 4)\n    hw_abort (me, \"must be four byte read\");\n\n  if (addr == rv->mbox_address)\n    hw_abort (me, \"invalid read of mbox address 0x%x\",\n\t      (unsigned) rv->mbox_address);\n\n  memcpy (addr_data, &a_l, 4);\n  HW_TRACE ((me, \"REG R 0x%x\", addr));\n  if (rv->dummy != NULL)\n    {\n      len = 8;\n      memcpy (addr_data + 4, rv->dummy + addr - rv->reg_address, 4);\n    }\n  else\n    {\n      hw_rv_send (me, RV_READ_CMD, addr_data, len);\n      hw_rv_handle_incoming (me, RV_READ_CMD, addr_data, &len);\n    }\n\n  if (len != 8)\n    hw_abort (me, \"read %d != 8 bytes returned\", len);\n  HW_TRACE ((me, \":= 0x%02x%02x%02x%02x\",\n\t     addr_data[7], addr_data[6], addr_data[5], addr_data[4]));\n  memcpy (dest, addr_data + 4, 4);\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          910,
+          0
+        ],
+        [
+          948,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_reg_read",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_mbox (struct hw *me, unsigned_word address)\n{\n  unsigned8 buf[256+3];\n  unsigned int cmd;\n  unsigned int rlen;\n  unsigned32 i;\n  unsigned int len\n    = hw_dma_read_buffer (me, buf, 0, address, 3);\n\n  if (len != 3)\n    hw_abort (me, \"mbox read %d != 3 bytes returned\", len);\n\n  cmd = buf[2];\n  if (cmd != RV_MBOX_HANDLE_CMD && cmd != RV_MBOX_PUT_CMD)\n    hw_abort (me, \"unsupported mbox command %d\", cmd);\n\n  len = buf[0] + buf[1]*256;\n\n  if (len > sizeof (buf))\n    hw_abort (me, \"mbox cmd %d send size %d unsupported\", cmd, len);\n\n  rlen = hw_dma_read_buffer (me, buf + 3, 0, address + 3, len - 3);\n  if (rlen != len - 3)\n    hw_abort (me, \"mbox read %d != %d bytes returned\", rlen, len - 3);\n\n  HW_TRACE ((me, \"MBOX %s 0x%x..0x%x\",\n\t     cmd == RV_MBOX_HANDLE_CMD ? \"H\" : \"P\",\n\t     address, address + len - 1));\n  for (i = 0; i < rlen; i += 8)\n    HW_TRACE ((me, \"0x%x: %02x %02x %02x %02x %02x %02x %02x %02x\",\n\t       address + 3 + i,\n\t       buf[3+i], buf[4+i], buf[5+i], buf[6+i], buf[7+i], buf[8+i],\n\t       buf[9+i], buf[10+i]));\n\n  len -= 3;\n  hw_rv_send (me, cmd, buf + 3, len);\n\n  /* Note: both ..._PUT and ..._HANDLE get the ..._HANDLE reply.  */\n  hw_rv_handle_incoming (me, RV_MBOX_HANDLE_CMD, buf + 3, &len);\n  if (len > sizeof (buf))\n    hw_abort (me, \"mbox cmd %d receive size %d unsupported\", cmd, len);\n  HW_TRACE ((me, \"-> 0x%x..0x%x\", address, address + len + 3 - 1));\n  for (i = 0; i < len; i += 8)\n    HW_TRACE ((me, \"0x%x: %02x %02x %02x %02x %02x %02x %02x %02x\",\n\t       address + 3 + i,\n\t       buf[3+i], buf[4+i], buf[5+i], buf[6+i], buf[7+i], buf[8+i],\n\t       buf[9+i], buf[10+i]));\n\n  len += 3;\n  buf[0] = len & 255;\n  buf[1] = len / 256;\n  rlen = hw_dma_write_buffer (me, buf, 0, address, len, 0);\n  if (rlen != len)\n    hw_abort (me, \"mbox write %d != %d bytes\", rlen, len);\n}",
+      "fn_code_pos": [
+        [
+          952,
+          0
+        ],
+        [
+          1007,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_mbox",
+        "parameters": {
+          "me": "struct hw",
+          "address": "unsigned_word"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned int\nhw_rv_reg_write (struct hw *me,\n\t\t const void *source,\n\t\t int space,\n\t\t unsigned_word addr,\n\t\t unsigned int nr_bytes)\n{\n  hw_rv_device *rv = (hw_rv_device *) hw_data (me);\n\n  unsigned8 addr_data[8] = \"\";\n  unsigned32 a_l = H2LE_4 (addr - rv->reg_address + rv->remote_reg_address);\n  unsigned int len = 8;\n\n  if (nr_bytes != 4)\n    hw_abort (me, \"must be four byte write\");\n\n  memcpy (addr_data, &a_l, 4);\n  memcpy (addr_data + 4, source, 4);\n\n  if (addr == rv->mbox_address)\n    {\n      unsigned32 mbox_addr_le;\n      if (rv->dummy != NULL)\n\thw_abort (me, \"mbox not supported for a dummy instance\");\n      memcpy (&mbox_addr_le, source, 4);\n      hw_rv_mbox (me, LE2H_4 (mbox_addr_le));\n      return nr_bytes;\n    }\n\n  HW_TRACE ((me, \"REG W 0x%x := 0x%02x%02x%02x%02x\", addr,\n\t     addr_data[7], addr_data[6], addr_data[5], addr_data[4]));\n  if (rv->dummy != NULL)\n    {\n      len = 8;\n      memcpy (rv->dummy + addr - rv->reg_address, addr_data + 4, 4);\n    }\n  else\n    {\n      hw_rv_send (me, RV_WRITE_CMD, addr_data, len);\n      hw_rv_handle_incoming (me, RV_WRITE_CMD, addr_data, &len);\n    }\n\n  if (len != 8)\n    hw_abort (me, \"read %d != 8 bytes returned\", len);\n\n  /* We had an access: tighten up all slack.  */\n  rv->next_period = 1;\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          1011,
+          0
+        ],
+        [
+          1060,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_reg_write",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nhw_rv_finish (struct hw *me)\n{\n  hw_rv_device *rv = HW_ZALLOC (me, hw_rv_device);\n  int i;\n  const struct hw_property *mem_prop;\n  const struct hw_property *dummy_prop;\n  const struct hw_property *mbox_prop;\n\n  set_hw_data (me, rv);\n\n#undef RV_GET_IPROP\n#undef RV_GET_PROP\n#define RV_GET_PROP(T, N, M, D)\t\t\t\t\\\n  do\t\t\t\t\t\t\t\\\n    {\t\t\t\t\t\t\t\\\n      if (hw_find_property (me, N) != NULL)\t\t\\\n\trv->M = hw_find_ ## T ## _property (me, N);\t\\\n      else\t\t\t\t\t\t\\\n\trv->M = (D);\t\t\t\t\t\\\n    }\t\t\t\t\t\t\t\\\n  while (0)\n#define RV_GET_IPROP(N, M, D) RV_GET_PROP (integer, N, M, D)\n\n  RV_GET_PROP (string, \"host\", host, \"127.0.0.1\");\n  RV_GET_IPROP (\"port\", port, 10000);\n  RV_GET_IPROP (\"remote-reg\", remote_reg_address, 0);\n  RV_GET_IPROP (\"max-poll-ticks\", max_tick_poll_interval, 10000);\n  RV_GET_IPROP (\"watchdog-interval\", watchdog_interval, 30);\n  RV_GET_IPROP (\"remote-mem\", remote_mem_address, 0);\n  RV_GET_IPROP (\"mem-burst-mask\", mem_burst_mask, 0xffff);\n  RV_GET_IPROP (\"intmultiple\", intmultiple, 0);\n\n  set_hw_io_read_buffer (me, hw_rv_reg_read);\n  set_hw_io_write_buffer (me, hw_rv_reg_write);\n  set_hw_ports (me, hw_rv_ports);\n  rv->next_period = 1;\n\n  /* FIXME: We only support zero or one reg and zero or one mem area.  */\n  if (hw_find_property (me, \"reg\") != NULL)\n    {\n      reg_property_spec reg;\n      if (hw_find_reg_array_property (me, \"reg\", 0, &reg))\n\t{\n\t  unsigned_word attach_address;\n\t  int attach_space;\n\t  unsigned int attach_size;\n\n\t  hw_unit_address_to_attach_address (hw_parent (me),\n\t\t\t\t\t     &reg.address,\n\t\t\t\t\t     &attach_space,\n\t\t\t\t\t     &attach_address,\n\t\t\t\t\t     me);\n\t  rv->reg_address = attach_address;\n\t  hw_unit_size_to_attach_size (hw_parent (me),\n\t\t\t\t       &reg.size,\n\t\t\t\t       &attach_size, me);\n\t  rv->reg_size = attach_size;\n\t  if ((attach_address & 3) != 0)\n\t    hw_abort (me, \"register block must be 4 byte aligned\");\n\t  hw_attach_address (hw_parent (me),\n\t\t\t     0,\n\t\t\t     attach_space, attach_address, attach_size,\n\t\t\t     me);\n\t}\n      else\n\thw_abort (me, \"property \\\"reg\\\" has the wrong type\");\n    }\n\n  dummy_prop = hw_find_property (me, \"dummy\");\n  if (dummy_prop != NULL)\n    {\n      if (rv->reg_size == 0)\n\thw_abort (me, \"dummy argument requires a \\\"reg\\\" property\");\n\n      if (hw_property_type (dummy_prop) == integer_property)\n\t{\n\t  unsigned32 dummyfill = hw_find_integer_property (me, \"dummy\");\n\t  unsigned8 *dummymem = hw_malloc (me, rv->reg_size);\n\t  memset (dummymem, dummyfill, rv->reg_size);\n\t  rv->dummy = dummymem;\n\t}\n      else\n\t{\n\t  const char *dummyarg = hw_find_string_property (me, \"dummy\");\n\t  unsigned8 *dummymem = hw_malloc (me, rv->reg_size);\n\t  FILE *f = fopen (dummyarg, \"rb\");\n\n\t  if (f == NULL)\n\t    hw_abort (me, \"opening dummy-file \\\"%s\\\": %s\",\n\t\t      dummyarg, strerror (errno));\n\t  if (fread (dummymem, 1, rv->reg_size, f) != rv->reg_size)\n\t    hw_abort (me, \"reading dummy-file \\\"%s\\\": %s\",\n\t\t      dummyarg, strerror (errno));\n\t  fclose (f);\n\t  rv->dummy = dummymem;\n\t}\n    }\n\n  mbox_prop = hw_find_property (me, \"mbox\");\n  if (mbox_prop != NULL)\n    {\n      if (hw_property_type (mbox_prop) == integer_property)\n\t{\n\t  signed_cell attach_address_sc\n\t    = hw_find_integer_property (me, \"mbox\");\n\n\t  rv->mbox_address = (unsigned32) attach_address_sc;\n\t  hw_attach_address (hw_parent (me),\n\t\t\t     0,\n\t\t\t     0, (unsigned32) attach_address_sc, 4, me);\n\t}\n      else\n\thw_abort (me, \"property \\\"mbox\\\" has the wrong type\");\n    }\n\n  mem_prop = hw_find_property (me, \"mem\");\n  if (mem_prop != NULL)\n    {\n      signed_cell attach_address_sc;\n      signed_cell attach_size_sc;\n\n      /* Only specific names are reg_array_properties, the rest are\n\t array_properties.  */\n      if (hw_property_type (mem_prop) == array_property\n\t  && hw_property_sizeof_array (mem_prop) == 2 * sizeof (attach_address_sc)\n\t  && hw_find_integer_array_property (me, \"mem\", 0, &attach_address_sc)\n\t  && hw_find_integer_array_property (me, \"mem\", 1, &attach_size_sc))\n\t{\n\t  /* Unfortunate choice of types forces us to dance around a bit.  */\n\t  rv->mem_address = (unsigned32) attach_address_sc;\n\t  rv->mem_size = (unsigned32) attach_size_sc;\n\t  if ((attach_address_sc & 3) != 0)\n\t    hw_abort (me, \"memory block must be 4 byte aligned\");\n\t}\n      else\n\thw_abort (me, \"property \\\"mem\\\" has the wrong type\");\n    }\n\n  hw_rv_map_ints (me);\n\n  hw_rv_init_socket (me);\n\n  /* We need an extra initialization pass, after all others currently\n     scheduled (mostly, after the simulation events machinery has been\n     initialized so the events we want don't get thrown out).  */\n  hw_rv_add_init (me);\n}",
+      "fn_code_pos": [
+        [
+          1064,
+          0
+        ],
+        [
+          1211,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_rv_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct _hw_rv_device\n{\n  /* Mapping of remote interrupt bit-numbers to local ones.  */\n  unsigned32 remote_to_local_int[32];\n\n  /* When multiple bits are set, a non-zero value here indicates that\n     this value should be used instead.  */\n  unsigned32 intmultiple;\n\n  /* Local address of registers.  */\n  unsigned32 reg_address;\n\n  /* Size of register bank in bytes.  */\n  unsigned32 reg_size;\n\n  /* Remote address of registers.  */\n  unsigned32 remote_reg_address;\n\n  /* Local address of DMA:able memory.  */\n  unsigned32 mem_address;\n\n  /* Size of DMA:able memory in bytes.  */\n  unsigned32 mem_size;\n\n  /* Bitmask for valid DMA request size.  */\n  unsigned32 mem_burst_mask;\n\n  /* Remote address of DMA:able memory.  */\n  unsigned32 remote_mem_address;\n\n  /* (Local) address of mbox; where to put a pointer to the mbox to be\n     sent.  */\n  unsigned32 mbox_address;\n\n  /* Probably not 127.0.0.1:10000.  */\n  const char *host;\n  int port;\n\n  /* If non-NULL, points to memory to use instead of connection.  */\n  unsigned8 *dummy;\n\n  /* File descriptor for the socket.  Set to -1 when error.  Only one\n     of dummy and this is active.  */\n  int fd;\n\n  /* Stashed errno, as we don't emit an error right away.  */\n  int saved_errno;\n\n  /* This, plus latency because the CPU might not be checking until a\n     CTI insn (usually a branch or a jump) is the interval in cycles\n     between the rv is polled for e.g. DMA requests.  */\n  unsigned32 max_tick_poll_interval;\n\n  /* Running counter for exponential backoff up to\n     max_tick_poll_interval to avoid polling the connection\n     unnecessarily often.  Set to 1 when rv activity (read/write\n     register, DMA request) is detected.  */\n  unsigned32 next_period;\n\n  /* This is the interval in wall-clock seconds between watchdog\n     packets are sent to the remote side.  Zero means no watchdog\n     packets. */\n  unsigned32 watchdog_interval;\n\n  /* Last time we sent a watchdog packet.  */\n  struct timeval last_wdog_time;\n\n  /* Mostly used as a kludge for knowing which rv:s have poll events\n     active.  */\n  struct hw_event *poll_callback;\n} hw_rv_device;",
+      {
+        "remote_to_local_int[32]": "unsigned32",
+        "intmultiple": "unsigned32",
+        "reg_address": "unsigned32",
+        "reg_size": "unsigned32",
+        "remote_reg_address": "unsigned32",
+        "mem_address": "unsigned32",
+        "mem_size": "unsigned32",
+        "mem_burst_mask": "unsigned32",
+        "remote_mem_address": "unsigned32",
+        "mbox_address": "unsigned32",
+        "char": "const",
+        "port": "int",
+        "*dummy": "unsigned8",
+        "fd": "int",
+        "saved_errno": "int",
+        "max_tick_poll_interval": "unsigned32",
+        "next_period": "unsigned32",
+        "watchdog_interval": "unsigned32",
+        "last_wdog_time": "struct timeval",
+        "*poll_callback": "struct hw_event"
+      },
+      "hw_rv_device",
+      [
+        308,
+        0
+      ],
+      [
+        378,
+        15
+      ]
+    ],
+    [
+      "struct sim_hw { struct hw *tree; }",
+      {
+        "*tree": "struct hw"
+      },
+      "sim_hw",
+      [
+        824,
+        0
+      ],
+      [
+        824,
+        34
+      ]
+    ],
+    [
+      "typedef struct _hw_rv_device\n{\n  /* Mapping of remote interrupt bit-numbers to local ones.  */\n  unsigned32 remote_to_local_int[32];\n\n  /* When multiple bits are set, a non-zero value here indicates that\n     this value should be used instead.  */\n  unsigned32 intmultiple;\n\n  /* Local address of registers.  */\n  unsigned32 reg_address;\n\n  /* Size of register bank in bytes.  */\n  unsigned32 reg_size;\n\n  /* Remote address of registers.  */\n  unsigned32 remote_reg_address;\n\n  /* Local address of DMA:able memory.  */\n  unsigned32 mem_address;\n\n  /* Size of DMA:able memory in bytes.  */\n  unsigned32 mem_size;\n\n  /* Bitmask for valid DMA request size.  */\n  unsigned32 mem_burst_mask;\n\n  /* Remote address of DMA:able memory.  */\n  unsigned32 remote_mem_address;\n\n  /* (Local) address of mbox; where to put a pointer to the mbox to be\n     sent.  */\n  unsigned32 mbox_address;\n\n  /* Probably not 127.0.0.1:10000.  */\n  const char *host;\n  int port;\n\n  /* If non-NULL, points to memory to use instead of connection.  */\n  unsigned8 *dummy;\n\n  /* File descriptor for the socket.  Set to -1 when error.  Only one\n     of dummy and this is active.  */\n  int fd;\n\n  /* Stashed errno, as we don't emit an error right away.  */\n  int saved_errno;\n\n  /* This, plus latency because the CPU might not be checking until a\n     CTI insn (usually a branch or a jump) is the interval in cycles\n     between the rv is polled for e.g. DMA requests.  */\n  unsigned32 max_tick_poll_interval;\n\n  /* Running counter for exponential backoff up to\n     max_tick_poll_interval to avoid polling the connection\n     unnecessarily often.  Set to 1 when rv activity (read/write\n     register, DMA request) is detected.  */\n  unsigned32 next_period;\n\n  /* This is the interval in wall-clock seconds between watchdog\n     packets are sent to the remote side.  Zero means no watchdog\n     packets. */\n  unsigned32 watchdog_interval;\n\n  /* Last time we sent a watchdog packet.  */\n  struct timeval last_wdog_time;\n\n  /* Mostly used as a kludge for knowing which rv:s have poll events\n     active.  */\n  struct hw_event *poll_callback;\n} hw_rv_device;",
+      {
+        "remote_to_local_int[32]": "unsigned32",
+        "intmultiple": "unsigned32",
+        "reg_address": "unsigned32",
+        "reg_size": "unsigned32",
+        "remote_reg_address": "unsigned32",
+        "mem_address": "unsigned32",
+        "mem_size": "unsigned32",
+        "mem_burst_mask": "unsigned32",
+        "remote_mem_address": "unsigned32",
+        "mbox_address": "unsigned32",
+        "char": "const",
+        "port": "int",
+        "*dummy": "unsigned8",
+        "fd": "int",
+        "saved_errno": "int",
+        "max_tick_poll_interval": "unsigned32",
+        "next_period": "unsigned32",
+        "watchdog_interval": "unsigned32",
+        "last_wdog_time": "struct timeval",
+        "*poll_callback": "struct hw_event"
+      },
+      "hw_rv_device",
+      [
+        308,
+        0
+      ],
+      [
+        378,
+        15
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        373,
+        2
+      ],
+      [
+        373,
+        16
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        377,
+        2
+      ],
+      [
+        377,
+        17
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        388,
+        13
+      ],
+      [
+        388,
+        38
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        397,
+        13
+      ],
+      [
+        397,
+        22
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        427,
+        12
+      ],
+      [
+        427,
+        21
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        458,
+        12
+      ],
+      [
+        458,
+        21
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        492,
+        16
+      ],
+      [
+        492,
+        25
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        546,
+        17
+      ],
+      [
+        546,
+        26
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        597,
+        11
+      ],
+      [
+        597,
+        20
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        625,
+        23
+      ],
+      [
+        625,
+        32
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        700,
+        17
+      ],
+      [
+        700,
+        26
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        716,
+        17
+      ],
+      [
+        716,
+        26
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        721,
+        2
+      ],
+      [
+        721,
+        16
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        723,
+        2
+      ],
+      [
+        723,
+        16
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        753,
+        16
+      ],
+      [
+        753,
+        25
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        780,
+        15
+      ],
+      [
+        780,
+        24
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        801,
+        18
+      ],
+      [
+        801,
+        27
+      ]
+    ],
+    [
+      "struct sim_hw { struct hw *tree; }",
+      {
+        "*tree": "struct hw"
+      },
+      "sim_hw",
+      [
+        824,
+        0
+      ],
+      [
+        824,
+        34
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        824,
+        16
+      ],
+      [
+        824,
+        25
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        845,
+        16
+      ],
+      [
+        845,
+        25
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        853,
+        19
+      ],
+      [
+        853,
+        28
+      ]
+    ],
+    [
+      "struct sockaddr_in",
+      {},
+      "",
+      [
+        857,
+        2
+      ],
+      [
+        857,
+        20
+      ]
+    ],
+    [
+      "struct hostent",
+      {},
+      "",
+      [
+        875,
+        6
+      ],
+      [
+        875,
+        20
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        893,
+        22
+      ],
+      [
+        893,
+        37
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        911,
+        16
+      ],
+      [
+        911,
+        25
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        953,
+        12
+      ],
+      [
+        953,
+        21
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        1012,
+        17
+      ],
+      [
+        1012,
+        26
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        1065,
+        14
+      ],
+      [
+        1065,
+        23
+      ]
+    ],
+    [
+      "struct hw_property",
+      {},
+      "",
+      [
+        1069,
+        8
+      ],
+      [
+        1069,
+        26
+      ]
+    ],
+    [
+      "struct hw_property",
+      {},
+      "",
+      [
+        1070,
+        8
+      ],
+      [
+        1070,
+        26
+      ]
+    ],
+    [
+      "struct hw_property",
+      {},
+      "",
+      [
+        1071,
+        8
+      ],
+      [
+        1071,
+        26
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        1215,
+        6
+      ],
+      [
+        1215,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-tree.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <strings.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\n",
+      [
+        52,
+        0
+      ],
+      [
+        53,
+        0
+      ]
+    ],
+    [
+      "#include <sys/select.h>\n",
+      [
+        56,
+        0
+      ],
+      [
+        57,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in.h>\n",
+      [
+        60,
+        0
+      ],
+      [
+        61,
+        0
+      ]
+    ],
+    [
+      "#include <arpa/inet.h>\n",
+      [
+        61,
+        0
+      ],
+      [
+        62,
+        0
+      ]
+    ],
+    [
+      "#include <netdb.h>\n",
+      [
+        62,
+        0
+      ],
+      [
+        63,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        63,
+        0
+      ],
+      [
+        64,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum rv_command {\n  RV_READ_CMD = 0,\n  RV_WRITE_CMD = 1,\n  RV_IRQ_CMD = 2,\n  RV_MEM_RD_CMD = 3,\n  RV_MEM_WR_CMD = 4,\n  RV_MBOX_HANDLE_CMD = 5,\n  RV_MBOX_PUT_CMD = 6,\n  RV_WATCHDOG_CMD = 7\n}",
+      {
+        "RV_READ_CMD": "",
+        "RV_WRITE_CMD": "",
+        "RV_IRQ_CMD": "",
+        "RV_MEM_RD_CMD": "",
+        "RV_MEM_WR_CMD": "",
+        "RV_MBOX_HANDLE_CMD": "",
+        "RV_MBOX_PUT_CMD": "",
+        "RV_WATCHDOG_CMD": ""
+      },
+      "rv_command",
+      [
+        296,
+        0
+      ],
+      [
+        305,
+        1
+      ]
+    ],
+    [
+      "enum\n  {\n    INT_PORT\n  }",
+      {
+        "INT_PORT": ""
+      },
+      "",
+      [
+        382,
+        0
+      ],
+      [
+        385,
+        3
+      ]
+    ]
+  ]
+}

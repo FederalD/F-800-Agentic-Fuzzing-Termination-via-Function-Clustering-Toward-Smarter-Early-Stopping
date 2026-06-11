@@ -1,0 +1,995 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nparse_spufs_run (ptid_t ptid, int *fd, CORE_ADDR *addr)\n{\n  enum bfd_endian byte_order = gdbarch_byte_order (target_gdbarch ());\n  struct cleanup *old_chain;\n  struct gdbarch_tdep *tdep;\n  struct regcache *regcache;\n  gdb_byte buf[4];\n  ULONGEST regval;\n\n  /* If we're not on PPU, there's nothing to detect.  */\n  if (gdbarch_bfd_arch_info (target_gdbarch ())->arch != bfd_arch_powerpc)\n    return 0;\n\n  /* If we're called too early (e.g. after fork), we cannot\n     access the inferior yet.  */\n  if (find_inferior_ptid (ptid) == NULL)\n    return 0;\n\n  /* Get PPU-side registers.  */\n  regcache = get_thread_arch_regcache (ptid, target_gdbarch ());\n  tdep = gdbarch_tdep (target_gdbarch ());\n\n  /* Fetch instruction preceding current NIP.  */\n  old_chain = save_inferior_ptid ();\n  inferior_ptid = ptid;\n  regval = target_read_memory (regcache_read_pc (regcache) - 4, buf, 4);\n  do_cleanups (old_chain);\n  if (regval != 0)\n    return 0;\n  /* It should be a \"sc\" instruction.  */\n  if (extract_unsigned_integer (buf, 4, byte_order) != INSTR_SC)\n    return 0;\n  /* System call number should be NR_spu_run.  */\n  regcache_cooked_read_unsigned (regcache, tdep->ppc_gp0_regnum, &regval);\n  if (regval != NR_spu_run)\n    return 0;\n\n  /* Register 3 contains fd, register 4 the NPC param pointer.  */\n  regcache_cooked_read_unsigned (regcache, PPC_ORIG_R3_REGNUM, &regval);\n  *fd = (int) regval;\n  regcache_cooked_read_unsigned (regcache, tdep->ppc_gp0_regnum + 4, &regval);\n  *addr = (CORE_ADDR) regval;\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          54,
+          0
+        ],
+        [
+          98,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "parse_spufs_run",
+        "parameters": {
+          "ptid": "ptid_t",
+          "fd": "int",
+          "addr": "CORE_ADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static struct gdbarch *\nspu_gdbarch (int spufs_fd)\n{\n  struct gdbarch_info info;\n  gdbarch_info_init (&info);\n  info.bfd_arch_info = bfd_lookup_arch (bfd_arch_spu, bfd_mach_spu);\n  info.byte_order = BFD_ENDIAN_BIG;\n  info.osabi = GDB_OSABI_LINUX;\n  info.tdep_info = &spufs_fd;\n  return gdbarch_find_by_info (info);\n}",
+      "fn_code_pos": [
+        [
+          101,
+          0
+        ],
+        [
+          111,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_gdbarch",
+        "parameters": {
+          "spufs_fd": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static struct gdbarch *\nspu_thread_architecture (struct target_ops *ops, ptid_t ptid)\n{\n  int spufs_fd;\n  CORE_ADDR spufs_addr;\n\n  if (parse_spufs_run (ptid, &spufs_fd, &spufs_addr))\n    return spu_gdbarch (spufs_fd);\n\n  return target_gdbarch ();\n}",
+      "fn_code_pos": [
+        [
+          114,
+          0
+        ],
+        [
+          124,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_thread_architecture",
+        "parameters": {
+          "ops": "struct target_ops",
+          "ptid": "ptid_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nspu_region_ok_for_hw_watchpoint (struct target_ops *self,\n\t\t\t\t CORE_ADDR addr, int len)\n{\n  struct target_ops *ops_beneath = find_target_beneath (self);\n\n  /* We cannot watch SPU local store.  */\n  if (SPUADDR_SPU (addr) != -1)\n    return 0;\n\n  return ops_beneath->to_region_ok_for_hw_watchpoint (ops_beneath, addr, len);\n}",
+      "fn_code_pos": [
+        [
+          127,
+          0
+        ],
+        [
+          138,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_region_ok_for_hw_watchpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "addr": "CORE_ADDR",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nspu_fetch_registers (struct target_ops *ops,\n\t\t     struct regcache *regcache, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  struct target_ops *ops_beneath = find_target_beneath (ops);\n  int spufs_fd;\n  CORE_ADDR spufs_addr;\n\n  /* Since we use functions that rely on inferior_ptid, we need to set and\n     restore it.  */\n  scoped_restore save_ptid\n    = make_scoped_restore (&inferior_ptid, regcache_get_ptid (regcache));\n\n  /* This version applies only if we're currently in spu_run.  */\n  if (gdbarch_bfd_arch_info (gdbarch)->arch != bfd_arch_spu)\n    {\n      ops_beneath->to_fetch_registers (ops_beneath, regcache, regno);\n      return;\n    }\n\n  /* We must be stopped on a spu_run system call.  */\n  if (!parse_spufs_run (inferior_ptid, &spufs_fd, &spufs_addr))\n    return;\n\n  /* The ID register holds the spufs file handle.  */\n  if (regno == -1 || regno == SPU_ID_REGNUM)\n    {\n      gdb_byte buf[4];\n      store_unsigned_integer (buf, 4, byte_order, spufs_fd);\n      regcache_raw_supply (regcache, SPU_ID_REGNUM, buf);\n    }\n\n  /* The NPC register is found in PPC memory at SPUFS_ADDR.  */\n  if (regno == -1 || regno == SPU_PC_REGNUM)\n    {\n      gdb_byte buf[4];\n\n      if (target_read (ops_beneath, TARGET_OBJECT_MEMORY, NULL,\n\t\t       buf, spufs_addr, sizeof buf) == sizeof buf)\n\tregcache_raw_supply (regcache, SPU_PC_REGNUM, buf);\n    }\n\n  /* The GPRs are found in the \"regs\" spufs file.  */\n  if (regno == -1 || (regno >= 0 && regno < SPU_NUM_GPRS))\n    {\n      gdb_byte buf[16 * SPU_NUM_GPRS];\n      char annex[32];\n      int i;\n\n      xsnprintf (annex, sizeof annex, \"%d/regs\", spufs_fd);\n      if (target_read (ops_beneath, TARGET_OBJECT_SPU, annex,\n\t\t       buf, 0, sizeof buf) == sizeof buf)\n\tfor (i = 0; i < SPU_NUM_GPRS; i++)\n\t  regcache_raw_supply (regcache, i, buf + i*16);\n    }\n}",
+      "fn_code_pos": [
+        [
+          141,
+          0
+        ],
+        [
+          198,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_fetch_registers",
+        "parameters": {
+          "ops": "struct target_ops",
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nspu_store_registers (struct target_ops *ops,\n\t\t     struct regcache *regcache, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct target_ops *ops_beneath = find_target_beneath (ops);\n  int spufs_fd;\n  CORE_ADDR spufs_addr;\n\n  /* Since we use functions that rely on inferior_ptid, we need to set and\n     restore it.  */\n  scoped_restore save_ptid\n    = make_scoped_restore (&inferior_ptid, regcache_get_ptid (regcache));\n\n  /* This version applies only if we're currently in spu_run.  */\n  if (gdbarch_bfd_arch_info (gdbarch)->arch != bfd_arch_spu)\n    {\n      ops_beneath->to_store_registers (ops_beneath, regcache, regno);\n      return;\n    }\n\n  /* We must be stopped on a spu_run system call.  */\n  if (!parse_spufs_run (inferior_ptid, &spufs_fd, &spufs_addr))\n    return;\n\n  /* The NPC register is found in PPC memory at SPUFS_ADDR.  */\n  if (regno == -1 || regno == SPU_PC_REGNUM)\n    {\n      gdb_byte buf[4];\n      regcache_raw_collect (regcache, SPU_PC_REGNUM, buf);\n\n      target_write (ops_beneath, TARGET_OBJECT_MEMORY, NULL,\n\t\t    buf, spufs_addr, sizeof buf);\n    }\n\n  /* The GPRs are found in the \"regs\" spufs file.  */\n  if (regno == -1 || (regno >= 0 && regno < SPU_NUM_GPRS))\n    {\n      gdb_byte buf[16 * SPU_NUM_GPRS];\n      char annex[32];\n      int i;\n\n      for (i = 0; i < SPU_NUM_GPRS; i++)\n\tregcache_raw_collect (regcache, i, buf + i*16);\n\n      xsnprintf (annex, sizeof annex, \"%d/regs\", spufs_fd);\n      target_write (ops_beneath, TARGET_OBJECT_SPU, annex,\n\t\t    buf, 0, sizeof buf);\n    }\n}",
+      "fn_code_pos": [
+        [
+          201,
+          0
+        ],
+        [
+          250,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_store_registers",
+        "parameters": {
+          "ops": "struct target_ops",
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static enum target_xfer_status\nspu_xfer_partial (struct target_ops *ops, enum target_object object,\n\t\t  const char *annex, gdb_byte *readbuf,\n\t\t  const gdb_byte *writebuf, ULONGEST offset, ULONGEST len,\n\t\t  ULONGEST *xfered_len)\n{\n  struct target_ops *ops_beneath = find_target_beneath (ops);\n\n  /* Use the \"mem\" spufs file to access SPU local store.  */\n  if (object == TARGET_OBJECT_MEMORY)\n    {\n      int fd = SPUADDR_SPU (offset);\n      CORE_ADDR addr = SPUADDR_ADDR (offset);\n      char mem_annex[32], lslr_annex[32];\n      gdb_byte buf[32];\n      ULONGEST lslr;\n      enum target_xfer_status ret;\n\n      if (fd >= 0)\n\t{\n\t  xsnprintf (mem_annex, sizeof mem_annex, \"%d/mem\", fd);\n\t  ret = ops_beneath->to_xfer_partial (ops_beneath, TARGET_OBJECT_SPU,\n\t\t\t\t\t      mem_annex, readbuf, writebuf,\n\t\t\t\t\t      addr, len, xfered_len);\n\t  if (ret == TARGET_XFER_OK)\n\t    return ret;\n\n\t  /* SPU local store access wraps the address around at the\n\t     local store limit.  We emulate this here.  To avoid needing\n\t     an extra access to retrieve the LSLR, we only do that after\n\t     trying the original address first, and getting end-of-file.  */\n\t  xsnprintf (lslr_annex, sizeof lslr_annex, \"%d/lslr\", fd);\n\t  memset (buf, 0, sizeof buf);\n\t  if (ops_beneath->to_xfer_partial (ops_beneath, TARGET_OBJECT_SPU,\n\t\t\t\t\t    lslr_annex, buf, NULL,\n\t\t\t\t\t    0, sizeof buf, xfered_len)\n\t      != TARGET_XFER_OK)\n\t    return ret;\n\n\t  lslr = strtoulst ((char *) buf, NULL, 16);\n\t  return ops_beneath->to_xfer_partial (ops_beneath, TARGET_OBJECT_SPU,\n\t\t\t\t\t       mem_annex, readbuf, writebuf,\n\t\t\t\t\t       addr & lslr, len, xfered_len);\n\t}\n    }\n\n  return ops_beneath->to_xfer_partial (ops_beneath, object, annex,\n\t\t\t\t       readbuf, writebuf, offset, len, xfered_len);\n}",
+      "fn_code_pos": [
+        [
+          253,
+          0
+        ],
+        [
+          301,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_xfer_partial",
+        "parameters": {
+          "ops": "struct target_ops",
+          "object": "enum target_object",
+          "annex": "char",
+          "readbuf": "gdb_byte",
+          "writebuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST",
+          "xfered_len": "ULONGEST"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nspu_search_memory (struct target_ops* ops,\n\t\t   CORE_ADDR start_addr, ULONGEST search_space_len,\n\t\t   const gdb_byte *pattern, ULONGEST pattern_len,\n\t\t   CORE_ADDR *found_addrp)\n{\n  struct target_ops *ops_beneath = find_target_beneath (ops);\n\n  /* For SPU local store, always fall back to the simple method.  */\n  if (SPUADDR_SPU (start_addr) >= 0)\n    return simple_search_memory (ops,\n\t\t\t\t start_addr, search_space_len,\n\t\t\t\t pattern, pattern_len, found_addrp);\n\n  return ops_beneath->to_search_memory (ops_beneath,\n\t\t\t\t\tstart_addr, search_space_len,\n\t\t\t\t\tpattern, pattern_len, found_addrp);\n}",
+      "fn_code_pos": [
+        [
+          304,
+          0
+        ],
+        [
+          321,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_search_memory",
+        "parameters": {
+          "ops": "struct target_ops",
+          "start_addr": "CORE_ADDR",
+          "search_space_len": "ULONGEST",
+          "pattern": "gdb_byte",
+          "pattern_len": "ULONGEST",
+          "found_addrp": "CORE_ADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nspu_multiarch_activate (void)\n{\n  /* If GDB was configured without SPU architecture support,\n     we cannot install SPU multi-architecture support either.  */\n  if (spu_gdbarch (-1) == NULL)\n    return;\n\n  push_target (&spu_ops);\n\n  /* Make sure the thread architecture is re-evaluated.  */\n  registers_changed ();\n}",
+      "fn_code_pos": [
+        [
+          326,
+          0
+        ],
+        [
+          338,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_multiarch_activate",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nspu_multiarch_deactivate (void)\n{\n  unpush_target (&spu_ops);\n\n  /* Make sure the thread architecture is re-evaluated.  */\n  registers_changed ();\n}",
+      "fn_code_pos": [
+        [
+          340,
+          0
+        ],
+        [
+          347,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_multiarch_deactivate",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nspu_multiarch_inferior_created (struct target_ops *ops, int from_tty)\n{\n  if (spu_standalone_p ())\n    spu_multiarch_activate ();\n}",
+      "fn_code_pos": [
+        [
+          349,
+          0
+        ],
+        [
+          354,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_multiarch_inferior_created",
+        "parameters": {
+          "ops": "struct target_ops",
+          "from_tty": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nspu_multiarch_solib_loaded (struct so_list *so)\n{\n  if (!spu_standalone_p ())\n    if (so->abfd && bfd_get_arch (so->abfd) == bfd_arch_spu)\n      if (spu_nr_solib++ == 0)\n\tspu_multiarch_activate ();\n}",
+      "fn_code_pos": [
+        [
+          356,
+          0
+        ],
+        [
+          363,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_multiarch_solib_loaded",
+        "parameters": {
+          "so": "struct so_list"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nspu_multiarch_solib_unloaded (struct so_list *so)\n{\n  if (!spu_standalone_p ())\n    if (so->abfd && bfd_get_arch (so->abfd) == bfd_arch_spu)\n      if (--spu_nr_solib == 0)\n\tspu_multiarch_deactivate ();\n}",
+      "fn_code_pos": [
+        [
+          365,
+          0
+        ],
+        [
+          372,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_multiarch_solib_unloaded",
+        "parameters": {
+          "so": "struct so_list"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nspu_mourn_inferior (struct target_ops *ops)\n{\n  struct target_ops *ops_beneath = find_target_beneath (ops);\n\n  ops_beneath->to_mourn_inferior (ops_beneath);\n  spu_multiarch_deactivate ();\n}",
+      "fn_code_pos": [
+        [
+          374,
+          0
+        ],
+        [
+          381,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_mourn_inferior",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ninit_spu_ops (void)\n{\n  spu_ops.to_shortname = \"spu\";\n  spu_ops.to_longname = \"SPU multi-architecture support.\";\n  spu_ops.to_doc = \"SPU multi-architecture support.\";\n  spu_ops.to_mourn_inferior = spu_mourn_inferior;\n  spu_ops.to_fetch_registers = spu_fetch_registers;\n  spu_ops.to_store_registers = spu_store_registers;\n  spu_ops.to_xfer_partial = spu_xfer_partial;\n  spu_ops.to_search_memory = spu_search_memory;\n  spu_ops.to_region_ok_for_hw_watchpoint = spu_region_ok_for_hw_watchpoint;\n  spu_ops.to_thread_architecture = spu_thread_architecture;\n  spu_ops.to_stratum = arch_stratum;\n  spu_ops.to_magic = OPS_MAGIC;\n}",
+      "fn_code_pos": [
+        [
+          386,
+          0
+        ],
+        [
+          401,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "init_spu_ops",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_spu_multiarch (void)\n{\n  /* Install ourselves on the target stack.  */\n  init_spu_ops ();\n  complete_target_initialization (&spu_ops);\n\n  /* Install observers to watch for SPU objects.  */\n  observer_attach_inferior_created (spu_multiarch_inferior_created);\n  observer_attach_solib_loaded (spu_multiarch_solib_loaded);\n  observer_attach_solib_unloaded (spu_multiarch_solib_unloaded);\n}",
+      "fn_code_pos": [
+        [
+          406,
+          0
+        ],
+        [
+          417,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_spu_multiarch",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "spu_gdbarch (int spufs_fd)",
+      "fn_dec_pos": [
+        [
+          102,
+          0
+        ],
+        [
+          102,
+          26
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_gdbarch",
+        "parameters": {
+          "spufs_fd": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "spu_thread_architecture (struct target_ops *ops, ptid_t ptid)",
+      "fn_dec_pos": [
+        [
+          115,
+          0
+        ],
+        [
+          115,
+          61
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "spu_thread_architecture",
+        "parameters": {
+          "ops": "struct target_ops",
+          "ptid": "ptid_t"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        37,
+        7
+      ],
+      [
+        37,
+        24
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        58,
+        2
+      ],
+      [
+        58,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        59,
+        2
+      ],
+      [
+        59,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        60,
+        2
+      ],
+      [
+        60,
+        17
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        101,
+        7
+      ],
+      [
+        101,
+        21
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        104,
+        2
+      ],
+      [
+        104,
+        21
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        114,
+        7
+      ],
+      [
+        114,
+        21
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        115,
+        25
+      ],
+      [
+        115,
+        42
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        128,
+        33
+      ],
+      [
+        128,
+        50
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        131,
+        2
+      ],
+      [
+        131,
+        19
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        142,
+        21
+      ],
+      [
+        142,
+        38
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        143,
+        7
+      ],
+      [
+        143,
+        22
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        145,
+        2
+      ],
+      [
+        145,
+        16
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        147,
+        2
+      ],
+      [
+        147,
+        19
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        202,
+        21
+      ],
+      [
+        202,
+        38
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        203,
+        7
+      ],
+      [
+        203,
+        22
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        205,
+        2
+      ],
+      [
+        205,
+        16
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        206,
+        2
+      ],
+      [
+        206,
+        19
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        254,
+        18
+      ],
+      [
+        254,
+        35
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        259,
+        2
+      ],
+      [
+        259,
+        19
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        305,
+        19
+      ],
+      [
+        305,
+        36
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        310,
+        2
+      ],
+      [
+        310,
+        19
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        350,
+        32
+      ],
+      [
+        350,
+        49
+      ]
+    ],
+    [
+      "struct so_list",
+      {},
+      "",
+      [
+        357,
+        28
+      ],
+      [
+        357,
+        42
+      ]
+    ],
+    [
+      "struct so_list",
+      {},
+      "",
+      [
+        366,
+        30
+      ],
+      [
+        366,
+        44
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        375,
+        20
+      ],
+      [
+        375,
+        37
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        377,
+        2
+      ],
+      [
+        377,
+        19
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcmd.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"arch-utils.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"observer.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"symfile.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"objfiles.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"solib.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"solist.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"ppc-tdep.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"ppc-linux-tdep.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"spu-tdep.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        57,
+        2
+      ],
+      [
+        57,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        146,
+        2
+      ],
+      [
+        146,
+        17
+      ]
+    ],
+    [
+      "enum target_xfer_status",
+      {},
+      "",
+      [
+        253,
+        7
+      ],
+      [
+        253,
+        30
+      ]
+    ],
+    [
+      "enum target_object",
+      {},
+      "",
+      [
+        254,
+        42
+      ],
+      [
+        254,
+        60
+      ]
+    ],
+    [
+      "enum target_xfer_status",
+      {},
+      "",
+      [
+        269,
+        6
+      ],
+      [
+        269,
+        29
+      ]
+    ]
+  ]
+}

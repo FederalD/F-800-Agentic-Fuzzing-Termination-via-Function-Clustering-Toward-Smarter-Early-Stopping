@@ -1,0 +1,1723 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\ndos_getc (volatile struct dos_ttystate *port)\n{\n  int c;\n\n  if (port->count == 0)\n    return -1;\n\n  c = port->cbuf[port->first];\n  disable ();\n  port->first = (port->first + 1) & (CBSIZE - 1);\n  port->count--;\n  enable ();\n  return c;\n}",
+      "fn_code_pos": [
+        [
+          241,
+          0
+        ],
+        [
+          255,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_getc",
+        "parameters": {
+          "port": "struct dos_ttystate"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_putc (int c, struct dos_ttystate *port)\n{\n  if (port->count >= CBSIZE - 1)\n    return -1;\n  port->cbuf[(port->first + port->count) & (CBSIZE - 1)] = c;\n  port->count++;\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          258,
+          0
+        ],
+        [
+          266,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_putc",
+        "parameters": {
+          "c": "int",
+          "port": "struct dos_ttystate"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ndos_comisr (int irq)\n{\n  struct dos_ttystate *port;\n  unsigned char iir, lsr, c;\n\n  disable ();\t\t\t/* Paranoia */\n  outportb (ICU_OCW2, 0x20);\t/* End-Of-Interrupt */\n#ifdef DOS_STATS\n  ++intrcnt;\n#endif\n\n  port = intrupts[irq].port;\n  if (!port)\n    {\n      COUNT (CNT_STRAY);\n      return;\t\t\t/* not open */\n    }\n\n  while (1)\n    {\n      iir = inb (port, com_iir) & IIR_IMASK;\n      switch (iir)\n\t{\n\n\tcase IIR_RLS:\n\t  lsr = inb (port, com_lsr);\n\t  goto rx;\n\n\tcase IIR_RXTOUT:\n\tcase IIR_RXRDY:\n\t  lsr = 0;\n\n\trx:\n\t  do\n\t    {\n\t      c = inb (port, com_data);\n\t      if (lsr & (LSR_BI | LSR_FE | LSR_PE | LSR_OE))\n\t\t{\n\t\t  if (lsr & (LSR_BI | LSR_FE))\n\t\t    port->ferr++;\n\t\t  else if (lsr & LSR_PE)\n\t\t    port->perr++;\n\t\t  if (lsr & LSR_OE)\n\t\t    port->oflo++;\n\t\t}\n\n\t      if (dos_putc (c, port) < 0)\n\t\t{\n\t\t  COUNT (CNT_ORUN);\n\t\t}\n\t      else\n\t\t{\n\t\t  COUNT (CNT_RX);\n\t\t}\n\t    }\n\t  while ((lsr = inb (port, com_lsr)) & LSR_RXRDY);\n\t  break;\n\n\tcase IIR_MLSC:\n\t  /* could be used to flowcontrol Tx */\n\t  port->msr = inb (port, com_msr);\n\t  break;\n\n\tcase IIR_TXRDY:\n\t  port->txbusy = 0;\n\t  break;\n\n\tcase IIR_NOPEND:\n\t  /* No more pending interrupts, all done.  */\n\t  return;\n\n\tdefault:\n\t  /* Unexpected interrupt, ignore.  */\n\t  break;\n\t}\n      COUNT (iir);\n    }\n}",
+      "fn_code_pos": [
+        [
+          270,
+          0
+        ],
+        [
+          348,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_comisr",
+        "parameters": {
+          "irq": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static struct intrupt *\ndos_hookirq (unsigned int irq)\n{\n  struct intrupt *intr;\n  unsigned int vec;\n  isr_t isr;\n\n  if (irq >= NINTR)\n    return 0;\n\n  intr = &intrupts[irq];\n  if (intr->inuse)\n    return 0;\n\n  vec = 0x08 + irq;\n  isr = isrs[irq];\n\n  /* Setup real mode handler.  */\n  _go32_dpmi_get_real_mode_interrupt_vector (vec, &intr->old_rmhandler);\n\n  intr->new_rmhandler.pm_selector = _go32_my_cs ();\n  intr->new_rmhandler.pm_offset = (u_long) isr;\n  if (_go32_dpmi_allocate_real_mode_callback_iret (&intr->new_rmhandler,\n\t\t\t\t\t\t   &intr->regs))\n    {\n      return 0;\n    }\n\n  if (_go32_dpmi_set_real_mode_interrupt_vector (vec, &intr->new_rmhandler))\n    {\n      return 0;\n    }\n\n  /* Setup protected mode handler.  */\n  _go32_dpmi_get_protected_mode_interrupt_vector (vec, &intr->old_pmhandler);\n\n  intr->new_pmhandler.pm_selector = _go32_my_cs ();\n  intr->new_pmhandler.pm_offset = (u_long) isr;\n  _go32_dpmi_allocate_iret_wrapper (&intr->new_pmhandler);\n\n  if (_go32_dpmi_set_protected_mode_interrupt_vector (vec,\n\t\t\t\t\t\t      &intr->new_pmhandler))\n    {\n      return 0;\n    }\n\n  /* Setup interrupt controller mask.  */\n  disable ();\n  outportb (ICU_MASK, inportb (ICU_MASK) & ~(1 << irq));\n  enable ();\n\n  intr->inuse = 1;\n  return intr;\n}",
+      "fn_code_pos": [
+        [
+          366,
+          0
+        ],
+        [
+          419,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_hookirq",
+        "parameters": {
+          "irq": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndos_unhookirq (struct intrupt *intr)\n{\n  unsigned int irq, vec;\n  unsigned char mask;\n\n  irq = intr - intrupts;\n  vec = 0x08 + irq;\n\n  /* Restore old interrupt mask bit.  */\n  mask = 1 << irq;\n  disable ();\n  outportb (ICU_MASK, inportb (ICU_MASK) | (mask & icu_oldmask));\n  enable ();\n\n  /* Remove real mode handler.  */\n  _go32_dpmi_set_real_mode_interrupt_vector (vec, &intr->old_rmhandler);\n  _go32_dpmi_free_real_mode_callback (&intr->new_rmhandler);\n\n  /* Remove protected mode handler.  */\n  _go32_dpmi_set_protected_mode_interrupt_vector (vec, &intr->old_pmhandler);\n  _go32_dpmi_free_iret_wrapper (&intr->new_pmhandler);\n  intr->inuse = 0;\n}",
+      "fn_code_pos": [
+        [
+          422,
+          0
+        ],
+        [
+          445,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_unhookirq",
+        "parameters": {
+          "intr": "struct intrupt"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_open (struct serial *scb, const char *name)\n{\n  struct dos_ttystate *port;\n  int fd, i;\n\n  if (strncasecmp (name, \"/dev/\", 5) == 0)\n    name += 5;\n  else if (strncasecmp (name, \"\\\\dev\\\\\", 5) == 0)\n    name += 5;\n\n  if (strlen (name) != 4 || strncasecmp (name, \"com\", 3) != 0)\n    {\n      errno = ENOENT;\n      return -1;\n    }\n\n  if (name[3] < '1' || name[3] > '4')\n    {\n      errno = ENOENT;\n      return -1;\n    }\n\n  /* FIXME: this is a Bad Idea (tm)!  One should *never* invent file\n     handles, since they might be already used by other files/devices.\n     The Right Way to do this is to create a real handle by dup()'ing\n     some existing one.  */\n  fd = name[3] - '1';\n  port = &ports[fd];\n  if (port->refcnt++ > 0)\n    {\n      /* Device already opened another user.  Just point at it.  */\n      scb->fd = fd;\n      return 0;\n    }\n\n  /* Force access to ID reg.  */\n  outb (port, com_cfcr, 0);\n  outb (port, com_iir, 0);\n  for (i = 0; i < 17; i++)\n    {\n      if ((inb (port, com_iir) & 0x38) == 0)\n\tgoto ok;\n      (void) inb (port, com_data);\t/* clear recv */\n    }\n  errno = ENODEV;\n  return -1;\n\nok:\n  /* Disable all interrupts in chip.  */\n  outb (port, com_ier, 0);\n\n  /* Tentatively enable 16550 fifo, and see if it responds.  */\n  outb (port, com_fifo,\n\tFIFO_ENABLE | FIFO_RCV_RST | FIFO_XMT_RST | FIFO_TRIGGER);\n  sleep (1);\n  port->fifo = ((inb (port, com_iir) & IIR_FIFO_MASK) == IIR_FIFO_MASK);\n\n  /* clear pending status reports.  */\n  (void) inb (port, com_lsr);\n  (void) inb (port, com_msr);\n\n  /* Enable external interrupt gate (to avoid floating IRQ).  */\n  outb (port, com_mcr, MCR_IENABLE);\n\n  /* Hook up interrupt handler and initialise icu.  */\n  port->intrupt = dos_hookirq (port->irq);\n  if (!port->intrupt)\n    {\n      outb (port, com_mcr, 0);\n      outb (port, com_fifo, 0);\n      errno = ENODEV;\n      return -1;\n    }\n\n  disable ();\n\n  /* record port */\n  port->intrupt->port = port;\n  scb->fd = fd;\n\n  /* Clear rx buffer, tx busy flag and overflow count.  */\n  port->first = port->count = 0;\n  port->txbusy = 0;\n  port->oflo = 0;\n\n  /* Set default baud rate and mode: 9600,8,n,1 */\n  i = dos_baudconv (port->baudrate = 9600);\n  outb (port, com_cfcr, CFCR_DLAB);\n  outb (port, com_dlbl, i & 0xff);\n  outb (port, com_dlbh, i >> 8);\n  outb (port, com_cfcr, CFCR_8BITS);\n\n  /* Enable all interrupts.  */\n  outb (port, com_ier, IER_ETXRDY | IER_ERXRDY | IER_ERLS | IER_EMSC);\n\n  /* Enable DTR & RTS.  */\n  outb (port, com_mcr, MCR_DTR | MCR_RTS | MCR_IENABLE);\n\n  enable ();\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          449,
+          0
+        ],
+        [
+          551,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_open",
+        "parameters": {
+          "scb": "struct serial",
+          "name": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ndos_close (struct serial *scb)\n{\n  struct dos_ttystate *port;\n  struct intrupt *intrupt;\n\n  if (!scb)\n    return;\n\n  port = &ports[scb->fd];\n\n  if (port->refcnt-- > 1)\n    return;\n\n  if (!(intrupt = port->intrupt))\n    return;\n\n  /* Disable interrupts, fifo, flow control.  */\n  disable ();\n  port->intrupt = 0;\n  intrupt->port = 0;\n  outb (port, com_fifo, 0);\n  outb (port, com_ier, 0);\n  enable ();\n\n  /* Unhook handler, and disable interrupt gate.  */\n  dos_unhookirq (intrupt);\n  outb (port, com_mcr, 0);\n\n  /* Check for overflow errors.  */\n  if (port->oflo)\n    {\n      fprintf_unfiltered (gdb_stderr,\n\t\t\t  \"Serial input overruns occurred.\\n\");\n      fprintf_unfiltered (gdb_stderr, \"This system %s handle %d baud.\\n\",\n\t\t\t  port->fifo ? \"cannot\" : \"needs a 16550 to\",\n\t\t\t  port->baudrate);\n    }\n}",
+      "fn_code_pos": [
+        [
+          554,
+          0
+        ],
+        [
+          592,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_close",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_flush_output (struct serial *scb)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          597,
+          0
+        ],
+        [
+          601,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_flush_output",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_setparity (struct serial *scb, int parity)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          605,
+          0
+        ],
+        [
+          609,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_setparity",
+        "parameters": {
+          "scb": "struct serial",
+          "parity": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_drain_output (struct serial *scb)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          613,
+          0
+        ],
+        [
+          617,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_drain_output",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ndos_raw (struct serial *scb)\n{\n  /* Always in raw mode.  */\n}",
+      "fn_code_pos": [
+        [
+          619,
+          0
+        ],
+        [
+          623,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_raw",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_readchar (struct serial *scb, int timeout)\n{\n  struct dos_ttystate *port = &ports[scb->fd];\n  long then;\n  int c;\n\n  then = rawclock () + (timeout * RAWHZ);\n  while ((c = dos_getc (port)) < 0)\n    {\n      QUIT;\n\n      if (timeout >= 0 && (rawclock () - then) >= 0)\n\treturn SERIAL_TIMEOUT;\n    }\n\n  return c;\n}",
+      "fn_code_pos": [
+        [
+          625,
+          0
+        ],
+        [
+          642,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_readchar",
+        "parameters": {
+          "scb": "struct serial",
+          "timeout": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static serial_ttystate\ndos_get_tty_state (struct serial *scb)\n{\n  struct dos_ttystate *port = &ports[scb->fd];\n  struct dos_ttystate *state;\n\n  /* Are they asking about a port we opened?  */\n  if (port->refcnt <= 0)\n    {\n      /* We've never heard about this port.  We should fail this call,\n\t unless they are asking about one of the 3 standard handles,\n\t in which case we pretend the handle was open by us if it is\n\t connected to a terminal device.  This is beacuse Unix\n\t terminals use the serial interface, so GDB expects the\n\t standard handles to go through here.  */\n      if (scb->fd >= 3 || !isatty (scb->fd))\n\treturn NULL;\n    }\n\n  state = XNEW (struct dos_ttystate);\n  *state = *port;\n  return (serial_ttystate) state;\n}",
+      "fn_code_pos": [
+        [
+          645,
+          0
+        ],
+        [
+          667,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_get_tty_state",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "serial_ttystate"
+      }
+    },
+    {
+      "fn_code": "static serial_ttystate\ndos_copy_tty_state (struct serial *scb, serial_ttystate ttystate)\n{\n  struct dos_ttystate *state;\n\n  state = XNEW (struct dos_ttystate);\n  *state = *(struct dos_ttystate *) ttystate;\n\n  return (serial_ttystate) state;\n}",
+      "fn_code_pos": [
+        [
+          669,
+          0
+        ],
+        [
+          678,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_copy_tty_state",
+        "parameters": {
+          "scb": "struct serial",
+          "ttystate": "serial_ttystate"
+        },
+        "return_type": "serial_ttystate"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_set_tty_state (struct serial *scb, serial_ttystate ttystate)\n{\n  struct dos_ttystate *state;\n\n  state = (struct dos_ttystate *) ttystate;\n  dos_setbaudrate (scb, state->baudrate);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          680,
+          0
+        ],
+        [
+          688,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_set_tty_state",
+        "parameters": {
+          "scb": "struct serial",
+          "ttystate": "serial_ttystate"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_noflush_set_tty_state (struct serial *scb, serial_ttystate new_ttystate,\n\t\t\t   serial_ttystate old_ttystate)\n{\n  struct dos_ttystate *state;\n\n  state = (struct dos_ttystate *) new_ttystate;\n  dos_setbaudrate (scb, state->baudrate);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          690,
+          0
+        ],
+        [
+          699,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_noflush_set_tty_state",
+        "parameters": {
+          "scb": "struct serial",
+          "new_ttystate": "serial_ttystate",
+          "old_ttystate": "serial_ttystate"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_flush_input (struct serial *scb)\n{\n  struct dos_ttystate *port = &ports[scb->fd];\n\n  disable ();\n  port->first = port->count = 0;\n  if (port->fifo)\n    outb (port, com_fifo, FIFO_ENABLE | FIFO_RCV_RST | FIFO_TRIGGER);\n  enable ();\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          701,
+          0
+        ],
+        [
+          712,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_flush_input",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ndos_print_tty_state (struct serial *scb, serial_ttystate ttystate,\n\t\t     struct ui_file *stream)\n{\n  /* Nothing to print.  */\n  return;\n}",
+      "fn_code_pos": [
+        [
+          714,
+          0
+        ],
+        [
+          720,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_print_tty_state",
+        "parameters": {
+          "scb": "struct serial",
+          "ttystate": "serial_ttystate",
+          "stream": "struct ui_file"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_baudconv (int rate)\n{\n  long x, err;\n\n  if (rate <= 0)\n    return -1;\n\n#define divrnd(n, q)\t(((n) * 2 / (q) + 1) / 2) /* Divide and round off.  */\n  x = divrnd (COMTICK, rate);\n  if (x <= 0)\n    return -1;\n\n  err = divrnd (1000 * COMTICK, x * rate) - 1000;\n  if (err < 0)\n    err = -err;\n  if (err > SPEED_TOLERANCE)\n    return -1;\n#undef divrnd\n  return x;\n}",
+      "fn_code_pos": [
+        [
+          722,
+          0
+        ],
+        [
+          742,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_baudconv",
+        "parameters": {
+          "rate": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_setbaudrate (struct serial *scb, int rate)\n{\n  struct dos_ttystate *port = &ports[scb->fd];\n\n  if (port->baudrate != rate)\n    {\n      int x;\n      unsigned char cfcr;\n\n      x = dos_baudconv (rate);\n      if (x <= 0)\n\t{\n\t  fprintf_unfiltered (gdb_stderr, \"%d: impossible baudrate\\n\", rate);\n\t  errno = EINVAL;\n\t  return -1;\n\t}\n\n      disable ();\n      cfcr = inb (port, com_cfcr);\n\n      outb (port, com_cfcr, CFCR_DLAB);\n      outb (port, com_dlbl, x & 0xff);\n      outb (port, com_dlbh, x >> 8);\n      outb (port, com_cfcr, cfcr);\n      port->baudrate = rate;\n      enable ();\n    }\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          745,
+          0
+        ],
+        [
+          775,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_setbaudrate",
+        "parameters": {
+          "scb": "struct serial",
+          "rate": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_setstopbits (struct serial *scb, int num)\n{\n  struct dos_ttystate *port = &ports[scb->fd];\n  unsigned char cfcr;\n\n  disable ();\n  cfcr = inb (port, com_cfcr);\n\n  switch (num)\n    {\n    case SERIAL_1_STOPBITS:\n      outb (port, com_cfcr, cfcr & ~CFCR_STOPB);\n      break;\n    case SERIAL_1_AND_A_HALF_STOPBITS:\n    case SERIAL_2_STOPBITS:\n      outb (port, com_cfcr, cfcr | CFCR_STOPB);\n      break;\n    default:\n      enable ();\n      return 1;\n    }\n  enable ();\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          777,
+          0
+        ],
+        [
+          802,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_setstopbits",
+        "parameters": {
+          "scb": "struct serial",
+          "num": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_write (struct serial *scb, const void *buf, size_t count)\n{\n  volatile struct dos_ttystate *port = &ports[scb->fd];\n  size_t fifosize = port->fifo ? 16 : 1;\n  long then;\n  size_t cnt;\n  const char *str = (const char *) buf;\n\n  while (count > 0)\n    {\n      QUIT;\n\n      /* Send the data, fifosize bytes at a time.  */\n      cnt = fifosize > count ? count : fifosize;\n      port->txbusy = 1;\n      /* Francisco Pastor <fpastor.etra-id@etra.es> says OUTSB messes\n\t up the communications with UARTs with FIFOs.  */\n#ifdef UART_FIFO_WORKS\n      outportsb (port->base + com_data, str, cnt);\n      str += cnt;\n      count -= cnt;\n#else\n      for ( ; cnt > 0; cnt--, count--)\n\toutportb (port->base + com_data, *str++);\n#endif\n#ifdef DOS_STATS\n      cnts[CNT_TX] += cnt;\n#endif\n      /* Wait for transmission to complete (max 1 sec).  */\n      then = rawclock () + RAWHZ;\n      while (port->txbusy)\n\t{\n\t  if ((rawclock () - then) >= 0)\n\t    {\n\t      errno = EIO;\n\t      return SERIAL_ERROR;\n\t    }\n\t}\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          804,
+          0
+        ],
+        [
+          845,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_write",
+        "parameters": {
+          "scb": "struct serial",
+          "buf": "void",
+          "count": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ndos_sendbreak (struct serial *scb)\n{\n  volatile struct dos_ttystate *port = &ports[scb->fd];\n  unsigned char cfcr;\n  long then;\n\n  cfcr = inb (port, com_cfcr);\n  outb (port, com_cfcr, cfcr | CFCR_SBREAK);\n\n  /* 0.25 sec delay */\n  then = rawclock () + RAWHZ / 4;\n  while ((rawclock () - then) < 0)\n    continue;\n\n  outb (port, com_cfcr, cfcr);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          848,
+          0
+        ],
+        [
+          865,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_sendbreak",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\ngdb_pipe (int pdes[2])\n{\n  /* No support for pipes.  */\n  errno = ENOSYS;\n  return -1;\n}",
+      "fn_code_pos": [
+        [
+          892,
+          0
+        ],
+        [
+          898,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdb_pipe",
+        "parameters": {
+          "pdes": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ndos_info (char *arg, int from_tty)\n{\n  struct dos_ttystate *port;\n#ifdef DOS_STATS\n  int i;\n#endif\n\n  for (port = ports; port < &ports[4]; port++)\n    {\n      if (port->baudrate == 0)\n\tcontinue;\n      printf_filtered (\"Port:\\tCOM%ld (%sactive)\\n\", (long)(port - ports) + 1,\n\t\t       port->intrupt ? \"\" : \"not \");\n      printf_filtered (\"Addr:\\t0x%03x (irq %d)\\n\", port->base, port->irq);\n      printf_filtered (\"16550:\\t%s\\n\", port->fifo ? \"yes\" : \"no\");\n      printf_filtered (\"Speed:\\t%d baud\\n\", port->baudrate);\n      printf_filtered (\"Errs:\\tframing %d parity %d overflow %d\\n\\n\",\n\t\t       port->ferr, port->perr, port->oflo);\n    }\n\n#ifdef DOS_STATS\n  printf_filtered (\"\\nTotal interrupts: %d\\n\", intrcnt);\n  for (i = 0; i < NCNT; i++)\n    if (cnts[i])\n      printf_filtered (\"%s:\\t%lu\\n\", cntnames[i], (unsigned long) cnts[i]);\n#endif\n}",
+      "fn_code_pos": [
+        [
+          900,
+          0
+        ],
+        [
+          927,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_info",
+        "parameters": {
+          "arg": "char",
+          "from_tty": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_ser_dos (void)\n{\n  serial_add_interface (&dos_ops);\n\n  /* Save original interrupt mask register.  */\n  icu_oldmask = inportb (ICU_MASK);\n\n  /* Mark fixed motherboard irqs as inuse.  */\n  intrupts[0].inuse =\t\t/* timer tick */\n    intrupts[1].inuse =\t\t/* keyboard */\n    intrupts[2].inuse = 1;\t/* slave icu */\n\n  add_setshow_zinteger_cmd (\"com1base\", class_obscure, &ports[0].base, _(\"\\\nSet COM1 base i/o port address.\"), _(\"\\\nShow COM1 base i/o port address.\"), NULL,\n\t\t\t    NULL,\n\t\t\t    NULL, /* FIXME: i18n: */\n\t\t\t    &setlist, &showlist);\n\n  add_setshow_zinteger_cmd (\"com1irq\", class_obscure, &ports[0].irq, _(\"\\\nSet COM1 interrupt request.\"), _(\"\\\nShow COM1 interrupt request.\"), NULL,\n\t\t\t    NULL,\n\t\t\t    NULL, /* FIXME: i18n: */\n\t\t\t    &setlist, &showlist);\n\n  add_setshow_zinteger_cmd (\"com2base\", class_obscure, &ports[1].base, _(\"\\\nSet COM2 base i/o port address.\"), _(\"\\\nShow COM2 base i/o port address.\"), NULL,\n\t\t\t    NULL,\n\t\t\t    NULL, /* FIXME: i18n: */\n\t\t\t    &setlist, &showlist);\n\n  add_setshow_zinteger_cmd (\"com2irq\", class_obscure, &ports[1].irq, _(\"\\\nSet COM2 interrupt request.\"), _(\"\\\nShow COM2 interrupt request.\"), NULL,\n\t\t\t    NULL,\n\t\t\t    NULL, /* FIXME: i18n: */\n\t\t\t    &setlist, &showlist);\n\n  add_setshow_zinteger_cmd (\"com3base\", class_obscure, &ports[2].base, _(\"\\\nSet COM3 base i/o port address.\"), _(\"\\\nShow COM3 base i/o port address.\"), NULL,\n\t\t\t    NULL,\n\t\t\t    NULL, /* FIXME: i18n: */\n\t\t\t    &setlist, &showlist);\n\n  add_setshow_zinteger_cmd (\"com3irq\", class_obscure, &ports[2].irq, _(\"\\\nSet COM3 interrupt request.\"), _(\"\\\nShow COM3 interrupt request.\"), NULL,\n\t\t\t    NULL,\n\t\t\t    NULL, /* FIXME: i18n: */\n\t\t\t    &setlist, &showlist);\n\n  add_setshow_zinteger_cmd (\"com4base\", class_obscure, &ports[3].base, _(\"\\\nSet COM4 base i/o port address.\"), _(\"\\\nShow COM4 base i/o port address.\"), NULL,\n\t\t\t    NULL,\n\t\t\t    NULL, /* FIXME: i18n: */\n\t\t\t    &setlist, &showlist);\n\n  add_setshow_zinteger_cmd (\"com4irq\", class_obscure, &ports[3].irq, _(\"\\\nSet COM4 interrupt request.\"), _(\"\\\nShow COM4 interrupt request.\"), NULL,\n\t\t\t    NULL,\n\t\t\t    NULL, /* FIXME: i18n: */\n\t\t\t    &setlist, &showlist);\n\n  add_info (\"serial\", dos_info,\n\t    _(\"Print DOS serial port status.\"));\n}",
+      "fn_code_pos": [
+        [
+          932,
+          0
+        ],
+        [
+          1003,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_ser_dos",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "dos_open (struct serial *scb, const char *name)",
+      "fn_dec_pos": [
+        [
+          225,
+          11
+        ],
+        [
+          225,
+          58
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_open",
+        "parameters": {
+          "scb": "struct serial",
+          "name": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "dos_raw (struct serial *scb)",
+      "fn_dec_pos": [
+        [
+          226,
+          12
+        ],
+        [
+          226,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_raw",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "dos_readchar (struct serial *scb, int timeout)",
+      "fn_dec_pos": [
+        [
+          227,
+          11
+        ],
+        [
+          227,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_readchar",
+        "parameters": {
+          "scb": "struct serial",
+          "timeout": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "dos_setbaudrate (struct serial *scb, int rate)",
+      "fn_dec_pos": [
+        [
+          228,
+          11
+        ],
+        [
+          228,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_setbaudrate",
+        "parameters": {
+          "scb": "struct serial",
+          "rate": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "dos_write (struct serial *scb, const void *buf, size_t count)",
+      "fn_dec_pos": [
+        [
+          229,
+          11
+        ],
+        [
+          229,
+          72
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_write",
+        "parameters": {
+          "scb": "struct serial",
+          "buf": "void",
+          "count": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "dos_close (struct serial *scb)",
+      "fn_dec_pos": [
+        [
+          230,
+          12
+        ],
+        [
+          230,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_close",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "dos_get_tty_state (struct serial *scb)",
+      "fn_dec_pos": [
+        [
+          231,
+          23
+        ],
+        [
+          231,
+          61
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_get_tty_state",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "serial_ttystate"
+      }
+    },
+    {
+      "fn_code": "dos_set_tty_state (struct serial *scb, serial_ttystate state)",
+      "fn_dec_pos": [
+        [
+          232,
+          11
+        ],
+        [
+          232,
+          72
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_set_tty_state",
+        "parameters": {
+          "scb": "struct serial",
+          "state": "serial_ttystate"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "dos_baudconv (int rate)",
+      "fn_dec_pos": [
+        [
+          233,
+          11
+        ],
+        [
+          233,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_baudconv",
+        "parameters": {
+          "rate": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "(*isr_t) (void)",
+      "fn_dec_pos": [
+        [
+          356,
+          13
+        ],
+        [
+          356,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "dos_hookirq (unsigned int irq)",
+      "fn_dec_pos": [
+        [
+          367,
+          0
+        ],
+        [
+          367,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dos_hookirq",
+        "parameters": {
+          "irq": "unsigned int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct intrupt\n  {\n    char inuse;\n    struct dos_ttystate *port;\n    _go32_dpmi_seginfo old_rmhandler;\n    _go32_dpmi_seginfo old_pmhandler;\n    _go32_dpmi_seginfo new_rmhandler;\n    _go32_dpmi_seginfo new_pmhandler;\n    _go32_dpmi_registers regs;\n  }",
+      {
+        "inuse": "char",
+        "*port": "struct dos_ttystate",
+        "old_rmhandler": "_go32_dpmi_seginfo",
+        "old_pmhandler": "_go32_dpmi_seginfo",
+        "new_rmhandler": "_go32_dpmi_seginfo",
+        "new_pmhandler": "_go32_dpmi_seginfo",
+        "regs": "_go32_dpmi_registers"
+      },
+      "intrupt",
+      [
+        175,
+        7
+      ],
+      [
+        184,
+        3
+      ]
+    ],
+    [
+      "struct dos_ttystate\n  {\n    int base;\n    int irq;\n    int refcnt;\n    struct intrupt *intrupt;\n    int fifo;\n    int baudrate;\n    unsigned char cbuf[CBSIZE];\n    unsigned int first;\n    unsigned int count;\n    int txbusy;\n    unsigned char old_mcr;\n    int ferr;\n    int perr;\n    int oflo;\n    int msr;\n  }",
+      {
+        "base": "int",
+        "irq": "int",
+        "refcnt": "int",
+        "*intrupt": "struct intrupt",
+        "fifo": "int",
+        "baudrate": "int",
+        "cbuf[CBSIZE]": "unsigned char",
+        "first": "unsigned int",
+        "count": "unsigned int",
+        "txbusy": "int",
+        "old_mcr": "unsigned char",
+        "ferr": "int",
+        "perr": "int",
+        "oflo": "int",
+        "msr": "int"
+      },
+      "dos_ttystate",
+      [
+        188,
+        7
+      ],
+      [
+        205,
+        3
+      ]
+    ],
+    [
+      "struct intrupt\n  {\n    char inuse;\n    struct dos_ttystate *port;\n    _go32_dpmi_seginfo old_rmhandler;\n    _go32_dpmi_seginfo old_pmhandler;\n    _go32_dpmi_seginfo new_rmhandler;\n    _go32_dpmi_seginfo new_pmhandler;\n    _go32_dpmi_registers regs;\n  }",
+      {
+        "inuse": "char",
+        "*port": "struct dos_ttystate",
+        "old_rmhandler": "_go32_dpmi_seginfo",
+        "old_pmhandler": "_go32_dpmi_seginfo",
+        "new_rmhandler": "_go32_dpmi_seginfo",
+        "new_pmhandler": "_go32_dpmi_seginfo",
+        "regs": "_go32_dpmi_registers"
+      },
+      "intrupt",
+      [
+        175,
+        7
+      ],
+      [
+        184,
+        3
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        178,
+        4
+      ],
+      [
+        178,
+        23
+      ]
+    ],
+    [
+      "struct dos_ttystate\n  {\n    int base;\n    int irq;\n    int refcnt;\n    struct intrupt *intrupt;\n    int fifo;\n    int baudrate;\n    unsigned char cbuf[CBSIZE];\n    unsigned int first;\n    unsigned int count;\n    int txbusy;\n    unsigned char old_mcr;\n    int ferr;\n    int perr;\n    int oflo;\n    int msr;\n  }",
+      {
+        "base": "int",
+        "irq": "int",
+        "refcnt": "int",
+        "*intrupt": "struct intrupt",
+        "fifo": "int",
+        "baudrate": "int",
+        "cbuf[CBSIZE]": "unsigned char",
+        "first": "unsigned int",
+        "count": "unsigned int",
+        "txbusy": "int",
+        "old_mcr": "unsigned char",
+        "ferr": "int",
+        "perr": "int",
+        "oflo": "int",
+        "msr": "int"
+      },
+      "dos_ttystate",
+      [
+        188,
+        7
+      ],
+      [
+        205,
+        3
+      ]
+    ],
+    [
+      "struct intrupt",
+      {},
+      "",
+      [
+        193,
+        4
+      ],
+      [
+        193,
+        18
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        225,
+        21
+      ],
+      [
+        225,
+        34
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        226,
+        21
+      ],
+      [
+        226,
+        34
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        227,
+        25
+      ],
+      [
+        227,
+        38
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        228,
+        28
+      ],
+      [
+        228,
+        41
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        229,
+        22
+      ],
+      [
+        229,
+        35
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        230,
+        23
+      ],
+      [
+        230,
+        36
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        231,
+        42
+      ],
+      [
+        231,
+        55
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        232,
+        30
+      ],
+      [
+        232,
+        43
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        242,
+        19
+      ],
+      [
+        242,
+        38
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        259,
+        17
+      ],
+      [
+        259,
+        36
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        273,
+        2
+      ],
+      [
+        273,
+        21
+      ]
+    ],
+    [
+      "struct intrupt",
+      {},
+      "",
+      [
+        366,
+        7
+      ],
+      [
+        366,
+        21
+      ]
+    ],
+    [
+      "struct intrupt",
+      {},
+      "",
+      [
+        369,
+        2
+      ],
+      [
+        369,
+        16
+      ]
+    ],
+    [
+      "struct intrupt",
+      {},
+      "",
+      [
+        423,
+        15
+      ],
+      [
+        423,
+        29
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        450,
+        10
+      ],
+      [
+        450,
+        23
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        452,
+        2
+      ],
+      [
+        452,
+        21
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        555,
+        11
+      ],
+      [
+        555,
+        24
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        557,
+        2
+      ],
+      [
+        557,
+        21
+      ]
+    ],
+    [
+      "struct intrupt",
+      {},
+      "",
+      [
+        558,
+        2
+      ],
+      [
+        558,
+        16
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        598,
+        18
+      ],
+      [
+        598,
+        31
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        606,
+        15
+      ],
+      [
+        606,
+        28
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        614,
+        18
+      ],
+      [
+        614,
+        31
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        620,
+        9
+      ],
+      [
+        620,
+        22
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        626,
+        14
+      ],
+      [
+        626,
+        27
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        628,
+        2
+      ],
+      [
+        628,
+        21
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        646,
+        19
+      ],
+      [
+        646,
+        32
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        648,
+        2
+      ],
+      [
+        648,
+        21
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        649,
+        2
+      ],
+      [
+        649,
+        21
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        670,
+        20
+      ],
+      [
+        670,
+        33
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        672,
+        2
+      ],
+      [
+        672,
+        21
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        675,
+        13
+      ],
+      [
+        675,
+        32
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        681,
+        19
+      ],
+      [
+        681,
+        32
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        683,
+        2
+      ],
+      [
+        683,
+        21
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        685,
+        11
+      ],
+      [
+        685,
+        30
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        691,
+        27
+      ],
+      [
+        691,
+        40
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        694,
+        2
+      ],
+      [
+        694,
+        21
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        696,
+        11
+      ],
+      [
+        696,
+        30
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        702,
+        17
+      ],
+      [
+        702,
+        30
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        704,
+        2
+      ],
+      [
+        704,
+        21
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        715,
+        21
+      ],
+      [
+        715,
+        34
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        716,
+        7
+      ],
+      [
+        716,
+        21
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        746,
+        17
+      ],
+      [
+        746,
+        30
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        748,
+        2
+      ],
+      [
+        748,
+        21
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        778,
+        17
+      ],
+      [
+        778,
+        30
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        780,
+        2
+      ],
+      [
+        780,
+        21
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        805,
+        11
+      ],
+      [
+        805,
+        24
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        807,
+        11
+      ],
+      [
+        807,
+        30
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        849,
+        15
+      ],
+      [
+        849,
+        28
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        851,
+        11
+      ],
+      [
+        851,
+        30
+      ]
+    ],
+    [
+      "struct serial_ops",
+      {},
+      "",
+      [
+        868,
+        13
+      ],
+      [
+        868,
+        30
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        889,
+        12
+      ],
+      [
+        889,
+        25
+      ]
+    ],
+    [
+      "struct dos_ttystate",
+      {},
+      "",
+      [
+        903,
+        2
+      ],
+      [
+        903,
+        21
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcmd.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"serial.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <time.h>\n",
+      [
+        125,
+        0
+      ],
+      [
+        126,
+        0
+      ]
+    ],
+    [
+      "#include <dos.h>\n",
+      [
+        126,
+        0
+      ],
+      [
+        127,
+        0
+      ]
+    ],
+    [
+      "#include <go32.h>\n",
+      [
+        127,
+        0
+      ],
+      [
+        128,
+        0
+      ]
+    ],
+    [
+      "#include <dpmi.h>\n",
+      [
+        128,
+        0
+      ],
+      [
+        129,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

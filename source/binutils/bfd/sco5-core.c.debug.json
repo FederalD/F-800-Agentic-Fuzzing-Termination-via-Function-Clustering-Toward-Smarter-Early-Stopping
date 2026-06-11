@@ -1,0 +1,522 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static asection *\nmake_bfd_asection (bfd *abfd,\n\t\t   const char *name,\n\t\t   flagword flags,\n\t\t   bfd_size_type size,\n\t\t   bfd_vma vma,\n\t\t   file_ptr filepos)\n{\n  asection *asect;\n\n  asect = bfd_make_section_anyway_with_flags (abfd, name, flags);\n  if (!asect)\n    return NULL;\n  asect->size = size;\n  asect->vma = vma;\n  asect->filepos = filepos;\n  asect->alignment_power = 2;\n\n  return asect;\n}",
+      "fn_code_pos": [
+        [
+          48,
+          0
+        ],
+        [
+          67,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "make_bfd_asection",
+        "parameters": {
+          "abfd": "bfd",
+          "name": "char",
+          "flags": "flagword",
+          "size": "bfd_size_type",
+          "vma": "bfd_vma",
+          "filepos": "file_ptr"
+        },
+        "return_type": "asection"
+      }
+    },
+    {
+      "fn_code": "static struct user *\nread_uarea (bfd *abfd, int filepos)\n{\n  struct sco5_core_struct *rawptr;\n  bfd_size_type amt = sizeof (struct sco5_core_struct);\n\n  rawptr = (struct sco5_core_struct *) bfd_zmalloc (amt);\n  if (rawptr == NULL)\n    return NULL;\n\n  abfd->tdata.sco5_core_data = rawptr;\n\n  if (bfd_seek (abfd, (file_ptr) filepos, SEEK_SET) != 0\n      || bfd_bread ((void *) &rawptr->u, (bfd_size_type) sizeof rawptr->u,\n\t\t   abfd) != sizeof rawptr->u)\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n\n  /* Sanity check perhaps??? */\n  if (rawptr->u.u_dsize > 0x1000000)    /* Remember, it's in pages...  */\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n  if (rawptr->u.u_ssize > 0x1000000)\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n  return &rawptr->u;\n}",
+      "fn_code_pos": [
+        [
+          69,
+          0
+        ],
+        [
+          101,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_uarea",
+        "parameters": {
+          "abfd": "bfd",
+          "filepos": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "const bfd_target *\nsco5_core_file_p (bfd *abfd)\n{\n  int coffset_siz, val, nsecs, cheadoffs;\n  int coresize;\n  struct user *u;\n  struct coreoffsets coffsets;\n  struct coresecthead chead;\n  char *secname;\n  flagword flags;\n\n  /* Read coreoffsets region at end of core (see core(FP)).  */\n\n  {\n    struct stat statbuf;\n\n    if (bfd_stat (abfd, &statbuf) < 0)\n      return NULL;\n\n    coresize = statbuf.st_size;\n  }\n  /* Last long in core is sizeof struct coreoffsets, read it */\n  if ((bfd_seek (abfd, (file_ptr) (coresize - sizeof coffset_siz),\n\t\t SEEK_SET) != 0)\n      || bfd_bread ((void *) &coffset_siz, (bfd_size_type) sizeof coffset_siz,\n\t\t   abfd) != sizeof coffset_siz)\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n\n  /* Use it to seek start of coreoffsets region, read it and determine\n     validity */\n  if ((bfd_seek (abfd, (file_ptr) (coresize - coffset_siz), SEEK_SET) != 0)\n      || (bfd_bread ((void *) &coffsets, (bfd_size_type) sizeof coffsets, abfd)\n\t  != sizeof coffsets)\n      || ((coffsets.u_info != 1) && (coffsets.u_info != C_VERSION)))\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n\n  if (coffsets.u_info == 1)\n    {\n      /* Old version, no section heads, read info from user struct */\n\n      u = read_uarea (abfd, coffsets.u_user);\n      if (! u)\n\tgoto fail;\n\n      if (!make_bfd_asection (abfd, \".reg\", SEC_HAS_CONTENTS,\n\t\t\t      (bfd_size_type) coffsets.u_usize,\n\t\t\t      0 - (bfd_vma) u->u_ar0,\n\t\t\t      (file_ptr) coffsets.u_user))\n\tgoto fail;\n\n      if (!make_bfd_asection (abfd, \".data\",\n\t\t\t      SEC_ALLOC + SEC_LOAD + SEC_HAS_CONTENTS,\n\t\t\t      ((bfd_size_type) u->u_exdata.ux_dsize\n\t\t\t       + u->u_exdata.ux_bsize),\n\t\t\t      (bfd_vma) u->u_exdata.ux_datorg,\n\t\t\t      (file_ptr) coffsets.u_data))\n\tgoto fail;\n\n      if (!make_bfd_asection (abfd, \".stack\",\n\t\t\t      SEC_ALLOC + SEC_LOAD + SEC_HAS_CONTENTS,\n\t\t\t      (bfd_size_type) u->u_ssize * NBPC,\n\t\t\t      (bfd_vma) u->u_sub,\n\t\t\t      (file_ptr) coffsets.u_stack))\n\tgoto fail;\n\n      return abfd->xvec;\t\t/* Done for version 1 */\n    }\n\n  /* Immediately before coreoffsets region is a long with offset in core\n     to first coresecthead (CORES_OFFSETS), the long before this is the\n     number of section heads in the list. Read both longs and read the\n     coresecthead and check its validity */\n\n  if ((bfd_seek (abfd,\n\t\t (file_ptr) (coresize - coffset_siz - 2 * sizeof coffset_siz),\n\t\t SEEK_SET) != 0)\n      || (bfd_bread ((void *) &nsecs, (bfd_size_type) sizeof nsecs, abfd)\n\t  != sizeof nsecs)\n      || (bfd_bread ((void *) &cheadoffs, (bfd_size_type) sizeof cheadoffs,\n\t\t    abfd) != sizeof cheadoffs)\n      || (bfd_seek (abfd, (file_ptr) cheadoffs, SEEK_SET) != 0)\n      || (bfd_bread ((void *) &chead, (bfd_size_type) sizeof chead, abfd)\n\t  != sizeof chead)\n      || (chead.cs_stype != CORES_OFFSETS)\n      || (chead.cs_x.csx_magic != COREMAGIC_NUMBER))\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      goto fail;\n    }\n\n  /* OK, we believe you.  You're a core file (sure, sure).  */\n\n  /* Now loop over all regions and map them */\n  nsecs--;\t\t\t\t/* We've seen CORES_OFFSETS already */\n  for (; nsecs; nsecs--)\n    {\n      if ((bfd_seek (abfd, (file_ptr) chead.cs_hseek, SEEK_SET) != 0)\n\t  || (bfd_bread ((void *) &chead, (bfd_size_type) sizeof chead, abfd)\n\t      != sizeof chead))\n\t{\n\t  bfd_set_error (bfd_error_wrong_format);\n\t  goto fail;\n\t}\n\n      switch (chead.cs_stype)\n\t{\n\tcase CORES_MAGIC:\t\t\t/* Core header, check magic */\n\t  if (chead.cs_x.csx_magic != COREMAGIC_NUMBER)\n\t    {\n\t      bfd_set_error (bfd_error_wrong_format);\n\t      goto fail;\n\t    }\n\t  secname = NULL;\n\t  nsecs++;\t\t\t\t/* MAGIC not in section cnt!*/\n\t  break;\n\tcase CORES_UAREA:\t\t\t/* U-area, read in tdata */\n\t  u = read_uarea (abfd, chead.cs_sseek);\n\t  if (! u)\n\t    goto fail;\n\n\t  /* This is tricky.  As the \"register section\", we give them\n\t     the entire upage and stack.  u.u_ar0 points to where\n\t     \"register 0\" is stored.  There are two tricks with this,\n\t     though.  One is that the rest of the registers might be\n\t     at positive or negative (or both) displacements from\n\t     *u_ar0.  The other is that u_ar0 is sometimes an absolute\n\t     address in kernel memory, and on other systems it is an\n\t     offset from the beginning of the `struct user'.\n\n\t     As a practical matter, we don't know where the registers\n\t     actually are, so we have to pass the whole area to GDB.\n\t     We encode the value of u_ar0 by setting the .regs section\n\t     up so that its virtual memory address 0 is at the place\n\t     pointed to by u_ar0 (by setting the vma of the start of\n\t     the section to -u_ar0).  GDB uses this info to locate the\n\t     regs, using minor trickery to get around the\n\t     offset-or-absolute-addr problem.  */\n\n\t  chead.cs_vaddr = 0 - (bfd_vma) u->u_ar0;\n\n\t  secname = \".reg\";\n\t  flags = SEC_HAS_CONTENTS;\n\n\t  break;\n\tcase CORES_PREGION:\t\t\t/* A program region, map it */\n\t  switch (chead.cs_x.csx_preg.csxp_rtyp)\n\t    {\n\t    case PT_DATA:\n\t      secname = \".data\";\t/* Data region.\t\t */\n\t      break;\n\t    case PT_STACK:\n\t      secname = \".stack\";\t/* Stack region.\t */\n\t      break;\n\t    case PT_SHMEM:\n\t      secname = \".shmem\";\t/* Shared memory\t */\n\t      break;\n\t    case PT_LIBDAT:\n\t      secname = \".libdat\";\t/* Shared library data\t */\n\t      break;\n\t    case PT_V86:\n\t      secname = \".virt86\";\t/* Virtual 8086 mode\t */\n\t      break;\n\t    case PT_SHFIL:\n\t      secname = \".mmfile\";\t/* Memory mapped file\t */\n\t      break;\n\t    case PT_XDATA0:\n\t      secname = \".Xdat0\";\t/* XENIX data region, virtual 0 */\n\t      break;\n\t    default:\n\t      secname = \"\";\n\t    }\n\t  flags = SEC_ALLOC + SEC_LOAD + SEC_HAS_CONTENTS;\n\t  break;\n\tcase CORES_PROC:\t\t\t/* struct proc */\n\tcase CORES_ITIMER:\t\t\t/* interval timers */\n\tcase CORES_SCOUTSNAME:\t\t\t/* struct scoutsname */\n\t  secname = NULL;\t/* Ignore these */\n\t  break;\n\tdefault:\n\t  _bfd_error_handler (\"Unhandled SCO core file section type %d\\n\",\n\t\t\t      chead.cs_stype);\n\t  continue;\n\t}\n\n      if (secname\n\t  && !make_bfd_asection (abfd, secname, flags,\n\t\t\t\t (bfd_size_type) chead.cs_vsize,\n\t\t\t\t (bfd_vma) chead.cs_vaddr,\n\t\t\t\t (file_ptr) chead.cs_sseek))\n\tgoto fail;\n\n    }\n\n  return abfd->xvec;\n\n fail:\n  if (abfd->tdata.any)\n    {\n      bfd_release (abfd, abfd->tdata.any);\n      abfd->tdata.any = NULL;\n    }\n  bfd_section_list_clear (abfd);\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          103,
+          0
+        ],
+        [
+          312,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sco5_core_file_p",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": "bfd_target"
+      }
+    },
+    {
+      "fn_code": "char *\nsco5_core_file_failing_command (bfd *abfd)\n{\n  char *com = abfd->tdata.sco5_core_data->u.u_comm;\n  if (*com)\n    return com;\n  else\n    return NULL;\n}",
+      "fn_code_pos": [
+        [
+          314,
+          0
+        ],
+        [
+          322,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sco5_core_file_failing_command",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "int\nsco5_core_file_failing_signal (bfd *ignore_abfd)\n{\n  return ((ignore_abfd->tdata.sco5_core_data->u.u_sysabort != 0)\n\t  ? ignore_abfd->tdata.sco5_core_data->u.u_sysabort\n\t  : -1);\n}",
+      "fn_code_pos": [
+        [
+          324,
+          0
+        ],
+        [
+          330,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sco5_core_file_failing_signal",
+        "parameters": {
+          "ignore_abfd": "bfd"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nswap_abort (void)\n{\n  abort (); /* This way doesn't require any declaration for ANSI to fuck up */\n}",
+      "fn_code_pos": [
+        [
+          333,
+          0
+        ],
+        [
+          337,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "swap_abort",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "make_bfd_asection (bfd *abfd,\n\t\t   const char *name,\n\t\t   flagword flags,\n\t\t   bfd_size_type size,\n\t\t   bfd_vma vma,\n\t\t   file_ptr filepos)",
+      "fn_dec_pos": [
+        [
+          49,
+          0
+        ],
+        [
+          54,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "make_bfd_asection",
+        "parameters": {
+          "abfd": "bfd",
+          "name": "char",
+          "flags": "flagword",
+          "size": "bfd_size_type",
+          "vma": "bfd_vma",
+          "filepos": "file_ptr"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "read_uarea (bfd *abfd, int filepos)",
+      "fn_dec_pos": [
+        [
+          70,
+          0
+        ],
+        [
+          70,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_uarea",
+        "parameters": {
+          "abfd": "bfd",
+          "filepos": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "sco5_core_file_p (bfd *abfd)",
+      "fn_dec_pos": [
+        [
+          104,
+          0
+        ],
+        [
+          104,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sco5_core_file_p",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "sco5_core_file_failing_command (bfd *abfd)",
+      "fn_dec_pos": [
+        [
+          315,
+          0
+        ],
+        [
+          315,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sco5_core_file_failing_command",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct sco5_core_struct\n{\n  struct user u;\n}",
+      {
+        "u": "struct user"
+      },
+      "sco5_core_struct",
+      [
+        38,
+        0
+      ],
+      [
+        41,
+        1
+      ]
+    ],
+    [
+      "struct sco5_core_struct\n{\n  struct user u;\n}",
+      {
+        "u": "struct user"
+      },
+      "sco5_core_struct",
+      [
+        38,
+        0
+      ],
+      [
+        41,
+        1
+      ]
+    ],
+    [
+      "struct user",
+      {},
+      "",
+      [
+        40,
+        2
+      ],
+      [
+        40,
+        13
+      ]
+    ],
+    [
+      "struct user",
+      {},
+      "",
+      [
+        69,
+        7
+      ],
+      [
+        69,
+        18
+      ]
+    ],
+    [
+      "struct sco5_core_struct",
+      {},
+      "",
+      [
+        72,
+        2
+      ],
+      [
+        72,
+        25
+      ]
+    ],
+    [
+      "struct sco5_core_struct",
+      {},
+      "",
+      [
+        73,
+        30
+      ],
+      [
+        73,
+        53
+      ]
+    ],
+    [
+      "struct sco5_core_struct",
+      {},
+      "",
+      [
+        75,
+        12
+      ],
+      [
+        75,
+        35
+      ]
+    ],
+    [
+      "struct user",
+      {},
+      "",
+      [
+        108,
+        2
+      ],
+      [
+        108,
+        13
+      ]
+    ],
+    [
+      "struct coreoffsets",
+      {},
+      "",
+      [
+        109,
+        2
+      ],
+      [
+        109,
+        20
+      ]
+    ],
+    [
+      "struct coresecthead",
+      {},
+      "",
+      [
+        110,
+        2
+      ],
+      [
+        110,
+        21
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        117,
+        4
+      ],
+      [
+        117,
+        15
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"libbfd.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"libaout.h\"\t\t/* BFD a.out internal data structures */\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <sys/param.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <sys/dir.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <sys/user.h>\t\t/* After a.out.h  */\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <sys/paccess.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include <sys/region.h>\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

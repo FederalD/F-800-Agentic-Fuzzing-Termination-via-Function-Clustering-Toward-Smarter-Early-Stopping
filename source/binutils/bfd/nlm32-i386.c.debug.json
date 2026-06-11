@@ -1,0 +1,216 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static bfd_boolean\nnlm_i386_write_import (bfd * abfd, asection * sec, arelent * rel)\n{\n  asymbol *sym;\n  bfd_vma val;\n  bfd_byte temp[4];\n\n  /* NetWare only supports two kinds of relocs.  We should check\n     special_function here, as well, but at the moment coff-i386\n     relocs uses a special_function which does not affect what we do\n     here.  */\n  if (rel->addend != 0\n      || rel->howto == NULL\n      || rel->howto->rightshift != 0\n      || rel->howto->size != 2\n      || rel->howto->bitsize != 32\n      || rel->howto->bitpos != 0\n      || rel->howto->src_mask != 0xffffffff\n      || rel->howto->dst_mask != 0xffffffff)\n    {\n      bfd_set_error (bfd_error_invalid_operation);\n      return FALSE;\n    }\n\n  sym = *rel->sym_ptr_ptr;\n\n  /* The value we write out is the offset into the appropriate\n     segment.  This offset is the section vma, adjusted by the vma of\n     the lowest section in that segment, plus the address of the\n     relocation.  */\n  val = bfd_get_section_vma (abfd, sec) + rel->address;\n\n  /* The second most significant bit is 0 if the value is an offset\n     into the data segment, or 1 if the value is an offset into the\n     code segment.  */\n  if (bfd_get_section_flags (abfd, sec) & SEC_CODE)\n    {\n      val -= nlm_get_text_low (abfd);\n      val |= NLM_HIBIT >> 1;\n    }\n  else\n    val -= nlm_get_data_low (abfd);\n\n  if (! bfd_is_und_section (bfd_get_section (sym)))\n    {\n      /* NetWare only supports absolute internal relocs.  */\n      if (rel->howto->pc_relative)\n\t{\n\t  bfd_set_error (bfd_error_invalid_operation);\n\t  return FALSE;\n\t}\n\n      /* The high bit is 1 if the reloc is against the code section, 0\n\t if against the data section.  */\n      if (bfd_get_section_flags (abfd, bfd_get_section (sym)) & SEC_CODE)\n\tval |= NLM_HIBIT;\n    }\n  else\n    {\n      /* The high bit is 1 if this is an absolute reloc, 0 if it is PC\n\t relative.  */\n      if (! rel->howto->pc_relative)\n\tval |= NLM_HIBIT;\n      else\n\t{\n\t  /* PC relative relocs on NetWare must be pcrel_offset.  */\n\t  if (! rel->howto->pcrel_offset)\n\t    {\n\t      bfd_set_error (bfd_error_invalid_operation);\n\t      return FALSE;\n\t    }\n\t}\n    }\n\n  bfd_put_32 (abfd, val, temp);\n  if (bfd_bwrite (temp, (bfd_size_type) sizeof (temp), abfd) != sizeof (temp))\n    return FALSE;\n\n  return TRUE;\n}",
+      "fn_code_pos": [
+        [
+          141,
+          0
+        ],
+        [
+          220,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nlm_i386_write_import",
+        "parameters": {
+          "abfd": "bfd",
+          "sec": "asection",
+          "rel": "arelent"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "static bfd_boolean\nnlm_i386_mangle_relocs (bfd *abfd,\n\t\t\tasection *sec,\n\t\t\tconst void * data,\n\t\t\tbfd_vma offset,\n\t\t\tbfd_size_type count)\n{\n  arelent **rel_ptr_ptr, **rel_end;\n\n  rel_ptr_ptr = sec->orelocation;\n  rel_end = rel_ptr_ptr + sec->reloc_count;\n  for (; rel_ptr_ptr < rel_end; rel_ptr_ptr++)\n    {\n      arelent *rel;\n      asymbol *sym;\n      bfd_vma addend;\n\n      rel = *rel_ptr_ptr;\n      sym = *rel->sym_ptr_ptr;\n\n      /* Note that no serious harm will ensue if we fail to change a\n\t reloc.  We will wind up failing in nlm_i386_write_import.  */\n\n      /* Make sure this reloc is within the data we have.  We only 4\n\t byte relocs here, so we insist on having 4 bytes.  */\n      if (rel->address < offset\n\t  || rel->address + 4 > offset + count)\n\tcontinue;\n\n      /* NetWare doesn't support reloc addends, so we get rid of them\n\t here by simply adding them into the object data.  We handle\n\t the symbol value, if any, the same way.  */\n      addend = rel->addend + sym->value;\n\n      /* The value of a symbol is the offset into the section.  If the\n\t symbol is in the .bss segment, we need to include the size of\n\t the data segment in the offset as well.  Fortunately, we know\n\t that at this point the size of the data section is in the NLM\n\t header.  */\n      if (((bfd_get_section_flags (abfd, bfd_get_section (sym))\n\t    & SEC_LOAD) == 0)\n\t  && ((bfd_get_section_flags (abfd, bfd_get_section (sym))\n\t       & SEC_ALLOC) != 0))\n\taddend += nlm_fixed_header (abfd)->dataImageSize;\n\n      if (addend != 0\n\t  && rel->howto != NULL\n\t  && rel->howto->rightshift == 0\n\t  && rel->howto->size == 2\n\t  && rel->howto->bitsize == 32\n\t  && rel->howto->bitpos == 0\n\t  && rel->howto->src_mask == 0xffffffff\n\t  && rel->howto->dst_mask == 0xffffffff)\n\t{\n\t  bfd_vma val;\n\n\t  val = bfd_get_32 (abfd, (bfd_byte *) data + rel->address - offset);\n\t  val += addend;\n\t  bfd_put_32 (abfd, val, (bfd_byte *) data + rel->address - offset);\n\t  rel->addend = 0;\n\t}\n\n      /* NetWare uses a reloc with pcrel_offset set.  We adjust\n\t pc_relative relocs accordingly.  We are going to change the\n\t howto field, so we can only do this if the current one is\n\t compatible.  We should check special_function here, but at\n\t the moment coff-i386 uses a special_function which does not\n\t affect what we are doing here.  */\n      if (rel->howto != NULL\n\t  && rel->howto->pc_relative\n\t  && ! rel->howto->pcrel_offset\n\t  && rel->howto->rightshift == 0\n\t  && rel->howto->size == 2\n\t  && rel->howto->bitsize == 32\n\t  && rel->howto->bitpos == 0\n\t  && rel->howto->src_mask == 0xffffffff\n\t  && rel->howto->dst_mask == 0xffffffff)\n\t{\n\t  bfd_vma val;\n\n\t  /* When pcrel_offset is not set, it means that the negative\n\t     of the address of the memory location is stored in the\n\t     memory location.  We must add it back in.  */\n\t  val = bfd_get_32 (abfd, (bfd_byte *) data + rel->address - offset);\n\t  val += rel->address;\n\t  bfd_put_32 (abfd, val, (bfd_byte *) data + rel->address - offset);\n\n\t  rel->howto = &nlm_i386_pcrel_howto;\n\t}\n    }\n\n  return TRUE;\n}",
+      "fn_code_pos": [
+        [
+          231,
+          0
+        ],
+        [
+          323,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nlm_i386_mangle_relocs",
+        "parameters": {
+          "abfd": "bfd",
+          "sec": "asection",
+          "data": "void",
+          "offset": "bfd_vma",
+          "count": "bfd_size_type"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "static bfd_boolean\nnlm_i386_write_external (bfd *abfd,\n\t\t\t bfd_size_type count,\n\t\t\t asymbol *sym,\n\t\t\t struct reloc_and_sec *relocs)\n{\n  unsigned int i;\n  bfd_byte len;\n  unsigned char temp[NLM_TARGET_LONG_SIZE];\n\n  len = strlen (sym->name);\n  if ((bfd_bwrite (&len, (bfd_size_type) sizeof (bfd_byte), abfd)\n       != sizeof (bfd_byte))\n      || bfd_bwrite (sym->name, (bfd_size_type) len, abfd) != len)\n    return FALSE;\n\n  bfd_put_32 (abfd, count, temp);\n  if (bfd_bwrite (temp, (bfd_size_type) sizeof (temp), abfd) != sizeof (temp))\n    return FALSE;\n\n  for (i = 0; i < count; i++)\n    if (! nlm_i386_write_import (abfd, relocs[i].sec, relocs[i].rel))\n      return FALSE;\n\n  return TRUE;\n}",
+      "fn_code_pos": [
+        [
+          373,
+          0
+        ],
+        [
+          398,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "nlm_i386_write_external",
+        "parameters": {
+          "abfd": "bfd",
+          "count": "bfd_size_type",
+          "sym": "asymbol",
+          "relocs": "struct reloc_and_sec"
+        },
+        "return_type": "bfd_boolean"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct nlm_relent",
+      {},
+      "",
+      [
+        330,
+        2
+      ],
+      [
+        330,
+        19
+      ]
+    ],
+    [
+      "struct nlm_relent",
+      {},
+      "",
+      [
+        353,
+        49
+      ],
+      [
+        353,
+        66
+      ]
+    ],
+    [
+      "struct reloc_and_sec",
+      {},
+      "",
+      [
+        377,
+        4
+      ],
+      [
+        377,
+        24
+      ]
+    ],
+    [
+      "struct nlm_backend_data",
+      {},
+      "",
+      [
+        402,
+        13
+      ],
+      [
+        402,
+        36
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"libbfd.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"nlm/i386-ext.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"libnlm.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"nlmswap.h\"\n",
+      [
+        400,
+        0
+      ],
+      [
+        401,
+        0
+      ]
+    ],
+    [
+      "#include \"nlm-target.h\"\n",
+      [
+        428,
+        0
+      ],
+      [
+        429,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

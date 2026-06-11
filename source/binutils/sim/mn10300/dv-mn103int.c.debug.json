@@ -1,0 +1,1366 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nattach_mn103int_regs (struct hw *me,\n\t\t      struct mn103int *controller)\n{\n  int i;\n  if (hw_find_property (me, \"reg\") == NULL)\n    hw_abort (me, \"Missing \\\"reg\\\" property\");\n  for (i = 0; i < NR_BLOCKS; i++)\n    {\n      unsigned_word attach_address;\n      int attach_space;\n      unsigned attach_size;\n      reg_property_spec reg;\n      if (!hw_find_reg_array_property (me, \"reg\", i, &reg))\n\thw_abort (me, \"\\\"reg\\\" property must contain three addr/size entries\");\n      hw_unit_address_to_attach_address (hw_parent (me),\n\t\t\t\t\t &reg.address,\n\t\t\t\t\t &attach_space,\n\t\t\t\t\t &attach_address,\n\t\t\t\t\t me);\n      controller->block[i].base = attach_address;\n      hw_unit_size_to_attach_size (hw_parent (me),\n\t\t\t\t   &reg.size,\n\t\t\t\t   &attach_size, me);\n      controller->block[i].bound = attach_address + (attach_size - 1);\n      hw_attach_address (hw_parent (me),\n\t\t\t 0,\n\t\t\t attach_space, attach_address, attach_size,\n\t\t\t me);\n    }\n}",
+      "fn_code_pos": [
+        [
+          297,
+          0
+        ],
+        [
+          327,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_mn103int_regs",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nmn103int_finish (struct hw *me)\n{\n  int gid;\n  struct mn103int *controller;\n\n  controller = HW_ZALLOC (me, struct mn103int);\n  set_hw_data (me, controller);\n  set_hw_io_read_buffer (me, mn103int_io_read_buffer);\n  set_hw_io_write_buffer (me, mn103int_io_write_buffer);\n  set_hw_ports (me, mn103int_ports);\n  set_hw_port_event (me, mn103int_port_event);\n  me->to_ioctl = mn103int_ioctl;\n\n  /* Attach ourself to our parent bus */\n  attach_mn103int_regs (me, controller);\n\n  /* Initialize all the groups according to their default configuration */\n  for (gid = 0; gid < NR_GROUPS; gid++)\n    {\n      struct mn103int_group *group = &controller->group[gid];\n      group->trigger = NEGATIVE_EDGE;\n      group->gid = gid;\n      if (FIRST_NMI_GROUP <= gid && gid <= LAST_NMI_GROUP)\n\t{\n\t  group->enable = 0xf;\n\t  group->type = NMI_GROUP;\n\t}\n      else if (FIRST_LEVEL_GROUP <= gid && gid <= LAST_LEVEL_GROUP)\n\t{\n\t  group->enable = 0x0;\n\t  group->type = LEVEL_GROUP;\n\t}\n      else\n\thw_abort (me, \"internal error - unknown group id\");\n    }\n}",
+      "fn_code_pos": [
+        [
+          329,
+          0
+        ],
+        [
+          365,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103int_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nfind_highest_interrupt_group (struct hw *me,\n\t\t\t      struct mn103int *controller)\n{\n  int gid;\n  int selected;\n\n  /* FIRST_NMI_GROUP (group zero) is used as a special default value\n     when searching for an interrupt group.*/\n  selected = FIRST_NMI_GROUP; \n  controller->group[FIRST_NMI_GROUP].level = 7;\n  \n  for (gid = FIRST_LEVEL_GROUP; gid <= LAST_LEVEL_GROUP; gid++)\n    {\n      struct mn103int_group *group = &controller->group[gid];\n      if ((group->request & group->enable) != 0)\n\t{\n\t  /* Remember, lower level, higher priority.  */\n\t  if (group->level < controller->group[selected].level)\n\t    {\n\t      selected = gid;\n\t    }\n\t}\n    }\n  return selected;\n}",
+      "fn_code_pos": [
+        [
+          372,
+          0
+        ],
+        [
+          397,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_highest_interrupt_group",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\npush_interrupt_level (struct hw *me,\n\t\t      struct mn103int *controller)\n{\n  int selected = find_highest_interrupt_group (me, controller);\n  int level = controller->group[selected].level;\n  HW_TRACE ((me, \"port-out - selected=%d level=%d\", selected, level));\n  hw_port_event (me, LEVEL_PORT, level);\n}",
+      "fn_code_pos": [
+        [
+          402,
+          0
+        ],
+        [
+          410,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "push_interrupt_level",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nmn103int_port_event (struct hw *me,\n\t\t     int my_port,\n\t\t     struct hw *source,\n\t\t     int source_port,\n\t\t     int level)\n{\n  struct mn103int *controller = hw_data (me);\n\n  switch (my_port)\n    {\n\n    case ACK_PORT:\n      {\n\tint selected = find_highest_interrupt_group (me, controller);\n\tif (controller->group[selected].level != level)\n\t  hw_abort (me, \"botched level synchronisation\");\n\tcontroller->interrupt_accepted_group = selected;\t\n\tHW_TRACE ((me, \"port-event port=ack level=%d - selected=%d\",\n\t\t   level, selected));\n\tbreak;\n      }\n\n    default:\n      {\n\tint gid;\n\tint iid;\n\tstruct mn103int_group *group;\n\tunsigned interrupt;\n\tif (my_port > NR_G_PORTS)\n\t  hw_abort (me, \"Event on unknown port %d\", my_port);\n\n\t/* map the port onto an interrupt group */\n\tgid = (my_port % NR_G_PORTS) / 4;\n\tgroup = &controller->group[gid];\n\tiid = (my_port % 4);\n\tinterrupt = 1 << iid;\n\n\t/* update our cached input */\n\tif (level)\n\t  group->input |= interrupt;\n\telse\n\t  group->input &= ~interrupt;\n\n\t/* update the request bits */\n\tswitch (group->trigger)\n\t  {\n\t  case ACTIVE_LOW:\n\t  case ACTIVE_HIGH:\n\t    if (level)\n\t      group->request |= interrupt;\n\t    break;\n\t  case NEGATIVE_EDGE:\n\t  case POSITIVE_EDGE:\n\t    group->request |= interrupt;\n\t  }\n\n\t/* force a corresponding output */\n\tswitch (group->type)\n\t  {\n\n\t  case NMI_GROUP:\n\t    {\n\t      /* for NMI's the event is the trigger */\n\t      HW_TRACE ((me, \"port-in port=%d group=%d interrupt=%d - NMI\",\n\t\t\t my_port, gid, iid));\n\t      if ((group->request & group->enable) != 0)\n\t\t{\n\t\t  HW_TRACE ((me, \"port-out NMI\"));\n\t\t  hw_port_event (me, NMI_PORT, 1);\n\t\t}\n\t      break;\n\t    }\n\t      \n\t  case LEVEL_GROUP:\n\t    {\n\t      /* if an interrupt is now pending */\n\t      HW_TRACE ((me, \"port-in port=%d group=%d interrupt=%d - INT\",\n\t\t\t my_port, gid, iid));\n\t      push_interrupt_level (me, controller);\n\t      break;\n\t    }\n\t  }\n\tbreak;\n      }\n\n    }\n}",
+      "fn_code_pos": [
+        [
+          415,
+          0
+        ],
+        [
+          502,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103int_port_event",
+        "parameters": {
+          "me": "struct hw",
+          "my_port": "int",
+          "source": "struct hw",
+          "source_port": "int",
+          "level": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static struct mn103int_group *\ndecode_group (struct hw *me,\n\t      struct mn103int *controller,\n\t      unsigned_word base,\n\t      unsigned_word *offset)\n{\n  int gid = (base / 4) % NR_GROUPS;\n  *offset = (base % 4);\n  return &controller->group[gid];\n}",
+      "fn_code_pos": [
+        [
+          506,
+          0
+        ],
+        [
+          515,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decode_group",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103int",
+          "base": "unsigned_word",
+          "offset": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned8\nread_icr (struct hw *me,\n\t  struct mn103int *controller,\n\t  unsigned_word base)\n{\n  unsigned_word offset;\n  struct mn103int_group *group = decode_group (me, controller, base, &offset);\n  unsigned8 val = 0;\n  switch (group->type)\n    {\n\n    case NMI_GROUP:\n      switch (offset)\n\t{\n\tcase 0:\n\t  val = INSERT_ID (group->request);\n\t  HW_TRACE ((me, \"read-icr group=%d:0 nmi 0x%02x\",\n\t\t     group->gid, val));\n\t  break;\n\tdefault:\n\t  break;\n\t}\n      break;\n\n    case LEVEL_GROUP:\n      switch (offset)\n\t{\n\tcase 0:\n\t  val = (INSERT_IR (group->request)\n\t\t | INSERT_ID (group->request & group->enable));\n\t  HW_TRACE ((me, \"read-icr group=%d:0 level 0x%02x\",\n\t\t     group->gid, val));\n\t  break;\n\tcase 1:\n\t  val = (INSERT_LV (group->level)\n\t\t | INSERT_IE (group->enable));\n\t  HW_TRACE ((me, \"read-icr level-%d:1 level 0x%02x\",\n\t\t     group->gid, val));\n\t  break;\n\t}\n      break;\n\n    default:\n      break;\n\n    }\n\n  return val;\n}",
+      "fn_code_pos": [
+        [
+          517,
+          0
+        ],
+        [
+          565,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_icr",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103int",
+          "base": "unsigned_word"
+        },
+        "return_type": "unsigned8"
+      }
+    },
+    {
+      "fn_code": "static void\nwrite_icr (struct hw *me,\n\t   struct mn103int *controller,\n\t   unsigned_word base,\n\t   unsigned8 val)\n{\n  unsigned_word offset;\n  struct mn103int_group *group = decode_group (me, controller, base, &offset);\n  switch (group->type)\n    {\n\n    case NMI_GROUP:\n      switch (offset)\n\t{\n\tcase 0:\n\t  HW_TRACE ((me, \"write-icr group=%d:0 nmi 0x%02x\",\n\t\t     group->gid, val));\n\t  group->request &= ~EXTRACT_ID (val);\n\t  break;\n\t  /* Special backdoor access to SYSEF flag from CPU.  See\n             interp.c:program_interrupt(). */\n\tcase 3:\n\t  HW_TRACE ((me, \"write-icr-special group=%d:0 nmi 0x%02x\",\n\t\t     group->gid, val));\n\t  group->request |= EXTRACT_ID (val);\n\tdefault:\n\t  break;\n\t}\n      break;\n\n    case LEVEL_GROUP:\n      switch (offset)\n\t{\n\tcase 0: /* request/detect */\n\t  /* Clear any ID bits and then set them according to IR */\n\t  HW_TRACE ((me, \"write-icr group=%d:0 level 0x%02x %x:%x:%x\",\n\t\t     group->gid, val,\n\t\t     group->request, EXTRACT_IR (val), EXTRACT_ID (val)));\n\t  group->request =\n\t    ((EXTRACT_IR (val) & EXTRACT_ID (val))\n\t     | (EXTRACT_IR (val) & group->request)\n\t     | (~EXTRACT_IR (val) & ~EXTRACT_ID (val) & group->request));\n\t  break;\n\tcase 1: /* level/enable */\n\t  HW_TRACE ((me, \"write-icr group=%d:1 level 0x%02x\",\n\t\t     group->gid, val));\n\t  group->level = EXTRACT_LV (val);\n\t  group->enable = EXTRACT_IE (val);\n\t  break;\n\tdefault:\n\t  /* ignore */\n\t  break;\n\t}\n      push_interrupt_level (me, controller);\n      break;\n\n    default:\n      break;\n\n    }\n}",
+      "fn_code_pos": [
+        [
+          567,
+          0
+        ],
+        [
+          627,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_icr",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103int",
+          "base": "unsigned_word",
+          "val": "unsigned8"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned8\nread_iagr (struct hw *me,\n\t   struct mn103int *controller,\n\t   unsigned_word offset)\n{\n  unsigned8 val;\n  switch (offset)\n    {\n    case 0:\n      {\n\tif (!(controller->group[controller->interrupt_accepted_group].request\n\t      & controller->group[controller->interrupt_accepted_group].enable))\n\t  {\n\t    /* oops, lost the request */\n\t    val = 0;\n\t    HW_TRACE ((me, \"read-iagr:0 lost-0\"));\n\t  }\n\telse\n\t  {\n\t    val = (controller->interrupt_accepted_group << 2);\n\t    HW_TRACE ((me, \"read-iagr:0 %d\", (int) val));\n\t  }\n\tbreak;\n      }\n    case 1:\n      val = 0;\n      HW_TRACE ((me, \"read-iagr:1 %d\", (int) val));\n      break;\n    default:\n      val = 0;\n      HW_TRACE ((me, \"read-iagr 0x%08lx bad offset\", (long) offset));\n      break;\n    }\n  return val;\n}",
+      "fn_code_pos": [
+        [
+          632,
+          0
+        ],
+        [
+          666,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_iagr",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103int",
+          "offset": "unsigned_word"
+        },
+        "return_type": "unsigned8"
+      }
+    },
+    {
+      "fn_code": "static struct mn103int_group *\nexternal_group (struct mn103int *controller,\n\t\tunsigned_word offset)\n{\n  switch (offset)\n    {\n    case 0:\n      return &controller->group[IRQ0_PORT/4];\n    case 1:\n      return &controller->group[IRQ4_PORT/4];\n    default:\n      return NULL;\n    }\n}",
+      "fn_code_pos": [
+        [
+          672,
+          0
+        ],
+        [
+          685,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "external_group",
+        "parameters": {
+          "controller": "struct mn103int",
+          "offset": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned8\nread_extmd (struct hw *me,\n\t    struct mn103int *controller,\n\t    unsigned_word offset)\n{\n  int gid;\n  unsigned8 val = 0;\n  struct mn103int_group *group = external_group (controller, offset);\n  if (group != NULL)\n    {\n      for (gid = 0; gid < 4; gid++)\n\t{\n\t  val |= (group[gid].trigger << (gid * 2));\n\t}\n    }\n  HW_TRACE ((me, \"read-extmd 0x%02lx\", (long) val));\n  return val;\n}",
+      "fn_code_pos": [
+        [
+          687,
+          0
+        ],
+        [
+          704,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_extmd",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103int",
+          "offset": "unsigned_word"
+        },
+        "return_type": "unsigned8"
+      }
+    },
+    {
+      "fn_code": "static void\nwrite_extmd (struct hw *me,\n\t     struct mn103int *controller,\n\t     unsigned_word offset,\n\t     unsigned8 val)\n{\n  int gid;\n  struct mn103int_group *group = external_group (controller, offset);\n  if (group != NULL)\n    {\n      for (gid = 0; gid < 4; gid++)\n\t{\n\t  group[gid].trigger = (val >> (gid * 2)) & 0x3;\n\t  /* MAYBE: interrupts already pending? */\n\t}\n    }\n  HW_TRACE ((me, \"write-extmd 0x%02lx\", (long) val));\n}",
+      "fn_code_pos": [
+        [
+          706,
+          0
+        ],
+        [
+          723,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_extmd",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103int",
+          "offset": "unsigned_word",
+          "val": "unsigned8"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ndecode_addr (struct hw *me,\n\t     struct mn103int *controller,\n\t     unsigned_word address,\n\t     unsigned_word *offset)\n{\n  int i;\n  for (i = 0; i < NR_BLOCKS; i++)\n    {\n      if (address >= controller->block[i].base\n\t  && address <= controller->block[i].bound)\n\t{\n\t  *offset = address - controller->block[i].base;\n\t  return i;\n\t}\n    }\n  hw_abort (me, \"bad address\");\n  return -1;\n}",
+      "fn_code_pos": [
+        [
+          728,
+          0
+        ],
+        [
+          746,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decode_addr",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103int",
+          "address": "unsigned_word",
+          "offset": "unsigned_word"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nmn103int_io_read_buffer (struct hw *me,\n\t\t\t void *dest,\n\t\t\t int space,\n\t\t\t unsigned_word base,\n\t\t\t unsigned nr_bytes)\n{\n  struct mn103int *controller = hw_data (me);\n  unsigned8 *buf = dest;\n  unsigned byte;\n  /* HW_TRACE ((me, \"read 0x%08lx %d\", (long) base, (int) nr_bytes)); */\n  for (byte = 0; byte < nr_bytes; byte++)\n    {\n      unsigned_word address = base + byte;\n      unsigned_word offset;\n      switch (decode_addr (me, controller, address, &offset))\n\t{\n\tcase ICR_BLOCK:\n\t  buf[byte] = read_icr (me, controller, offset);\n\t  break;\n\tcase IAGR_BLOCK:\n\t  buf[byte] = read_iagr (me, controller, offset);\n\t  break;\n\tcase EXTMD_BLOCK:\n\t  buf[byte] = read_extmd (me, controller, offset);\n\t  break;\n\tdefault:\n\t  hw_abort (me, \"bad switch\");\n\t}\n    }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          748,
+          0
+        ],
+        [
+          779,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103int_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nmn103int_io_write_buffer (struct hw *me,\n\t\t\t  const void *source,\n\t\t\t  int space,\n\t\t\t  unsigned_word base,\n\t\t\t  unsigned nr_bytes)\n{\n  struct mn103int *controller = hw_data (me);\n  const unsigned8 *buf = source;\n  unsigned byte;\n  /* HW_TRACE ((me, \"write 0x%08lx %d\", (long) base, (int) nr_bytes)); */\n  for (byte = 0; byte < nr_bytes; byte++)\n    {\n      unsigned_word address = base + byte;\n      unsigned_word offset;\n      switch (decode_addr (me, controller, address, &offset))\n\t{\n\tcase ICR_BLOCK:\n\t  write_icr (me, controller, offset, buf[byte]);\n\t  break;\n\tcase IAGR_BLOCK:\n\t  /* not allowed */\n\t  break;\n\tcase EXTMD_BLOCK:\n\t  write_extmd (me, controller, offset, buf[byte]);\n\t  break;\n\tdefault:\n\t  hw_abort (me, \"bad switch\");\n\t}\n    }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          781,
+          0
+        ],
+        [
+          812,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103int_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nmn103int_ioctl(struct hw *me,\n\t       hw_ioctl_request request,\n\t       va_list ap)\n{\n  struct mn103int *controller = (struct mn103int *)hw_data(me);\n  controller->group[0].request = EXTRACT_ID(4);\n  mn103int_port_event(me, 2 /* nmi_port(syserr) */, NULL, 0, 0);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          814,
+          0
+        ],
+        [
+          823,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103int_ioctl",
+        "parameters": {
+          "me": "struct hw",
+          "request": "hw_ioctl_request",
+          "ap": "va_list"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "decode_group (struct hw *me,\n\t      struct mn103int *controller,\n\t      unsigned_word base,\n\t      unsigned_word *offset)",
+      "fn_dec_pos": [
+        [
+          507,
+          0
+        ],
+        [
+          510,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decode_group",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct mn103int",
+          "base": "unsigned_word",
+          "offset": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "external_group (struct mn103int *controller,\n\t\tunsigned_word offset)",
+      "fn_dec_pos": [
+        [
+          673,
+          0
+        ],
+        [
+          674,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "external_group",
+        "parameters": {
+          "controller": "struct mn103int",
+          "offset": "unsigned_word"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct mn103int_group {\n  int gid;\n  int level;\n  unsigned enable;\n  unsigned request;\n  unsigned input;\n  enum mn103int_trigger trigger;\n  enum mn103int_type type;\n}",
+      {
+        "gid": "int",
+        "level": "int",
+        "enable": "unsigned",
+        "request": "unsigned",
+        "input": "unsigned",
+        "trigger": "enum mn103int_trigger",
+        "type": "enum mn103int_type"
+      },
+      "mn103int_group",
+      [
+        124,
+        0
+      ],
+      [
+        132,
+        1
+      ]
+    ],
+    [
+      "struct mn103int_block {\n  unsigned_word base;\n  unsigned_word bound;\n}",
+      {
+        "base": "unsigned_word",
+        "bound": "unsigned_word"
+      },
+      "mn103int_block",
+      [
+        148,
+        0
+      ],
+      [
+        151,
+        1
+      ]
+    ],
+    [
+      "struct mn103int {\n  struct mn103int_block block[NR_BLOCKS];\n  struct mn103int_group group[NR_GROUPS];\n  unsigned interrupt_accepted_group;\n}",
+      {
+        "block[NR_BLOCKS]": "struct mn103int_block",
+        "group[NR_GROUPS]": "struct mn103int_group",
+        "interrupt_accepted_group": "unsigned"
+      },
+      "mn103int",
+      [
+        156,
+        0
+      ],
+      [
+        160,
+        1
+      ]
+    ],
+    [
+      "struct mn103int_group {\n  int gid;\n  int level;\n  unsigned enable;\n  unsigned request;\n  unsigned input;\n  enum mn103int_trigger trigger;\n  enum mn103int_type type;\n}",
+      {
+        "gid": "int",
+        "level": "int",
+        "enable": "unsigned",
+        "request": "unsigned",
+        "input": "unsigned",
+        "trigger": "enum mn103int_trigger",
+        "type": "enum mn103int_type"
+      },
+      "mn103int_group",
+      [
+        124,
+        0
+      ],
+      [
+        132,
+        1
+      ]
+    ],
+    [
+      "struct mn103int_block {\n  unsigned_word base;\n  unsigned_word bound;\n}",
+      {
+        "base": "unsigned_word",
+        "bound": "unsigned_word"
+      },
+      "mn103int_block",
+      [
+        148,
+        0
+      ],
+      [
+        151,
+        1
+      ]
+    ],
+    [
+      "struct mn103int {\n  struct mn103int_block block[NR_BLOCKS];\n  struct mn103int_group group[NR_GROUPS];\n  unsigned interrupt_accepted_group;\n}",
+      {
+        "block[NR_BLOCKS]": "struct mn103int_block",
+        "group[NR_GROUPS]": "struct mn103int_group",
+        "interrupt_accepted_group": "unsigned"
+      },
+      "mn103int",
+      [
+        156,
+        0
+      ],
+      [
+        160,
+        1
+      ]
+    ],
+    [
+      "struct mn103int_block",
+      {},
+      "",
+      [
+        157,
+        2
+      ],
+      [
+        157,
+        23
+      ]
+    ],
+    [
+      "struct mn103int_group",
+      {},
+      "",
+      [
+        158,
+        2
+      ],
+      [
+        158,
+        23
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        212,
+        13
+      ],
+      [
+        212,
+        38
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        298,
+        22
+      ],
+      [
+        298,
+        31
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        299,
+        8
+      ],
+      [
+        299,
+        23
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        330,
+        17
+      ],
+      [
+        330,
+        26
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        333,
+        2
+      ],
+      [
+        333,
+        17
+      ]
+    ],
+    [
+      "struct mn103int_group",
+      {},
+      "",
+      [
+        349,
+        6
+      ],
+      [
+        349,
+        27
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        373,
+        30
+      ],
+      [
+        373,
+        39
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        374,
+        9
+      ],
+      [
+        374,
+        24
+      ]
+    ],
+    [
+      "struct mn103int_group",
+      {},
+      "",
+      [
+        386,
+        6
+      ],
+      [
+        386,
+        27
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        403,
+        22
+      ],
+      [
+        403,
+        31
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        404,
+        8
+      ],
+      [
+        404,
+        23
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        416,
+        21
+      ],
+      [
+        416,
+        30
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        418,
+        7
+      ],
+      [
+        418,
+        16
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        422,
+        2
+      ],
+      [
+        422,
+        17
+      ]
+    ],
+    [
+      "struct mn103int_group",
+      {},
+      "",
+      [
+        442,
+        1
+      ],
+      [
+        442,
+        22
+      ]
+    ],
+    [
+      "struct mn103int_group",
+      {},
+      "",
+      [
+        506,
+        7
+      ],
+      [
+        506,
+        28
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        507,
+        14
+      ],
+      [
+        507,
+        23
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        508,
+        7
+      ],
+      [
+        508,
+        22
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        518,
+        10
+      ],
+      [
+        518,
+        19
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        519,
+        3
+      ],
+      [
+        519,
+        18
+      ]
+    ],
+    [
+      "struct mn103int_group",
+      {},
+      "",
+      [
+        523,
+        2
+      ],
+      [
+        523,
+        23
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        568,
+        11
+      ],
+      [
+        568,
+        20
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        569,
+        4
+      ],
+      [
+        569,
+        19
+      ]
+    ],
+    [
+      "struct mn103int_group",
+      {},
+      "",
+      [
+        574,
+        2
+      ],
+      [
+        574,
+        23
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        633,
+        11
+      ],
+      [
+        633,
+        20
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        634,
+        4
+      ],
+      [
+        634,
+        19
+      ]
+    ],
+    [
+      "struct mn103int_group",
+      {},
+      "",
+      [
+        672,
+        7
+      ],
+      [
+        672,
+        28
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        673,
+        16
+      ],
+      [
+        673,
+        31
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        688,
+        12
+      ],
+      [
+        688,
+        21
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        689,
+        5
+      ],
+      [
+        689,
+        20
+      ]
+    ],
+    [
+      "struct mn103int_group",
+      {},
+      "",
+      [
+        694,
+        2
+      ],
+      [
+        694,
+        23
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        707,
+        13
+      ],
+      [
+        707,
+        22
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        708,
+        6
+      ],
+      [
+        708,
+        21
+      ]
+    ],
+    [
+      "struct mn103int_group",
+      {},
+      "",
+      [
+        713,
+        2
+      ],
+      [
+        713,
+        23
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        729,
+        13
+      ],
+      [
+        729,
+        22
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        730,
+        6
+      ],
+      [
+        730,
+        21
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        749,
+        25
+      ],
+      [
+        749,
+        34
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        755,
+        2
+      ],
+      [
+        755,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        782,
+        26
+      ],
+      [
+        782,
+        35
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        788,
+        2
+      ],
+      [
+        788,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        815,
+        15
+      ],
+      [
+        815,
+        24
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        819,
+        2
+      ],
+      [
+        819,
+        17
+      ]
+    ],
+    [
+      "struct mn103int",
+      {},
+      "",
+      [
+        819,
+        33
+      ],
+      [
+        819,
+        48
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        826,
+        6
+      ],
+      [
+        826,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-hw.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum mn103int_trigger {\n  ACTIVE_LOW,\n  ACTIVE_HIGH,\n  POSITIVE_EDGE,\n  NEGATIVE_EDGE,\n}",
+      {
+        "ACTIVE_LOW": "",
+        "ACTIVE_HIGH": "",
+        "POSITIVE_EDGE": "",
+        "NEGATIVE_EDGE": ""
+      },
+      "mn103int_trigger",
+      [
+        112,
+        0
+      ],
+      [
+        117,
+        1
+      ]
+    ],
+    [
+      "enum mn103int_type {\n  NMI_GROUP,\n  LEVEL_GROUP,\n}",
+      {
+        "NMI_GROUP": "",
+        "LEVEL_GROUP": ""
+      },
+      "mn103int_type",
+      [
+        119,
+        0
+      ],
+      [
+        122,
+        1
+      ]
+    ],
+    [
+      "enum mn103int_trigger",
+      {},
+      "",
+      [
+        130,
+        2
+      ],
+      [
+        130,
+        23
+      ]
+    ],
+    [
+      "enum mn103int_type",
+      {},
+      "",
+      [
+        131,
+        2
+      ],
+      [
+        131,
+        20
+      ]
+    ],
+    [
+      "enum {\n  FIRST_NMI_GROUP = 0,\n  LAST_NMI_GROUP = 1,\n  FIRST_LEVEL_GROUP = 2,\n  LAST_LEVEL_GROUP = 30,\n  NR_GROUPS,\n}",
+      {
+        "FIRST_NMI_GROUP": "",
+        "LAST_NMI_GROUP": "",
+        "FIRST_LEVEL_GROUP": "",
+        "LAST_LEVEL_GROUP": "",
+        "NR_GROUPS": ""
+      },
+      "",
+      [
+        134,
+        0
+      ],
+      [
+        140,
+        1
+      ]
+    ],
+    [
+      "enum {\n  LOWEST_LEVEL = 7,\n}",
+      {
+        "LOWEST_LEVEL": ""
+      },
+      "",
+      [
+        142,
+        0
+      ],
+      [
+        144,
+        1
+      ]
+    ],
+    [
+      "enum { ICR_BLOCK, IAGR_BLOCK, EXTMD_BLOCK, NR_BLOCKS }",
+      {
+        "ICR_BLOCK": "",
+        "IAGR_BLOCK": "",
+        "EXTMD_BLOCK": "",
+        "NR_BLOCKS": ""
+      },
+      "",
+      [
+        153,
+        0
+      ],
+      [
+        153,
+        54
+      ]
+    ],
+    [
+      "enum {\n  NMI_PORT,\n  LEVEL_PORT,\n}",
+      {
+        "NMI_PORT": "",
+        "LEVEL_PORT": ""
+      },
+      "",
+      [
+        166,
+        0
+      ],
+      [
+        169,
+        1
+      ]
+    ],
+    [
+      "enum {\n  G0_PORT = 0,\n  G1_PORT = 4,\n  G2_PORT = 8,\n  G3_PORT = 12,\n  G4_PORT = 16,\n  G5_PORT = 20,\n  G6_PORT = 24,\n  G7_PORT = 28,\n  G8_PORT = 32,\n  G9_PORT = 36,\n  G10_PORT = 40,\n  G11_PORT = 44,\n  G12_PORT = 48,\n  G13_PORT = 52,\n  G14_PORT = 56,\n  G15_PORT = 60,\n  G16_PORT = 64,\n  G17_PORT = 68,\n  G18_PORT = 72,\n  G19_PORT = 76,\n  G20_PORT = 80,\n  G21_PORT = 84,\n  G22_PORT = 88,\n  G23_PORT = 92,\n  IRQ0_PORT = G23_PORT,\n  G24_PORT = 96,\n  G25_PORT = 100,\n  G26_PORT = 104,\n  G27_PORT = 108,\n  IRQ4_PORT = G27_PORT,\n  G28_PORT = 112,\n  G29_PORT = 116,\n  G30_PORT = 120,\n  NR_G_PORTS = 124,\n  ACK_PORT,\n}",
+      {
+        "G0_PORT": "",
+        "G1_PORT": "",
+        "G2_PORT": "",
+        "G3_PORT": "",
+        "G4_PORT": "",
+        "G5_PORT": "",
+        "G6_PORT": "",
+        "G7_PORT": "",
+        "G8_PORT": "",
+        "G9_PORT": "",
+        "G10_PORT": "",
+        "G11_PORT": "",
+        "G12_PORT": "",
+        "G13_PORT": "",
+        "G14_PORT": "",
+        "G15_PORT": "",
+        "G16_PORT": "",
+        "G17_PORT": "",
+        "G18_PORT": "",
+        "G19_PORT": "",
+        "G20_PORT": "",
+        "G21_PORT": "",
+        "G22_PORT": "",
+        "G23_PORT": "",
+        "IRQ0_PORT": "",
+        "G24_PORT": "",
+        "G25_PORT": "",
+        "G26_PORT": "",
+        "G27_PORT": "",
+        "IRQ4_PORT": "",
+        "G28_PORT": "",
+        "G29_PORT": "",
+        "G30_PORT": "",
+        "NR_G_PORTS": "",
+        "ACK_PORT": ""
+      },
+      "",
+      [
+        174,
+        0
+      ],
+      [
+        210,
+        1
+      ]
+    ]
+  ]
+}

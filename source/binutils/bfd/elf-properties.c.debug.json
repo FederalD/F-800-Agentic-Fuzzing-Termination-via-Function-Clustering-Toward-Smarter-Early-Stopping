@@ -1,0 +1,359 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "elf_property *\n_bfd_elf_get_property (bfd *abfd, unsigned int type, unsigned int datasz)\n{\n  elf_property_list *p, **lastp;\n\n  if (bfd_get_flavour (abfd) != bfd_target_elf_flavour)\n    {\n      /* Never should happen.  */\n      abort ();\n    }\n\n  /* Keep the property list in order of type.  */\n  lastp = &elf_properties (abfd);\n  for (p = *lastp; p; p = p->next)\n    {\n      /* Reuse the existing entry.  */\n      if (type == p->property.pr_type)\n\t{\n\t  if (datasz > p->property.pr_datasz)\n\t    {\n\t      /* This can happen when mixing 32-bit and 64-bit objects.  */\n\t      p->property.pr_datasz = datasz;\n\t    }\n\t  return &p->property;\n\t}\n      else if (type < p->property.pr_type)\n\tbreak;\n      lastp = &p->next;\n    }\n  p = (elf_property_list *) bfd_alloc (abfd, sizeof (*p));\n  if (p == NULL)\n    {\n      _bfd_error_handler (_(\"%B: out of memory in _bfd_elf_get_property\"),\n\t\t\t  abfd);\n      _exit (EXIT_FAILURE);\n    }\n  memset (p, 0, sizeof (*p));\n  p->property.pr_type = type;\n  p->property.pr_datasz = datasz;\n  p->next = *lastp;\n  *lastp = p;\n  return &p->property;\n}",
+      "fn_code_pos": [
+        [
+          32,
+          0
+        ],
+        [
+          74,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_bfd_elf_get_property",
+        "parameters": {
+          "abfd": "bfd",
+          "type": "unsigned int",
+          "datasz": "unsigned int"
+        },
+        "return_type": "elf_property"
+      }
+    },
+    {
+      "fn_code": "bfd_boolean\n_bfd_elf_parse_gnu_properties (bfd *abfd, Elf_Internal_Note *note)\n{\n  const struct elf_backend_data *bed = get_elf_backend_data (abfd);\n  unsigned int align_size = bed->s->elfclass == ELFCLASS64 ? 8 : 4;\n  bfd_byte *ptr = (bfd_byte *) note->descdata;\n  bfd_byte *ptr_end = ptr + note->descsz;\n\n  if (note->descsz < 8 || (note->descsz % align_size) != 0)\n    {\nbad_size:\n      _bfd_error_handler\n\t(_(\"warning: %B: corrupt GNU_PROPERTY_TYPE (%ld) size: %#lx\"),\n\t abfd, note->type, note->descsz);\n      return FALSE;\n    }\n\n  while (1)\n    {\n      unsigned int type = bfd_h_get_32 (abfd, ptr);\n      unsigned int datasz = bfd_h_get_32 (abfd, ptr + 4);\n      elf_property *prop;\n\n      ptr += 8;\n\n      if ((ptr + datasz) > ptr_end)\n\t{\n\t  _bfd_error_handler\n\t    (_(\"warning: %B: corrupt GNU_PROPERTY_TYPE (%ld) type (0x%x) datasz: 0x%x\"),\n\t     abfd, note->type, type, datasz);\n\t  /* Clear all properties.  */\n\t  elf_properties (abfd) = NULL;\n\t  return FALSE;\n\t}\n\n      if (type >= GNU_PROPERTY_LOPROC)\n\t{\n\t  if (bed->elf_machine_code == EM_NONE)\n\t    {\n\t      /* Ignore processor-specific properties with generic ELF\n\t\t target vector.  They should be handled by the matching\n\t\t ELF target vector.  */\n\t      goto next;\n\t    }\n\t  else if (type < GNU_PROPERTY_LOUSER\n\t\t   && bed->parse_gnu_properties)\n\t    {\n\t      enum elf_property_kind kind\n\t\t= bed->parse_gnu_properties (abfd, type, ptr, datasz);\n\t      if (kind == property_corrupt)\n\t\t{\n\t\t  /* Clear all properties.  */\n\t\t  elf_properties (abfd) = NULL;\n\t\t  return FALSE;\n\t\t}\n\t      else if (kind != property_ignored)\n\t\tgoto next;\n\t    }\n\t}\n      else\n\t{\n\t  switch (type)\n\t    {\n\t    case GNU_PROPERTY_STACK_SIZE:\n\t      if (datasz != align_size)\n\t\t{\n\t\t  _bfd_error_handler\n\t\t    (_(\"warning: %B: corrupt stack size: 0x%x\"),\n\t\t     abfd, datasz);\n\t\t  /* Clear all properties.  */\n\t\t  elf_properties (abfd) = NULL;\n\t\t  return FALSE;\n\t\t}\n\t      prop = _bfd_elf_get_property (abfd, type, datasz);\n\t      if (datasz == 8)\n\t\tprop->u.number = bfd_h_get_64 (abfd, ptr);\n\t      else\n\t\tprop->u.number = bfd_h_get_32 (abfd, ptr);\n\t      prop->pr_kind = property_number;\n\t      goto next;\n\n\t    case GNU_PROPERTY_NO_COPY_ON_PROTECTED:\n\t      if (datasz != 0)\n\t\t{\n\t\t  _bfd_error_handler\n\t\t    (_(\"warning: %B: corrupt no copy on protected size: 0x%x\"),\n\t\t     abfd, datasz);\n\t\t  /* Clear all properties.  */\n\t\t  elf_properties (abfd) = NULL;\n\t\t  return FALSE;\n\t\t}\n\t      prop = _bfd_elf_get_property (abfd, type, datasz);\n\t      prop->pr_kind = property_number;\n\t      goto next;\n\n\t    default:\n\t      break;\n\t    }\n\t}\n\n      _bfd_error_handler\n\t(_(\"warning: %B: unsupported GNU_PROPERTY_TYPE (%ld) type: 0x%x\"),\n\t abfd, note->type, type);\n\nnext:\n      ptr += (datasz + (align_size - 1)) & ~ (align_size - 1);\n      if (ptr == ptr_end)\n\tbreak;\n\n      if (ptr > (ptr_end - 8))\n\tgoto bad_size;\n    }\n\n  return TRUE;\n}",
+      "fn_code_pos": [
+        [
+          78,
+          0
+        ],
+        [
+          192,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_bfd_elf_parse_gnu_properties",
+        "parameters": {
+          "abfd": "bfd",
+          "note": "Elf_Internal_Note"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "static bfd_boolean\nelf_merge_gnu_properties (struct bfd_link_info *info, bfd *abfd,\n\t\t\t  elf_property *aprop, elf_property *bprop)\n{\n  const struct elf_backend_data *bed = get_elf_backend_data (abfd);\n  unsigned int pr_type = aprop != NULL ? aprop->pr_type : bprop->pr_type;\n\n  if (bed->merge_gnu_properties != NULL\n      && pr_type >= GNU_PROPERTY_LOPROC\n      && pr_type < GNU_PROPERTY_LOUSER)\n    return bed->merge_gnu_properties (info, abfd, aprop, bprop);\n\n  switch (pr_type)\n    {\n    case GNU_PROPERTY_STACK_SIZE:\n      if (aprop != NULL && bprop != NULL)\n\t{\n\t  if (bprop->u.number > aprop->u.number)\n\t    {\n\t      aprop->u.number = bprop->u.number;\n\t      return TRUE;\n\t    }\n\t  break;\n\t}\n      /* FALLTHROUGH */\n\n    case GNU_PROPERTY_NO_COPY_ON_PROTECTED:\n      /* Return TRUE if APROP is NULL to indicate that BPROP should\n\t be added to ABFD.  */\n      return aprop == NULL;\n\n    default:\n      /* Never should happen.  */\n      abort ();\n    }\n\n  return FALSE;\n}",
+      "fn_code_pos": [
+        [
+          198,
+          0
+        ],
+        [
+          235,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "elf_merge_gnu_properties",
+        "parameters": {
+          "info": "struct bfd_link_info",
+          "abfd": "bfd",
+          "aprop": "elf_property",
+          "bprop": "elf_property"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "static elf_property *\nelf_find_and_remove_property (elf_property_list **listp,\n\t\t\t      unsigned int type)\n{\n  elf_property_list *list;\n\n  for (list = *listp; list; list = list->next)\n    {\n      if (type == list->property.pr_type)\n\t{\n\t  /* Remove this property.  */\n\t  *listp = list->next;\n\t  return &list->property;\n\t}\n      else if (type < list->property.pr_type)\n\tbreak;\n      listp = &list->next;\n    }\n\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          240,
+          0
+        ],
+        [
+          260,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "elf_find_and_remove_property",
+        "parameters": {
+          "listp": "elf_property_list",
+          "type": "unsigned int"
+        },
+        "return_type": "elf_property"
+      }
+    },
+    {
+      "fn_code": "static void\nelf_merge_gnu_property_list (struct bfd_link_info *info, bfd *abfd,\n\t\t\t     elf_property_list **listp)\n{\n  elf_property_list *p, **lastp;\n  elf_property *pr;\n\n  /* Merge each GNU property in ABFD with the one on *LISTP.  */\n  lastp = &elf_properties (abfd);\n  for (p = *lastp; p; p = p->next)\n    {\n      pr = elf_find_and_remove_property (listp, p->property.pr_type);\n      /* Pass NULL to elf_merge_gnu_properties for the property which\n\t isn't on *LISTP.  */\n      elf_merge_gnu_properties (info, abfd, &p->property, pr);\n      if (p->property.pr_kind == property_remove)\n\t{\n\t  /* Remove this property.  */\n\t  *lastp = p->next;\n\t  continue;\n\t}\n      lastp = &p->next;\n    }\n\n  /* Merge the remaining properties on *LISTP with ABFD.  */\n  for (p = *listp; p != NULL; p = p->next)\n    if (elf_merge_gnu_properties (info, abfd, NULL, &p->property))\n      {\n\tpr = _bfd_elf_get_property (abfd, p->property.pr_type,\n\t\t\t\t    p->property.pr_datasz);\n\t/* It must be a new property.  */\n\tif (pr->pr_kind != property_unknown)\n\t  abort ();\n\t/* Add a new property.  */\n\t*pr = p->property;\n      }\n}",
+      "fn_code_pos": [
+        [
+          264,
+          0
+        ],
+        [
+          300,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "elf_merge_gnu_property_list",
+        "parameters": {
+          "info": "struct bfd_link_info",
+          "abfd": "bfd",
+          "listp": "elf_property_list"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "bfd *\n_bfd_elf_link_setup_gnu_properties (struct bfd_link_info *info)\n{\n  bfd *abfd, *first_pbfd = NULL;\n  elf_property_list *list;\n  asection *sec;\n  bfd_boolean has_properties = FALSE;\n  const struct elf_backend_data *bed\n    = get_elf_backend_data (info->output_bfd);\n  unsigned int elfclass = bed->s->elfclass;\n  int elf_machine_code = bed->elf_machine_code;\n\n  /* Find the first relocatable ELF input with GNU properties.  */\n  for (abfd = info->input_bfds; abfd != NULL; abfd = abfd->link.next)\n    if (bfd_get_flavour (abfd) == bfd_target_elf_flavour\n\t&& (abfd->flags & DYNAMIC) == 0\n\t&& elf_properties (abfd) != NULL)\n      {\n\thas_properties = TRUE;\n\n\t/* Ignore GNU properties from ELF objects with different machine\n\t   code or class.  */\n\tif ((elf_machine_code\n\t     == get_elf_backend_data (abfd)->elf_machine_code)\n\t    && (elfclass\n\t\t== get_elf_backend_data (abfd)->s->elfclass))\n\t  {\n\t    /* Keep .note.gnu.property section in FIRST_PBFD.  */\n\t    first_pbfd = abfd;\n\t    break;\n\t  }\n      }\n\n  /* Do nothing if there is no .note.gnu.property section.  */\n  if (!has_properties)\n    return NULL;\n\n  /* Merge .note.gnu.property sections.  */\n  for (abfd = info->input_bfds; abfd != NULL; abfd = abfd->link.next)\n    if (abfd != first_pbfd && (abfd->flags & DYNAMIC) == 0)\n      {\n\telf_property_list *null_ptr = NULL;\n\telf_property_list **listp = &null_ptr;\n\n\t/* Merge .note.gnu.property section in relocatable ELF input.  */\n\tif (bfd_get_flavour (abfd) == bfd_target_elf_flavour)\n\t  {\n\t    list = elf_properties (abfd);\n\n\t    /* Ignore GNU properties from ELF objects with different\n\t       machine code.  */\n\t    if (list != NULL\n\t\t&& (elf_machine_code\n\t\t    == get_elf_backend_data (abfd)->elf_machine_code))\n\t      listp = &elf_properties (abfd);\n\t  }\n\telse\n\t  list = NULL;\n\n\t/* Merge properties with FIRST_PBFD.  FIRST_PBFD can be NULL\n\t   when all properties are from ELF objects with different\n\t   machine code or class.  */\n\tif (first_pbfd != NULL)\n\t  elf_merge_gnu_property_list (info, first_pbfd, listp);\n\n\tif (list != NULL)\n\t  {\n\t    /* Discard .note.gnu.property section in the rest inputs.  */\n\t    sec = bfd_get_section_by_name (abfd,\n\t\t\t\t\t   NOTE_GNU_PROPERTY_SECTION_NAME);\n\t    sec->output_section = bfd_abs_section_ptr;\n\t  }\n      }\n\n  /* Rewrite .note.gnu.property section so that GNU properties are\n     always sorted by type even if input GNU properties aren't sorted.  */\n  if (first_pbfd != NULL)\n    {\n      unsigned int size;\n      unsigned int descsz;\n      bfd_byte *contents;\n      Elf_External_Note *e_note;\n      unsigned int align_size = bed->s->elfclass == ELFCLASS64 ? 8 : 4;\n\n      sec = bfd_get_section_by_name (first_pbfd,\n\t\t\t\t     NOTE_GNU_PROPERTY_SECTION_NAME);\n\n      /* Update stack size in .note.gnu.property with -z stack-size=N\n\t if N > 0.  */\n      if (info->stacksize > 0)\n\t{\n\t  elf_property *p;\n\t  bfd_vma stacksize = info->stacksize;\n\n\t  p = _bfd_elf_get_property (first_pbfd, GNU_PROPERTY_STACK_SIZE,\n\t\t\t\t     align_size);\n\t  if (p->pr_kind == property_unknown)\n\t    {\n\t      /* Create GNU_PROPERTY_STACK_SIZE.  */\n\t      p->u.number = stacksize;\n\t      p->pr_kind = property_number;\n\t    }\n\t  else if (stacksize > p->u.number)\n\t    p->u.number = stacksize;\n\t}\n      else if (elf_properties (first_pbfd) == NULL)\n\t{\n\t  /* Discard .note.gnu.property section if all properties have\n\t     been removed.  */\n\t  sec->output_section = bfd_abs_section_ptr;\n\t  return NULL;\n\t}\n\n      /* Compute the section size.  */\n      descsz = offsetof (Elf_External_Note, name[sizeof \"GNU\"]);\n      descsz = (descsz + 3) & -(unsigned int) 4;\n      size = descsz;\n      for (list = elf_properties (first_pbfd);\n\t   list != NULL;\n\t   list = list->next)\n\t{\n\t  /* There are 4 byte type + 4 byte datasz for each property.  */\n\t  size += 4 + 4 + list->property.pr_datasz;\n\t  /* Align each property.  */\n\t  size = (size + (align_size - 1)) & ~(align_size - 1);\n\t}\n\n      /* Update .note.gnu.property section now.  */\n      sec->size = size;\n      contents = (bfd_byte *) bfd_zalloc (first_pbfd, size);\n\n      e_note = (Elf_External_Note *) contents;\n      bfd_h_put_32 (first_pbfd, sizeof \"GNU\", &e_note->namesz);\n      bfd_h_put_32 (first_pbfd, size - descsz, &e_note->descsz);\n      bfd_h_put_32 (first_pbfd, NT_GNU_PROPERTY_TYPE_0, &e_note->type);\n      memcpy (e_note->name, \"GNU\", sizeof \"GNU\");\n\n      size = descsz;\n      for (list = elf_properties (first_pbfd);\n\t   list != NULL;\n\t   list = list->next)\n\t{\n\t  /* There are 4 byte type + 4 byte datasz for each property.  */\n\t  bfd_h_put_32 (first_pbfd, list->property.pr_type,\n\t\t\tcontents + size);\n\t  bfd_h_put_32 (first_pbfd, list->property.pr_datasz,\n\t\t\tcontents + size + 4);\n\t  size += 4 + 4;\n\n\t  /* Write out property value.  */\n\t  switch (list->property.pr_kind)\n\t    {\n\t    case property_number:\n\t      switch (list->property.pr_datasz)\n\t\t{\n\t\tdefault:\n\t\t  /* Never should happen.  */\n\t\t  abort ();\n\n\t\tcase 0:\n\t\t  break;\n\n\t\tcase 4:\n\t\t  bfd_h_put_32 (first_pbfd, list->property.u.number,\n\t\t\t\tcontents + size);\n\t\t  break;\n\n\t\tcase 8:\n\t\t  bfd_h_put_64 (first_pbfd, list->property.u.number,\n\t\t\t\tcontents + size);\n\t\t  break;\n\t\t}\n\t      break;\n\n\t    default:\n\t      /* Never should happen.  */\n\t      abort ();\n\t    }\n\t  size += list->property.pr_datasz;\n\n\t  /* Align each property.  */\n\t  size = (size + (align_size - 1)) & ~ (align_size - 1);\n\t}\n\n      /* Cache the section contents for elf_link_input_bfd.  */\n      elf_section_data (sec)->this_hdr.contents = contents;\n    }\n\n  return first_pbfd;\n}",
+      "fn_code_pos": [
+        [
+          305,
+          0
+        ],
+        [
+          494,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_bfd_elf_link_setup_gnu_properties",
+        "parameters": {
+          "info": "struct bfd_link_info"
+        },
+        "return_type": "bfd"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "_bfd_elf_get_property (bfd *abfd, unsigned int type, unsigned int datasz)",
+      "fn_dec_pos": [
+        [
+          33,
+          0
+        ],
+        [
+          33,
+          73
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_bfd_elf_get_property",
+        "parameters": {
+          "abfd": "bfd",
+          "type": "unsigned int",
+          "datasz": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "elf_find_and_remove_property (elf_property_list **listp,\n\t\t\t      unsigned int type)",
+      "fn_dec_pos": [
+        [
+          241,
+          0
+        ],
+        [
+          242,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "elf_find_and_remove_property",
+        "parameters": {
+          "listp": "elf_property_list",
+          "type": "unsigned int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "_bfd_elf_link_setup_gnu_properties (struct bfd_link_info *info)",
+      "fn_dec_pos": [
+        [
+          306,
+          0
+        ],
+        [
+          306,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_bfd_elf_link_setup_gnu_properties",
+        "parameters": {
+          "info": "struct bfd_link_info"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct elf_backend_data",
+      {},
+      "",
+      [
+        81,
+        8
+      ],
+      [
+        81,
+        31
+      ]
+    ],
+    [
+      "struct bfd_link_info",
+      {},
+      "",
+      [
+        199,
+        26
+      ],
+      [
+        199,
+        46
+      ]
+    ],
+    [
+      "struct elf_backend_data",
+      {},
+      "",
+      [
+        202,
+        8
+      ],
+      [
+        202,
+        31
+      ]
+    ],
+    [
+      "struct bfd_link_info",
+      {},
+      "",
+      [
+        265,
+        29
+      ],
+      [
+        265,
+        49
+      ]
+    ],
+    [
+      "struct bfd_link_info",
+      {},
+      "",
+      [
+        306,
+        36
+      ],
+      [
+        306,
+        56
+      ]
+    ],
+    [
+      "struct elf_backend_data",
+      {},
+      "",
+      [
+        312,
+        8
+      ],
+      [
+        312,
+        31
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"libbfd.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"elf-bfd.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum elf_property_kind",
+      {},
+      "",
+      [
+        125,
+        7
+      ],
+      [
+        125,
+        29
+      ]
+    ]
+  ]
+}

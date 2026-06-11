@@ -1,0 +1,1063 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static struct mdebug_extra_func_info *\nfind_proc_desc (CORE_ADDR pc)\n{\n  const struct block *b = block_for_pc (pc);\n  struct mdebug_extra_func_info *proc_desc = NULL;\n  struct symbol *sym = NULL;\n  const char *sh_name = NULL;\n\n  if (b)\n    {\n      CORE_ADDR startaddr;\n      find_pc_partial_function (pc, &sh_name, &startaddr, NULL);\n\n      if (startaddr > BLOCK_START (b))\n\t/* This is the \"pathological\" case referred to in a comment in\n\t   print_frame_info.  It might be better to move this check into\n\t   symbol reading.  */\n\tsym = NULL;\n      else\n\tsym = lookup_symbol (MDEBUG_EFI_SYMBOL_NAME, b, LABEL_DOMAIN,\n\t\t\t     0).symbol;\n    }\n\n  if (sym)\n    {\n      proc_desc = (struct mdebug_extra_func_info *) SYMBOL_VALUE_BYTES (sym);\n\n      /* Correct incorrect setjmp procedure descriptor from the library\n         to make backtrace through setjmp work.  */\n      if (proc_desc->pdr.pcreg == 0\n\t  && strcmp (sh_name, \"setjmp\") == 0)\n\t{\n\t  proc_desc->pdr.pcreg = ALPHA_RA_REGNUM;\n\t  proc_desc->pdr.regmask = 0x80000000;\n\t  proc_desc->pdr.regoffset = -4;\n\t}\n\n      /* If we never found a PDR for this function in symbol reading,\n\t then examine prologues to find the information.  */\n      if (proc_desc->pdr.framereg == -1)\n\tproc_desc = NULL;\n    }\n\n  return proc_desc;\n}",
+      "fn_code_pos": [
+        [
+          90,
+          0
+        ],
+        [
+          134,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_proc_desc",
+        "parameters": {
+          "pc": "CORE_ADDR"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nalpha_mdebug_frameless (struct mdebug_extra_func_info *proc_desc)\n{\n  return (PROC_FRAME_REG (proc_desc) == ALPHA_SP_REGNUM\n\t  && PROC_FRAME_OFFSET (proc_desc) == 0);\n}",
+      "fn_code_pos": [
+        [
+          138,
+          0
+        ],
+        [
+          143,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frameless",
+        "parameters": {
+          "proc_desc": "struct mdebug_extra_func_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\nalpha_mdebug_after_prologue (CORE_ADDR pc,\n\t\t\t     struct mdebug_extra_func_info *proc_desc)\n{\n  if (proc_desc)\n    {\n      /* If function is frameless, then we need to do it the hard way.  I\n         strongly suspect that frameless always means prologueless...  */\n      if (alpha_mdebug_frameless (proc_desc))\n\treturn 0;\n    }\n\n  return alpha_after_prologue (pc);\n}",
+      "fn_code_pos": [
+        [
+          148,
+          0
+        ],
+        [
+          161,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_after_prologue",
+        "parameters": {
+          "pc": "CORE_ADDR",
+          "proc_desc": "struct mdebug_extra_func_info"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static int\nalpha_mdebug_in_prologue (CORE_ADDR pc,\n\t\t\t  struct mdebug_extra_func_info *proc_desc)\n{\n  CORE_ADDR after_prologue_pc = alpha_mdebug_after_prologue (pc, proc_desc);\n  return (after_prologue_pc == 0 || pc < after_prologue_pc);\n}",
+      "fn_code_pos": [
+        [
+          166,
+          0
+        ],
+        [
+          172,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_in_prologue",
+        "parameters": {
+          "pc": "CORE_ADDR",
+          "proc_desc": "struct mdebug_extra_func_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static struct alpha_mdebug_unwind_cache *\nalpha_mdebug_frame_unwind_cache (struct frame_info *this_frame, \n\t\t\t\t void **this_prologue_cache)\n{\n  struct alpha_mdebug_unwind_cache *info;\n  struct mdebug_extra_func_info *proc_desc;\n  ULONGEST vfp;\n  CORE_ADDR pc, reg_position;\n  unsigned long mask;\n  int ireg, returnreg;\n\n  if (*this_prologue_cache)\n    return (struct alpha_mdebug_unwind_cache *) *this_prologue_cache;\n\n  info = FRAME_OBSTACK_ZALLOC (struct alpha_mdebug_unwind_cache);\n  *this_prologue_cache = info;\n  pc = get_frame_address_in_block (this_frame);\n\n  /* ??? We don't seem to be able to cache the lookup of the PDR\n     from alpha_mdebug_frame_p.  It'd be nice if we could change\n     the arguments to that function.  Oh well.  */\n  proc_desc = find_proc_desc (pc);\n  info->proc_desc = proc_desc;\n  gdb_assert (proc_desc != NULL);\n\n  info->saved_regs = trad_frame_alloc_saved_regs (this_frame);\n\n  /* The VFP of the frame is at FRAME_REG+FRAME_OFFSET.  */\n  vfp = get_frame_register_unsigned (this_frame, PROC_FRAME_REG (proc_desc));\n  vfp += PROC_FRAME_OFFSET (info->proc_desc);\n  info->vfp = vfp;\n\n  /* Fill in the offsets for the registers which gen_mask says were saved.  */\n\n  reg_position = vfp + PROC_REG_OFFSET (proc_desc);\n  mask = PROC_REG_MASK (proc_desc);\n  returnreg = PROC_PC_REG (proc_desc);\n\n  /* Note that RA is always saved first, regardless of its actual\n     register number.  */\n  if (mask & (1 << returnreg))\n    {\n      /* Clear bit for RA so we don't save it again later.  */\n      mask &= ~(1 << returnreg);\n\n      info->saved_regs[returnreg].addr = reg_position;\n      reg_position += 8;\n    }\n\n  for (ireg = 0; ireg <= 31; ++ireg)\n    if (mask & (1 << ireg))\n      {\n\tinfo->saved_regs[ireg].addr = reg_position;\n\treg_position += 8;\n      }\n\n  reg_position = vfp + PROC_FREG_OFFSET (proc_desc);\n  mask = PROC_FREG_MASK (proc_desc);\n\n  for (ireg = 0; ireg <= 31; ++ireg)\n    if (mask & (1 << ireg))\n      {\n\tinfo->saved_regs[ALPHA_FP0_REGNUM + ireg].addr = reg_position;\n\treg_position += 8;\n      }\n\n  /* The stack pointer of the previous frame is computed by popping\n     the current stack frame.  */\n  if (!trad_frame_addr_p (info->saved_regs, ALPHA_SP_REGNUM))\n   trad_frame_set_value (info->saved_regs, ALPHA_SP_REGNUM, vfp);\n\n  return info;\n}",
+      "fn_code_pos": [
+        [
+          187,
+          0
+        ],
+        [
+          259,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frame_unwind_cache",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_prologue_cache": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nalpha_mdebug_frame_this_id (struct frame_info *this_frame,\n\t\t\t    void **this_prologue_cache,\n\t\t\t    struct frame_id *this_id)\n{\n  struct alpha_mdebug_unwind_cache *info\n    = alpha_mdebug_frame_unwind_cache (this_frame, this_prologue_cache);\n\n  *this_id = frame_id_build (info->vfp, get_frame_func (this_frame));\n}",
+      "fn_code_pos": [
+        [
+          264,
+          0
+        ],
+        [
+          273,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frame_this_id",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_prologue_cache": "void",
+          "this_id": "struct frame_id"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static struct value *\nalpha_mdebug_frame_prev_register (struct frame_info *this_frame,\n\t\t\t\t  void **this_prologue_cache, int regnum)\n{\n  struct alpha_mdebug_unwind_cache *info\n    = alpha_mdebug_frame_unwind_cache (this_frame, this_prologue_cache);\n\n  /* The PC of the previous frame is stored in the link register of\n     the current frame.  Frob regnum so that we pull the value from\n     the correct place.  */\n  if (regnum == ALPHA_PC_REGNUM)\n    regnum = PROC_PC_REG (info->proc_desc);\n  \n  return trad_frame_get_prev_register (this_frame, info->saved_regs, regnum);\n}",
+      "fn_code_pos": [
+        [
+          277,
+          0
+        ],
+        [
+          291,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_prologue_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nalpha_mdebug_max_frame_size_exceeded (struct mdebug_extra_func_info *proc_desc)\n{\n  /* If frame offset is null, we can be in two cases: either the\n     function is frameless (the stack frame is null) or its\n     frame exceeds the maximum debuggable frame size (512 Kbytes).  */\n\n  return (PROC_FRAME_OFFSET (proc_desc) == 0\n\t  && !alpha_mdebug_frameless (proc_desc));\n}",
+      "fn_code_pos": [
+        [
+          296,
+          0
+        ],
+        [
+          305,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_max_frame_size_exceeded",
+        "parameters": {
+          "proc_desc": "struct mdebug_extra_func_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nalpha_mdebug_frame_sniffer (const struct frame_unwind *self,\n                            struct frame_info *this_frame,\n                            void **this_cache)\n{\n  CORE_ADDR pc = get_frame_address_in_block (this_frame);\n  struct mdebug_extra_func_info *proc_desc;\n\n  /* If this PC does not map to a PDR, then clearly this isn't an\n     mdebug frame.  */\n  proc_desc = find_proc_desc (pc);\n  if (proc_desc == NULL)\n    return 0;\n\n  /* If we're in the prologue, the PDR for this frame is not yet valid.\n     Say no here and we'll fall back on the heuristic unwinder.  */\n  if (alpha_mdebug_in_prologue (pc, proc_desc))\n    return 0;\n\n  /* If the maximum debuggable frame size has been exceeded, the\n     proc desc is bogus.  Fall back on the heuristic unwinder.  */\n  if (alpha_mdebug_max_frame_size_exceeded (proc_desc))\n    return 0;\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          307,
+          0
+        ],
+        [
+          332,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frame_sniffer",
+        "parameters": {
+          "self": "struct frame_unwind",
+          "this_frame": "struct frame_info",
+          "this_cache": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\nalpha_mdebug_frame_base_address (struct frame_info *this_frame,\n\t\t\t\t void **this_prologue_cache)\n{\n  struct alpha_mdebug_unwind_cache *info\n    = alpha_mdebug_frame_unwind_cache (this_frame, this_prologue_cache);\n\n  return info->vfp;\n}",
+      "fn_code_pos": [
+        [
+          343,
+          0
+        ],
+        [
+          351,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frame_base_address",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_prologue_cache": "void"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\nalpha_mdebug_frame_locals_address (struct frame_info *this_frame,\n\t\t\t\t   void **this_prologue_cache)\n{\n  struct alpha_mdebug_unwind_cache *info\n    = alpha_mdebug_frame_unwind_cache (this_frame, this_prologue_cache);\n\n  return info->vfp - PROC_LOCALOFF (info->proc_desc);\n}",
+      "fn_code_pos": [
+        [
+          353,
+          0
+        ],
+        [
+          361,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frame_locals_address",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_prologue_cache": "void"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\nalpha_mdebug_frame_args_address (struct frame_info *this_frame,\n\t\t\t\t void **this_prologue_cache)\n{\n  struct alpha_mdebug_unwind_cache *info\n    = alpha_mdebug_frame_unwind_cache (this_frame, this_prologue_cache);\n\n  return info->vfp - ALPHA_NUM_ARG_REGS * 8;\n}",
+      "fn_code_pos": [
+        [
+          363,
+          0
+        ],
+        [
+          371,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frame_args_address",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_prologue_cache": "void"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static const struct frame_base *\nalpha_mdebug_frame_base_sniffer (struct frame_info *this_frame)\n{\n  CORE_ADDR pc = get_frame_address_in_block (this_frame);\n  struct mdebug_extra_func_info *proc_desc;\n\n  /* If this PC does not map to a PDR, then clearly this isn't an\n     mdebug frame.  */\n  proc_desc = find_proc_desc (pc);\n  if (proc_desc == NULL)\n    return NULL;\n\n  /* If the maximum debuggable frame size has been exceeded, the\n     proc desc is bogus.  Fall back on the heuristic unwinder.  */\n  if (alpha_mdebug_max_frame_size_exceeded (proc_desc))\n    return 0;\n\n  return &alpha_mdebug_frame_base;\n}",
+      "fn_code_pos": [
+        [
+          380,
+          0
+        ],
+        [
+          398,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frame_base_sniffer",
+        "parameters": {
+          "this_frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\nalpha_mdebug_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)\n{\n  frame_unwind_append_unwinder (gdbarch, &alpha_mdebug_frame_unwind);\n  frame_base_append_sniffer (gdbarch, alpha_mdebug_frame_base_sniffer);\n}",
+      "fn_code_pos": [
+        [
+          401,
+          0
+        ],
+        [
+          406,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_init_abi",
+        "parameters": {
+          "info": "struct gdbarch_info",
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "find_proc_desc (CORE_ADDR pc)",
+      "fn_dec_pos": [
+        [
+          91,
+          0
+        ],
+        [
+          91,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_proc_desc",
+        "parameters": {
+          "pc": "CORE_ADDR"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "alpha_mdebug_frame_unwind_cache (struct frame_info *this_frame, \n\t\t\t\t void **this_prologue_cache)",
+      "fn_dec_pos": [
+        [
+          188,
+          0
+        ],
+        [
+          189,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frame_unwind_cache",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_prologue_cache": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "alpha_mdebug_frame_prev_register (struct frame_info *this_frame,\n\t\t\t\t  void **this_prologue_cache, int regnum)",
+      "fn_dec_pos": [
+        [
+          278,
+          0
+        ],
+        [
+          279,
+          45
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_prologue_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "alpha_mdebug_frame_base_sniffer (struct frame_info *this_frame)",
+      "fn_dec_pos": [
+        [
+          381,
+          0
+        ],
+        [
+          381,
+          63
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "alpha_mdebug_frame_base_sniffer",
+        "parameters": {
+          "this_frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct alpha_mdebug_unwind_cache\n{\n  struct mdebug_extra_func_info *proc_desc;\n  CORE_ADDR vfp;\n  struct trad_frame_saved_reg *saved_regs;\n}",
+      {
+        "*proc_desc": "struct mdebug_extra_func_info",
+        "vfp": "CORE_ADDR",
+        "*saved_regs": "struct trad_frame_saved_reg"
+      },
+      "alpha_mdebug_unwind_cache",
+      [
+        177,
+        0
+      ],
+      [
+        182,
+        1
+      ]
+    ],
+    [
+      "struct mdebug_extra_func_info",
+      {},
+      "",
+      [
+        90,
+        7
+      ],
+      [
+        90,
+        36
+      ]
+    ],
+    [
+      "struct block",
+      {},
+      "",
+      [
+        93,
+        8
+      ],
+      [
+        93,
+        20
+      ]
+    ],
+    [
+      "struct mdebug_extra_func_info",
+      {},
+      "",
+      [
+        94,
+        2
+      ],
+      [
+        94,
+        31
+      ]
+    ],
+    [
+      "struct symbol",
+      {},
+      "",
+      [
+        95,
+        2
+      ],
+      [
+        95,
+        15
+      ]
+    ],
+    [
+      "struct mdebug_extra_func_info",
+      {},
+      "",
+      [
+        115,
+        19
+      ],
+      [
+        115,
+        48
+      ]
+    ],
+    [
+      "struct mdebug_extra_func_info",
+      {},
+      "",
+      [
+        139,
+        24
+      ],
+      [
+        139,
+        53
+      ]
+    ],
+    [
+      "struct mdebug_extra_func_info",
+      {},
+      "",
+      [
+        150,
+        8
+      ],
+      [
+        150,
+        37
+      ]
+    ],
+    [
+      "struct mdebug_extra_func_info",
+      {},
+      "",
+      [
+        168,
+        5
+      ],
+      [
+        168,
+        34
+      ]
+    ],
+    [
+      "struct alpha_mdebug_unwind_cache\n{\n  struct mdebug_extra_func_info *proc_desc;\n  CORE_ADDR vfp;\n  struct trad_frame_saved_reg *saved_regs;\n}",
+      {
+        "*proc_desc": "struct mdebug_extra_func_info",
+        "vfp": "CORE_ADDR",
+        "*saved_regs": "struct trad_frame_saved_reg"
+      },
+      "alpha_mdebug_unwind_cache",
+      [
+        177,
+        0
+      ],
+      [
+        182,
+        1
+      ]
+    ],
+    [
+      "struct mdebug_extra_func_info",
+      {},
+      "",
+      [
+        179,
+        2
+      ],
+      [
+        179,
+        31
+      ]
+    ],
+    [
+      "struct trad_frame_saved_reg",
+      {},
+      "",
+      [
+        181,
+        2
+      ],
+      [
+        181,
+        29
+      ]
+    ],
+    [
+      "struct alpha_mdebug_unwind_cache",
+      {},
+      "",
+      [
+        187,
+        7
+      ],
+      [
+        187,
+        39
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        188,
+        33
+      ],
+      [
+        188,
+        50
+      ]
+    ],
+    [
+      "struct alpha_mdebug_unwind_cache",
+      {},
+      "",
+      [
+        191,
+        2
+      ],
+      [
+        191,
+        34
+      ]
+    ],
+    [
+      "struct mdebug_extra_func_info",
+      {},
+      "",
+      [
+        192,
+        2
+      ],
+      [
+        192,
+        31
+      ]
+    ],
+    [
+      "struct alpha_mdebug_unwind_cache",
+      {},
+      "",
+      [
+        199,
+        12
+      ],
+      [
+        199,
+        44
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        265,
+        28
+      ],
+      [
+        265,
+        45
+      ]
+    ],
+    [
+      "struct frame_id",
+      {},
+      "",
+      [
+        267,
+        7
+      ],
+      [
+        267,
+        22
+      ]
+    ],
+    [
+      "struct alpha_mdebug_unwind_cache",
+      {},
+      "",
+      [
+        269,
+        2
+      ],
+      [
+        269,
+        34
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        277,
+        7
+      ],
+      [
+        277,
+        19
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        278,
+        34
+      ],
+      [
+        278,
+        51
+      ]
+    ],
+    [
+      "struct alpha_mdebug_unwind_cache",
+      {},
+      "",
+      [
+        281,
+        2
+      ],
+      [
+        281,
+        34
+      ]
+    ],
+    [
+      "struct mdebug_extra_func_info",
+      {},
+      "",
+      [
+        297,
+        38
+      ],
+      [
+        297,
+        67
+      ]
+    ],
+    [
+      "struct frame_unwind",
+      {},
+      "",
+      [
+        308,
+        34
+      ],
+      [
+        308,
+        53
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        309,
+        28
+      ],
+      [
+        309,
+        45
+      ]
+    ],
+    [
+      "struct mdebug_extra_func_info",
+      {},
+      "",
+      [
+        313,
+        2
+      ],
+      [
+        313,
+        31
+      ]
+    ],
+    [
+      "struct frame_unwind",
+      {},
+      "",
+      [
+        334,
+        13
+      ],
+      [
+        334,
+        32
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        344,
+        33
+      ],
+      [
+        344,
+        50
+      ]
+    ],
+    [
+      "struct alpha_mdebug_unwind_cache",
+      {},
+      "",
+      [
+        347,
+        2
+      ],
+      [
+        347,
+        34
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        354,
+        35
+      ],
+      [
+        354,
+        52
+      ]
+    ],
+    [
+      "struct alpha_mdebug_unwind_cache",
+      {},
+      "",
+      [
+        357,
+        2
+      ],
+      [
+        357,
+        34
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        364,
+        33
+      ],
+      [
+        364,
+        50
+      ]
+    ],
+    [
+      "struct alpha_mdebug_unwind_cache",
+      {},
+      "",
+      [
+        367,
+        2
+      ],
+      [
+        367,
+        34
+      ]
+    ],
+    [
+      "struct frame_base",
+      {},
+      "",
+      [
+        373,
+        13
+      ],
+      [
+        373,
+        30
+      ]
+    ],
+    [
+      "struct frame_base",
+      {},
+      "",
+      [
+        380,
+        13
+      ],
+      [
+        380,
+        30
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        381,
+        33
+      ],
+      [
+        381,
+        50
+      ]
+    ],
+    [
+      "struct mdebug_extra_func_info",
+      {},
+      "",
+      [
+        384,
+        2
+      ],
+      [
+        384,
+        31
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        402,
+        23
+      ],
+      [
+        402,
+        42
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        402,
+        49
+      ],
+      [
+        402,
+        63
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        18,
+        0
+      ],
+      [
+        19,
+        0
+      ]
+    ],
+    [
+      "#include \"frame.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"frame-unwind.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"frame-base.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"block.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"trad-frame.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"alpha-tdep.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"mdebugread.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

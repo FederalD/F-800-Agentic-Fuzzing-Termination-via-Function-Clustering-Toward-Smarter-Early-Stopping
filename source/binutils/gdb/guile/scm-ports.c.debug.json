@@ -1,0 +1,1265 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static SCM\nioscm_open_port (scm_t_bits port_type, long mode_bits)\n{\n  SCM port;\n\n#if 0 /* TODO: Guile doesn't export this.  What to do?  */\n  scm_i_scm_pthread_mutex_lock (&scm_i_port_table_mutex);\n#endif\n\n  port = scm_new_port_table_entry (port_type);\n\n  SCM_SET_CELL_TYPE (port, port_type | mode_bits);\n\n#if 0 /* TODO: Guile doesn't export this.  What to do?  */\n  scm_i_pthread_mutex_unlock (&scm_i_port_table_mutex);\n#endif\n\n  return port;\n}",
+      "fn_code_pos": [
+        [
+          136,
+          0
+        ],
+        [
+          154,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_open_port",
+        "parameters": {
+          "port_type": "scm_t_bits",
+          "mode_bits": "long"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static int\nioscm_input_waiting (SCM port)\n{\n  int fdes = 0;\n\n  if (! scm_is_eq (port, input_port_scm))\n    return 0;\n\n#ifdef HAVE_POLL\n  {\n    /* This is copied from libguile/fports.c.  */\n    struct pollfd pollfd = { fdes, POLLIN, 0 };\n    static int use_poll = -1;\n\n    if (use_poll < 0)\n      {\n\t/* This is copied from event-loop.c: poll cannot be used for stdin on\n\t   m68k-motorola-sysv.  */\n\tstruct pollfd test_pollfd = { fdes, POLLIN, 0 };\n\n\tif (poll (&test_pollfd, 1, 0) == 1 && (test_pollfd.revents & POLLNVAL))\n\t  use_poll = 0;\n\telse\n\t  use_poll = 1;\n      }\n\n    if (use_poll)\n      {\n\t/* Guile doesn't export SIGINT hooks like Python does.\n\t   For now pass EINTR to scm_syserror, that's what fports.c does.  */\n\tif (poll (&pollfd, 1, 0) < 0)\n\t  scm_syserror (FUNC_NAME);\n\n\treturn pollfd.revents & POLLIN ? 1 : 0;\n      }\n  }\n  /* Fall through.  */\n#endif\n\n  {\n    struct timeval timeout;\n    fd_set input_fds;\n    int num_fds = fdes + 1;\n    int num_found;\n\n    memset (&timeout, 0, sizeof (timeout));\n    FD_ZERO (&input_fds);\n    FD_SET (fdes, &input_fds);\n\n    num_found = interruptible_select (num_fds,\n\t\t\t\t      &input_fds, NULL, NULL,\n\t\t\t\t      &timeout);\n    if (num_found < 0)\n      {\n\t/* Guile doesn't export SIGINT hooks like Python does.\n\t   For now pass EINTR to scm_syserror, that's what fports.c does.  */\n        scm_syserror (FUNC_NAME);\n      }\n    return num_found > 0 && FD_ISSET (fdes, &input_fds);\n  }\n}",
+      "fn_code_pos": [
+        [
+          161,
+          0
+        ],
+        [
+          221,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_input_waiting",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nioscm_fill_input (SCM port)\n{\n  /* Borrowed from libguile/fports.c.  */\n  long count;\n  scm_t_port *pt = SCM_PTAB_ENTRY (port);\n\n  /* If we're called on stdout,stderr, punt.  */\n  if (! scm_is_eq (port, input_port_scm))\n    return (scm_t_wchar) EOF; /* Set errno and return -1?  */\n\n  gdb_flush (gdb_stdout);\n  gdb_flush (gdb_stderr);\n\n  count = ui_file_read (gdb_stdin, (char *) pt->read_buf, pt->read_buf_size);\n  if (count == -1)\n    scm_syserror (FUNC_NAME);\n  if (count == 0)\n    return (scm_t_wchar) EOF;\n\n  pt->read_pos = pt->read_buf;\n  pt->read_end = pt->read_buf + count;\n  return *pt->read_buf;\n}",
+      "fn_code_pos": [
+        [
+          225,
+          0
+        ],
+        [
+          248,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_fill_input",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nfputsn_filtered (const char *s, size_t size, struct ui_file *stream)\n{\n  size_t i;\n\n  for (i = 0; i < size; ++i)\n    {\n      if (s[i] == '\\0')\n\tfputs_filtered (\"\\\\000\", stream);\n      else\n\tfputc_filtered (s[i], stream);\n    }\n}",
+      "fn_code_pos": [
+        [
+          253,
+          0
+        ],
+        [
+          265,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fputsn_filtered",
+        "parameters": {
+          "s": "char",
+          "size": "size_t",
+          "stream": "struct ui_file"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nioscm_write (SCM port, const void *data, size_t size)\n{\n\n  /* If we're called on stdin, punt.  */\n  if (scm_is_eq (port, input_port_scm))\n    return;\n\n  TRY\n    {\n      if (scm_is_eq (port, error_port_scm))\n\tfputsn_filtered ((const char *) data, size, gdb_stderr);\n      else\n\tfputsn_filtered ((const char *) data, size, gdb_stdout);\n    }",
+      "fn_code_pos": [
+        [
+          269,
+          0
+        ],
+        [
+          283,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_write",
+        "parameters": {
+          "port": "SCM",
+          "data": "void",
+          "size": "size_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "CATCH (except, RETURN_MASK_ALL)\n    {\n      GDBSCM_HANDLE_GDB_EXCEPTION (except);\n    }",
+      "fn_code_pos": [
+        [
+          284,
+          2
+        ],
+        [
+          287,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "END_CATCH\n}\n\n/* Flush gdb's stdout or stderr.  */\n\nstatic void\nioscm_flush (SCM port)\n{\n  /* If we're called on stdin, punt.  */\n  if (scm_is_eq (port, input_port_scm))\n    return;\n\n  if (scm_is_eq (port, error_port_scm))\n    gdb_flush (gdb_stderr);\n  else\n    gdb_flush (gdb_stdout);\n}",
+      "fn_code_pos": [
+        [
+          288,
+          2
+        ],
+        [
+          304,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_flush",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": "END_CATCH"
+      }
+    },
+    {
+      "fn_code": "static void\nioscm_init_gdb_stdio_port (void)\n{\n  stdio_port_desc = scm_make_port_type (stdio_port_desc_name,\n\t\t\t\t\tioscm_fill_input, ioscm_write);\n\n  scm_set_port_input_waiting (stdio_port_desc, ioscm_input_waiting);\n  scm_set_port_flush (stdio_port_desc, ioscm_flush);\n}",
+      "fn_code_pos": [
+        [
+          311,
+          0
+        ],
+        [
+          319,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_init_gdb_stdio_port",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nioscm_init_stdio_buffers (SCM port, long mode_bits)\n{\n  scm_t_port *pt = SCM_PTAB_ENTRY (port);\n#define GDB_STDIO_BUFFER_DEFAULT_SIZE 1024\n  int size = mode_bits & SCM_BUF0 ? 0 : GDB_STDIO_BUFFER_DEFAULT_SIZE;\n  int writing = (mode_bits & SCM_WRTNG) != 0;\n\n  /* This is heavily copied from scm_fport_buffer_add.  */\n\n  if (!writing && size > 0)\n    {\n      pt->read_buf\n\t= (unsigned char *) scm_gc_malloc_pointerless (size, \"port buffer\");\n      pt->read_pos = pt->read_end = pt->read_buf;\n      pt->read_buf_size = size;\n    }\n  else\n    {\n      pt->read_pos = pt->read_buf = pt->read_end = &pt->shortbuf;\n      pt->read_buf_size = 1;\n    }\n\n  if (writing && size > 0)\n    {\n      pt->write_buf\n\t= (unsigned char *) scm_gc_malloc_pointerless (size, \"port buffer\");\n      pt->write_pos = pt->write_buf;\n      pt->write_buf_size = size;\n    }\n  else\n    {\n      pt->write_buf = pt->write_pos = &pt->shortbuf;\n      pt->write_buf_size = 1;\n    }\n  pt->write_end = pt->write_buf + pt->write_buf_size;\n}",
+      "fn_code_pos": [
+        [
+          325,
+          0
+        ],
+        [
+          361,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_init_stdio_buffers",
+        "parameters": {
+          "port": "SCM",
+          "mode_bits": "long"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static SCM\nioscm_make_gdb_stdio_port (int fd)\n{\n  int is_a_tty = isatty (fd);\n  const char *name;\n  const char *mode_str;\n  long mode_bits;\n  SCM port;\n\n  switch (fd)\n    {\n    case 0:\n      name = input_port_name;\n      mode_str = is_a_tty ? \"r0\" : \"r\";\n      break;\n    case 1:\n      name = output_port_name;\n      mode_str = is_a_tty ? \"w0\" : \"w\";\n      break;\n    case 2:\n      name = error_port_name;\n      mode_str = is_a_tty ? \"w0\" : \"w\";\n      break;\n    default:\n      gdb_assert_not_reached (\"bad stdio file descriptor\");\n    }\n\n  mode_bits = scm_mode_bits ((char *) mode_str);\n  port = ioscm_open_port (stdio_port_desc, mode_bits);\n\n  scm_set_port_filename_x (port, gdbscm_scm_from_c_string (name));\n\n  ioscm_init_stdio_buffers (port, mode_bits);\n\n  return port;\n}",
+      "fn_code_pos": [
+        [
+          365,
+          0
+        ],
+        [
+          400,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_make_gdb_stdio_port",
+        "parameters": {
+          "fd": "int"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_stdio_port_p (SCM scm)\n{\n  /* This is copied from SCM_FPORTP.  */\n  return scm_from_bool (!SCM_IMP (scm)\n\t\t\t&& (SCM_TYP16 (scm) == stdio_port_desc));\n}",
+      "fn_code_pos": [
+        [
+          404,
+          0
+        ],
+        [
+          410,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_stdio_port_p",
+        "parameters": {
+          "scm": "SCM"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_input_port (void)\n{\n  return input_port_scm;\n}",
+      "fn_code_pos": [
+        [
+          416,
+          0
+        ],
+        [
+          420,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_input_port",
+        "parameters": {},
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_output_port (void)\n{\n  return output_port_scm;\n}",
+      "fn_code_pos": [
+        [
+          424,
+          0
+        ],
+        [
+          428,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_output_port",
+        "parameters": {},
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_error_port (void)\n{\n  return error_port_scm;\n}",
+      "fn_code_pos": [
+        [
+          432,
+          0
+        ],
+        [
+          436,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_error_port",
+        "parameters": {},
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "ioscm_file_port::ioscm_file_port (SCM port)\n  : m_port (port)\n{}",
+      "fn_code_pos": [
+        [
+          440,
+          0
+        ],
+        [
+          442,
+          2
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_file_port::ioscm_file_port",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\nioscm_file_port::flush ()\n{\n}",
+      "fn_code_pos": [
+        [
+          444,
+          0
+        ],
+        [
+          447,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_file_port::flush",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nioscm_file_port::write (const char *buffer, long length_buffer)\n{\n  scm_c_write (m_port, buffer, length_buffer);\n}",
+      "fn_code_pos": [
+        [
+          449,
+          0
+        ],
+        [
+          453,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_file_port::write",
+        "parameters": {
+          "buffer": "char",
+          "length_buffer": "long"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static SCM\nioscm_with_output_to_port_worker (SCM port, SCM thunk, enum oport oport,\n\t\t\t\t  const char *func_name)\n{\n  struct cleanup *cleanups;\n  SCM result;\n\n  SCM_ASSERT_TYPE (gdbscm_is_true (scm_output_port_p (port)), port,\n\t\t   SCM_ARG1, func_name, _(\"output port\"));\n  SCM_ASSERT_TYPE (gdbscm_is_true (scm_thunk_p (thunk)), thunk,\n\t\t   SCM_ARG2, func_name, _(\"thunk\"));\n\n  cleanups = set_batch_flag_and_make_cleanup_restore_page_info ();\n\n  scoped_restore restore_async = make_scoped_restore (&current_ui->async, 0);\n\n  ui_file_up port_file (new ioscm_file_port (port));\n\n  scoped_restore save_file = make_scoped_restore (oport == GDB_STDERR\n\t\t\t\t\t\t  ? &gdb_stderr : &gdb_stdout);\n\n  if (oport == GDB_STDERR)\n    gdb_stderr = port_file.get ();\n  else\n    {\n      current_uiout->redirect (port_file.get ());\n      make_cleanup_ui_out_redirect_pop (current_uiout);\n\n      gdb_stdout = port_file.get ();\n    }\n\n  result = gdbscm_safe_call_0 (thunk, NULL);\n\n  do_cleanups (cleanups);\n\n  if (gdbscm_is_exception (result))\n    gdbscm_throw (result);\n\n  return result;\n}",
+      "fn_code_pos": [
+        [
+          458,
+          0
+        ],
+        [
+          497,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_with_output_to_port_worker",
+        "parameters": {
+          "port": "SCM",
+          "thunk": "SCM",
+          "oport": "enum oport",
+          "func_name": "char"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_percent_with_gdb_output_to_port (SCM port, SCM thunk)\n{\n  return ioscm_with_output_to_port_worker (port, thunk, GDB_STDOUT, FUNC_NAME);\n}",
+      "fn_code_pos": [
+        [
+          508,
+          0
+        ],
+        [
+          512,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_percent_with_gdb_output_to_port",
+        "parameters": {
+          "port": "SCM",
+          "thunk": "SCM"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_percent_with_gdb_error_to_port (SCM port, SCM thunk)\n{\n  return ioscm_with_output_to_port_worker (port, thunk, GDB_STDERR, FUNC_NAME);\n}",
+      "fn_code_pos": [
+        [
+          523,
+          0
+        ],
+        [
+          527,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_percent_with_gdb_error_to_port",
+        "parameters": {
+          "port": "SCM",
+          "thunk": "SCM"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static int\nioscm_lseek_address (ioscm_memory_port *iomem, LONGEST offset, int whence)\n{\n  CORE_ADDR new_current;\n\n  gdb_assert (iomem->current <= iomem->size);\n\n  switch (whence)\n    {\n    case SEEK_CUR:\n      /* Catch over/underflow.  */\n      if ((offset < 0 && iomem->current + offset > iomem->current)\n\t  || (offset > 0 && iomem->current + offset < iomem->current))\n\treturn 0;\n      new_current = iomem->current + offset;\n      break;\n    case SEEK_SET:\n      new_current = offset;\n      break;\n    case SEEK_END:\n      if (offset == 0)\n\t{\n\t  new_current = iomem->size;\n\t  break;\n\t}\n      /* TODO: Not supported yet.  */\n      return 0;\n    default:\n      return 0;\n    }\n\n  if (new_current > iomem->size)\n    return 0;\n  iomem->current = new_current;\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          535,
+          0
+        ],
+        [
+          570,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_lseek_address",
+        "parameters": {
+          "iomem": "ioscm_memory_port",
+          "offset": "LONGEST",
+          "whence": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ngdbscm_memory_port_fill_input (SCM port)\n{\n  scm_t_port *pt = SCM_PTAB_ENTRY (port);\n  ioscm_memory_port *iomem = (ioscm_memory_port *) SCM_STREAM (port);\n  size_t to_read;\n\n  /* \"current\" is the offset of the first byte we want to read.  */\n  gdb_assert (iomem->current <= iomem->size);\n  if (iomem->current == iomem->size)\n    return EOF;\n\n  /* Don't read outside the allowed memory range.  */\n  to_read = pt->read_buf_size;\n  if (to_read > iomem->size - iomem->current)\n    to_read = iomem->size - iomem->current;\n\n  if (target_read_memory (iomem->start + iomem->current, pt->read_buf,\n\t\t\t  to_read) != 0)\n    gdbscm_memory_error (FUNC_NAME, _(\"error reading memory\"), SCM_EOL);\n\n  iomem->current += to_read;\n  pt->read_pos = pt->read_buf;\n  pt->read_end = pt->read_buf + to_read;\n  return *pt->read_buf;\n}",
+      "fn_code_pos": [
+        [
+          574,
+          0
+        ],
+        [
+          599,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_fill_input",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ngdbscm_memory_port_end_input (SCM port, int offset)\n{\n  scm_t_port *pt = SCM_PTAB_ENTRY (port);\n  ioscm_memory_port *iomem = (ioscm_memory_port *) SCM_STREAM (port);\n  size_t remaining = pt->read_end - pt->read_pos;\n\n  /* Note: Use of \"int offset\" is specified by Guile ports API.  */\n  if ((offset < 0 && remaining + offset > remaining)\n      || (offset > 0 && remaining + offset < remaining))\n    {\n      gdbscm_out_of_range_error (FUNC_NAME, 0, scm_from_int (offset),\n\t\t\t\t _(\"overflow in offset calculation\"));\n    }\n  offset += remaining;\n\n  if (offset > 0)\n    {\n      pt->read_pos = pt->read_end;\n      /* Throw error if unread-char used at beginning of file\n\t then attempting to write.  Seems correct.  */\n      if (!ioscm_lseek_address (iomem, -offset, SEEK_CUR))\n\t{\n\t  gdbscm_out_of_range_error (FUNC_NAME, 0, scm_from_int (offset),\n\t\t\t\t     _(\"bad offset\"));\n\t}\n    }\n\n  pt->rw_active = SCM_PORT_NEITHER;\n}",
+      "fn_code_pos": [
+        [
+          604,
+          0
+        ],
+        [
+          633,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_end_input",
+        "parameters": {
+          "port": "SCM",
+          "offset": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ngdbscm_memory_port_flush (SCM port)\n{\n  scm_t_port *pt = SCM_PTAB_ENTRY (port);\n  ioscm_memory_port *iomem = (ioscm_memory_port *) SCM_STREAM (port);\n  size_t to_write = pt->write_pos - pt->write_buf;\n\n  if (to_write == 0)\n    return;\n\n  /* There's no way to indicate a short write, so if the request goes past\n     the end of the port's memory range, flag an error.  */\n  if (to_write > iomem->size - iomem->current)\n    {\n      gdbscm_out_of_range_error (FUNC_NAME, 0,\n\t\t\t\t gdbscm_scm_from_ulongest (to_write),\n\t\t\t\t _(\"writing beyond end of memory range\"));\n    }\n\n  if (target_write_memory (iomem->start + iomem->current, pt->write_buf,\n\t\t\t   to_write) != 0)\n    gdbscm_memory_error (FUNC_NAME, _(\"error writing memory\"), SCM_EOL);\n\n  iomem->current += to_write;\n  pt->write_pos = pt->write_buf;\n  pt->rw_active = SCM_PORT_NEITHER;\n}",
+      "fn_code_pos": [
+        [
+          637,
+          0
+        ],
+        [
+          663,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_flush",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ngdbscm_memory_port_write (SCM port, const void *void_data, size_t size)\n{\n  scm_t_port *pt = SCM_PTAB_ENTRY (port);\n  ioscm_memory_port *iomem = (ioscm_memory_port *) SCM_STREAM (port);\n  const gdb_byte *data = (const gdb_byte *) void_data;\n\n  /* There's no way to indicate a short write, so if the request goes past\n     the end of the port's memory range, flag an error.  */\n  if (size > iomem->size - iomem->current)\n    {\n      gdbscm_out_of_range_error (FUNC_NAME, 0, gdbscm_scm_from_ulongest (size),\n\t\t\t\t _(\"writing beyond end of memory range\"));\n    }\n\n  if (pt->write_buf == &pt->shortbuf)\n    {\n      /* Unbuffered port.  */\n      if (target_write_memory (iomem->start + iomem->current, data, size) != 0)\n\tgdbscm_memory_error (FUNC_NAME, _(\"error writing memory\"), SCM_EOL);\n      iomem->current += size;\n      return;\n    }\n\n  /* Note: The edge case of what to do when the buffer exactly fills is\n     debatable.  Guile flushes when the buffer exactly fills up, so we\n     do too.  It's counter-intuitive to my mind, but in case there's a\n     subtlety somewhere that depends on this, we do the same.  */\n\n  {\n    size_t space = pt->write_end - pt->write_pos;\n\n    if (size < space)\n      {\n\t/* Data fits in buffer, and does not fill it.  */\n\tmemcpy (pt->write_pos, data, size);\n\tpt->write_pos += size;\n      }\n    else\n      {\n\tmemcpy (pt->write_pos, data, space);\n\tpt->write_pos = pt->write_end;\n\tgdbscm_memory_port_flush (port);\n\t{\n\t  const gdb_byte *ptr = data + space;\n\t  size_t remaining = size - space;\n\n\t  if (remaining >= pt->write_buf_size)\n\t    {\n\t      if (target_write_memory (iomem->start + iomem->current, ptr,\n\t\t\t\t       remaining) != 0)\n\t\tgdbscm_memory_error (FUNC_NAME, _(\"error writing memory\"),\n\t\t\t\t     SCM_EOL);\n\t      iomem->current += remaining;\n\t    }\n\t  else\n\t    {\n\t      memcpy (pt->write_pos, ptr, remaining);\n\t      pt->write_pos += remaining;\n\t    }\n\t}\n      }\n  }\n}",
+      "fn_code_pos": [
+        [
+          667,
+          0
+        ],
+        [
+          730,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_write",
+        "parameters": {
+          "port": "SCM",
+          "void_data": "void",
+          "size": "size_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static scm_t_off\ngdbscm_memory_port_seek (SCM port, scm_t_off offset, int whence)\n{\n  scm_t_port *pt = SCM_PTAB_ENTRY (port);\n  ioscm_memory_port *iomem = (ioscm_memory_port *) SCM_STREAM (port);\n  CORE_ADDR result;\n  int rc;\n\n  if (pt->rw_active == SCM_PORT_WRITE)\n    {\n      if (offset != 0 || whence != SEEK_CUR)\n\t{\n\t  gdbscm_memory_port_flush (port);\n\t  rc = ioscm_lseek_address (iomem, offset, whence);\n\t  result = iomem->current;\n\t}\n      else\n\t{\n\t  /* Read current position without disturbing the buffer,\n\t     but flag an error if what's in the buffer goes outside the\n\t     allowed range.  */\n\t  CORE_ADDR current = iomem->current;\n\t  size_t delta = pt->write_pos - pt->write_buf;\n\n\t  if (current + delta < current\n\t      || current + delta > iomem->size)\n\t    rc = 0;\n\t  else\n\t    {\n\t      result = current + delta;\n\t      rc = 1;\n\t    }\n\t}\n    }\n  else if (pt->rw_active == SCM_PORT_READ)\n    {\n      if (offset != 0 || whence != SEEK_CUR)\n\t{\n\t  scm_end_input (port);\n\t  rc = ioscm_lseek_address (iomem, offset, whence);\n\t  result = iomem->current;\n\t}\n      else\n\t{\n\t  /* Read current position without disturbing the buffer\n\t     (particularly the unread-char buffer).  */\n\t  CORE_ADDR current = iomem->current;\n\t  size_t remaining = pt->read_end - pt->read_pos;\n\n\t  if (current - remaining > current\n\t      || current - remaining < iomem->start)\n\t    rc = 0;\n\t  else\n\t    {\n\t      result = current - remaining;\n\t      rc = 1;\n\t    }\n\n\t  if (rc != 0 && pt->read_buf == pt->putback_buf)\n\t    {\n\t      size_t saved_remaining = pt->saved_read_end - pt->saved_read_pos;\n\n\t      if (result - saved_remaining > result\n\t\t  || result - saved_remaining < iomem->start)\n\t\trc = 0;\n\t      else\n\t\tresult -= saved_remaining;\n\t    }\n\t}\n    }\n  else /* SCM_PORT_NEITHER */\n    {\n      rc = ioscm_lseek_address (iomem, offset, whence);\n      result = iomem->current;\n    }\n\n  if (rc == 0)\n    {\n      gdbscm_out_of_range_error (FUNC_NAME, 0,\n\t\t\t\t gdbscm_scm_from_longest (offset),\n\t\t\t\t _(\"bad seek\"));\n    }\n\n  /* TODO: The Guile API doesn't support 32x64.  We can't fix that here,\n     and there's no need to throw an error if the new address can't be\n     represented in a scm_t_off.  But we could return something less\n     clumsy.  */\n  return result;\n}",
+      "fn_code_pos": [
+        [
+          734,
+          0
+        ],
+        [
+          822,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_seek",
+        "parameters": {
+          "port": "SCM",
+          "offset": "scm_t_off",
+          "whence": "int"
+        },
+        "return_type": "scm_t_off"
+      }
+    },
+    {
+      "fn_code": "static int\ngdbscm_memory_port_close (SCM port)\n{\n  scm_t_port *pt = SCM_PTAB_ENTRY (port);\n  ioscm_memory_port *iomem = (ioscm_memory_port *) SCM_STREAM (port);\n\n  gdbscm_memory_port_flush (port);\n\n  if (pt->read_buf == pt->putback_buf)\n    pt->read_buf = pt->saved_read_buf;\n  if (pt->read_buf != &pt->shortbuf)\n    xfree (pt->read_buf);\n  if (pt->write_buf != &pt->shortbuf)\n    xfree (pt->write_buf);\n  scm_gc_free (iomem, sizeof (*iomem), \"memory port\");\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          826,
+          0
+        ],
+        [
+          843,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_close",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static size_t\ngdbscm_memory_port_free (SCM port)\n{\n  gdbscm_memory_port_close (port);\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          847,
+          0
+        ],
+        [
+          853,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_free",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": "size_t"
+      }
+    },
+    {
+      "fn_code": "static int\ngdbscm_memory_port_print (SCM exp, SCM port, scm_print_state *pstate)\n{\n  ioscm_memory_port *iomem = (ioscm_memory_port *) SCM_STREAM (exp);\n  char *type = SCM_PTOBNAME (SCM_PTOBNUM (exp));\n\n  scm_puts (\"#<\", port);\n  scm_print_port_mode (exp, port);\n  /* scm_print_port_mode includes a trailing space.  */\n  gdbscm_printf (port, \"%s %s-%s\", type,\n\t\t hex_string (iomem->start), hex_string (iomem->end));\n  scm_putc ('>', port);\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          857,
+          0
+        ],
+        [
+          870,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_print",
+        "parameters": {
+          "exp": "SCM",
+          "port": "SCM",
+          "pstate": "scm_print_state"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nioscm_init_memory_port_type (void)\n{\n  memory_port_desc = scm_make_port_type (memory_port_desc_name,\n\t\t\t\t\t gdbscm_memory_port_fill_input,\n\t\t\t\t\t gdbscm_memory_port_write);\n\n  scm_set_port_end_input (memory_port_desc, gdbscm_memory_port_end_input);\n  scm_set_port_flush (memory_port_desc, gdbscm_memory_port_flush);\n  scm_set_port_seek (memory_port_desc, gdbscm_memory_port_seek);\n  scm_set_port_close (memory_port_desc, gdbscm_memory_port_close);\n  scm_set_port_free (memory_port_desc, gdbscm_memory_port_free);\n  scm_set_port_print (memory_port_desc, gdbscm_memory_port_print);\n}",
+      "fn_code_pos": [
+        [
+          874,
+          0
+        ],
+        [
+          887,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_init_memory_port_type",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static long\nioscm_parse_mode_bits (const char *func_name, const char *mode)\n{\n  const char *p;\n  long mode_bits;\n\n  if (*mode != 'r' && *mode != 'w')\n    {\n      gdbscm_out_of_range_error (func_name, 0,\n\t\t\t\t gdbscm_scm_from_c_string (mode),\n\t\t\t\t _(\"bad mode string\"));\n    }\n  for (p = mode + 1; *p != '\\0'; ++p)\n    {\n      switch (*p)\n\t{\n\tcase '0':\n\tcase 'b':\n\tcase '+':\n\t  break;\n\tdefault:\n\t  gdbscm_out_of_range_error (func_name, 0,\n\t\t\t\t     gdbscm_scm_from_c_string (mode),\n\t\t\t\t     _(\"bad mode string\"));\n\t}\n    }\n\n  /* Kinda awkward to convert the mode from SCM -> string only to have Guile\n     convert it back to SCM, but that's the API we have to work with.  */\n  mode_bits = scm_mode_bits ((char *) mode);\n\n  return mode_bits;\n}",
+      "fn_code_pos": [
+        [
+          892,
+          0
+        ],
+        [
+          924,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_parse_mode_bits",
+        "parameters": {
+          "func_name": "char",
+          "mode": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nioscm_init_memory_port (SCM port, CORE_ADDR start, CORE_ADDR end)\n{\n  scm_t_port *pt;\n  ioscm_memory_port *iomem;\n  int buffered = (SCM_CELL_WORD_0 (port) & SCM_BUF0) == 0;\n\n  gdb_assert (start <= end);\n\n  iomem = (ioscm_memory_port *) scm_gc_malloc_pointerless (sizeof (*iomem),\n\t\t\t\t\t\t\t   \"memory port\");\n\n  iomem->start = start;\n  iomem->end = end;\n  iomem->size = end - start;\n  iomem->current = 0;\n  if (buffered)\n    {\n      iomem->read_buf_size = default_read_buf_size;\n      iomem->write_buf_size = default_write_buf_size;\n    }\n  else\n    {\n      iomem->read_buf_size = 1;\n      iomem->write_buf_size = 1;\n    }\n\n  pt = SCM_PTAB_ENTRY (port);\n  /* Match the expectation of `binary-port?'.  */\n  pt->encoding = NULL;\n  pt->rw_random = 1;\n  pt->read_buf_size = iomem->read_buf_size;\n  pt->write_buf_size = iomem->write_buf_size;\n  if (buffered)\n    {\n      pt->read_buf = (unsigned char *) xmalloc (pt->read_buf_size);\n      pt->write_buf = (unsigned char *) xmalloc (pt->write_buf_size);\n    }\n  else\n    {\n      pt->read_buf = &pt->shortbuf;\n      pt->write_buf = &pt->shortbuf;\n    }\n  pt->read_pos = pt->read_end = pt->read_buf;\n  pt->write_pos = pt->write_buf;\n  pt->write_end = pt->write_buf + pt->write_buf_size;\n\n  SCM_SETSTREAM (port, iomem);\n}",
+      "fn_code_pos": [
+        [
+          931,
+          0
+        ],
+        [
+          979,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_init_memory_port",
+        "parameters": {
+          "port": "SCM",
+          "start": "CORE_ADDR",
+          "end": "CORE_ADDR"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nioscm_reinit_memory_port (SCM port, size_t read_buf_size,\n\t\t\t  size_t write_buf_size, const char *func_name)\n{\n  scm_t_port *pt = SCM_PTAB_ENTRY (port);\n  ioscm_memory_port *iomem = (ioscm_memory_port *) SCM_STREAM (port);\n\n  gdb_assert (read_buf_size >= min_memory_port_buf_size\n\t      && read_buf_size <= max_memory_port_buf_size);\n  gdb_assert (write_buf_size >= min_memory_port_buf_size\n\t      && write_buf_size <= max_memory_port_buf_size);\n\n  /* First check if the port is unbuffered.  */\n\n  if (pt->read_buf == &pt->shortbuf)\n    {\n      gdb_assert (pt->write_buf == &pt->shortbuf);\n      scm_misc_error (func_name, _(\"port is unbuffered: ~a\"),\n\t\t      scm_list_1 (port));\n    }\n\n  /* Next check if anything is buffered.  */\n\n  if (read_buf_size != pt->read_buf_size\n      && pt->read_end != pt->read_buf)\n    {\n      scm_misc_error (func_name, _(\"read buffer not empty: ~a\"),\n\t\t      scm_list_1 (port));\n    }\n\n  if (write_buf_size != pt->write_buf_size\n      && pt->write_pos != pt->write_buf)\n    {\n      scm_misc_error (func_name, _(\"write buffer not empty: ~a\"),\n\t\t      scm_list_1 (port));\n    }\n\n  /* Now we can update the buffer sizes, but only if the size has changed.  */\n\n  if (read_buf_size != pt->read_buf_size)\n    {\n      iomem->read_buf_size = read_buf_size;\n      pt->read_buf_size = read_buf_size;\n      xfree (pt->read_buf);\n      pt->read_buf = (unsigned char *) xmalloc (pt->read_buf_size);\n      pt->read_pos = pt->read_end = pt->read_buf;\n    }\n\n  if (write_buf_size != pt->write_buf_size)\n    {\n      iomem->write_buf_size = write_buf_size;\n      pt->write_buf_size = write_buf_size;\n      xfree (pt->write_buf);\n      pt->write_buf = (unsigned char *) xmalloc (pt->write_buf_size);\n      pt->write_pos = pt->write_buf;\n      pt->write_end = pt->write_buf + pt->write_buf_size;\n    }\n}",
+      "fn_code_pos": [
+        [
+          987,
+          0
+        ],
+        [
+          1044,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ioscm_reinit_memory_port",
+        "parameters": {
+          "port": "SCM",
+          "read_buf_size": "size_t",
+          "write_buf_size": "size_t",
+          "func_name": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_open_memory (SCM rest)\n{\n  const SCM keywords[] = {\n    mode_keyword, start_keyword, size_keyword, SCM_BOOL_F\n  };\n  char *mode = NULL;\n  CORE_ADDR start = 0;\n  CORE_ADDR end;\n  int mode_arg_pos = -1, start_arg_pos = -1, size_arg_pos = -1;\n  ULONGEST size;\n  SCM port;\n  long mode_bits;\n\n  gdbscm_parse_function_args (FUNC_NAME, SCM_ARG1, keywords, \"#sUU\", rest,\n\t\t\t      &mode_arg_pos, &mode,\n\t\t\t      &start_arg_pos, &start,\n\t\t\t      &size_arg_pos, &size);\n\n  scm_dynwind_begin ((scm_t_dynwind_flags) 0);\n\n  if (mode == NULL)\n    mode = xstrdup (\"r\");\n  scm_dynwind_free (mode);\n\n  if (size_arg_pos > 0)\n    {\n      /* For now be strict about start+size overflowing.  If it becomes\n\t a nuisance we can relax things later.  */\n      if (start + size < start)\n\t{\n\t  gdbscm_out_of_range_error (FUNC_NAME, 0,\n\t\t\t\tscm_list_2 (gdbscm_scm_from_ulongest (start),\n\t\t\t\t\t    gdbscm_scm_from_ulongest (size)),\n\t\t\t\t     _(\"start+size overflows\"));\n\t}\n      end = start + size;\n    }\n  else\n    end = ~(CORE_ADDR) 0;\n\n  mode_bits = ioscm_parse_mode_bits (FUNC_NAME, mode);\n\n  port = ioscm_open_port (memory_port_desc, mode_bits);\n\n  ioscm_init_memory_port (port, start, end);\n\n  scm_dynwind_end ();\n\n  /* TODO: Set the file name as \"memory-start-end\"?  */\n  return port;\n}",
+      "fn_code_pos": [
+        [
+          1070,
+          0
+        ],
+        [
+          1121,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_open_memory",
+        "parameters": {
+          "rest": "SCM"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static int\ngdbscm_is_memory_port (SCM obj)\n{\n  return !SCM_IMP (obj) && (SCM_TYP16 (obj) == memory_port_desc);\n}",
+      "fn_code_pos": [
+        [
+          1125,
+          0
+        ],
+        [
+          1129,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_is_memory_port",
+        "parameters": {
+          "obj": "SCM"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_memory_port_p (SCM obj)\n{\n  return scm_from_bool (gdbscm_is_memory_port (obj));\n}",
+      "fn_code_pos": [
+        [
+          1133,
+          0
+        ],
+        [
+          1137,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_p",
+        "parameters": {
+          "obj": "SCM"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_memory_port_range (SCM port)\n{\n  ioscm_memory_port *iomem;\n\n  SCM_ASSERT_TYPE (gdbscm_is_memory_port (port), port, SCM_ARG1, FUNC_NAME,\n\t\t   memory_port_desc_name);\n\n  iomem = (ioscm_memory_port *) SCM_STREAM (port);\n  return scm_list_2 (gdbscm_scm_from_ulongest (iomem->start),\n\t\t     gdbscm_scm_from_ulongest (iomem->end));\n}",
+      "fn_code_pos": [
+        [
+          1141,
+          0
+        ],
+        [
+          1152,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_range",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_memory_port_read_buffer_size (SCM port)\n{\n  ioscm_memory_port *iomem;\n\n  SCM_ASSERT_TYPE (gdbscm_is_memory_port (port), port, SCM_ARG1, FUNC_NAME,\n\t\t   memory_port_desc_name);\n\n  iomem = (ioscm_memory_port *) SCM_STREAM (port);\n  return scm_from_uint (iomem->read_buf_size);\n}",
+      "fn_code_pos": [
+        [
+          1156,
+          0
+        ],
+        [
+          1166,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_read_buffer_size",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_set_memory_port_read_buffer_size_x (SCM port, SCM size)\n{\n  ioscm_memory_port *iomem;\n\n  SCM_ASSERT_TYPE (gdbscm_is_memory_port (port), port, SCM_ARG1, FUNC_NAME,\n\t\t   memory_port_desc_name);\n  SCM_ASSERT_TYPE (scm_is_integer (size), size, SCM_ARG2, FUNC_NAME,\n\t\t   _(\"integer\"));\n\n  if (!scm_is_unsigned_integer (size, min_memory_port_buf_size,\n\t\t\t\tmax_memory_port_buf_size))\n    {\n      gdbscm_out_of_range_error (FUNC_NAME, SCM_ARG2, size,\n\t\t\t\t out_of_range_buf_size);\n    }\n\n  iomem = (ioscm_memory_port *) SCM_STREAM (port);\n  ioscm_reinit_memory_port (port, scm_to_uint (size), iomem->write_buf_size,\n\t\t\t    FUNC_NAME);\n\n  return SCM_UNSPECIFIED;\n}",
+      "fn_code_pos": [
+        [
+          1172,
+          0
+        ],
+        [
+          1194,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_set_memory_port_read_buffer_size_x",
+        "parameters": {
+          "port": "SCM",
+          "size": "SCM"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_memory_port_write_buffer_size (SCM port)\n{\n  ioscm_memory_port *iomem;\n\n  SCM_ASSERT_TYPE (gdbscm_is_memory_port (port), port, SCM_ARG1, FUNC_NAME,\n\t\t   memory_port_desc_name);\n\n  iomem = (ioscm_memory_port *) SCM_STREAM (port);\n  return scm_from_uint (iomem->write_buf_size);\n}",
+      "fn_code_pos": [
+        [
+          1198,
+          0
+        ],
+        [
+          1208,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_memory_port_write_buffer_size",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "static SCM\ngdbscm_set_memory_port_write_buffer_size_x (SCM port, SCM size)\n{\n  ioscm_memory_port *iomem;\n\n  SCM_ASSERT_TYPE (gdbscm_is_memory_port (port), port, SCM_ARG1, FUNC_NAME,\n\t\t   memory_port_desc_name);\n  SCM_ASSERT_TYPE (scm_is_integer (size), size, SCM_ARG2, FUNC_NAME,\n\t\t   _(\"integer\"));\n\n  if (!scm_is_unsigned_integer (size, min_memory_port_buf_size,\n\t\t\t\tmax_memory_port_buf_size))\n    {\n      gdbscm_out_of_range_error (FUNC_NAME, SCM_ARG2, size,\n\t\t\t\t out_of_range_buf_size);\n    }\n\n  iomem = (ioscm_memory_port *) SCM_STREAM (port);\n  ioscm_reinit_memory_port (port, iomem->read_buf_size, scm_to_uint (size),\n\t\t\t    FUNC_NAME);\n\n  return SCM_UNSPECIFIED;\n}",
+      "fn_code_pos": [
+        [
+          1214,
+          0
+        ],
+        [
+          1236,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_set_memory_port_write_buffer_size_x",
+        "parameters": {
+          "port": "SCM",
+          "size": "SCM"
+        },
+        "return_type": "SCM"
+      }
+    },
+    {
+      "fn_code": "void\ngdbscm_initialize_ports (void)\n{\n  /* Save the original stdio ports for debugging purposes.  */\n\n  orig_input_port_scm = scm_current_input_port ();\n  orig_output_port_scm = scm_current_output_port ();\n  orig_error_port_scm = scm_current_error_port ();\n\n  /* Set up the stdio ports.  */\n\n  ioscm_init_gdb_stdio_port ();\n  input_port_scm = ioscm_make_gdb_stdio_port (0);\n  output_port_scm = ioscm_make_gdb_stdio_port (1);\n  error_port_scm = ioscm_make_gdb_stdio_port (2);\n\n  /* Set up memory ports.  */\n\n  ioscm_init_memory_port_type ();\n\n  /* Install the accessor functions.  */\n\n  gdbscm_define_functions (port_functions, 1);\n  gdbscm_define_functions (private_port_functions, 0);\n\n  /* Keyword args for open-memory.  */\n\n  mode_keyword = scm_from_latin1_keyword (\"mode\");\n  start_keyword = scm_from_latin1_keyword (\"start\");\n  size_keyword = scm_from_latin1_keyword (\"size\");\n\n  /* Error message text for \"out of range\" memory port buffer sizes.  */\n\n  out_of_range_buf_size = xstrprintf (\"size not between %u - %u\",\n\t\t\t\t      min_memory_port_buf_size,\n\t\t\t\t      max_memory_port_buf_size);\n}",
+      "fn_code_pos": [
+        [
+          1339,
+          0
+        ],
+        [
+          1375,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdbscm_initialize_ports",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "ioscm_file_port (SCM port)",
+      "fn_dec_pos": [
+        [
+          43,
+          11
+        ],
+        [
+          43,
+          37
+        ]
+      ],
+      "class_code": "95d433e91cb4a05152d3df332fca9dd8ecfb0ba51c0f766d41be72097a11ef0a",
+      "class_node_pos": [
+        [
+          39,
+          0
+        ],
+        [
+          50,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "ioscm_file_port",
+        "parameters": {
+          "port": "SCM"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "flush () override",
+      "fn_dec_pos": [
+        [
+          45,
+          7
+        ],
+        [
+          45,
+          24
+        ]
+      ],
+      "class_code": "95d433e91cb4a05152d3df332fca9dd8ecfb0ba51c0f766d41be72097a11ef0a",
+      "class_node_pos": [
+        [
+          39,
+          0
+        ],
+        [
+          50,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "flush",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "write (const char *buf, long length_buf) override",
+      "fn_dec_pos": [
+        [
+          46,
+          7
+        ],
+        [
+          46,
+          56
+        ]
+      ],
+      "class_code": "95d433e91cb4a05152d3df332fca9dd8ecfb0ba51c0f766d41be72097a11ef0a",
+      "class_node_pos": [
+        [
+          39,
+          0
+        ],
+        [
+          50,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "write",
+        "parameters": {
+          "buf": "char",
+          "length_buf": "long"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {
+    "95d433e91cb4a05152d3df332fca9dd8ecfb0ba51c0f766d41be72097a11ef0a": {
+      "class_code": "class ioscm_file_port : public ui_file\n{\npublic:\n  /* Return a ui_file that writes to PORT.  */\n  explicit ioscm_file_port (SCM port);\n\n  void flush () override;\n  void write (const char *buf, long length_buf) override;\n\nprivate:\n  SCM m_port;\n}",
+      "class_name": "ioscm_file_port",
+      "class_pos": [
+        [
+          39,
+          0
+        ],
+        [
+          50,
+          1
+        ]
+      ]
+    }
+  },
+  "struct_node_list": [
+    [
+      "typedef struct\n{\n  /* Bounds of memory range this port is allowed to access: [start, end).\n     This means that 0xff..ff is not accessible.  I can live with that.  */\n  CORE_ADDR start, end;\n\n  /* (end - start), recorded for convenience.  */\n  ULONGEST size;\n\n  /* Think of this as the lseek value maintained by the kernel.\n     This value is always in the range [0, size].  */\n  ULONGEST current;\n\n  /* The size of the internal r/w buffers.\n     Scheme ports aren't a straightforward mapping to memory r/w.\n     Generally the user specifies how much to r/w and all access is\n     unbuffered.  We don't try to provide equivalent access, but we allow\n     the user to specify these values to help get something similar.  */\n  unsigned read_buf_size, write_buf_size;\n} ioscm_memory_port;",
+      {
+        "start": "CORE_ADDR",
+        "size": "ULONGEST",
+        "current": "ULONGEST",
+        "read_buf_size": "unsigned"
+      },
+      "ioscm_memory_port",
+      [
+        54,
+        0
+      ],
+      [
+        73,
+        20
+      ]
+    ],
+    [
+      "typedef struct\n{\n  /* Bounds of memory range this port is allowed to access: [start, end).\n     This means that 0xff..ff is not accessible.  I can live with that.  */\n  CORE_ADDR start, end;\n\n  /* (end - start), recorded for convenience.  */\n  ULONGEST size;\n\n  /* Think of this as the lseek value maintained by the kernel.\n     This value is always in the range [0, size].  */\n  ULONGEST current;\n\n  /* The size of the internal r/w buffers.\n     Scheme ports aren't a straightforward mapping to memory r/w.\n     Generally the user specifies how much to r/w and all access is\n     unbuffered.  We don't try to provide equivalent access, but we allow\n     the user to specify these values to help get something similar.  */\n  unsigned read_buf_size, write_buf_size;\n} ioscm_memory_port;",
+      {
+        "start": "CORE_ADDR",
+        "size": "ULONGEST",
+        "current": "ULONGEST",
+        "read_buf_size": "unsigned"
+      },
+      "ioscm_memory_port",
+      [
+        54,
+        0
+      ],
+      [
+        73,
+        20
+      ]
+    ],
+    [
+      "struct pollfd",
+      {},
+      "",
+      [
+        172,
+        4
+      ],
+      [
+        172,
+        17
+      ]
+    ],
+    [
+      "struct pollfd",
+      {},
+      "",
+      [
+        179,
+        1
+      ],
+      [
+        179,
+        14
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        201,
+        4
+      ],
+      [
+        201,
+        18
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        254,
+        45
+      ],
+      [
+        254,
+        59
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        462,
+        2
+      ],
+      [
+        462,
+        16
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_select.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"top.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"target.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"guile-internal.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <poll.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <sys/poll.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum oport { GDB_STDOUT, GDB_STDERR }",
+      {
+        "GDB_STDOUT": "",
+        "GDB_STDERR": ""
+      },
+      "oport",
+      [
+        104,
+        0
+      ],
+      [
+        104,
+        37
+      ]
+    ],
+    [
+      "enum oport",
+      {},
+      "",
+      [
+        459,
+        55
+      ],
+      [
+        459,
+        65
+      ]
+    ]
+  ]
+}

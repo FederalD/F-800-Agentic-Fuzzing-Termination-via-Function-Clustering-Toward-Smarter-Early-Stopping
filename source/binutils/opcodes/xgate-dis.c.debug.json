@@ -1,0 +1,608 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nprint_insn (bfd_vma memaddr, struct disassemble_info* info)\n{\n  int status;\n  unsigned int raw_code;\n  char *s = 0;\n  long bytesRead = 0;\n  int i = 0;\n  struct xgate_opcode *opcodePTR = (struct xgate_opcode*) xgate_opcodes;\n  struct decodeInfo *decodeTablePTR = 0;\n  struct decodeInfo *decodePTR = 0;\n  unsigned int operandRegisterBits = 0;\n  signed int relAddr = 0;\n  signed int operandOne = 0;\n  signed int operandTwo = 0;\n  bfd_byte buffer[4];\n  bfd_vma absAddress;\n\n  unsigned int operMaskReg = 0;\n  /* Initialize our array of opcode masks and check them against our constant\n     table.  */\n  if (!initialized)\n    {\n      decodeTable = xmalloc (sizeof (struct decodeInfo) * xgate_num_opcodes);\n      for (i = 0, decodeTablePTR = decodeTable; i < xgate_num_opcodes;\n          i++, decodeTablePTR++, opcodePTR++)\n        {\n          unsigned int bin = 0;\n          unsigned int mask = 0;\n          for (s = opcodePTR->format; *s; s++)\n            {\n              bin <<= 1;\n              mask <<= 1;\n              operandRegisterBits <<= 1;\n              bin |= (*s == '1');\n              mask |= (*s == '0' || *s == '1');\n              operandRegisterBits |= (*s == 'r');\n            }\n          /* Asserting will uncover inconsistencies in our table.  */\n          assert ((s - opcodePTR->format) == 16 || (s - opcodePTR->format) == 32);\n          assert (opcodePTR->bin_opcode == bin);\n\n          decodeTablePTR->operMask = mask;\n          decodeTablePTR->operMasksRegisterBits = operandRegisterBits;\n          decodeTablePTR->opcodePTR = opcodePTR;\n        }\n      initialized = 1;\n    }\n\n  /* Read 16 bits.  */\n  bytesRead += XGATE_TWO_BYTES;\n  status = read_memory (memaddr, buffer, XGATE_TWO_BYTES, info);\n  if (status == 0)\n    {\n      raw_code = buffer[0];\n      raw_code <<= 8;\n      raw_code += buffer[1];\n\n      decodePTR = find_match (raw_code);\n      if (decodePTR)\n        {\n          operMaskReg = decodePTR->operMasksRegisterBits;\n          (*info->fprintf_func)(info->stream, \"%s\", decodePTR->opcodePTR->name);\n\n          /* First we compare the shorthand format of the constraints. If we\n\t      still are unable to pinpoint the operands\n\t      we analyze the opcodes constraint string.  */\n          if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_MON_R_C))\n        \t{\n        \t  (*info->fprintf_func)(info->stream, \" R%x, CCR\",\n        \t\t  (raw_code >> 8) & 0x7);\n        \t}\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_MON_C_R))\n            {\n        \t  (*info->fprintf_func)(info->stream, \" CCR, R%x\",\n        \t      (raw_code >> 8) & 0x7);\n            }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_MON_R_P))\n            {\n        \t  (*info->fprintf_func)(info->stream, \" R%x, PC\",\n        \t      (raw_code >> 8) & 0x7);\n            }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_TRI))\n            {\n                  (*info->fprintf_func)(info->stream, \" R%x, R%x, R%x\",\n                      (raw_code >> 8) & 0x7, (raw_code >> 5) & 0x7,\n                      (raw_code >> 2) & 0x7);\n            }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_IDR))\n            {\n                  if (raw_code & 0x01)\n                    {\n                      (*info->fprintf_func)(info->stream, \" R%x, (R%x, R%x+)\",\n                          (raw_code >> 8) & 0x7, (raw_code >> 5) & 0x7,\n                          (raw_code >> 2) & 0x7);\n                    }\n                   else if (raw_code & 0x02)\n                          {\n                            (*info->fprintf_func)(info->stream, \" R%x, (R%x, -R%x)\",\n                                (raw_code >> 8) & 0x7, (raw_code >> 5) & 0x7,\n                                (raw_code >> 2) & 0x7);\n                          }\n                   else\n                     {\n                       (*info->fprintf_func)(info->stream, \" R%x, (R%x, R%x)\",\n                           (raw_code >> 8) & 0x7, (raw_code >> 5) & 0x7,\n                           (raw_code >> 2) & 0x7);\n                     }\n            }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_DYA))\n            {\n        \t  operandOne = ripBits (&operMaskReg, 3, opcodePTR, raw_code);\n        \t  operandTwo = ripBits (&operMaskReg, 3, opcodePTR, raw_code);\n        \t ( *info->fprintf_func)(info->stream, \" R%x, R%x\", operandOne,\n        \t      operandTwo);\n            }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_IDO5))\n            {\n        \t  (*info->fprintf_func)(info->stream, \" R%x, (R%x, #0x%x)\",\n        \t      (raw_code >> 8) & 0x7, (raw_code >> 5) & 0x7, raw_code & 0x1f);\n            }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_MON))\n            {\n        \t  operandOne = ripBits (&operMaskReg, 3, decodePTR->opcodePTR,\n        \t     raw_code);\n        \t (*info->fprintf_func)(info->stream, \" R%x\", operandOne);\n            }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_REL9))\n            {\n              /* If address is negative handle it accordingly.  */\n              if (raw_code & XGATE_NINE_SIGNBIT)\n                {\n                  relAddr = XGATE_NINE_BITS >> 1; /* Clip sign bit.  */\n                  relAddr = ~relAddr; /* Make signed.  */\n                  relAddr |= (raw_code & 0xFF) + 1; /* Apply our value.  */\n                  relAddr <<= 1; /* Multiply by two as per processor docs.  */\n                }\n              else\n                {\n                  relAddr = raw_code & 0xff;\n                  relAddr = (relAddr << 1) + 2;\n                }\n             (*info->fprintf_func)(info->stream, \" *%d\", relAddr);\n             (*info->fprintf_func)(info->stream, \"  Abs* 0x\");\n             (*info->print_address_func)(memaddr + relAddr, info);\n           }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_REL10))\n            {\n              /* If address is negative handle it accordingly.  */\n              if (raw_code & XGATE_TEN_SIGNBIT)\n                {\n                  relAddr = XGATE_TEN_BITS >> 1; /* Clip sign bit.  */\n                  relAddr = ~relAddr; /* Make signed.  */\n                  relAddr |= (raw_code & 0x1FF) + 1; /* Apply our value.  */\n                  relAddr <<= 1; /* Multiply by two as per processor docs.  */\n                }\n              else\n                {\n                  relAddr = raw_code & 0x1FF;\n                  relAddr = (relAddr << 1) + 2;\n                }\n              (*info->fprintf_func)(info->stream, \" *%d\", relAddr);\n              (*info->fprintf_func)(info->stream, \"  Abs* 0x\");\n              (*info->print_address_func)(memaddr + relAddr, info);\n            }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_IMM4))\n            {\n              (*info->fprintf_func)(info->stream, \" R%x, #0x%02x\",\n              (raw_code >> 8) & 0x7, (raw_code >> 4) & 0xF);\n            }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_IMM8))\n            {\n              if (macro_search (decodePTR->opcodePTR->name, previousOpName) &&\n                 previousOpName[0])\n               {\n                 absAddress = (0xFF & raw_code) << 8;\n                 absAddress |= perviousBin & 0xFF;\n                 (*info->fprintf_func)(info->stream, \" R%x, #0x%02x Abs* 0x\",\n                     (raw_code >> 8) & 0x7, raw_code & 0xff);\n                 (*info->print_address_func)(absAddress, info);\n                 previousOpName[0] = 0;\n               }\n              else\n               {\n                 strcpy (previousOpName, decodePTR->opcodePTR->name);\n                 (*info->fprintf_func)(info->stream, \" R%x, #0x%02x\",\n                     (raw_code >> 8) & 0x7, raw_code & 0xff);\n               }\n            }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_IMM3))\n            {\n        \t  (*info->fprintf_func)(info->stream, \" #0x%x\",\n        \t     (raw_code >> 8) & 0x7);\n            }\n          else if (!strcmp (decodePTR->opcodePTR->constraints, XGATE_OP_INH))\n            {\n        \t  //\n            }\n          else\n            {\n              (*info->fprintf_func)(info->stream, \" unhandled mode %s\",\n                opcodePTR->constraints);\n            }\n          perviousBin = raw_code;\n        }\n      else\n        {\n          (*info->fprintf_func)(info->stream,\n\t\t\t\t\" unable to find opcode match #0%x\", raw_code);\n        }\n    }\n  return bytesRead;\n}",
+      "fn_code_pos": [
+        [
+          60,
+          0
+        ],
+        [
+          272,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_insn",
+        "parameters": {
+          "memaddr": "bfd_vma",
+          "info": "struct disassemble_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nprint_insn_xgate (bfd_vma memaddr, struct disassemble_info* info)\n{\n  return print_insn (memaddr, info);\n}",
+      "fn_code_pos": [
+        [
+          274,
+          0
+        ],
+        [
+          278,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_insn_xgate",
+        "parameters": {
+          "memaddr": "bfd_vma",
+          "info": "struct disassemble_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nread_memory (bfd_vma memaddr, bfd_byte* buffer, int size,\n    struct disassemble_info* info)\n{\n  int status;\n  status = (*info->read_memory_func) (memaddr, buffer, size, info);\n  if (status != 0)\n    {\n      (*info->memory_error_func) (status, memaddr, info);\n      return -1;\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          280,
+          0
+        ],
+        [
+          292,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_memory",
+        "parameters": {
+          "memaddr": "bfd_vma",
+          "buffer": "bfd_byte",
+          "size": "int",
+          "info": "struct disassemble_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nripBits (unsigned int *operandBitsRemaining,\n\t int numBitsRequested,\n\t struct xgate_opcode *opcodePTR,\n\t unsigned int memory)\n{\n  unsigned int currentBit;\n  int operand;\n  int numBitsFound;\n\n  for (operand = 0, numBitsFound = 0, currentBit = 1\n\t << ((opcodePTR->size * 8) - 1);\n       (numBitsFound < numBitsRequested) && currentBit; currentBit >>= 1)\n    {\n      if (currentBit & *operandBitsRemaining)\n\t{\n\t  *operandBitsRemaining &= ~(currentBit); /* Consume the current bit.  */\n\t  operand <<= 1; /* Make room for our next bit.  */\n\t  numBitsFound++;\n\t  operand |= (currentBit & memory) > 0;\n\t}\n    }\n  return operand;\n}",
+      "fn_code_pos": [
+        [
+          294,
+          0
+        ],
+        [
+          317,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ripBits",
+        "parameters": {
+          "operandBitsRemaining": "unsigned int",
+          "numBitsRequested": "int",
+          "opcodePTR": "struct xgate_opcode",
+          "memory": "unsigned int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nmacro_search (char *currentName, char *lastName)\n{\n  int i;\n  int length = 0;\n  char *where;\n\n  for (i = 0; i < xgate_num_opcodes; i++)\n    {\n      where = strstr (xgate_opcodes[i].constraints, lastName);\n\n      if (where)\n        {\n          length = strlen (where);\n        }\n      if (length)\n        {\n          where = strstr (xgate_opcodes[i].constraints, currentName);\n          if (where)\n            {\n              length = strlen (where);\n              return 1;\n            }\n        }\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          319,
+          0
+        ],
+        [
+          345,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "macro_search",
+        "parameters": {
+          "currentName": "char",
+          "lastName": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static struct decodeInfo *\nfind_match (unsigned int raw_code)\n{\n  struct decodeInfo *decodeTablePTR = 0;\n  int i;\n\n  for (i = 0, decodeTablePTR = decodeTable; i < xgate_num_opcodes;\n      i++, decodeTablePTR++)\n    {\n      if ((raw_code & decodeTablePTR->operMask)\n          == decodeTablePTR->opcodePTR->bin_opcode)\n        {\n          /* Make sure we didn't run into a macro or alias.  */\n          if (decodeTablePTR->opcodePTR->cycles_min != 0)\n            {\n              return decodeTablePTR;\n              break;\n            }\n          else\n\t    continue;\n        }\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          347,
+          0
+        ],
+        [
+          370,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_match",
+        "parameters": {
+          "raw_code": "unsigned int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "print_insn (bfd_vma, struct disassemble_info *)",
+      "fn_dec_pos": [
+        [
+          44,
+          11
+        ],
+        [
+          44,
+          58
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_insn",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "read_memory (bfd_vma, bfd_byte*, int, struct disassemble_info *)",
+      "fn_dec_pos": [
+        [
+          45,
+          11
+        ],
+        [
+          45,
+          75
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_memory",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "ripBits (unsigned int *, int,\n\t\t    struct xgate_opcode *, unsigned int)",
+      "fn_dec_pos": [
+        [
+          46,
+          11
+        ],
+        [
+          47,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ripBits",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "macro_search (char *, char *)",
+      "fn_dec_pos": [
+        [
+          48,
+          11
+        ],
+        [
+          48,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "macro_search",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "find_match (unsigned int)",
+      "fn_dec_pos": [
+        [
+          49,
+          27
+        ],
+        [
+          49,
+          52
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_match",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "find_match (unsigned int raw_code)",
+      "fn_dec_pos": [
+        [
+          348,
+          0
+        ],
+        [
+          348,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "find_match",
+        "parameters": {
+          "raw_code": "unsigned int"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct decodeInfo\n{\n  unsigned int operMask;\n  unsigned int operMasksRegisterBits;\n  struct xgate_opcode *opcodePTR;\n}",
+      {
+        "operMask": "unsigned int",
+        "operMasksRegisterBits": "unsigned int",
+        "*opcodePTR": "struct xgate_opcode"
+      },
+      "decodeInfo",
+      [
+        36,
+        0
+      ],
+      [
+        41,
+        1
+      ]
+    ],
+    [
+      "struct decodeInfo\n{\n  unsigned int operMask;\n  unsigned int operMasksRegisterBits;\n  struct xgate_opcode *opcodePTR;\n}",
+      {
+        "operMask": "unsigned int",
+        "operMasksRegisterBits": "unsigned int",
+        "*opcodePTR": "struct xgate_opcode"
+      },
+      "decodeInfo",
+      [
+        36,
+        0
+      ],
+      [
+        41,
+        1
+      ]
+    ],
+    [
+      "struct xgate_opcode",
+      {},
+      "",
+      [
+        40,
+        2
+      ],
+      [
+        40,
+        21
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        44,
+        32
+      ],
+      [
+        44,
+        55
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        45,
+        49
+      ],
+      [
+        45,
+        72
+      ]
+    ],
+    [
+      "struct xgate_opcode",
+      {},
+      "",
+      [
+        47,
+        6
+      ],
+      [
+        47,
+        25
+      ]
+    ],
+    [
+      "struct decodeInfo",
+      {},
+      "",
+      [
+        49,
+        7
+      ],
+      [
+        49,
+        24
+      ]
+    ],
+    [
+      "struct decodeInfo",
+      {},
+      "",
+      [
+        52,
+        7
+      ],
+      [
+        52,
+        24
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        61,
+        29
+      ],
+      [
+        61,
+        52
+      ]
+    ],
+    [
+      "struct xgate_opcode",
+      {},
+      "",
+      [
+        68,
+        2
+      ],
+      [
+        68,
+        21
+      ]
+    ],
+    [
+      "struct xgate_opcode",
+      {},
+      "",
+      [
+        68,
+        36
+      ],
+      [
+        68,
+        55
+      ]
+    ],
+    [
+      "struct decodeInfo",
+      {},
+      "",
+      [
+        69,
+        2
+      ],
+      [
+        69,
+        19
+      ]
+    ],
+    [
+      "struct decodeInfo",
+      {},
+      "",
+      [
+        70,
+        2
+      ],
+      [
+        70,
+        19
+      ]
+    ],
+    [
+      "struct decodeInfo",
+      {},
+      "",
+      [
+        83,
+        37
+      ],
+      [
+        83,
+        54
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        275,
+        35
+      ],
+      [
+        275,
+        58
+      ]
+    ],
+    [
+      "struct disassemble_info",
+      {},
+      "",
+      [
+        282,
+        4
+      ],
+      [
+        282,
+        27
+      ]
+    ],
+    [
+      "struct xgate_opcode",
+      {},
+      "",
+      [
+        297,
+        2
+      ],
+      [
+        297,
+        21
+      ]
+    ],
+    [
+      "struct decodeInfo",
+      {},
+      "",
+      [
+        347,
+        7
+      ],
+      [
+        347,
+        24
+      ]
+    ],
+    [
+      "struct decodeInfo",
+      {},
+      "",
+      [
+        350,
+        2
+      ],
+      [
+        350,
+        19
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <assert.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"disassemble.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"opintl.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"ansidecl.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"opcode/xgate.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

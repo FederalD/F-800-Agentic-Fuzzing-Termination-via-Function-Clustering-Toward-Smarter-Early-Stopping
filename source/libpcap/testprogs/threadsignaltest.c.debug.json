@@ -1,0 +1,617 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static const char *\nwin32_strerror(DWORD error)\n{\n  static char errbuf[ERRBUF_SIZE+1];\n  size_t errlen;\n\n  FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM, NULL, error, 0, errbuf,\n                ERRBUF_SIZE, NULL);\n\n  /*\n   * \"FormatMessage()\" \"helpfully\" sticks CR/LF at the end of the\n   * message.  Get rid of it.\n   */\n  errlen = strlen(errbuf);\n  if (errlen >= 2) {\n    errbuf[errlen - 1] = '\\0';\n    errbuf[errlen - 2] = '\\0';\n    errlen -= 2;\n  }\n  return errbuf;\n}",
+      "fn_code_pos": [
+        [
+          81,
+          0
+        ],
+        [
+          101,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "win32_strerror",
+        "parameters": {
+          "error": "DWORD"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\ncatch_sigusr1(int sig _U_)\n{\n\tprintf(\"Got SIGUSR1\\n\");\n}",
+      "fn_code_pos": [
+        [
+          103,
+          0
+        ],
+        [
+          107,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "catch_sigusr1",
+        "parameters": {
+          "sig": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nsleep_secs(int secs)\n{\n#ifdef _WIN32\n\tSleep(secs*1000);\n#else\n\tunsigned secs_remaining;\n\n\tif (secs <= 0)\n\t\treturn;\n\tsecs_remaining = secs;\n\twhile (secs_remaining != 0)\n\t\tsecs_remaining = sleep(secs_remaining);\n#endif\n}",
+      "fn_code_pos": [
+        [
+          110,
+          0
+        ],
+        [
+          124,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sleep_secs",
+        "parameters": {
+          "secs": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static THREAD_FUNC_RETURN_TYPE\ncapture_thread_func(THREAD_FUNC_ARG_TYPE arg)\n{\n\tchar *device = arg;\n\tint packet_count;\n\tint status;\n#ifndef _WIN32\n\tstruct sigaction action;\n\tsigset_t mask;\n#endif\n\n#ifndef _WIN32\n\tsigemptyset(&mask);\n\taction.sa_handler = catch_sigusr1;\n\taction.sa_mask = mask;\n\taction.sa_flags = 0;\n\tif (sigaction(SIGUSR1, &action, NULL) == -1)\n\t\terror(\"Can't catch SIGUSR1: %s\", strerror(errno));\n#endif\n\n\tprintf(\"Listening on %s\\n\", device);\n\tfor (;;) {\n\t\tpacket_count = 0;\n\t\tstatus = pcap_dispatch(pd, -1, countme,\n\t\t    (u_char *)&packet_count);\n\t\tif (status < 0)\n\t\t\tbreak;\n\t\tif (status != 0) {\n\t\t\tprintf(\"%d packets seen, %d packets counted after pcap_dispatch returns\\n\",\n\t\t\t    status, packet_count);\n\t\t} else\n\t\t\tprintf(\"No packets seen by pcap_dispatch\\n\");\n\t}\n\tif (status == -2) {\n\t\t/*\n\t\t * We got interrupted, so perhaps we didn't\n\t\t * manage to finish a line we were printing.\n\t\t * Print an extra newline, just in case.\n\t\t */\n\t\tputchar('\\n');\n\t\tprintf(\"Loop got broken\\n\");\n\t}\n\t(void)fflush(stdout);\n\tif (status == -1) {\n\t\t/*\n\t\t * Error.  Report it.\n\t\t */\n\t\t(void)fprintf(stderr, \"%s: pcap_loop: %s\\n\",\n\t\t    program_name, pcap_geterr(pd));\n\t}\n\treturn 0;\n}",
+      "fn_code_pos": [
+        [
+          126,
+          0
+        ],
+        [
+          177,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "capture_thread_func",
+        "parameters": {
+          "arg": "THREAD_FUNC_ARG_TYPE"
+        },
+        "return_type": "THREAD_FUNC_RETURN_TYPE"
+      }
+    },
+    {
+      "fn_code": "int\nmain(int argc, char **argv)\n{\n\tregister int op;\n\tregister char *cp, *cmdbuf, *device;\n\tint immediate = 0;\n\tpcap_if_t *devlist;\n\tbpf_u_int32 localnet, netmask;\n\tstruct bpf_program fcode;\n\tchar ebuf[PCAP_ERRBUF_SIZE];\n\tint status;\n\tTHREAD_HANDLE capture_thread;\n#ifndef _WIN32\n\tvoid *retval;\n#endif\n\n\tdevice = NULL;\n\tif ((cp = strrchr(argv[0], '/')) != NULL)\n\t\tprogram_name = cp + 1;\n\telse\n\t\tprogram_name = argv[0];\n\n\topterr = 0;\n\twhile ((op = getopt(argc, argv, \"i:\")) != -1) {\n\t\tswitch (op) {\n\n\t\tcase 'i':\n\t\t\tdevice = optarg;\n\t\t\tbreak;\n\n\t\tdefault:\n\t\t\tusage();\n\t\t\t/* NOTREACHED */\n\t\t}\n\t}\n\n\tif (device == NULL) {\n\t\tif (pcap_findalldevs(&devlist, ebuf) == -1)\n\t\t\terror(\"%s\", ebuf);\n\t\tif (devlist == NULL)\n\t\t\terror(\"no interfaces available for capture\");\n\t\tdevice = strdup(devlist->name);\n\t\tpcap_freealldevs(devlist);\n\t}\n\t*ebuf = '\\0';\n\tpd = pcap_create(device, ebuf);\n\tif (pd == NULL)\n\t\terror(\"%s\", ebuf);\n\tstatus = pcap_set_snaplen(pd, 65535);\n\tif (status != 0)\n\t\terror(\"%s: pcap_set_snaplen failed: %s\",\n\t\t\t    device, pcap_statustostr(status));\n\tif (immediate) {\n\t\tstatus = pcap_set_immediate_mode(pd, 1);\n\t\tif (status != 0)\n\t\t\terror(\"%s: pcap_set_immediate_mode failed: %s\",\n\t\t\t    device, pcap_statustostr(status));\n\t}\n\tstatus = pcap_set_timeout(pd, 5*60*1000);\n\tif (status != 0)\n\t\terror(\"%s: pcap_set_timeout failed: %s\",\n\t\t    device, pcap_statustostr(status));\n\tstatus = pcap_activate(pd);\n\tif (status < 0) {\n\t\t/*\n\t\t * pcap_activate() failed.\n\t\t */\n\t\terror(\"%s: %s\\n(%s)\", device,\n\t\t    pcap_statustostr(status), pcap_geterr(pd));\n\t} else if (status > 0) {\n\t\t/*\n\t\t * pcap_activate() succeeded, but it's warning us\n\t\t * of a problem it had.\n\t\t */\n\t\twarning(\"%s: %s\\n(%s)\", device,\n\t\t    pcap_statustostr(status), pcap_geterr(pd));\n\t}\n\tif (pcap_lookupnet(device, &localnet, &netmask, ebuf) < 0) {\n\t\tlocalnet = 0;\n\t\tnetmask = 0;\n\t\twarning(\"%s\", ebuf);\n\t}\n\tcmdbuf = copy_argv(&argv[optind]);\n\n\tif (pcap_compile(pd, &fcode, cmdbuf, 1, netmask) < 0)\n\t\terror(\"%s\", pcap_geterr(pd));\n\n\tif (pcap_setfilter(pd, &fcode) < 0)\n\t\terror(\"%s\", pcap_geterr(pd));\n\n#ifdef _WIN32\n\tcapture_thread = CreateThread(NULL, 0, capture_thread_func, device,\n\t    0, NULL);\n\tif (capture_thread == NULL)\n\t\terror(\"Can't create capture thread: %s\",\n\t\t    win32_strerror(GetLastError()));\n#else\n\tstatus = pthread_create(&capture_thread, NULL, capture_thread_func,\n\t    device);\n\tif (status != 0)\n\t\terror(\"Can't create capture thread: %s\", strerror(status));\n#endif\n\tsleep_secs(60);\n\tpcap_breakloop(pd);\n#ifdef _WIN32\n\tprintf(\"Setting event\\n\");\n\tif (!SetEvent(pcap_getevent(pd)))\n\t\terror(\"Can't set event for pcap_t: %s\",\n\t\t    win32_strerror(GetLastError()));\n\tif (WaitForSingleObject(capture_thread, INFINITE) == WAIT_FAILED)\n\t\terror(\"Wait for thread termination failed: %s\",\n\t\t    win32_strerror(GetLastError()));\n\tCloseHandle(capture_thread);\n#else\n\tprintf(\"Sending SIGUSR1\\n\");\n\tstatus = pthread_kill(capture_thread, SIGUSR1);\n\tif (status != 0)\n\t\twarning(\"Can't interrupt capture thread: %s\", strerror(status));\n\tstatus = pthread_join(capture_thread, &retval);\n\tif (status != 0)\n\t\terror(\"Wait for thread termination failed: %s\",\n\t\t    strerror(status));\n#endif\n\n\tpcap_close(pd);\n\tpcap_freecode(&fcode);\n\texit(status == -1 ? 1 : 0);\n}",
+      "fn_code_pos": [
+        [
+          179,
+          0
+        ],
+        [
+          306,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {
+          "argc": "int",
+          "argv": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ncountme(u_char *user, const struct pcap_pkthdr *h _U_, const u_char *sp _U_)\n{\n\tint *counterp = (int *)user;\n\n\t(*counterp)++;\n}",
+      "fn_code_pos": [
+        [
+          308,
+          0
+        ],
+        [
+          314,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "countme",
+        "parameters": {
+          "user": "u_char",
+          "h": "struct pcap_pkthdr",
+          "sp": "u_char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nusage(void)\n{\n\t(void)fprintf(stderr, \"Usage: %s [ -m ] [ -i interface ] [ -t timeout] [expression]\\n\",\n\t    program_name);\n\texit(1);\n}",
+      "fn_code_pos": [
+        [
+          316,
+          0
+        ],
+        [
+          322,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "usage",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nerror(const char *fmt, ...)\n{\n\tva_list ap;\n\n\t(void)fprintf(stderr, \"%s: \", program_name);\n\tva_start(ap, fmt);\n\t(void)vfprintf(stderr, fmt, ap);\n\tva_end(ap);\n\tif (*fmt) {\n\t\tfmt += strlen(fmt);\n\t\tif (fmt[-1] != '\\n')\n\t\t\t(void)fputc('\\n', stderr);\n\t}\n\texit(1);\n\t/* NOTREACHED */\n}",
+      "fn_code_pos": [
+        [
+          325,
+          0
+        ],
+        [
+          341,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "error",
+        "parameters": {
+          "fmt": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nwarning(const char *fmt, ...)\n{\n\tva_list ap;\n\n\t(void)fprintf(stderr, \"%s: WARNING: \", program_name);\n\tva_start(ap, fmt);\n\t(void)vfprintf(stderr, fmt, ap);\n\tva_end(ap);\n\tif (*fmt) {\n\t\tfmt += strlen(fmt);\n\t\tif (fmt[-1] != '\\n')\n\t\t\t(void)fputc('\\n', stderr);\n\t}\n}",
+      "fn_code_pos": [
+        [
+          344,
+          0
+        ],
+        [
+          358,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "warning",
+        "parameters": {
+          "fmt": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\ncopy_argv(register char **argv)\n{\n\tregister char **p;\n\tregister u_int len = 0;\n\tchar *buf;\n\tchar *src, *dst;\n\n\tp = argv;\n\tif (*p == 0)\n\t\treturn 0;\n\n\twhile (*p)\n\t\tlen += strlen(*p++) + 1;\n\n\tbuf = (char *)malloc(len);\n\tif (buf == NULL)\n\t\terror(\"copy_argv: malloc\");\n\n\tp = argv;\n\tdst = buf;\n\twhile ((src = *p++) != NULL) {\n\t\twhile ((*dst++ = *src++) != '\\0')\n\t\t\t;\n\t\tdst[-1] = ' ';\n\t}\n\tdst[-1] = '\\0';\n\n\treturn buf;\n}",
+      "fn_code_pos": [
+        [
+          363,
+          0
+        ],
+        [
+          392,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "copy_argv",
+        "parameters": {
+          "argv": "char"
+        },
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "countme(u_char *, const struct pcap_pkthdr *, const u_char *)",
+      "fn_dec_pos": [
+        [
+          66,
+          12
+        ],
+        [
+          66,
+          73
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "countme",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "PCAP_NORETURN usage(void)",
+      "fn_dec_pos": [
+        [
+          67,
+          12
+        ],
+        [
+          67,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "PCAP_NORETURN usage",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "PCAP_NORETURN error(const char *, ...)",
+      "fn_dec_pos": [
+        [
+          68,
+          12
+        ],
+        [
+          68,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "PCAP_NORETURN error",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "warning(const char *, ...)",
+      "fn_dec_pos": [
+        [
+          69,
+          12
+        ],
+        [
+          69,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "warning",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "copy_argv(char **)",
+      "fn_dec_pos": [
+        [
+          70,
+          13
+        ],
+        [
+          70,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "copy_argv",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "win32_strerror(DWORD error)",
+      "fn_dec_pos": [
+        [
+          82,
+          0
+        ],
+        [
+          82,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "win32_strerror",
+        "parameters": {
+          "error": "DWORD"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "copy_argv(register char **argv)",
+      "fn_dec_pos": [
+        [
+          364,
+          0
+        ],
+        [
+          364,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "copy_argv",
+        "parameters": {
+          "argv": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        66,
+        36
+      ],
+      [
+        66,
+        54
+      ]
+    ],
+    [
+      "struct sigaction",
+      {},
+      "",
+      [
+        133,
+        1
+      ],
+      [
+        133,
+        17
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        187,
+        1
+      ],
+      [
+        187,
+        19
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        309,
+        28
+      ],
+      [
+        309,
+        46
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"varattrs.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <stdarg.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <limits.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <winsock2.h>\n",
+      [
+        35,
+        2
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <windows.h>\n",
+      [
+        36,
+        2
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"getopt.h\"\n",
+      [
+        42,
+        2
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <pthread.h>\n",
+      [
+        44,
+        2
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        45,
+        2
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        46,
+        2
+      ],
+      [
+        47,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        52,
+        0
+      ],
+      [
+        53,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        53,
+        0
+      ],
+      [
+        54,
+        0
+      ]
+    ],
+    [
+      "#include <pcap.h>\n",
+      [
+        55,
+        0
+      ],
+      [
+        56,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap/funcattrs.h\"\n",
+      [
+        57,
+        0
+      ],
+      [
+        58,
+        0
+      ]
+    ],
+    [
+      "#include \"portability.h\"\n",
+      [
+        60,
+        2
+      ],
+      [
+        61,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

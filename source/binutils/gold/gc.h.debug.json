@@ -1,0 +1,801 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "template<typename Classify_reloc>\ninline unsigned int\nget_embedded_addend_size(int r_type, Relobj* obj)\n{\n  if (Classify_reloc::sh_type == elfcpp::SHT_REL)\n    return Classify_reloc::get_size_for_reloc(r_type, obj);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          150,
+          0
+        ],
+        [
+          157,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian, typename Target_type,\n\t typename Scan, typename Classify_reloc>\ninline void\ngc_process_relocs(\n    Symbol_table* symtab,\n    Layout*,\n    Target_type* target,\n    Sized_relobj_file<size, big_endian>* src_obj,\n    unsigned int src_indx,\n    const unsigned char* prelocs,\n    size_t reloc_count,\n    Output_section*,\n    bool,\n    size_t local_count,\n    const unsigned char* plocal_syms)\n{\n  Scan scan;\n\n  typedef typename Classify_reloc::Reltype Reltype;\n  const int reloc_size = Classify_reloc::reloc_size;\n  const int sym_size = elfcpp::Elf_sizes<size>::sym_size;\n\n  Icf::Sections_reachable_info* secvec = NULL;\n  Icf::Symbol_info* symvec = NULL;\n  Icf::Addend_info* addendvec = NULL;\n  Icf::Offset_info* offsetvec = NULL;\n  Icf::Reloc_addend_size_info* reloc_addend_size_vec = NULL;\n  bool is_icf_tracked = false;\n  const char* cident_section_name = NULL;\n\n  std::string src_section_name = (parameters->options().icf_enabled()\n                                  ? src_obj->section_name(src_indx)\n                                  : \"\");\n\n  bool check_section_for_function_pointers = false;\n\n  if (parameters->options().icf_enabled()\n      && is_section_foldable_candidate(src_section_name.c_str()))\n    {\n      is_icf_tracked = true;\n      Section_id src_id(src_obj, src_indx);\n      Icf::Reloc_info* reloc_info =\n        &symtab->icf()->reloc_info_list()[src_id];\n      secvec = &reloc_info->section_info;\n      symvec = &reloc_info->symbol_info;\n      addendvec = &reloc_info->addend_info;\n      offsetvec = &reloc_info->offset_info;\n      reloc_addend_size_vec = &reloc_info->reloc_addend_size_info;\n    }\n\n  check_section_for_function_pointers =\n    symtab->icf()->check_section_for_function_pointers(src_section_name,\n                                                       target);\n\n  for (size_t i = 0; i < reloc_count; ++i, prelocs += reloc_size)\n    {\n      Reltype reloc(prelocs);\n      unsigned int r_sym = Classify_reloc::get_r_sym(&reloc);\n      unsigned int r_type = Classify_reloc::get_r_type(&reloc);\n      typename elfcpp::Elf_types<size>::Elf_Swxword addend =\n\t  Classify_reloc::get_r_addend(&reloc);\n      Relobj* dst_obj;\n      unsigned int dst_indx;\n      typedef typename elfcpp::Elf_types<size>::Elf_Addr Address;\n      Address dst_off;\n\n      if (r_sym < local_count)\n        {\n          gold_assert(plocal_syms != NULL);\n          typename elfcpp::Sym<size, big_endian> lsym(plocal_syms\n                                                      + r_sym * sym_size);\n\t  dst_indx = lsym.get_st_shndx();\n          bool is_ordinary;\n\t  dst_indx = src_obj->adjust_sym_shndx(r_sym, dst_indx, &is_ordinary);\n          dst_obj = src_obj;\n\t  dst_off = lsym.get_st_value() + addend;\n\n          if (is_icf_tracked)\n            {\n\t      Address symvalue = dst_off - addend;\n\t      if (is_ordinary) \n\t\t(*secvec).push_back(Section_id(src_obj, dst_indx));\n\t      else\n                (*secvec).push_back(Section_id(NULL, 0));\n              (*symvec).push_back(NULL);\n\t      (*addendvec).push_back(std::make_pair(\n\t\t\t\t\tstatic_cast<long long>(symvalue),\n\t\t\t\t\tstatic_cast<long long>(addend)));\n              uint64_t reloc_offset =\n                convert_to_section_size_type(reloc.get_r_offset());\n\t      (*offsetvec).push_back(reloc_offset);\n              (*reloc_addend_size_vec).push_back(\n                get_embedded_addend_size<Classify_reloc>(r_type, src_obj));\n            }\n\n\t  // When doing safe folding, check to see if this relocation is that\n\t  // of a function pointer being taken.\n\t  if (is_ordinary\n\t      && check_section_for_function_pointers\n              && lsym.get_st_type() != elfcpp::STT_OBJECT\n \t      && scan.local_reloc_may_be_function_pointer(symtab, NULL, NULL,\n\t\t\t\t\t\t\t  src_obj, src_indx,\n\t\t\t                       \t\t  NULL, reloc, r_type,\n\t\t\t\t\t\t\t  lsym))\n            symtab->icf()->set_section_has_function_pointers(\n              src_obj, lsym.get_st_shndx());\n\n          if (!is_ordinary || dst_indx == src_indx)\n            continue;\n        }\n      else\n        {\n          Symbol* gsym = src_obj->global_symbol(r_sym);\n          gold_assert(gsym != NULL);\n          if (gsym->is_forwarder())\n            gsym = symtab->resolve_forwards(gsym);\n\n          dst_obj = NULL;\n          dst_indx = 0;\n          bool is_ordinary = false;\n          if (gsym->source() == Symbol::FROM_OBJECT\n\t      && !gsym->object()->is_dynamic())\n            {\n              dst_obj = static_cast<Relobj*>(gsym->object());\n              dst_indx = gsym->shndx(&is_ordinary);\n            }\n\t  dst_off = static_cast<const Sized_symbol<size>*>(gsym)->value();\n\t  dst_off += addend;\n\n\t  // When doing safe folding, check to see if this relocation is that\n\t  // of a function pointer being taken.\n\t  if (gsym->source() == Symbol::FROM_OBJECT\n              && gsym->type() == elfcpp::STT_FUNC\n              && check_section_for_function_pointers\n              && dst_obj != NULL\n              && (!is_ordinary\n                  || scan.global_reloc_may_be_function_pointer(\n                       symtab, NULL, NULL, src_obj, src_indx, NULL, reloc,\n                       r_type, gsym)))\n            symtab->icf()->set_section_has_function_pointers(dst_obj, dst_indx);\n\n          // If the symbol name matches '__start_XXX' then the section with\n          // the C identifier like name 'XXX' should not be garbage collected.\n          // A similar treatment to symbols with the name '__stop_XXX'.\n          if (is_prefix_of(cident_section_start_prefix, gsym->name()))\n            {\n              cident_section_name = (gsym->name() \n                                     + strlen(cident_section_start_prefix));\n            }\n          else if (is_prefix_of(cident_section_stop_prefix, gsym->name()))\n            {\n              cident_section_name = (gsym->name() \n                                     + strlen(cident_section_stop_prefix));\n            }\n          if (is_icf_tracked)\n            {\n\t      Address symvalue = dst_off - addend;\n              if (is_ordinary && dst_obj != NULL)\n\t\t(*secvec).push_back(Section_id(dst_obj, dst_indx));\n\t      else\n                (*secvec).push_back(Section_id(NULL, 0));\n              (*symvec).push_back(gsym);\n\t      (*addendvec).push_back(std::make_pair(\n\t\t\t\t\tstatic_cast<long long>(symvalue),\n\t\t\t\t\tstatic_cast<long long>(addend)));\n              uint64_t reloc_offset =\n                convert_to_section_size_type(reloc.get_r_offset());\n\t      (*offsetvec).push_back(reloc_offset);\n              (*reloc_addend_size_vec).push_back(\n                get_embedded_addend_size<Classify_reloc>(r_type, src_obj));\n\t    }\n\n          if (dst_obj == NULL)\n            continue;\n          if (!is_ordinary)\n            continue;\n        }\n      if (parameters->options().gc_sections())\n        {\n\t  symtab->gc()->add_reference(src_obj, src_indx, dst_obj, dst_indx);\n\t  parameters->sized_target<size, big_endian>()\n\t    ->gc_add_reference(symtab, src_obj, src_indx, dst_obj, dst_indx,\n\t\t\t       dst_off);\n          if (cident_section_name != NULL)\n            {\n              Garbage_collection::Cident_section_map::iterator ele =\n                symtab->gc()->cident_sections()->find(std::string(cident_section_name));\n              if (ele == symtab->gc()->cident_sections()->end())\n                continue;\n\t      Section_id src_id(src_obj, src_indx);\n              Garbage_collection::Sections_reachable&\n                v(symtab->gc()->section_reloc_map()[src_id]);\n              Garbage_collection::Sections_reachable& cident_secn(ele->second);\n              for (Garbage_collection::Sections_reachable::iterator it_v\n                     = cident_secn.begin();\n                   it_v != cident_secn.end();\n                   ++it_v)\n                {\n                  v.insert(*it_v);\n                }\n            }\n        }\n    }\n  return;\n}",
+      "fn_code_pos": [
+        [
+          165,
+          0
+        ],
+        [
+          369,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Garbage_collection()\n  : is_worklist_ready_(false)\n  { }",
+      "fn_code_pos": [
+        [
+          56,
+          2
+        ],
+        [
+          58,
+          5
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "Garbage_collection",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Sections_reachable&\n  referenced_list()\n  { return referenced_list_; }",
+      "fn_code_pos": [
+        [
+          62,
+          2
+        ],
+        [
+          64,
+          30
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "Sections_reachable"
+      }
+    },
+    {
+      "fn_code": "Section_ref&\n  section_reloc_map()\n  { return this->section_reloc_map_; }",
+      "fn_code_pos": [
+        [
+          66,
+          2
+        ],
+        [
+          68,
+          38
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "Section_ref"
+      }
+    },
+    {
+      "fn_code": "Worklist_type&\n  worklist()\n  { return this->work_list_; }",
+      "fn_code_pos": [
+        [
+          70,
+          2
+        ],
+        [
+          72,
+          30
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "Worklist_type"
+      }
+    },
+    {
+      "fn_code": "bool\n  is_worklist_ready()\n  { return this->is_worklist_ready_; }",
+      "fn_code_pos": [
+        [
+          74,
+          2
+        ],
+        [
+          76,
+          38
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "is_worklist_ready",
+        "parameters": {},
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "void\n  worklist_ready()\n  { this->is_worklist_ready_ = true; }",
+      "fn_code_pos": [
+        [
+          78,
+          2
+        ],
+        [
+          80,
+          38
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "worklist_ready",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "bool\n  is_section_garbage(Relobj* obj, unsigned int shndx)\n  { return (this->referenced_list().find(Section_id(obj, shndx))\n            == this->referenced_list().end()); }",
+      "fn_code_pos": [
+        [
+          85,
+          2
+        ],
+        [
+          88,
+          48
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "is_section_garbage",
+        "parameters": {
+          "obj": "Relobj",
+          "shndx": "unsigned int"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "Cident_section_map*\n  cident_sections()\n  { return &cident_sections_; }",
+      "fn_code_pos": [
+        [
+          90,
+          2
+        ],
+        [
+          92,
+          31
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "cident_sections",
+        "parameters": {},
+        "return_type": "Cident_section_map"
+      }
+    },
+    {
+      "fn_code": "void\n  add_cident_section(std::string section_name,\n\t\t     Section_id secn)\n  { this->cident_sections_[section_name].insert(secn); }",
+      "fn_code_pos": [
+        [
+          94,
+          2
+        ],
+        [
+          97,
+          56
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "add_cident_section",
+        "parameters": {
+          "section_name": "std::string",
+          "secn": "Section_id"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n  add_reference(Relobj* src_object, unsigned int src_shndx,\n\t\tRelobj* dst_object, unsigned int dst_shndx)\n  {\n    Section_id src_id(src_object, src_shndx);\n    Section_id dst_id(dst_object, dst_shndx);\n    Sections_reachable& reachable = this->section_reloc_map_[src_id];\n    reachable.insert(dst_id);\n  }",
+      "fn_code_pos": [
+        [
+          101,
+          2
+        ],
+        [
+          109,
+          3
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "add_reference",
+        "parameters": {
+          "src_object": "Relobj",
+          "src_shndx": "unsigned int",
+          "dst_object": "Relobj",
+          "dst_shndx": "unsigned int"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "referenced_list()",
+      "fn_dec_pos": [
+        [
+          63,
+          2
+        ],
+        [
+          63,
+          19
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "referenced_list",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "section_reloc_map()",
+      "fn_dec_pos": [
+        [
+          67,
+          2
+        ],
+        [
+          67,
+          21
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "section_reloc_map",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "worklist()",
+      "fn_dec_pos": [
+        [
+          71,
+          2
+        ],
+        [
+          71,
+          12
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "worklist",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "do_transitive_closure()",
+      "fn_dec_pos": [
+        [
+          83,
+          2
+        ],
+        [
+          83,
+          25
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "do_transitive_closure",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "cident_sections()",
+      "fn_dec_pos": [
+        [
+          91,
+          2
+        ],
+        [
+          91,
+          19
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "cident_sections",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "src_id(src_object, src_shndx)",
+      "fn_dec_pos": [
+        [
+          105,
+          15
+        ],
+        [
+          105,
+          44
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "src_id",
+        "parameters": {},
+        "return_type": "Section_id"
+      }
+    },
+    {
+      "fn_code": "dst_id(dst_object, dst_shndx)",
+      "fn_dec_pos": [
+        [
+          106,
+          15
+        ],
+        [
+          106,
+          44
+        ]
+      ],
+      "class_code": "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da",
+      "class_node_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "fn_meta": {
+        "identifier": "dst_id",
+        "parameters": {},
+        "return_type": "Section_id"
+      }
+    },
+    {
+      "fn_code": "src_id(src_obj, src_indx)",
+      "fn_dec_pos": [
+        [
+          205,
+          17
+        ],
+        [
+          205,
+          42
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "src_id",
+        "parameters": {},
+        "return_type": "Section_id"
+      }
+    },
+    {
+      "fn_code": "reloc(prelocs)",
+      "fn_dec_pos": [
+        [
+          221,
+          14
+        ],
+        [
+          221,
+          28
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "reloc",
+        "parameters": {},
+        "return_type": "Reltype"
+      }
+    },
+    {
+      "fn_code": "src_id(src_obj, src_indx)",
+      "fn_dec_pos": [
+        [
+          354,
+          18
+        ],
+        [
+          354,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "src_id",
+        "parameters": {},
+        "return_type": "Section_id"
+      }
+    }
+  ],
+  "class_node_list": {
+    "45ff24dcece548c5fd7eb9eb8412dc0813142b02e5d53a792527ee3b66820c7b": {
+      "class_code": "class Object",
+      "class_name": "Object",
+      "class_pos": [
+        [
+          35,
+          0
+        ],
+        [
+          35,
+          12
+        ]
+      ]
+    },
+    "cfd5cb05f1d6d2784c2857eb90895e086f322fd72fade840fa5f39e69152ff69": {
+      "class_code": "template<int size, bool big_endian>\nclass Sized_relobj_file;",
+      "class_name": "Sized_relobj_file",
+      "class_pos": [
+        [
+          37,
+          0
+        ],
+        [
+          38,
+          24
+        ]
+      ]
+    },
+    "e8a1b4c6d6fb6e5ae7753438a9ca553b10b856a754aef0615d7e3424785daf65": {
+      "class_code": "class Output_section",
+      "class_name": "Output_section",
+      "class_pos": [
+        [
+          40,
+          0
+        ],
+        [
+          40,
+          20
+        ]
+      ]
+    },
+    "ef159fdb089264a4f9da1a8058bf254e55c5a2b61c7eb2c79c01e5eb2399c1d4": {
+      "class_code": "class General_options",
+      "class_name": "General_options",
+      "class_pos": [
+        [
+          41,
+          0
+        ],
+        [
+          41,
+          21
+        ]
+      ]
+    },
+    "095f71424aea4fccb37e7224dd4e2f8841a251ff652d4d03a5a75c6a5f2bfd17": {
+      "class_code": "class Layout",
+      "class_name": "Layout",
+      "class_pos": [
+        [
+          42,
+          0
+        ],
+        [
+          42,
+          12
+        ]
+      ]
+    },
+    "7c01b64ea40f693db593b12d0bdaf2f9be4e13f10e64f73cc2cfb78fb0f780da": {
+      "class_code": "class Garbage_collection\n{\n public:\n\n  typedef Unordered_set<Section_id, Section_id_hash> Sections_reachable;\n  typedef std::map<Section_id, Sections_reachable> Section_ref;\n  typedef std::vector<Section_id> Worklist_type;\n  // This maps the name of the section which can be represented as a C\n  // identifier (cident) to the list of sections that have that name.\n  // Different object files can have cident sections with the same name.\n  typedef std::map<std::string, Sections_reachable> Cident_section_map;\n\n  Garbage_collection()\n  : is_worklist_ready_(false)\n  { }\n\n  // Accessor methods for the private members.\n\n  Sections_reachable&\n  referenced_list()\n  { return referenced_list_; }\n\n  Section_ref&\n  section_reloc_map()\n  { return this->section_reloc_map_; }\n\n  Worklist_type&\n  worklist()\n  { return this->work_list_; }\n\n  bool\n  is_worklist_ready()\n  { return this->is_worklist_ready_; }\n\n  void\n  worklist_ready()\n  { this->is_worklist_ready_ = true; }\n\n  void\n  do_transitive_closure();\n\n  bool\n  is_section_garbage(Relobj* obj, unsigned int shndx)\n  { return (this->referenced_list().find(Section_id(obj, shndx))\n            == this->referenced_list().end()); }\n\n  Cident_section_map*\n  cident_sections()\n  { return &cident_sections_; }\n\n  void\n  add_cident_section(std::string section_name,\n\t\t     Section_id secn)\n  { this->cident_sections_[section_name].insert(secn); }\n\n  // Add a reference from the SRC_SHNDX-th section of SRC_OBJECT to\n  // DST_SHNDX-th section of DST_OBJECT.\n  void\n  add_reference(Relobj* src_object, unsigned int src_shndx,\n\t\tRelobj* dst_object, unsigned int dst_shndx)\n  {\n    Section_id src_id(src_object, src_shndx);\n    Section_id dst_id(dst_object, dst_shndx);\n    Sections_reachable& reachable = this->section_reloc_map_[src_id];\n    reachable.insert(dst_id);\n  }\n\n private:\n\n  Worklist_type work_list_;\n  bool is_worklist_ready_;\n  Section_ref section_reloc_map_;\n  Sections_reachable referenced_list_;\n  Cident_section_map cident_sections_;\n}",
+      "class_name": "Garbage_collection",
+      "class_pos": [
+        [
+          44,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ]
+    }
+  },
+  "struct_node_list": [
+    [
+      "struct Symbols_data\n{\n  // Section headers.\n  unsigned char* section_headers_data;\n  // Section names.\n  unsigned char* section_names_data;\n  // Size of section name data in bytes.\n  section_size_type section_names_size;\n  // Symbol data.\n  unsigned char* symbols_data;\n  // Size of symbol data in bytes.\n  section_size_type symbols_size;\n  // Offset of external symbols within symbol data.  This structure\n  // sometimes contains only external symbols, in which case this will\n  // be zero.  Sometimes it contains all symbols.\n  section_offset_type external_symbols_offset;\n  // Symbol names.\n  unsigned char* symbol_names_data;\n  // Size of symbol name data in bytes.\n  section_size_type symbol_names_size;\n}",
+      {
+        "* section_headers_data": "unsigned char",
+        "* section_names_data": "unsigned char",
+        "section_names_size": "section_size_type",
+        "* symbols_data": "unsigned char",
+        "symbols_size": "section_size_type",
+        "external_symbols_offset": "section_offset_type",
+        "* symbol_names_data": "unsigned char",
+        "symbol_names_size": "section_size_type"
+      },
+      "Symbols_data",
+      [
+        124,
+        0
+      ],
+      [
+        144,
+        1
+      ]
+    ],
+    [
+      "struct Symbols_data\n{\n  // Section headers.\n  unsigned char* section_headers_data;\n  // Section names.\n  unsigned char* section_names_data;\n  // Size of section name data in bytes.\n  section_size_type section_names_size;\n  // Symbol data.\n  unsigned char* symbols_data;\n  // Size of symbol data in bytes.\n  section_size_type symbols_size;\n  // Offset of external symbols within symbol data.  This structure\n  // sometimes contains only external symbols, in which case this will\n  // be zero.  Sometimes it contains all symbols.\n  section_offset_type external_symbols_offset;\n  // Symbol names.\n  unsigned char* symbol_names_data;\n  // Size of symbol name data in bytes.\n  section_size_type symbol_names_size;\n}",
+      {
+        "* section_headers_data": "unsigned char",
+        "* section_names_data": "unsigned char",
+        "section_names_size": "section_size_type",
+        "* symbols_data": "unsigned char",
+        "symbols_size": "section_size_type",
+        "external_symbols_offset": "section_offset_type",
+        "* symbol_names_data": "unsigned char",
+        "symbol_names_size": "section_size_type"
+      },
+      "Symbols_data",
+      [
+        124,
+        0
+      ],
+      [
+        144,
+        1
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <vector>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"elfcpp.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"symtab.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"object.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"icf.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

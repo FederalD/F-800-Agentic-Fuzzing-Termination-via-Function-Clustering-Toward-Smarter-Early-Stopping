@@ -1,0 +1,273 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static inline void\nset_close_on_exec(int fd ATTRIBUTE_UNUSED)\n{\n// Mingw does not define F_SETFD.\n#ifdef F_SETFD\n  fcntl(fd, F_SETFD, FD_CLOEXEC);\n#endif\n}",
+      "fn_code_pos": [
+        [
+          47,
+          0
+        ],
+        [
+          54,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "set_close_on_exec",
+        "parameters": {
+          "fd": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Descriptors::Descriptors()\n  : lock_(NULL), initialize_lock_(&this->lock_), open_descriptors_(),\n    stack_top_(-1), current_(0), limit_(8192 - 16)\n{\n  this->open_descriptors_.reserve(128);\n}",
+      "fn_code_pos": [
+        [
+          64,
+          0
+        ],
+        [
+          69,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Descriptors::Descriptors",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "int\nDescriptors::open(int descriptor, const char* name, int flags, int mode)\n{\n  // We don't initialize this until we are called, because we can't\n  // initialize a Lock until we have parsed the options to find out\n  // whether we are running with threads.  We can be called before\n  // options are valid when reading a linker script.\n  bool lock_initialized = this->initialize_lock_.initialize();\n\n  gold_assert(lock_initialized || descriptor < 0);\n\n  if (is_debugging_enabled(DEBUG_FILES))\n    this->limit_ = 8;\n\n  if (descriptor >= 0)\n    {\n      Hold_lock hl(*this->lock_);\n\n      gold_assert(static_cast<size_t>(descriptor)\n\t\t  < this->open_descriptors_.size());\n      Open_descriptor* pod = &this->open_descriptors_[descriptor];\n      if (pod->name == name\n\t  || (pod->name != NULL && strcmp(pod->name, name) == 0))\n\t{\n\t  gold_assert(!pod->inuse);\n\t  pod->inuse = true;\n\t  if (descriptor == this->stack_top_)\n\t    {\n\t      this->stack_top_ = pod->stack_next;\n\t      pod->stack_next = -1;\n\t      pod->is_on_stack = false;\n\t    }\n\t  gold_debug(DEBUG_FILES, \"Reused existing descriptor %d for \\\"%s\\\"\",\n\t\t     descriptor, name);\n\t  return descriptor;\n\t}\n    }\n\n  while (true)\n    {\n      // We always want to set the close-on-exec flag; we don't\n      // require callers to pass it.\n      flags |= O_CLOEXEC;\n\n      // Always open the file as a binary file.\n      flags |= O_BINARY;\n\n      int new_descriptor = ::open(name, flags, mode);\n      if (new_descriptor < 0\n\t  && errno != ENFILE\n\t  && errno != EMFILE)\n\t{\n\t  if (descriptor >= 0 && errno == ENOENT)\n\t    {\n\t      {\n\t\tHold_lock hl(*this->lock_);\n\n\t\tgold_error(_(\"file %s was removed during the link\"), name);\n\t      }\n\n\t      errno = ENOENT;\n\t    }\n\n\t  gold_debug(DEBUG_FILES, \"Opened new descriptor %d for \\\"%s\\\"\",\n\t\t     new_descriptor, name);\n\t  return new_descriptor;\n\t}\n\n      if (new_descriptor >= 0)\n\t{\n\t  // If we have any plugins, we really do need to set the\n\t  // close-on-exec flag, even if O_CLOEXEC is not defined.\n\t  // FIXME: In some cases O_CLOEXEC may be defined in the\n\t  // header file but not supported by the kernel.\n\t  // Unfortunately there doesn't seem to be any obvious way to\n\t  // detect that, as unknown flags passed to open are ignored.\n\t  if (O_CLOEXEC == 0\n\t      && parameters->options_valid()\n\t      && parameters->options().has_plugins())\n\t    set_close_on_exec(new_descriptor);\n\n\t  {\n\t    Hold_optional_lock hl(this->lock_);\n\n\t    if (static_cast<size_t>(new_descriptor)\n\t\t>= this->open_descriptors_.size())\n\t      this->open_descriptors_.resize(new_descriptor + 64);\n\n\t    Open_descriptor* pod = &this->open_descriptors_[new_descriptor];\n\t    pod->name = name;\n\t    pod->stack_next = -1;\n\t    pod->inuse = true;\n\t    pod->is_write = (flags & O_ACCMODE) != O_RDONLY;\n\t    pod->is_on_stack = false;\n\n\t    ++this->current_;\n\t    if (this->current_ >= this->limit_)\n\t      this->close_some_descriptor();\n\n\t    gold_debug(DEBUG_FILES, \"Opened new descriptor %d for \\\"%s\\\"\",\n\t\t       new_descriptor, name);\n\t    return new_descriptor;\n\t  }\n\t}\n\n      // We ran out of file descriptors.\n      {\n\tHold_optional_lock hl(this->lock_);\n\n\tthis->limit_ = this->current_ - 16;\n\tif (this->limit_ < 8)\n\t  this->limit_ = 8;\n\tif (!this->close_some_descriptor())\n\t  gold_fatal(_(\"out of file descriptors and couldn't close any\"));\n      }\n    }\n}",
+      "fn_code_pos": [
+        [
+          73,
+          0
+        ],
+        [
+          189,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Descriptors::open",
+        "parameters": {
+          "descriptor": "int",
+          "name": "char",
+          "flags": "int",
+          "mode": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nDescriptors::release(int descriptor, bool permanent)\n{\n  Hold_optional_lock hl(this->lock_);\n\n  gold_assert(descriptor >= 0\n\t      && (static_cast<size_t>(descriptor)\n\t\t  < this->open_descriptors_.size()));\n  Open_descriptor* pod = &this->open_descriptors_[descriptor];\n\n  if (permanent\n      || (this->current_ > this->limit_ && !pod->is_write))\n    {\n      if (::close(descriptor) < 0)\n\tgold_warning(_(\"while closing %s: %s\"), pod->name, strerror(errno));\n      pod->name = NULL;\n      --this->current_;\n    }\n  else\n    {\n      pod->inuse = false;\n      if (!pod->is_write && !pod->is_on_stack)\n\t{\n\t  pod->stack_next = this->stack_top_;\n\t  this->stack_top_ = descriptor;\n\t  pod->is_on_stack = true;\n\t}\n    }\n\n  gold_debug(DEBUG_FILES, \"Released descriptor %d for \\\"%s\\\"\",\n\t     descriptor, pod->name);\n}",
+      "fn_code_pos": [
+        [
+          193,
+          0
+        ],
+        [
+          224,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Descriptors::release",
+        "parameters": {
+          "descriptor": "int",
+          "permanent": "bool"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "bool\nDescriptors::close_some_descriptor()\n{\n  int last = -1;\n  int i = this->stack_top_;\n  while (i >= 0)\n    {\n      gold_assert(static_cast<size_t>(i) < this->open_descriptors_.size());\n      Open_descriptor* pod = &this->open_descriptors_[i];\n      if (!pod->inuse && !pod->is_write)\n\t{\n\t  if (::close(i) < 0)\n\t    gold_warning(_(\"while closing %s: %s\"), pod->name, strerror(errno));\n\t  --this->current_;\n\t  gold_debug(DEBUG_FILES, \"Closed descriptor %d for \\\"%s\\\"\",\n\t\t     i, pod->name);\n\t  pod->name = NULL;\n\t  if (last < 0)\n\t    this->stack_top_ = pod->stack_next;\n\t  else\n\t    this->open_descriptors_[last].stack_next = pod->stack_next;\n\t  pod->stack_next = -1;\n\t  pod->is_on_stack = false;\n\t  return true;\n\t}\n      last = i;\n      i = pod->stack_next;\n    }\n\n  // We couldn't find any descriptors to close.  This is weird but not\n  // necessarily an error.\n  return false;\n}",
+      "fn_code_pos": [
+        [
+          234,
+          0
+        ],
+        [
+          266,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Descriptors::close_some_descriptor",
+        "parameters": {},
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "void\nDescriptors::close_all()\n{\n  Hold_optional_lock hl(this->lock_);\n\n  for (size_t i = 0; i < this->open_descriptors_.size(); i++)\n    {\n      Open_descriptor* pod = &this->open_descriptors_[i];\n      if (pod->name != NULL && !pod->inuse && !pod->is_write)\n\t{\n\t  if (::close(i) < 0)\n\t    gold_warning(_(\"while closing %s: %s\"), pod->name, strerror(errno));\n\t  gold_debug(DEBUG_FILES, \"Closed descriptor %d for \\\"%s\\\" (close_all)\",\n\t\t     static_cast<int>(i), pod->name);\n\t  pod->name = NULL;\n\t  pod->stack_next = -1;\n\t  pod->is_on_stack = false;\n\t}\n    }\n  this->stack_top_ = -1;\n}",
+      "fn_code_pos": [
+        [
+          270,
+          0
+        ],
+        [
+          290,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Descriptors::close_all",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"gold.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <cerrno>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <cstdio>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <cstring>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"debug.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"parameters.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"options.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"gold-threads.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"descriptors.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"binary-io.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

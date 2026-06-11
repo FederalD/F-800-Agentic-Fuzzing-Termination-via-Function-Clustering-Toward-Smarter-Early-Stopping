@@ -1,0 +1,348 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "bfd_vma\nbfd_coff_reloc16_get_value (arelent *reloc,\n\t\t\t    struct bfd_link_info *link_info,\n\t\t\t    asection *input_section)\n{\n  bfd_vma value;\n  asymbol *symbol = *(reloc->sym_ptr_ptr);\n  /* A symbol holds a pointer to a section, and an offset from the\n     base of the section.  To relocate, we find where the section will\n     live in the output and add that in.  */\n\n  if (bfd_is_und_section (symbol->section)\n      || bfd_is_com_section (symbol->section))\n    {\n      struct bfd_link_hash_entry *h;\n\n      /* The symbol is undefined in this BFD.  Look it up in the\n\t global linker hash table.  FIXME: This should be changed when\n\t we convert this stuff to use a specific final_link function\n\t and change the interface to bfd_relax_section to not require\n\t the generic symbols.  */\n      h = bfd_wrapped_link_hash_lookup (input_section->owner, link_info,\n\t\t\t\t\tbfd_asymbol_name (symbol),\n\t\t\t\t\tFALSE, FALSE, TRUE);\n      if (h != (struct bfd_link_hash_entry *) NULL\n\t  && (h->type == bfd_link_hash_defined\n\t      || h->type == bfd_link_hash_defweak))\n\tvalue = (h->u.def.value\n\t\t + h->u.def.section->output_section->vma\n\t\t + h->u.def.section->output_offset);\n      else if (h != (struct bfd_link_hash_entry *) NULL\n\t       && h->type == bfd_link_hash_common)\n\tvalue = h->u.c.size;\n      else if (h != (struct bfd_link_hash_entry *) NULL\n\t       && h->type == bfd_link_hash_undefweak)\n\t/* This is a GNU extension.  */\n\tvalue = 0;\n      else\n\t{\n\t  (*link_info->callbacks->undefined_symbol)\n\t    (link_info, bfd_asymbol_name (symbol),\n\t     input_section->owner, input_section, reloc->address, TRUE);\n\t  value = 0;\n\t}\n    }\n  else\n    {\n      value = symbol->value\n\t+ symbol->section->output_offset\n\t+ symbol->section->output_section->vma;\n    }\n\n  /* Add the value contained in the relocation.  */\n  value += reloc->addend;\n\n  return value;\n}",
+      "fn_code_pos": [
+        [
+          43,
+          0
+        ],
+        [
+          99,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfd_coff_reloc16_get_value",
+        "parameters": {
+          "reloc": "arelent",
+          "link_info": "struct bfd_link_info",
+          "input_section": "asection"
+        },
+        "return_type": "bfd_vma"
+      }
+    },
+    {
+      "fn_code": "void\nbfd_perform_slip (bfd *abfd,\n\t\t  unsigned int slip,\n\t\t  asection *input_section,\n\t\t  bfd_vma value)\n{\n  asymbol **s;\n\n  s = _bfd_generic_link_get_symbols (abfd);\n  BFD_ASSERT (s != (asymbol **) NULL);\n\n  /* Find all symbols past this point, and make them know\n     what's happened.  */\n  while (*s)\n    {\n      asymbol *p = *s;\n      if (p->section == input_section)\n\t{\n\t  /* This was pointing into this section, so mangle it.  */\n\t  if (p->value > value)\n\t    {\n\t      p->value -= slip;\n\t      if (p->udata.p != NULL)\n\t\t{\n\t\t  struct generic_link_hash_entry *h;\n\n\t\t  h = (struct generic_link_hash_entry *) p->udata.p;\n\t\t  BFD_ASSERT (h->root.type == bfd_link_hash_defined\n\t\t\t      || h->root.type == bfd_link_hash_defweak);\n\t\t  h->root.u.def.value -= slip;\n\t\t  BFD_ASSERT (h->root.u.def.value == p->value);\n\t\t}\n\t    }\n\t}\n      s++;\n    }\n}",
+      "fn_code_pos": [
+        [
+          101,
+          0
+        ],
+        [
+          137,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfd_perform_slip",
+        "parameters": {
+          "abfd": "bfd",
+          "slip": "unsigned int",
+          "input_section": "asection",
+          "value": "bfd_vma"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "bfd_boolean\nbfd_coff_reloc16_relax_section (bfd *abfd,\n\t\t\t\tasection *input_section,\n\t\t\t\tstruct bfd_link_info *link_info,\n\t\t\t\tbfd_boolean *again)\n{\n  /* Get enough memory to hold the stuff.  */\n  bfd *input_bfd = input_section->owner;\n  unsigned *shrinks;\n  unsigned shrink = 0;\n  long reloc_size = bfd_get_reloc_upper_bound (input_bfd, input_section);\n  arelent **reloc_vector = NULL;\n  long reloc_count;\n\n  if (bfd_link_relocatable (link_info))\n    (*link_info->callbacks->einfo)\n      (_(\"%P%F: --relax and -r may not be used together\\n\"));\n\n  /* We only do global relaxation once.  It is not safe to do it multiple\n     times (see discussion of the \"shrinks\" array below).  */\n  *again = FALSE;\n\n  if (reloc_size < 0)\n    return FALSE;\n\n  reloc_vector = (arelent **) bfd_malloc ((bfd_size_type) reloc_size);\n  if (!reloc_vector && reloc_size > 0)\n    return FALSE;\n\n  /* Get the relocs and think about them.  */\n  reloc_count =\n    bfd_canonicalize_reloc (input_bfd, input_section, reloc_vector,\n\t\t\t    _bfd_generic_link_get_symbols (input_bfd));\n  if (reloc_count < 0)\n    {\n      free (reloc_vector);\n      return FALSE;\n    }\n\n  /* The reloc16.c and related relaxing code is very simple, the price\n     for that simplicity is we can only call this function once for\n     each section.\n\n     So, to get the best results within that limitation, we do multiple\n     relaxing passes over each section here.  That involves keeping track\n     of the \"shrink\" at each reloc in the section.  This allows us to\n     accurately determine the relative location of two relocs within\n     this section.\n\n     In theory, if we kept the \"shrinks\" array for each section for the\n     entire link, we could use the generic relaxing code in the linker\n     and get better results, particularly for jsr->bsr and 24->16 bit\n     memory reference relaxations.  */\n\n  if (reloc_count > 0)\n    {\n      int another_pass = 0;\n      bfd_size_type amt;\n\n      /* Allocate and initialize the shrinks array for this section.\n\t The last element is used as an accumulator of shrinks.  */\n      amt = reloc_count + 1;\n      amt *= sizeof (unsigned);\n      shrinks = (unsigned *) bfd_zmalloc (amt);\n\n      /* Loop until nothing changes in this section.  */\n      do\n\t{\n\t  arelent **parent;\n\t  unsigned int i;\n\t  long j;\n\n\t  another_pass = 0;\n\n\t  for (i = 0, parent = reloc_vector; *parent; parent++, i++)\n\t    {\n\t      /* Let the target/machine dependent code examine each reloc\n\t\t in this section and attempt to shrink it.  */\n\t      shrink = bfd_coff_reloc16_estimate (abfd, input_section, *parent,\n\t\t\t\t\t\t  shrinks[i], link_info);\n\n\t      /* If it shrunk, note it in the shrinks array and set up for\n\t\t another pass.  */\n\t      if (shrink != shrinks[i])\n\t\t{\n\t\t  another_pass = 1;\n\t\t  for (j = i + 1; j <= reloc_count; j++)\n\t\t    shrinks[j] += shrink - shrinks[i];\n\t\t}\n\t    }\n\t}\n      while (another_pass);\n\n      shrink = shrinks[reloc_count];\n      free ((char *) shrinks);\n    }\n\n  input_section->rawsize = input_section->size;\n  input_section->size -= shrink;\n  free ((char *) reloc_vector);\n  return TRUE;\n}",
+      "fn_code_pos": [
+        [
+          139,
+          0
+        ],
+        [
+          240,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfd_coff_reloc16_relax_section",
+        "parameters": {
+          "abfd": "bfd",
+          "input_section": "asection",
+          "link_info": "struct bfd_link_info",
+          "again": "bfd_boolean"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "bfd_byte *\nbfd_coff_reloc16_get_relocated_section_contents\n  (bfd *in_abfd,\n   struct bfd_link_info *link_info,\n   struct bfd_link_order *link_order,\n   bfd_byte *data,\n   bfd_boolean relocatable,\n   asymbol **symbols)\n{\n  /* Get enough memory to hold the stuff.  */\n  bfd *input_bfd = link_order->u.indirect.section->owner;\n  asection *input_section = link_order->u.indirect.section;\n  long reloc_size = bfd_get_reloc_upper_bound (input_bfd, input_section);\n  arelent **reloc_vector;\n  long reloc_count;\n  bfd_size_type sz;\n\n  if (reloc_size < 0)\n    return NULL;\n\n  /* If producing relocatable output, don't bother to relax.  */\n  if (relocatable)\n    return bfd_generic_get_relocated_section_contents (in_abfd, link_info,\n\t\t\t\t\t\t       link_order,\n\t\t\t\t\t\t       data, relocatable,\n\t\t\t\t\t\t       symbols);\n\n  /* Read in the section.  */\n  sz = input_section->rawsize ? input_section->rawsize : input_section->size;\n  if (!bfd_get_section_contents (input_bfd, input_section, data, 0, sz))\n    return NULL;\n\n  reloc_vector = (arelent **) bfd_malloc ((bfd_size_type) reloc_size);\n  if (!reloc_vector && reloc_size != 0)\n    return NULL;\n\n  reloc_count = bfd_canonicalize_reloc (input_bfd,\n\t\t\t\t\tinput_section,\n\t\t\t\t\treloc_vector,\n\t\t\t\t\tsymbols);\n  if (reloc_count < 0)\n    {\n      free (reloc_vector);\n      return NULL;\n    }\n\n  if (reloc_count > 0)\n    {\n      arelent **parent = reloc_vector;\n      arelent *reloc;\n      unsigned int dst_address = 0;\n      unsigned int src_address = 0;\n      unsigned int run;\n      unsigned int idx;\n\n      /* Find how long a run we can do.  */\n      while (dst_address < link_order->size)\n\t{\n\t  reloc = *parent;\n\t  if (reloc)\n\t    {\n\t      /* Note that the relaxing didn't tie up the addresses in the\n\t\t relocation, so we use the original address to work out the\n\t\t run of non-relocated data.  */\n\t      run = reloc->address - src_address;\n\t      parent++;\n\t    }\n\t  else\n\t    {\n\t      run = link_order->size - dst_address;\n\t    }\n\n\t  /* Copy the bytes.  */\n\t  for (idx = 0; idx < run; idx++)\n\t    data[dst_address++] = data[src_address++];\n\n\t  /* Now do the relocation.  */\n\t  if (reloc)\n\t    {\n\t      bfd_coff_reloc16_extra_cases (input_bfd, link_info, link_order,\n\t\t\t\t\t    reloc, data, &src_address,\n\t\t\t\t\t    &dst_address);\n\t    }\n\t}\n    }\n  free ((char *) reloc_vector);\n  return data;\n}",
+      "fn_code_pos": [
+        [
+          242,
+          0
+        ],
+        [
+          329,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfd_coff_reloc16_get_relocated_section_contents",
+        "parameters": {
+          "in_abfd": "bfd",
+          "link_info": "struct bfd_link_info",
+          "link_order": "struct bfd_link_order",
+          "data": "bfd_byte",
+          "relocatable": "bfd_boolean",
+          "symbols": "asymbol"
+        },
+        "return_type": "bfd_byte"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "bfd_coff_reloc16_get_relocated_section_contents\n  (bfd *in_abfd,\n   struct bfd_link_info *link_info,\n   struct bfd_link_order *link_order,\n   bfd_byte *data,\n   bfd_boolean relocatable,\n   asymbol **symbols)",
+      "fn_dec_pos": [
+        [
+          243,
+          0
+        ],
+        [
+          249,
+          21
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfd_coff_reloc16_get_relocated_section_contents",
+        "parameters": {
+          "in_abfd": "bfd",
+          "link_info": "struct bfd_link_info",
+          "link_order": "struct bfd_link_order",
+          "data": "bfd_byte",
+          "relocatable": "bfd_boolean",
+          "symbols": "asymbol"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct bfd_link_info",
+      {},
+      "",
+      [
+        45,
+        7
+      ],
+      [
+        45,
+        27
+      ]
+    ],
+    [
+      "struct bfd_link_hash_entry",
+      {},
+      "",
+      [
+        57,
+        6
+      ],
+      [
+        57,
+        32
+      ]
+    ],
+    [
+      "struct bfd_link_hash_entry",
+      {},
+      "",
+      [
+        67,
+        16
+      ],
+      [
+        67,
+        42
+      ]
+    ],
+    [
+      "struct bfd_link_hash_entry",
+      {},
+      "",
+      [
+        73,
+        21
+      ],
+      [
+        73,
+        47
+      ]
+    ],
+    [
+      "struct bfd_link_hash_entry",
+      {},
+      "",
+      [
+        76,
+        21
+      ],
+      [
+        76,
+        47
+      ]
+    ],
+    [
+      "struct generic_link_hash_entry",
+      {},
+      "",
+      [
+        125,
+        4
+      ],
+      [
+        125,
+        34
+      ]
+    ],
+    [
+      "struct generic_link_hash_entry",
+      {},
+      "",
+      [
+        127,
+        9
+      ],
+      [
+        127,
+        39
+      ]
+    ],
+    [
+      "struct bfd_link_info",
+      {},
+      "",
+      [
+        142,
+        4
+      ],
+      [
+        142,
+        24
+      ]
+    ],
+    [
+      "struct bfd_link_info",
+      {},
+      "",
+      [
+        245,
+        3
+      ],
+      [
+        245,
+        23
+      ]
+    ],
+    [
+      "struct bfd_link_order",
+      {},
+      "",
+      [
+        246,
+        3
+      ],
+      [
+        246,
+        24
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"libbfd.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"bfdlink.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include \"genlink.h\"\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"coff/internal.h\"\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include \"libcoff.h\"\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

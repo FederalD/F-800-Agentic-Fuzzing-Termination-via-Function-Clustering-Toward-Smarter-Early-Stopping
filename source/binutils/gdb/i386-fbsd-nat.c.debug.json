@@ -1,0 +1,441 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\ni386fbsd_resume (struct target_ops *ops,\n\t\t ptid_t ptid, int step, enum gdb_signal signal)\n{\n  pid_t pid = ptid_get_pid (ptid);\n  int request = PT_STEP;\n\n  if (pid == -1)\n    /* Resume all threads.  This only gets used in the non-threaded\n       case, where \"resume all threads\" and \"resume inferior_ptid\" are\n       the same.  */\n    pid = ptid_get_pid (inferior_ptid);\n\n  if (!step)\n    {\n      struct regcache *regcache = get_current_regcache ();\n      ULONGEST eflags;\n\n      /* Workaround for a bug in FreeBSD.  Make sure that the trace\n \t flag is off when doing a continue.  There is a code path\n \t through the kernel which leaves the flag set when it should\n \t have been cleared.  If a process has a signal pending (such\n \t as SIGALRM) and we do a PT_STEP, the process never really has\n \t a chance to run because the kernel needs to notify the\n \t debugger that a signal is being sent.  Therefore, the process\n \t never goes through the kernel's trap() function which would\n \t normally clear it.  */\n\n      regcache_cooked_read_unsigned (regcache, I386_EFLAGS_REGNUM,\n\t\t\t\t     &eflags);\n      if (eflags & 0x0100)\n\tregcache_cooked_write_unsigned (regcache, I386_EFLAGS_REGNUM,\n\t\t\t\t\teflags & ~0x0100);\n\n      request = PT_CONTINUE;\n    }\n\n  /* An addres of (caddr_t) 1 tells ptrace to continue from where it\n     was.  (If GDB wanted it to start some other way, we have already\n     written a new PC value to the child.)  */\n  if (ptrace (request, pid, (caddr_t) 1,\n\t      gdb_signal_to_host (signal)) == -1)\n    perror_with_name ((\"ptrace\"));\n}",
+      "fn_code_pos": [
+        [
+          38,
+          0
+        ],
+        [
+          81,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386fbsd_resume",
+        "parameters": {
+          "ops": "struct target_ops",
+          "ptid": "ptid_t",
+          "step": "int",
+          "signal": "enum gdb_signal"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ni386fbsd_supply_pcb (struct regcache *regcache, struct pcb *pcb)\n{\n  /* The following is true for FreeBSD 4.7:\n\n     The pcb contains %eip, %ebx, %esp, %ebp, %esi, %edi and %gs.\n     This accounts for all callee-saved registers specified by the\n     psABI and then some.  Here %esp contains the stack pointer at the\n     point just after the call to cpu_switch().  From this information\n     we reconstruct the register state as it would look when we just\n     returned from cpu_switch().  */\n\n  /* The stack pointer shouldn't be zero.  */\n  if (pcb->pcb_esp == 0)\n    return 0;\n\n  pcb->pcb_esp += 4;\n  regcache_raw_supply (regcache, I386_EDI_REGNUM, &pcb->pcb_edi);\n  regcache_raw_supply (regcache, I386_ESI_REGNUM, &pcb->pcb_esi);\n  regcache_raw_supply (regcache, I386_EBP_REGNUM, &pcb->pcb_ebp);\n  regcache_raw_supply (regcache, I386_ESP_REGNUM, &pcb->pcb_esp);\n  regcache_raw_supply (regcache, I386_EBX_REGNUM, &pcb->pcb_ebx);\n  regcache_raw_supply (regcache, I386_EIP_REGNUM, &pcb->pcb_eip);\n  regcache_raw_supply (regcache, I386_GS_REGNUM, &pcb->pcb_gs);\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          90,
+          0
+        ],
+        [
+          116,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386fbsd_supply_pcb",
+        "parameters": {
+          "regcache": "struct regcache",
+          "pcb": "struct pcb"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static const struct target_desc *\ni386fbsd_read_description (struct target_ops *ops)\n{\n  static int xsave_probed;\n  static uint64_t xcr0;\n\n  if (!xsave_probed)\n    {\n      struct ptrace_xstate_info info;\n\n      if (ptrace (PT_GETXSTATE_INFO, ptid_get_pid (inferior_ptid),\n\t\t  (PTRACE_TYPE_ARG3) &info, sizeof (info)) == 0)\n\t{\n\t  x86bsd_xsave_len = info.xsave_len;\n\t  xcr0 = info.xsave_mask;\n\t}\n      xsave_probed = 1;\n    }\n\n  if (x86bsd_xsave_len != 0)\n    {\n      return i386_target_description (xcr0);\n    }\n  else\n    return tdesc_i386;\n}",
+      "fn_code_pos": [
+        [
+          122,
+          0
+        ],
+        [
+          147,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386fbsd_read_description",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_i386fbsd_nat (void)\n{\n  struct target_ops *t;\n\n  /* Add some extra features to the common *BSD/i386 target.  */\n  t = i386bsd_target ();\n\n#ifdef PT_GETXSTATE_INFO\n  t->to_read_description = i386fbsd_read_description;\n#endif\n\n  t->to_resume = i386fbsd_resume;\n  fbsd_nat_add_target (t);\n\n  /* Support debugging kernel virtual memory images.  */\n  bsd_kvm_add_target (i386fbsd_supply_pcb);\n\n#ifdef KERN_PROC_SIGTRAMP\n  /* Normally signal frames are detected via i386fbsd_sigtramp_p.\n     However, FreeBSD 9.2 through 10.1 do not include the page holding\n     the signal code in core dumps.  These releases do provide a\n     kern.proc.sigtramp.<pid> sysctl that returns the location of the\n     signal trampoline for a running process.  We fetch the location\n     of the current (gdb) process and use this to identify signal\n     frames in core dumps from these releases.  */\n  {\n    int mib[4];\n    struct kinfo_sigtramp kst;\n    size_t len;\n\n    mib[0] = CTL_KERN;\n    mib[1] = KERN_PROC;\n    mib[2] = KERN_PROC_SIGTRAMP;\n    mib[3] = getpid ();\n    len = sizeof (kst);\n    if (sysctl (mib, 4, &kst, &len, NULL, 0) == 0)\n      {\n\ti386fbsd_sigtramp_start_addr = (uintptr_t) kst.ksigtramp_start;\n\ti386fbsd_sigtramp_end_addr = (uintptr_t) kst.ksigtramp_end;\n      }\n  }\n#endif\n}",
+      "fn_code_pos": [
+        [
+          153,
+          0
+        ],
+        [
+          196,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_i386fbsd_nat",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "i386fbsd_read_description (struct target_ops *ops)",
+      "fn_dec_pos": [
+        [
+          123,
+          0
+        ],
+        [
+          123,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "i386fbsd_read_description",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "_initialize_i386fbsd_nat (void)",
+      "fn_dec_pos": [
+        [
+          151,
+          5
+        ],
+        [
+          151,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_i386fbsd_nat",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        39,
+        17
+      ],
+      [
+        39,
+        34
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        53,
+        6
+      ],
+      [
+        53,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        91,
+        21
+      ],
+      [
+        91,
+        36
+      ]
+    ],
+    [
+      "struct pcb",
+      {},
+      "",
+      [
+        91,
+        48
+      ],
+      [
+        91,
+        58
+      ]
+    ],
+    [
+      "struct target_desc",
+      {},
+      "",
+      [
+        122,
+        13
+      ],
+      [
+        122,
+        31
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        123,
+        27
+      ],
+      [
+        123,
+        44
+      ]
+    ],
+    [
+      "struct ptrace_xstate_info",
+      {},
+      "",
+      [
+        130,
+        6
+      ],
+      [
+        130,
+        31
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        156,
+        2
+      ],
+      [
+        156,
+        19
+      ]
+    ],
+    [
+      "struct kinfo_sigtramp",
+      {},
+      "",
+      [
+        181,
+        4
+      ],
+      [
+        181,
+        25
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"target.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ptrace.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <sys/sysctl.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <sys/user.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"fbsd-nat.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"i386-tdep.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"x86-nat.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"x86-bsd-nat.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"i386-bsd-nat.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <machine/pcb.h>\n",
+      [
+        86,
+        0
+      ],
+      [
+        87,
+        0
+      ]
+    ],
+    [
+      "#include \"bsd-kvm.h\"\n",
+      [
+        88,
+        0
+      ],
+      [
+        89,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum gdb_signal",
+      {},
+      "",
+      [
+        40,
+        26
+      ],
+      [
+        40,
+        41
+      ]
+    ]
+  ]
+}

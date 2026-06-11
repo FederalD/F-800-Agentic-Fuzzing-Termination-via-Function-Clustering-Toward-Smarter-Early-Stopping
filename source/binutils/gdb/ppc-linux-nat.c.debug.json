@@ -1,0 +1,4213 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nppc_register_u_addr (struct gdbarch *gdbarch, int regno)\n{\n  int u_addr = -1;\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  /* NOTE: cagney/2003-11-25: This is the word size used by the ptrace\n     interface, and not the wordsize of the program's ABI.  */\n  int wordsize = sizeof (long);\n\n  /* General purpose registers occupy 1 slot each in the buffer.  */\n  if (regno >= tdep->ppc_gp0_regnum \n      && regno < tdep->ppc_gp0_regnum + ppc_num_gprs)\n    u_addr = ((regno - tdep->ppc_gp0_regnum + PT_R0) * wordsize);\n\n  /* Floating point regs: eight bytes each in both 32- and 64-bit\n     ptrace interfaces.  Thus, two slots each in 32-bit interface, one\n     slot each in 64-bit interface.  */\n  if (tdep->ppc_fp0_regnum >= 0\n      && regno >= tdep->ppc_fp0_regnum\n      && regno < tdep->ppc_fp0_regnum + ppc_num_fprs)\n    u_addr = (PT_FPR0 * wordsize) + ((regno - tdep->ppc_fp0_regnum) * 8);\n\n  /* UISA special purpose registers: 1 slot each.  */\n  if (regno == gdbarch_pc_regnum (gdbarch))\n    u_addr = PT_NIP * wordsize;\n  if (regno == tdep->ppc_lr_regnum)\n    u_addr = PT_LNK * wordsize;\n  if (regno == tdep->ppc_cr_regnum)\n    u_addr = PT_CCR * wordsize;\n  if (regno == tdep->ppc_xer_regnum)\n    u_addr = PT_XER * wordsize;\n  if (regno == tdep->ppc_ctr_regnum)\n    u_addr = PT_CTR * wordsize;\n#ifdef PT_MQ\n  if (regno == tdep->ppc_mq_regnum)\n    u_addr = PT_MQ * wordsize;\n#endif\n  if (regno == tdep->ppc_ps_regnum)\n    u_addr = PT_MSR * wordsize;\n  if (regno == PPC_ORIG_R3_REGNUM)\n    u_addr = PT_ORIG_R3 * wordsize;\n  if (regno == PPC_TRAP_REGNUM)\n    u_addr = PT_TRAP * wordsize;\n  if (tdep->ppc_fpscr_regnum >= 0\n      && regno == tdep->ppc_fpscr_regnum)\n    {\n      /* NOTE: cagney/2005-02-08: On some 64-bit GNU/Linux systems the\n\t kernel headers incorrectly contained the 32-bit definition of\n\t PT_FPSCR.  For the 32-bit definition, floating-point\n\t registers occupy two 32-bit \"slots\", and the FPSCR lives in\n\t the second half of such a slot-pair (hence +1).  For 64-bit,\n\t the FPSCR instead occupies the full 64-bit 2-word-slot and\n\t hence no adjustment is necessary.  Hack around this.  */\n      if (wordsize == 8 && PT_FPSCR == (48 + 32 + 1))\n\tu_addr = (48 + 32) * wordsize;\n      /* If the FPSCR is 64-bit wide, we need to fetch the whole 64-bit\n\t slot and not just its second word.  The PT_FPSCR supplied when\n\t GDB is compiled as a 32-bit app doesn't reflect this.  */\n      else if (wordsize == 4 && register_size (gdbarch, regno) == 8\n\t       && PT_FPSCR == (48 + 2*32 + 1))\n\tu_addr = (48 + 2*32) * wordsize;\n      else\n\tu_addr = PT_FPSCR * wordsize;\n    }\n  return u_addr;\n}",
+      "fn_code_pos": [
+        [
+          286,
+          0
+        ],
+        [
+          351,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_register_u_addr",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "regno": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nfetch_vsx_register (struct regcache *regcache, int tid, int regno)\n{\n  int ret;\n  gdb_vsxregset_t regs;\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int vsxregsize = register_size (gdbarch, tdep->ppc_vsr0_upper_regnum);\n\n  ret = ptrace (PTRACE_GETVSXREGS, tid, 0, &regs);\n  if (ret < 0)\n    {\n      if (errno == EIO)\n\t{\n\t  have_ptrace_getsetvsxregs = 0;\n\t  return;\n\t}\n      perror_with_name (_(\"Unable to fetch VSX register\"));\n    }\n\n  regcache_raw_supply (regcache, regno,\n\t\t       regs + (regno - tdep->ppc_vsr0_upper_regnum)\n\t\t       * vsxregsize);\n}",
+      "fn_code_pos": [
+        [
+          356,
+          0
+        ],
+        [
+          379,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_vsx_register",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfetch_altivec_register (struct regcache *regcache, int tid, int regno)\n{\n  int ret;\n  int offset = 0;\n  gdb_vrregset_t regs;\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int vrregsize = register_size (gdbarch, tdep->ppc_vr0_regnum);\n\n  ret = ptrace (PTRACE_GETVRREGS, tid, 0, &regs);\n  if (ret < 0)\n    {\n      if (errno == EIO)\n        {\n          have_ptrace_getvrregs = 0;\n          return;\n        }\n      perror_with_name (_(\"Unable to fetch AltiVec register\"));\n    }\n \n  /* VSCR is fetched as a 16 bytes quantity, but it is really 4 bytes\n     long on the hardware.  We deal only with the lower 4 bytes of the\n     vector.  VRSAVE is at the end of the array in a 4 bytes slot, so\n     there is no need to define an offset for it.  */\n  if (regno == (tdep->ppc_vrsave_regnum - 1))\n    offset = vrregsize - register_size (gdbarch, tdep->ppc_vrsave_regnum);\n  \n  regcache_raw_supply (regcache, regno,\n\t\t       regs + (regno\n\t\t\t       - tdep->ppc_vr0_regnum) * vrregsize + offset);\n}",
+      "fn_code_pos": [
+        [
+          384,
+          0
+        ],
+        [
+          415,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_altivec_register",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nget_spe_registers (int tid, struct gdb_evrregset_t *evrregset)\n{\n  if (have_ptrace_getsetevrregs)\n    {\n      if (ptrace (PTRACE_GETEVRREGS, tid, 0, evrregset) >= 0)\n        return;\n      else\n        {\n          /* EIO means that the PTRACE_GETEVRREGS request isn't supported;\n             we just return zeros.  */\n          if (errno == EIO)\n            have_ptrace_getsetevrregs = 0;\n          else\n            /* Anything else needs to be reported.  */\n            perror_with_name (_(\"Unable to fetch SPE registers\"));\n        }\n    }\n\n  memset (evrregset, 0, sizeof (*evrregset));\n}",
+      "fn_code_pos": [
+        [
+          425,
+          0
+        ],
+        [
+          445,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_spe_registers",
+        "parameters": {
+          "tid": "int",
+          "evrregset": "struct gdb_evrregset_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfetch_spe_register (struct regcache *regcache, int tid, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  struct gdb_evrregset_t evrregs;\n\n  gdb_assert (sizeof (evrregs.evr[0])\n              == register_size (gdbarch, tdep->ppc_ev0_upper_regnum));\n  gdb_assert (sizeof (evrregs.acc)\n              == register_size (gdbarch, tdep->ppc_acc_regnum));\n  gdb_assert (sizeof (evrregs.spefscr)\n              == register_size (gdbarch, tdep->ppc_spefscr_regnum));\n\n  get_spe_registers (tid, &evrregs);\n\n  if (regno == -1)\n    {\n      int i;\n\n      for (i = 0; i < ppc_num_gprs; i++)\n        regcache_raw_supply (regcache, tdep->ppc_ev0_upper_regnum + i,\n                             &evrregs.evr[i]);\n    }\n  else if (tdep->ppc_ev0_upper_regnum <= regno\n           && regno < tdep->ppc_ev0_upper_regnum + ppc_num_gprs)\n    regcache_raw_supply (regcache, regno,\n                         &evrregs.evr[regno - tdep->ppc_ev0_upper_regnum]);\n\n  if (regno == -1\n      || regno == tdep->ppc_acc_regnum)\n    regcache_raw_supply (regcache, tdep->ppc_acc_regnum, &evrregs.acc);\n\n  if (regno == -1\n      || regno == tdep->ppc_spefscr_regnum)\n    regcache_raw_supply (regcache, tdep->ppc_spefscr_regnum,\n                         &evrregs.spefscr);\n}",
+      "fn_code_pos": [
+        [
+          451,
+          0
+        ],
+        [
+          488,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_spe_register",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfetch_register (struct regcache *regcache, int tid, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  /* This isn't really an address.  But ptrace thinks of it as one.  */\n  CORE_ADDR regaddr = ppc_register_u_addr (gdbarch, regno);\n  int bytes_transferred;\n  unsigned int offset;         /* Offset of registers within the u area.  */\n  gdb_byte buf[PPC_MAX_REGISTER_SIZE];\n\n  if (altivec_register_p (gdbarch, regno))\n    {\n      /* If this is the first time through, or if it is not the first\n         time through, and we have comfirmed that there is kernel\n         support for such a ptrace request, then go and fetch the\n         register.  */\n      if (have_ptrace_getvrregs)\n       {\n         fetch_altivec_register (regcache, tid, regno);\n         return;\n       }\n     /* If we have discovered that there is no ptrace support for\n        AltiVec registers, fall through and return zeroes, because\n        regaddr will be -1 in this case.  */\n    }\n  if (vsx_register_p (gdbarch, regno))\n    {\n      if (have_ptrace_getsetvsxregs)\n\t{\n\t  fetch_vsx_register (regcache, tid, regno);\n\t  return;\n\t}\n    }\n  else if (spe_register_p (gdbarch, regno))\n    {\n      fetch_spe_register (regcache, tid, regno);\n      return;\n    }\n\n  if (regaddr == -1)\n    {\n      memset (buf, '\\0', register_size (gdbarch, regno));   /* Supply zeroes */\n      regcache_raw_supply (regcache, regno, buf);\n      return;\n    }\n\n  /* Read the raw register using sizeof(long) sized chunks.  On a\n     32-bit platform, 64-bit floating-point registers will require two\n     transfers.  */\n  for (bytes_transferred = 0;\n       bytes_transferred < register_size (gdbarch, regno);\n       bytes_transferred += sizeof (long))\n    {\n      long l;\n\n      errno = 0;\n      l = ptrace (PTRACE_PEEKUSER, tid, (PTRACE_TYPE_ARG3) regaddr, 0);\n      regaddr += sizeof (long);\n      if (errno != 0)\n\t{\n          char message[128];\n\t  xsnprintf (message, sizeof (message), \"reading register %s (#%d)\",\n\t\t     gdbarch_register_name (gdbarch, regno), regno);\n\t  perror_with_name (message);\n\t}\n      memcpy (&buf[bytes_transferred], &l, sizeof (l));\n    }\n\n  /* Now supply the register.  Keep in mind that the regcache's idea\n     of the register's size may not be a multiple of sizeof\n     (long).  */\n  if (gdbarch_byte_order (gdbarch) == BFD_ENDIAN_LITTLE)\n    {\n      /* Little-endian values are always found at the left end of the\n         bytes transferred.  */\n      regcache_raw_supply (regcache, regno, buf);\n    }\n  else if (gdbarch_byte_order (gdbarch) == BFD_ENDIAN_BIG)\n    {\n      /* Big-endian values are found at the right end of the bytes\n         transferred.  */\n      size_t padding = (bytes_transferred - register_size (gdbarch, regno));\n      regcache_raw_supply (regcache, regno, buf + padding);\n    }\n  else \n    internal_error (__FILE__, __LINE__,\n                    _(\"fetch_register: unexpected byte order: %d\"),\n                    gdbarch_byte_order (gdbarch));\n}",
+      "fn_code_pos": [
+        [
+          490,
+          0
+        ],
+        [
+          579,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_register",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nsupply_vsxregset (struct regcache *regcache, gdb_vsxregset_t *vsxregsetp)\n{\n  int i;\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int vsxregsize = register_size (gdbarch, tdep->ppc_vsr0_upper_regnum);\n\n  for (i = 0; i < ppc_num_vshrs; i++)\n    {\n\tregcache_raw_supply (regcache, tdep->ppc_vsr0_upper_regnum + i,\n\t\t\t     *vsxregsetp + i * vsxregsize);\n    }\n}",
+      "fn_code_pos": [
+        [
+          581,
+          0
+        ],
+        [
+          594,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "supply_vsxregset",
+        "parameters": {
+          "regcache": "struct regcache",
+          "vsxregsetp": "gdb_vsxregset_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nsupply_vrregset (struct regcache *regcache, gdb_vrregset_t *vrregsetp)\n{\n  int i;\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int num_of_vrregs = tdep->ppc_vrsave_regnum - tdep->ppc_vr0_regnum + 1;\n  int vrregsize = register_size (gdbarch, tdep->ppc_vr0_regnum);\n  int offset = vrregsize - register_size (gdbarch, tdep->ppc_vrsave_regnum);\n\n  for (i = 0; i < num_of_vrregs; i++)\n    {\n      /* The last 2 registers of this set are only 32 bit long, not\n         128.  However an offset is necessary only for VSCR because it\n         occupies a whole vector, while VRSAVE occupies a full 4 bytes\n         slot.  */\n      if (i == (num_of_vrregs - 2))\n        regcache_raw_supply (regcache, tdep->ppc_vr0_regnum + i,\n\t\t\t     *vrregsetp + i * vrregsize + offset);\n      else\n        regcache_raw_supply (regcache, tdep->ppc_vr0_regnum + i,\n\t\t\t     *vrregsetp + i * vrregsize);\n    }\n}",
+      "fn_code_pos": [
+        [
+          596,
+          0
+        ],
+        [
+          619,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "supply_vrregset",
+        "parameters": {
+          "regcache": "struct regcache",
+          "vrregsetp": "gdb_vrregset_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfetch_vsx_registers (struct regcache *regcache, int tid)\n{\n  int ret;\n  gdb_vsxregset_t regs;\n\n  ret = ptrace (PTRACE_GETVSXREGS, tid, 0, &regs);\n  if (ret < 0)\n    {\n      if (errno == EIO)\n\t{\n\t  have_ptrace_getsetvsxregs = 0;\n\t  return;\n\t}\n      perror_with_name (_(\"Unable to fetch VSX registers\"));\n    }\n  supply_vsxregset (regcache, &regs);\n}",
+      "fn_code_pos": [
+        [
+          621,
+          0
+        ],
+        [
+          638,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_vsx_registers",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfetch_altivec_registers (struct regcache *regcache, int tid)\n{\n  int ret;\n  gdb_vrregset_t regs;\n  \n  ret = ptrace (PTRACE_GETVRREGS, tid, 0, &regs);\n  if (ret < 0)\n    {\n      if (errno == EIO)\n\t{\n          have_ptrace_getvrregs = 0;\n\t  return;\n\t}\n      perror_with_name (_(\"Unable to fetch AltiVec registers\"));\n    }\n  supply_vrregset (regcache, &regs);\n}",
+      "fn_code_pos": [
+        [
+          640,
+          0
+        ],
+        [
+          657,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_altivec_registers",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nfetch_all_gp_regs (struct regcache *regcache, int tid)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  gdb_gregset_t gregset;\n\n  if (ptrace (PTRACE_GETREGS, tid, 0, (void *) &gregset) < 0)\n    {\n      if (errno == EIO)\n        {\n          have_ptrace_getsetregs = 0;\n          return 0;\n        }\n      perror_with_name (_(\"Couldn't get general-purpose registers.\"));\n    }\n\n  supply_gregset (regcache, (const gdb_gregset_t *) &gregset);\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          667,
+          0
+        ],
+        [
+          687,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_all_gp_regs",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nfetch_gp_regs (struct regcache *regcache, int tid)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int i;\n\n  if (have_ptrace_getsetregs)\n    if (fetch_all_gp_regs (regcache, tid))\n      return;\n\n  /* If we've hit this point, it doesn't really matter which\n     architecture we are using.  We just need to read the\n     registers in the \"old-fashioned way\".  */\n  for (i = 0; i < ppc_num_gprs; i++)\n    fetch_register (regcache, tid, tdep->ppc_gp0_regnum + i);\n}",
+      "fn_code_pos": [
+        [
+          695,
+          0
+        ],
+        [
+          711,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_gp_regs",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nfetch_all_fp_regs (struct regcache *regcache, int tid)\n{\n  gdb_fpregset_t fpregs;\n\n  if (ptrace (PTRACE_GETFPREGS, tid, 0, (void *) &fpregs) < 0)\n    {\n      if (errno == EIO)\n        {\n          have_ptrace_getsetfpregs = 0;\n          return 0;\n        }\n      perror_with_name (_(\"Couldn't get floating-point registers.\"));\n    }\n\n  supply_fpregset (regcache, (const gdb_fpregset_t *) &fpregs);\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          721,
+          0
+        ],
+        [
+          739,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_all_fp_regs",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nfetch_fp_regs (struct regcache *regcache, int tid)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int i;\n\n  if (have_ptrace_getsetfpregs)\n    if (fetch_all_fp_regs (regcache, tid))\n      return;\n \n  /* If we've hit this point, it doesn't really matter which\n     architecture we are using.  We just need to read the\n     registers in the \"old-fashioned way\".  */\n  for (i = 0; i < ppc_num_fprs; i++)\n    fetch_register (regcache, tid, tdep->ppc_fp0_regnum + i);\n}",
+      "fn_code_pos": [
+        [
+          747,
+          0
+        ],
+        [
+          763,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_fp_regs",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void \nfetch_ppc_registers (struct regcache *regcache, int tid)\n{\n  int i;\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n\n  fetch_gp_regs (regcache, tid);\n  if (tdep->ppc_fp0_regnum >= 0)\n    fetch_fp_regs (regcache, tid);\n  fetch_register (regcache, tid, gdbarch_pc_regnum (gdbarch));\n  if (tdep->ppc_ps_regnum != -1)\n    fetch_register (regcache, tid, tdep->ppc_ps_regnum);\n  if (tdep->ppc_cr_regnum != -1)\n    fetch_register (regcache, tid, tdep->ppc_cr_regnum);\n  if (tdep->ppc_lr_regnum != -1)\n    fetch_register (regcache, tid, tdep->ppc_lr_regnum);\n  if (tdep->ppc_ctr_regnum != -1)\n    fetch_register (regcache, tid, tdep->ppc_ctr_regnum);\n  if (tdep->ppc_xer_regnum != -1)\n    fetch_register (regcache, tid, tdep->ppc_xer_regnum);\n  if (tdep->ppc_mq_regnum != -1)\n    fetch_register (regcache, tid, tdep->ppc_mq_regnum);\n  if (ppc_linux_trap_reg_p (gdbarch))\n    {\n      fetch_register (regcache, tid, PPC_ORIG_R3_REGNUM);\n      fetch_register (regcache, tid, PPC_TRAP_REGNUM);\n    }\n  if (tdep->ppc_fpscr_regnum != -1)\n    fetch_register (regcache, tid, tdep->ppc_fpscr_regnum);\n  if (have_ptrace_getvrregs)\n    if (tdep->ppc_vr0_regnum != -1 && tdep->ppc_vrsave_regnum != -1)\n      fetch_altivec_registers (regcache, tid);\n  if (have_ptrace_getsetvsxregs)\n    if (tdep->ppc_vsr0_upper_regnum != -1)\n      fetch_vsx_registers (regcache, tid);\n  if (tdep->ppc_ev0_upper_regnum >= 0)\n    fetch_spe_register (regcache, tid, -1);\n}",
+      "fn_code_pos": [
+        [
+          765,
+          0
+        ],
+        [
+          803,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_ppc_registers",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nppc_linux_fetch_inferior_registers (struct target_ops *ops,\n\t\t\t\t    struct regcache *regcache, int regno)\n{\n  pid_t tid = get_ptrace_pid (regcache_get_ptid (regcache));\n\n  if (regno == -1)\n    fetch_ppc_registers (regcache, tid);\n  else \n    fetch_register (regcache, tid, regno);\n}",
+      "fn_code_pos": [
+        [
+          808,
+          0
+        ],
+        [
+          818,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_fetch_inferior_registers",
+        "parameters": {
+          "ops": "struct target_ops",
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstore_vsx_register (const struct regcache *regcache, int tid, int regno)\n{\n  int ret;\n  gdb_vsxregset_t regs;\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int vsxregsize = register_size (gdbarch, tdep->ppc_vsr0_upper_regnum);\n\n  ret = ptrace (PTRACE_GETVSXREGS, tid, 0, &regs);\n  if (ret < 0)\n    {\n      if (errno == EIO)\n\t{\n\t  have_ptrace_getsetvsxregs = 0;\n\t  return;\n\t}\n      perror_with_name (_(\"Unable to fetch VSX register\"));\n    }\n\n  regcache_raw_collect (regcache, regno, regs +\n\t\t\t(regno - tdep->ppc_vsr0_upper_regnum) * vsxregsize);\n\n  ret = ptrace (PTRACE_SETVSXREGS, tid, 0, &regs);\n  if (ret < 0)\n    perror_with_name (_(\"Unable to store VSX register\"));\n}",
+      "fn_code_pos": [
+        [
+          821,
+          0
+        ],
+        [
+          847,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_vsx_register",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstore_altivec_register (const struct regcache *regcache, int tid, int regno)\n{\n  int ret;\n  int offset = 0;\n  gdb_vrregset_t regs;\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int vrregsize = register_size (gdbarch, tdep->ppc_vr0_regnum);\n\n  ret = ptrace (PTRACE_GETVRREGS, tid, 0, &regs);\n  if (ret < 0)\n    {\n      if (errno == EIO)\n        {\n          have_ptrace_getvrregs = 0;\n          return;\n        }\n      perror_with_name (_(\"Unable to fetch AltiVec register\"));\n    }\n\n  /* VSCR is fetched as a 16 bytes quantity, but it is really 4 bytes\n     long on the hardware.  */\n  if (regno == (tdep->ppc_vrsave_regnum - 1))\n    offset = vrregsize - register_size (gdbarch, tdep->ppc_vrsave_regnum);\n\n  regcache_raw_collect (regcache, regno,\n\t\t\tregs + (regno\n\t\t\t\t- tdep->ppc_vr0_regnum) * vrregsize + offset);\n\n  ret = ptrace (PTRACE_SETVRREGS, tid, 0, &regs);\n  if (ret < 0)\n    perror_with_name (_(\"Unable to store AltiVec register\"));\n}",
+      "fn_code_pos": [
+        [
+          850,
+          0
+        ],
+        [
+          883,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_altivec_register",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nset_spe_registers (int tid, struct gdb_evrregset_t *evrregset)\n{\n  if (have_ptrace_getsetevrregs)\n    {\n      if (ptrace (PTRACE_SETEVRREGS, tid, 0, evrregset) >= 0)\n        return;\n      else\n        {\n          /* EIO means that the PTRACE_SETEVRREGS request isn't\n             supported; we fail silently, and don't try the call\n             again.  */\n          if (errno == EIO)\n            have_ptrace_getsetevrregs = 0;\n          else\n            /* Anything else needs to be reported.  */\n            perror_with_name (_(\"Unable to set SPE registers\"));\n        }\n    }\n}",
+      "fn_code_pos": [
+        [
+          893,
+          0
+        ],
+        [
+          912,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "set_spe_registers",
+        "parameters": {
+          "tid": "int",
+          "evrregset": "struct gdb_evrregset_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstore_spe_register (const struct regcache *regcache, int tid, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  struct gdb_evrregset_t evrregs;\n\n  gdb_assert (sizeof (evrregs.evr[0])\n              == register_size (gdbarch, tdep->ppc_ev0_upper_regnum));\n  gdb_assert (sizeof (evrregs.acc)\n              == register_size (gdbarch, tdep->ppc_acc_regnum));\n  gdb_assert (sizeof (evrregs.spefscr)\n              == register_size (gdbarch, tdep->ppc_spefscr_regnum));\n\n  if (regno == -1)\n    /* Since we're going to write out every register, the code below\n       should store to every field of evrregs; if that doesn't happen,\n       make it obvious by initializing it with suspicious values.  */\n    memset (&evrregs, 42, sizeof (evrregs));\n  else\n    /* We can only read and write the entire EVR register set at a\n       time, so to write just a single register, we do a\n       read-modify-write maneuver.  */\n    get_spe_registers (tid, &evrregs);\n\n  if (regno == -1)\n    {\n      int i;\n\n      for (i = 0; i < ppc_num_gprs; i++)\n        regcache_raw_collect (regcache,\n                              tdep->ppc_ev0_upper_regnum + i,\n                              &evrregs.evr[i]);\n    }\n  else if (tdep->ppc_ev0_upper_regnum <= regno\n           && regno < tdep->ppc_ev0_upper_regnum + ppc_num_gprs)\n    regcache_raw_collect (regcache, regno,\n                          &evrregs.evr[regno - tdep->ppc_ev0_upper_regnum]);\n\n  if (regno == -1\n      || regno == tdep->ppc_acc_regnum)\n    regcache_raw_collect (regcache,\n                          tdep->ppc_acc_regnum,\n                          &evrregs.acc);\n\n  if (regno == -1\n      || regno == tdep->ppc_spefscr_regnum)\n    regcache_raw_collect (regcache,\n                          tdep->ppc_spefscr_regnum,\n                          &evrregs.spefscr);\n\n  /* Write back the modified register set.  */\n  set_spe_registers (tid, &evrregs);\n}",
+      "fn_code_pos": [
+        [
+          917,
+          0
+        ],
+        [
+          970,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_spe_register",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstore_register (const struct regcache *regcache, int tid, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  /* This isn't really an address.  But ptrace thinks of it as one.  */\n  CORE_ADDR regaddr = ppc_register_u_addr (gdbarch, regno);\n  int i;\n  size_t bytes_to_transfer;\n  gdb_byte buf[PPC_MAX_REGISTER_SIZE];\n\n  if (altivec_register_p (gdbarch, regno))\n    {\n      store_altivec_register (regcache, tid, regno);\n      return;\n    }\n  if (vsx_register_p (gdbarch, regno))\n    {\n      store_vsx_register (regcache, tid, regno);\n      return;\n    }\n  else if (spe_register_p (gdbarch, regno))\n    {\n      store_spe_register (regcache, tid, regno);\n      return;\n    }\n\n  if (regaddr == -1)\n    return;\n\n  /* First collect the register.  Keep in mind that the regcache's\n     idea of the register's size may not be a multiple of sizeof\n     (long).  */\n  memset (buf, 0, sizeof buf);\n  bytes_to_transfer = align_up (register_size (gdbarch, regno), sizeof (long));\n  if (gdbarch_byte_order (gdbarch) == BFD_ENDIAN_LITTLE)\n    {\n      /* Little-endian values always sit at the left end of the buffer.  */\n      regcache_raw_collect (regcache, regno, buf);\n    }\n  else if (gdbarch_byte_order (gdbarch) == BFD_ENDIAN_BIG)\n    {\n      /* Big-endian values sit at the right end of the buffer.  */\n      size_t padding = (bytes_to_transfer - register_size (gdbarch, regno));\n      regcache_raw_collect (regcache, regno, buf + padding);\n    }\n\n  for (i = 0; i < bytes_to_transfer; i += sizeof (long))\n    {\n      long l;\n\n      memcpy (&l, &buf[i], sizeof (l));\n      errno = 0;\n      ptrace (PTRACE_POKEUSER, tid, (PTRACE_TYPE_ARG3) regaddr, l);\n      regaddr += sizeof (long);\n\n      if (errno == EIO \n          && (regno == tdep->ppc_fpscr_regnum\n\t      || regno == PPC_ORIG_R3_REGNUM\n\t      || regno == PPC_TRAP_REGNUM))\n\t{\n\t  /* Some older kernel versions don't allow fpscr, orig_r3\n\t     or trap to be written.  */\n\t  continue;\n\t}\n\n      if (errno != 0)\n\t{\n          char message[128];\n\t  xsnprintf (message, sizeof (message), \"writing register %s (#%d)\",\n\t\t     gdbarch_register_name (gdbarch, regno), regno);\n\t  perror_with_name (message);\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          972,
+          0
+        ],
+        [
+          1046,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_register",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfill_vsxregset (const struct regcache *regcache, gdb_vsxregset_t *vsxregsetp)\n{\n  int i;\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int vsxregsize = register_size (gdbarch, tdep->ppc_vsr0_upper_regnum);\n\n  for (i = 0; i < ppc_num_vshrs; i++)\n    regcache_raw_collect (regcache, tdep->ppc_vsr0_upper_regnum + i,\n\t\t\t  *vsxregsetp + i * vsxregsize);\n}",
+      "fn_code_pos": [
+        [
+          1048,
+          0
+        ],
+        [
+          1059,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fill_vsxregset",
+        "parameters": {
+          "regcache": "struct regcache",
+          "vsxregsetp": "gdb_vsxregset_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfill_vrregset (const struct regcache *regcache, gdb_vrregset_t *vrregsetp)\n{\n  int i;\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int num_of_vrregs = tdep->ppc_vrsave_regnum - tdep->ppc_vr0_regnum + 1;\n  int vrregsize = register_size (gdbarch, tdep->ppc_vr0_regnum);\n  int offset = vrregsize - register_size (gdbarch, tdep->ppc_vrsave_regnum);\n\n  for (i = 0; i < num_of_vrregs; i++)\n    {\n      /* The last 2 registers of this set are only 32 bit long, not\n         128, but only VSCR is fetched as a 16 bytes quantity.  */\n      if (i == (num_of_vrregs - 2))\n        regcache_raw_collect (regcache, tdep->ppc_vr0_regnum + i,\n\t\t\t      *vrregsetp + i * vrregsize + offset);\n      else\n        regcache_raw_collect (regcache, tdep->ppc_vr0_regnum + i,\n\t\t\t      *vrregsetp + i * vrregsize);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1061,
+          0
+        ],
+        [
+          1082,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fill_vrregset",
+        "parameters": {
+          "regcache": "struct regcache",
+          "vrregsetp": "gdb_vrregset_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstore_vsx_registers (const struct regcache *regcache, int tid)\n{\n  int ret;\n  gdb_vsxregset_t regs;\n\n  ret = ptrace (PTRACE_GETVSXREGS, tid, 0, &regs);\n  if (ret < 0)\n    {\n      if (errno == EIO)\n\t{\n\t  have_ptrace_getsetvsxregs = 0;\n\t  return;\n\t}\n      perror_with_name (_(\"Couldn't get VSX registers\"));\n    }\n\n  fill_vsxregset (regcache, &regs);\n\n  if (ptrace (PTRACE_SETVSXREGS, tid, 0, &regs) < 0)\n    perror_with_name (_(\"Couldn't write VSX registers\"));\n}",
+      "fn_code_pos": [
+        [
+          1084,
+          0
+        ],
+        [
+          1105,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_vsx_registers",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstore_altivec_registers (const struct regcache *regcache, int tid)\n{\n  int ret;\n  gdb_vrregset_t regs;\n\n  ret = ptrace (PTRACE_GETVRREGS, tid, 0, &regs);\n  if (ret < 0)\n    {\n      if (errno == EIO)\n        {\n          have_ptrace_getvrregs = 0;\n          return;\n        }\n      perror_with_name (_(\"Couldn't get AltiVec registers\"));\n    }\n\n  fill_vrregset (regcache, &regs);\n  \n  if (ptrace (PTRACE_SETVRREGS, tid, 0, &regs) < 0)\n    perror_with_name (_(\"Couldn't write AltiVec registers\"));\n}",
+      "fn_code_pos": [
+        [
+          1107,
+          0
+        ],
+        [
+          1128,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_altivec_registers",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nstore_all_gp_regs (const struct regcache *regcache, int tid, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  gdb_gregset_t gregset;\n\n  if (ptrace (PTRACE_GETREGS, tid, 0, (void *) &gregset) < 0)\n    {\n      if (errno == EIO)\n        {\n          have_ptrace_getsetregs = 0;\n          return 0;\n        }\n      perror_with_name (_(\"Couldn't get general-purpose registers.\"));\n    }\n\n  fill_gregset (regcache, &gregset, regno);\n\n  if (ptrace (PTRACE_SETREGS, tid, 0, (void *) &gregset) < 0)\n    {\n      if (errno == EIO)\n        {\n          have_ptrace_getsetregs = 0;\n          return 0;\n        }\n      perror_with_name (_(\"Couldn't set general-purpose registers.\"));\n    }\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          1138,
+          0
+        ],
+        [
+          1168,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_all_gp_regs",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nstore_gp_regs (const struct regcache *regcache, int tid, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int i;\n\n  if (have_ptrace_getsetregs)\n    if (store_all_gp_regs (regcache, tid, regno))\n      return;\n\n  /* If we hit this point, it doesn't really matter which\n     architecture we are using.  We just need to store the\n     registers in the \"old-fashioned way\".  */\n  for (i = 0; i < ppc_num_gprs; i++)\n    store_register (regcache, tid, tdep->ppc_gp0_regnum + i);\n}",
+      "fn_code_pos": [
+        [
+          1176,
+          0
+        ],
+        [
+          1192,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_gp_regs",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nstore_all_fp_regs (const struct regcache *regcache, int tid, int regno)\n{\n  gdb_fpregset_t fpregs;\n\n  if (ptrace (PTRACE_GETFPREGS, tid, 0, (void *) &fpregs) < 0)\n    {\n      if (errno == EIO)\n        {\n          have_ptrace_getsetfpregs = 0;\n          return 0;\n        }\n      perror_with_name (_(\"Couldn't get floating-point registers.\"));\n    }\n\n  fill_fpregset (regcache, &fpregs, regno);\n\n  if (ptrace (PTRACE_SETFPREGS, tid, 0, (void *) &fpregs) < 0)\n    {\n      if (errno == EIO)\n        {\n          have_ptrace_getsetfpregs = 0;\n          return 0;\n        }\n      perror_with_name (_(\"Couldn't set floating-point registers.\"));\n    }\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          1202,
+          0
+        ],
+        [
+          1230,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_all_fp_regs",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nstore_fp_regs (const struct regcache *regcache, int tid, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  int i;\n\n  if (have_ptrace_getsetfpregs)\n    if (store_all_fp_regs (regcache, tid, regno))\n      return;\n\n  /* If we hit this point, it doesn't really matter which\n     architecture we are using.  We just need to store the\n     registers in the \"old-fashioned way\".  */\n  for (i = 0; i < ppc_num_fprs; i++)\n    store_register (regcache, tid, tdep->ppc_fp0_regnum + i);\n}",
+      "fn_code_pos": [
+        [
+          1238,
+          0
+        ],
+        [
+          1254,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_fp_regs",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstore_ppc_registers (const struct regcache *regcache, int tid)\n{\n  int i;\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n \n  store_gp_regs (regcache, tid, -1);\n  if (tdep->ppc_fp0_regnum >= 0)\n    store_fp_regs (regcache, tid, -1);\n  store_register (regcache, tid, gdbarch_pc_regnum (gdbarch));\n  if (tdep->ppc_ps_regnum != -1)\n    store_register (regcache, tid, tdep->ppc_ps_regnum);\n  if (tdep->ppc_cr_regnum != -1)\n    store_register (regcache, tid, tdep->ppc_cr_regnum);\n  if (tdep->ppc_lr_regnum != -1)\n    store_register (regcache, tid, tdep->ppc_lr_regnum);\n  if (tdep->ppc_ctr_regnum != -1)\n    store_register (regcache, tid, tdep->ppc_ctr_regnum);\n  if (tdep->ppc_xer_regnum != -1)\n    store_register (regcache, tid, tdep->ppc_xer_regnum);\n  if (tdep->ppc_mq_regnum != -1)\n    store_register (regcache, tid, tdep->ppc_mq_regnum);\n  if (tdep->ppc_fpscr_regnum != -1)\n    store_register (regcache, tid, tdep->ppc_fpscr_regnum);\n  if (ppc_linux_trap_reg_p (gdbarch))\n    {\n      store_register (regcache, tid, PPC_ORIG_R3_REGNUM);\n      store_register (regcache, tid, PPC_TRAP_REGNUM);\n    }\n  if (have_ptrace_getvrregs)\n    if (tdep->ppc_vr0_regnum != -1 && tdep->ppc_vrsave_regnum != -1)\n      store_altivec_registers (regcache, tid);\n  if (have_ptrace_getsetvsxregs)\n    if (tdep->ppc_vsr0_upper_regnum != -1)\n      store_vsx_registers (regcache, tid);\n  if (tdep->ppc_ev0_upper_regnum >= 0)\n    store_spe_register (regcache, tid, -1);\n}",
+      "fn_code_pos": [
+        [
+          1256,
+          0
+        ],
+        [
+          1294,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_ppc_registers",
+        "parameters": {
+          "regcache": "struct regcache",
+          "tid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned long\nppc_linux_get_hwcap (void)\n{\n  CORE_ADDR field;\n\n  if (target_auxv_search (&current_target, AT_HWCAP, &field))\n    return (unsigned long) field;\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1297,
+          0
+        ],
+        [
+          1306,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_get_hwcap",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nhave_ptrace_hwdebug_interface (void)\n{\n  static int have_ptrace_hwdebug_interface = -1;\n\n  if (have_ptrace_hwdebug_interface == -1)\n    {\n      int tid;\n\n      tid = ptid_get_lwp (inferior_ptid);\n      if (tid == 0)\n\ttid = ptid_get_pid (inferior_ptid);\n\n      /* Check for kernel support for PowerPC HWDEBUG ptrace interface.  */\n      if (ptrace (PPC_PTRACE_GETHWDBGINFO, tid, 0, &hwdebug_info) >= 0)\n\t{\n\t  /* Check whether PowerPC HWDEBUG ptrace interface is functional and\n\t     provides any supported feature.  */\n\t  if (hwdebug_info.features != 0)\n\t    {\n\t      have_ptrace_hwdebug_interface = 1;\n\t      max_slots_number = hwdebug_info.num_instruction_bps\n\t        + hwdebug_info.num_data_bps\n\t        + hwdebug_info.num_condition_regs;\n\t      return have_ptrace_hwdebug_interface;\n\t    }\n\t}\n      /* Old school interface and no PowerPC HWDEBUG ptrace support.  */\n      have_ptrace_hwdebug_interface = 0;\n      memset (&hwdebug_info, 0, sizeof (struct ppc_debug_info));\n    }\n\n  return have_ptrace_hwdebug_interface;\n}",
+      "fn_code_pos": [
+        [
+          1352,
+          0
+        ],
+        [
+          1385,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "have_ptrace_hwdebug_interface",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_can_use_hw_breakpoint (struct target_ops *self,\n\t\t\t\t enum bptype type, int cnt, int ot)\n{\n  int total_hw_wp, total_hw_bp;\n\n  if (have_ptrace_hwdebug_interface ())\n    {\n      /* When PowerPC HWDEBUG ptrace interface is available, the number of\n\t available hardware watchpoints and breakpoints is stored at the\n\t hwdebug_info struct.  */\n      total_hw_bp = hwdebug_info.num_instruction_bps;\n      total_hw_wp = hwdebug_info.num_data_bps;\n    }\n  else\n    {\n      /* When we do not have PowerPC HWDEBUG ptrace interface, we should\n\t consider having 1 hardware watchpoint and no hardware breakpoints.  */\n      total_hw_bp = 0;\n      total_hw_wp = 1;\n    }\n\n  if (type == bp_hardware_watchpoint || type == bp_read_watchpoint\n      || type == bp_access_watchpoint || type == bp_watchpoint)\n    {\n      if (cnt + ot > total_hw_wp)\n\treturn -1;\n    }\n  else if (type == bp_hardware_breakpoint)\n    {\n      if (total_hw_bp == 0)\n\t{\n\t  /* No hardware breakpoint support. */\n\t  return 0;\n\t}\n      if (cnt > total_hw_bp)\n\treturn -1;\n    }\n\n  if (!have_ptrace_hwdebug_interface ())\n    {\n      int tid;\n      ptid_t ptid = inferior_ptid;\n\n      /* We need to know whether ptrace supports PTRACE_SET_DEBUGREG\n\t and whether the target has DABR.  If either answer is no, the\n\t ptrace call will return -1.  Fail in that case.  */\n      tid = ptid_get_lwp (ptid);\n      if (tid == 0)\n\ttid = ptid_get_pid (ptid);\n\n      if (ptrace (PTRACE_SET_DEBUGREG, tid, 0, 0) == -1)\n\treturn 0;\n    }\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          1387,
+          0
+        ],
+        [
+          1443,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_can_use_hw_breakpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "type": "enum bptype",
+          "cnt": "int",
+          "ot": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_region_ok_for_hw_watchpoint (struct target_ops *self,\n\t\t\t\t       CORE_ADDR addr, int len)\n{\n  /* Handle sub-8-byte quantities.  */\n  if (len <= 0)\n    return 0;\n\n  /* The PowerPC HWDEBUG ptrace interface tells if there are alignment\n     restrictions for watchpoints in the processors.  In that case, we use that\n     information to determine the hardcoded watchable region for\n     watchpoints.  */\n  if (have_ptrace_hwdebug_interface ())\n    {\n      int region_size;\n      /* Embedded DAC-based processors, like the PowerPC 440 have ranged\n\t watchpoints and can watch any access within an arbitrary memory\n\t region. This is useful to watch arrays and structs, for instance.  It\n         takes two hardware watchpoints though.  */\n      if (len > 1\n\t  && hwdebug_info.features & PPC_DEBUG_FEATURE_DATA_BP_RANGE\n\t  && ppc_linux_get_hwcap () & PPC_FEATURE_BOOKE)\n\treturn 2;\n      /* Check if the processor provides DAWR interface.  */\n      if (hwdebug_info.features & PPC_DEBUG_FEATURE_DATA_BP_DAWR)\n\t/* DAWR interface allows to watch up to 512 byte wide ranges which\n\t   can't cross a 512 byte boundary.  */\n\tregion_size = 512;\n      else\n\tregion_size = hwdebug_info.data_bp_alignment;\n      /* Server processors provide one hardware watchpoint and addr+len should\n         fall in the watchable region provided by the ptrace interface.  */\n      if (region_size\n\t  && (addr + len > (addr & ~(region_size - 1)) + region_size))\n\treturn 0;\n    }\n  /* addr+len must fall in the 8 byte watchable region for DABR-based\n     processors (i.e., server processors).  Without the new PowerPC HWDEBUG \n     ptrace interface, DAC-based processors (i.e., embedded processors) will\n     use addresses aligned to 4-bytes due to the way the read/write flags are\n     passed in the old ptrace interface.  */\n  else if (((ppc_linux_get_hwcap () & PPC_FEATURE_BOOKE)\n\t   && (addr + len) > (addr & ~3) + 4)\n\t   || (addr + len) > (addr & ~7) + 8)\n    return 0;\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          1445,
+          0
+        ],
+        [
+          1492,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_region_ok_for_hw_watchpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "addr": "CORE_ADDR",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nhwdebug_point_cmp (struct ppc_hw_breakpoint *a, struct ppc_hw_breakpoint *b)\n{\n  return (a->trigger_type == b->trigger_type\n\t  && a->addr_mode == b->addr_mode\n\t  && a->condition_mode == b->condition_mode\n\t  && a->addr == b->addr\n\t  && a->addr2 == b->addr2\n\t  && a->condition_value == b->condition_value);\n}",
+      "fn_code_pos": [
+        [
+          1495,
+          0
+        ],
+        [
+          1504,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hwdebug_point_cmp",
+        "parameters": {
+          "a": "struct ppc_hw_breakpoint",
+          "b": "struct ppc_hw_breakpoint"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static struct thread_points *\nhwdebug_find_thread_points_by_tid (int tid, int alloc_new)\n{\n  int i;\n  struct thread_points *t;\n\n  for (i = 0; VEC_iterate (thread_points_p, ppc_threads, i, t); i++)\n    if (t->tid == tid)\n      return t;\n\n  t = NULL;\n\n  /* Do we need to allocate a new point_item\n     if the wanted one does not exist?  */\n  if (alloc_new)\n    {\n      t = XNEW (struct thread_points);\n      t->hw_breaks = XCNEWVEC (struct hw_break_tuple, max_slots_number);\n      t->tid = tid;\n      VEC_safe_push (thread_points_p, ppc_threads, t);\n    }\n\n  return t;\n}",
+      "fn_code_pos": [
+        [
+          1510,
+          0
+        ],
+        [
+          1533,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hwdebug_find_thread_points_by_tid",
+        "parameters": {
+          "tid": "int",
+          "alloc_new": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nhwdebug_insert_point (struct ppc_hw_breakpoint *b, int tid)\n{\n  int i;\n  long slot;\n  struct ppc_hw_breakpoint *p = XNEW (struct ppc_hw_breakpoint);\n  struct hw_break_tuple *hw_breaks;\n  struct cleanup *c = make_cleanup (xfree, p);\n  struct thread_points *t;\n  struct hw_break_tuple *tuple;\n\n  memcpy (p, b, sizeof (struct ppc_hw_breakpoint));\n\n  errno = 0;\n  slot = ptrace (PPC_PTRACE_SETHWDEBUG, tid, 0, p);\n  if (slot < 0)\n    perror_with_name (_(\"Unexpected error setting breakpoint or watchpoint\"));\n\n  /* Everything went fine, so we have to register this *point.  */\n  t = hwdebug_find_thread_points_by_tid (tid, 1);\n  gdb_assert (t != NULL);\n  hw_breaks = t->hw_breaks;\n\n  /* Find a free element in the hw_breaks vector.  */\n  for (i = 0; i < max_slots_number; i++)\n    if (hw_breaks[i].hw_break == NULL)\n      {\n\thw_breaks[i].slot = slot;\n\thw_breaks[i].hw_break = p;\n\tbreak;\n      }\n\n  gdb_assert (i != max_slots_number);\n\n  discard_cleanups (c);\n}",
+      "fn_code_pos": [
+        [
+          1538,
+          0
+        ],
+        [
+          1573,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hwdebug_insert_point",
+        "parameters": {
+          "b": "struct ppc_hw_breakpoint",
+          "tid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nhwdebug_remove_point (struct ppc_hw_breakpoint *b, int tid)\n{\n  int i;\n  struct hw_break_tuple *hw_breaks;\n  struct thread_points *t;\n\n  t = hwdebug_find_thread_points_by_tid (tid, 0);\n  gdb_assert (t != NULL);\n  hw_breaks = t->hw_breaks;\n\n  for (i = 0; i < max_slots_number; i++)\n    if (hw_breaks[i].hw_break && hwdebug_point_cmp (hw_breaks[i].hw_break, b))\n      break;\n\n  gdb_assert (i != max_slots_number);\n\n  /* We have to ignore ENOENT errors because the kernel implements hardware\n     breakpoints/watchpoints as \"one-shot\", that is, they are automatically\n     deleted when hit.  */\n  errno = 0;\n  if (ptrace (PPC_PTRACE_DELHWDEBUG, tid, 0, hw_breaks[i].slot) < 0)\n    if (errno != ENOENT)\n      perror_with_name (_(\"Unexpected error deleting \"\n\t\t\t  \"breakpoint or watchpoint\"));\n\n  xfree (hw_breaks[i].hw_break);\n  hw_breaks[i].hw_break = NULL;\n}",
+      "fn_code_pos": [
+        [
+          1578,
+          0
+        ],
+        [
+          1606,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hwdebug_remove_point",
+        "parameters": {
+          "b": "struct ppc_hw_breakpoint",
+          "tid": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_ranged_break_num_registers (struct target_ops *target)\n{\n  return ((have_ptrace_hwdebug_interface ()\n\t   && hwdebug_info.features & PPC_DEBUG_FEATURE_INSN_BP_RANGE)?\n\t  2 : -1);\n}",
+      "fn_code_pos": [
+        [
+          1610,
+          0
+        ],
+        [
+          1616,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_ranged_break_num_registers",
+        "parameters": {
+          "target": "struct target_ops"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_insert_hw_breakpoint (struct target_ops *self,\n\t\t\t\tstruct gdbarch *gdbarch,\n\t\t\t\t  struct bp_target_info *bp_tgt)\n{\n  struct lwp_info *lp;\n  struct ppc_hw_breakpoint p;\n\n  if (!have_ptrace_hwdebug_interface ())\n    return -1;\n\n  p.version = PPC_DEBUG_CURRENT_VERSION;\n  p.trigger_type = PPC_BREAKPOINT_TRIGGER_EXECUTE;\n  p.condition_mode = PPC_BREAKPOINT_CONDITION_NONE;\n  p.addr = (uint64_t) (bp_tgt->placed_address = bp_tgt->reqstd_address);\n  p.condition_value = 0;\n\n  if (bp_tgt->length)\n    {\n      p.addr_mode = PPC_BREAKPOINT_MODE_RANGE_INCLUSIVE;\n\n      /* The breakpoint will trigger if the address of the instruction is\n\t within the defined range, as follows: p.addr <= address < p.addr2.  */\n      p.addr2 = (uint64_t) bp_tgt->placed_address + bp_tgt->length;\n    }\n  else\n    {\n      p.addr_mode = PPC_BREAKPOINT_MODE_EXACT;\n      p.addr2 = 0;\n    }\n\n  ALL_LWPS (lp)\n    hwdebug_insert_point (&p, ptid_get_lwp (lp->ptid));\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1621,
+          0
+        ],
+        [
+          1656,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_insert_hw_breakpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "gdbarch": "struct gdbarch",
+          "bp_tgt": "struct bp_target_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_remove_hw_breakpoint (struct target_ops *self,\n\t\t\t\tstruct gdbarch *gdbarch,\n\t\t\t\t  struct bp_target_info *bp_tgt)\n{\n  struct lwp_info *lp;\n  struct ppc_hw_breakpoint p;\n\n  if (!have_ptrace_hwdebug_interface ())\n    return -1;\n\n  p.version = PPC_DEBUG_CURRENT_VERSION;\n  p.trigger_type = PPC_BREAKPOINT_TRIGGER_EXECUTE;\n  p.condition_mode = PPC_BREAKPOINT_CONDITION_NONE;\n  p.addr = (uint64_t) bp_tgt->placed_address;\n  p.condition_value = 0;\n\n  if (bp_tgt->length)\n    {\n      p.addr_mode = PPC_BREAKPOINT_MODE_RANGE_INCLUSIVE;\n\n      /* The breakpoint will trigger if the address of the instruction is within\n\t the defined range, as follows: p.addr <= address < p.addr2.  */\n      p.addr2 = (uint64_t) bp_tgt->placed_address + bp_tgt->length;\n    }\n  else\n    {\n      p.addr_mode = PPC_BREAKPOINT_MODE_EXACT;\n      p.addr2 = 0;\n    }\n\n  ALL_LWPS (lp)\n    hwdebug_remove_point (&p, ptid_get_lwp (lp->ptid));\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1658,
+          0
+        ],
+        [
+          1693,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_remove_hw_breakpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "gdbarch": "struct gdbarch",
+          "bp_tgt": "struct bp_target_info"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_trigger_type (enum target_hw_bp_type type)\n{\n  int t;\n\n  if (type == hw_read)\n    t = PPC_BREAKPOINT_TRIGGER_READ;\n  else if (type == hw_write)\n    t = PPC_BREAKPOINT_TRIGGER_WRITE;\n  else\n    t = PPC_BREAKPOINT_TRIGGER_READ | PPC_BREAKPOINT_TRIGGER_WRITE;\n\n  return t;\n}",
+      "fn_code_pos": [
+        [
+          1695,
+          0
+        ],
+        [
+          1708,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_trigger_type",
+        "parameters": {
+          "type": "enum target_hw_bp_type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_insert_mask_watchpoint (struct target_ops *ops, CORE_ADDR addr,\n\t\t\t\t  CORE_ADDR mask, enum target_hw_bp_type rw)\n{\n  struct lwp_info *lp;\n  struct ppc_hw_breakpoint p;\n\n  gdb_assert (have_ptrace_hwdebug_interface ());\n\n  p.version = PPC_DEBUG_CURRENT_VERSION;\n  p.trigger_type = get_trigger_type (rw);\n  p.addr_mode = PPC_BREAKPOINT_MODE_MASK;\n  p.condition_mode = PPC_BREAKPOINT_CONDITION_NONE;\n  p.addr = addr;\n  p.addr2 = mask;\n  p.condition_value = 0;\n\n  ALL_LWPS (lp)\n    hwdebug_insert_point (&p, ptid_get_lwp (lp->ptid));\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1715,
+          0
+        ],
+        [
+          1736,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_insert_mask_watchpoint",
+        "parameters": {
+          "ops": "struct target_ops",
+          "addr": "CORE_ADDR",
+          "mask": "CORE_ADDR",
+          "rw": "enum target_hw_bp_type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_remove_mask_watchpoint (struct target_ops *ops, CORE_ADDR addr,\n\t\t\t\t  CORE_ADDR mask, enum target_hw_bp_type rw)\n{\n  struct lwp_info *lp;\n  struct ppc_hw_breakpoint p;\n\n  gdb_assert (have_ptrace_hwdebug_interface ());\n\n  p.version = PPC_DEBUG_CURRENT_VERSION;\n  p.trigger_type = get_trigger_type (rw);\n  p.addr_mode = PPC_BREAKPOINT_MODE_MASK;\n  p.condition_mode = PPC_BREAKPOINT_CONDITION_NONE;\n  p.addr = addr;\n  p.addr2 = mask;\n  p.condition_value = 0;\n\n  ALL_LWPS (lp)\n    hwdebug_remove_point (&p, ptid_get_lwp (lp->ptid));\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          1743,
+          0
+        ],
+        [
+          1764,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_remove_mask_watchpoint",
+        "parameters": {
+          "ops": "struct target_ops",
+          "addr": "CORE_ADDR",
+          "mask": "CORE_ADDR",
+          "rw": "enum target_hw_bp_type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ncan_use_watchpoint_cond_accel (void)\n{\n  struct thread_points *p;\n  int tid = ptid_get_lwp (inferior_ptid);\n  int cnt = hwdebug_info.num_condition_regs, i;\n  CORE_ADDR tmp_value;\n\n  if (!have_ptrace_hwdebug_interface () || cnt == 0)\n    return 0;\n\n  p = hwdebug_find_thread_points_by_tid (tid, 0);\n\n  if (p)\n    {\n      for (i = 0; i < max_slots_number; i++)\n\tif (p->hw_breaks[i].hw_break != NULL\n\t    && (p->hw_breaks[i].hw_break->condition_mode\n\t\t!= PPC_BREAKPOINT_CONDITION_NONE))\n\t  cnt--;\n\n      /* There are no available slots now.  */\n      if (cnt <= 0)\n\treturn 0;\n    }\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          1767,
+          0
+        ],
+        [
+          1794,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "can_use_watchpoint_cond_accel",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ncalculate_dvc (CORE_ADDR addr, int len, CORE_ADDR data_value,\n\t       uint32_t *condition_mode, uint64_t *condition_value)\n{\n  int i, num_byte_enable, align_offset, num_bytes_off_dvc,\n      rightmost_enabled_byte;\n  CORE_ADDR addr_end_data, addr_end_dvc;\n\n  /* The DVC register compares bytes within fixed-length windows which\n     are word-aligned, with length equal to that of the DVC register.\n     We need to calculate where our watch region is relative to that\n     window and enable comparison of the bytes which fall within it.  */\n\n  align_offset = addr % hwdebug_info.sizeof_condition;\n  addr_end_data = addr + len;\n  addr_end_dvc = (addr - align_offset\n\t\t  + hwdebug_info.sizeof_condition);\n  num_bytes_off_dvc = (addr_end_data > addr_end_dvc)?\n\t\t\t addr_end_data - addr_end_dvc : 0;\n  num_byte_enable = len - num_bytes_off_dvc;\n  /* Here, bytes are numbered from right to left.  */\n  rightmost_enabled_byte = (addr_end_data < addr_end_dvc)?\n\t\t\t      addr_end_dvc - addr_end_data : 0;\n\n  *condition_mode = PPC_BREAKPOINT_CONDITION_AND;\n  for (i = 0; i < num_byte_enable; i++)\n    *condition_mode\n      |= PPC_BREAKPOINT_CONDITION_BE (i + rightmost_enabled_byte);\n\n  /* Now we need to match the position within the DVC of the comparison\n     value with where the watch region is relative to the window\n     (i.e., the ALIGN_OFFSET).  */\n\n  *condition_value = ((uint64_t) data_value >> num_bytes_off_dvc * 8\n\t\t      << rightmost_enabled_byte * 8);\n}",
+      "fn_code_pos": [
+        [
+          1804,
+          0
+        ],
+        [
+          1839,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "calculate_dvc",
+        "parameters": {
+          "addr": "CORE_ADDR",
+          "len": "int",
+          "data_value": "CORE_ADDR",
+          "condition_mode": "uint32_t",
+          "condition_value": "uint64_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nnum_memory_accesses (struct value *v)\n{\n  int found_memory_cnt = 0;\n  struct value *head = v;\n\n  /* The idea here is that evaluating an expression generates a series\n     of values, one holding the value of every subexpression.  (The\n     expression a*b+c has five subexpressions: a, b, a*b, c, and\n     a*b+c.)  GDB's values hold almost enough information to establish\n     the criteria given above --- they identify memory lvalues,\n     register lvalues, computed values, etcetera.  So we can evaluate\n     the expression, and then scan the chain of values that leaves\n     behind to determine the memory locations involved in the evaluation\n     of an expression.\n\n     However, I don't think that the values returned by inferior\n     function calls are special in any way.  So this function may not\n     notice that an expression contains an inferior function call.\n     FIXME.  */\n\n  for (; v; v = value_next (v))\n    {\n      /* Constants and values from the history are fine.  */\n      if (VALUE_LVAL (v) == not_lval || deprecated_value_modifiable (v) == 0)\n\tcontinue;\n      else if (VALUE_LVAL (v) == lval_memory)\n\t{\n\t  /* A lazy memory lvalue is one that GDB never needed to fetch;\n\t     we either just used its address (e.g., `a' in `a.b') or\n\t     we never needed it at all (e.g., `a' in `a,b').  */\n\t  if (!value_lazy (v))\n\t    found_memory_cnt++;\n\t}\n      /* Other kinds of values are not fine.  */\n      else\n\treturn -1;\n    }\n\n  return found_memory_cnt;\n}",
+      "fn_code_pos": [
+        [
+          1846,
+          0
+        ],
+        [
+          1886,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "num_memory_accesses",
+        "parameters": {
+          "v": "struct value"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\ncheck_condition (CORE_ADDR watch_addr, struct expression *cond,\n\t\t CORE_ADDR *data_value, int *len)\n{\n  int pc = 1, num_accesses_left, num_accesses_right;\n  struct value *left_val, *right_val, *left_chain, *right_chain;\n\n  if (cond->elts[0].opcode != BINOP_EQUAL)\n    return 0;\n\n  fetch_subexp_value (cond, &pc, &left_val, NULL, &left_chain, 0);\n  num_accesses_left = num_memory_accesses (left_chain);\n\n  if (left_val == NULL || num_accesses_left < 0)\n    {\n      free_value_chain (left_chain);\n\n      return 0;\n    }\n\n  fetch_subexp_value (cond, &pc, &right_val, NULL, &right_chain, 0);\n  num_accesses_right = num_memory_accesses (right_chain);\n\n  if (right_val == NULL || num_accesses_right < 0)\n    {\n      free_value_chain (left_chain);\n      free_value_chain (right_chain);\n\n      return 0;\n    }\n\n  if (num_accesses_left == 1 && num_accesses_right == 0\n      && VALUE_LVAL (left_val) == lval_memory\n      && value_address (left_val) == watch_addr)\n    {\n      *data_value = value_as_long (right_val);\n\n      /* DATA_VALUE is the constant in RIGHT_VAL, but actually has\n\t the same type as the memory region referenced by LEFT_VAL.  */\n      *len = TYPE_LENGTH (check_typedef (value_type (left_val)));\n    }\n  else if (num_accesses_left == 0 && num_accesses_right == 1\n\t   && VALUE_LVAL (right_val) == lval_memory\n\t   && value_address (right_val) == watch_addr)\n    {\n      *data_value = value_as_long (left_val);\n\n      /* DATA_VALUE is the constant in LEFT_VAL, but actually has\n\t the same type as the memory region referenced by RIGHT_VAL.  */\n      *len = TYPE_LENGTH (check_typedef (value_type (right_val)));\n    }\n  else\n    {\n      free_value_chain (left_chain);\n      free_value_chain (right_chain);\n\n      return 0;\n    }\n\n  free_value_chain (left_chain);\n  free_value_chain (right_chain);\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          1894,
+          0
+        ],
+        [
+          1957,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "check_condition",
+        "parameters": {
+          "watch_addr": "CORE_ADDR",
+          "cond": "struct expression",
+          "data_value": "CORE_ADDR",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_can_accel_watchpoint_condition (struct target_ops *self,\n\t\t\t\t\t  CORE_ADDR addr, int len, int rw,\n\t\t\t\t\t  struct expression *cond)\n{\n  CORE_ADDR data_value;\n\n  return (have_ptrace_hwdebug_interface ()\n\t  && hwdebug_info.num_condition_regs > 0\n\t  && check_condition (addr, cond, &data_value, &len));\n}",
+      "fn_code_pos": [
+        [
+          1962,
+          0
+        ],
+        [
+          1972,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_can_accel_watchpoint_condition",
+        "parameters": {
+          "self": "struct target_ops",
+          "addr": "CORE_ADDR",
+          "len": "int",
+          "rw": "int",
+          "cond": "struct expression"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ncreate_watchpoint_request (struct ppc_hw_breakpoint *p, CORE_ADDR addr,\n\t\t\t   int len, enum target_hw_bp_type type,\n\t\t\t   struct expression *cond, int insert)\n{\n  if (len == 1\n      || !(hwdebug_info.features & PPC_DEBUG_FEATURE_DATA_BP_RANGE))\n    {\n      int use_condition;\n      CORE_ADDR data_value;\n\n      use_condition = (insert? can_use_watchpoint_cond_accel ()\n\t\t\t: hwdebug_info.num_condition_regs > 0);\n      if (cond && use_condition && check_condition (addr, cond,\n\t\t\t\t\t\t    &data_value, &len))\n\tcalculate_dvc (addr, len, data_value, &p->condition_mode,\n\t\t       &p->condition_value);\n      else\n\t{\n\t  p->condition_mode = PPC_BREAKPOINT_CONDITION_NONE;\n\t  p->condition_value = 0;\n\t}\n\n      p->addr_mode = PPC_BREAKPOINT_MODE_EXACT;\n      p->addr2 = 0;\n    }\n  else\n    {\n      p->addr_mode = PPC_BREAKPOINT_MODE_RANGE_INCLUSIVE;\n      p->condition_mode = PPC_BREAKPOINT_CONDITION_NONE;\n      p->condition_value = 0;\n\n      /* The watchpoint will trigger if the address of the memory access is\n\t within the defined range, as follows: p->addr <= address < p->addr2.\n\n\t Note that the above sentence just documents how ptrace interprets\n\t its arguments; the watchpoint is set to watch the range defined by\n\t the user _inclusively_, as specified by the user interface.  */\n      p->addr2 = (uint64_t) addr + len;\n    }\n\n  p->version = PPC_DEBUG_CURRENT_VERSION;\n  p->trigger_type = get_trigger_type (type);\n  p->addr = (uint64_t) addr;\n}",
+      "fn_code_pos": [
+        [
+          1979,
+          0
+        ],
+        [
+          2023,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "create_watchpoint_request",
+        "parameters": {
+          "p": "struct ppc_hw_breakpoint",
+          "addr": "CORE_ADDR",
+          "len": "int",
+          "type": "enum target_hw_bp_type",
+          "cond": "struct expression",
+          "insert": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_insert_watchpoint (struct target_ops *self, CORE_ADDR addr, int len,\n\t\t\t     enum target_hw_bp_type type,\n\t\t\t     struct expression *cond)\n{\n  struct lwp_info *lp;\n  int ret = -1;\n\n  if (have_ptrace_hwdebug_interface ())\n    {\n      struct ppc_hw_breakpoint p;\n\n      create_watchpoint_request (&p, addr, len, type, cond, 1);\n\n      ALL_LWPS (lp)\n\thwdebug_insert_point (&p, ptid_get_lwp (lp->ptid));\n\n      ret = 0;\n    }\n  else\n    {\n      long dabr_value;\n      long read_mode, write_mode;\n\n      if (ppc_linux_get_hwcap () & PPC_FEATURE_BOOKE)\n\t{\n\t  /* PowerPC 440 requires only the read/write flags to be passed\n\t     to the kernel.  */\n\t  read_mode = 1;\n\t  write_mode = 2;\n\t}\n      else\n\t{\n\t  /* PowerPC 970 and other DABR-based processors are required to pass\n\t     the Breakpoint Translation bit together with the flags.  */\n\t  read_mode = 5;\n\t  write_mode = 6;\n\t}\n\n      dabr_value = addr & ~(read_mode | write_mode);\n      switch (type)\n\t{\n\t  case hw_read:\n\t    /* Set read and translate bits.  */\n\t    dabr_value |= read_mode;\n\t    break;\n\t  case hw_write:\n\t    /* Set write and translate bits.  */\n\t    dabr_value |= write_mode;\n\t    break;\n\t  case hw_access:\n\t    /* Set read, write and translate bits.  */\n\t    dabr_value |= read_mode | write_mode;\n\t    break;\n\t}\n\n      saved_dabr_value = dabr_value;\n\n      ALL_LWPS (lp)\n\tif (ptrace (PTRACE_SET_DEBUGREG, ptid_get_lwp (lp->ptid), 0,\n\t\t    saved_dabr_value) < 0)\n\t  return -1;\n\n      ret = 0;\n    }\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          2025,
+          0
+        ],
+        [
+          2092,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_insert_watchpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "addr": "CORE_ADDR",
+          "len": "int",
+          "type": "enum target_hw_bp_type",
+          "cond": "struct expression"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_remove_watchpoint (struct target_ops *self, CORE_ADDR addr, int len,\n\t\t\t     enum target_hw_bp_type type,\n\t\t\t     struct expression *cond)\n{\n  struct lwp_info *lp;\n  int ret = -1;\n\n  if (have_ptrace_hwdebug_interface ())\n    {\n      struct ppc_hw_breakpoint p;\n\n      create_watchpoint_request (&p, addr, len, type, cond, 0);\n\n      ALL_LWPS (lp)\n\thwdebug_remove_point (&p, ptid_get_lwp (lp->ptid));\n\n      ret = 0;\n    }\n  else\n    {\n      saved_dabr_value = 0;\n      ALL_LWPS (lp)\n\tif (ptrace (PTRACE_SET_DEBUGREG, ptid_get_lwp (lp->ptid), 0,\n\t\t    saved_dabr_value) < 0)\n\t  return -1;\n\n      ret = 0;\n    }\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          2094,
+          0
+        ],
+        [
+          2125,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_remove_watchpoint",
+        "parameters": {
+          "self": "struct target_ops",
+          "addr": "CORE_ADDR",
+          "len": "int",
+          "type": "enum target_hw_bp_type",
+          "cond": "struct expression"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nppc_linux_new_thread (struct lwp_info *lp)\n{\n  int tid = ptid_get_lwp (lp->ptid);\n\n  if (have_ptrace_hwdebug_interface ())\n    {\n      int i;\n      struct thread_points *p;\n      struct hw_break_tuple *hw_breaks;\n\n      if (VEC_empty (thread_points_p, ppc_threads))\n\treturn;\n\n      /* Get a list of breakpoints from any thread.  */\n      p = VEC_last (thread_points_p, ppc_threads);\n      hw_breaks = p->hw_breaks;\n\n      /* Copy that thread's breakpoints and watchpoints to the new thread.  */\n      for (i = 0; i < max_slots_number; i++)\n\tif (hw_breaks[i].hw_break)\n\t  {\n\t    /* Older kernels did not make new threads inherit their parent\n\t       thread's debug state, so we always clear the slot and replicate\n\t       the debug state ourselves, ensuring compatibility with all\n\t       kernels.  */\n\n\t    /* The ppc debug resource accounting is done through \"slots\".\n\t       Ask the kernel the deallocate this specific *point's slot.  */\n\t    ptrace (PPC_PTRACE_DELHWDEBUG, tid, 0, hw_breaks[i].slot);\n\n\t    hwdebug_insert_point (hw_breaks[i].hw_break, tid);\n\t  }\n    }\n  else\n    ptrace (PTRACE_SET_DEBUGREG, tid, 0, saved_dabr_value);\n}",
+      "fn_code_pos": [
+        [
+          2127,
+          0
+        ],
+        [
+          2163,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_new_thread",
+        "parameters": {
+          "lp": "struct lwp_info"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nppc_linux_thread_exit (struct thread_info *tp, int silent)\n{\n  int i;\n  int tid = ptid_get_lwp (tp->ptid);\n  struct hw_break_tuple *hw_breaks;\n  struct thread_points *t = NULL, *p;\n\n  if (!have_ptrace_hwdebug_interface ())\n    return;\n\n  for (i = 0; VEC_iterate (thread_points_p, ppc_threads, i, p); i++)\n    if (p->tid == tid)\n      {\n\tt = p;\n\tbreak;\n      }\n\n  if (t == NULL)\n    return;\n\n  VEC_unordered_remove (thread_points_p, ppc_threads, i);\n\n  hw_breaks = t->hw_breaks;\n\n  for (i = 0; i < max_slots_number; i++)\n    if (hw_breaks[i].hw_break)\n      xfree (hw_breaks[i].hw_break);\n\n  xfree (t->hw_breaks);\n  xfree (t);\n}",
+      "fn_code_pos": [
+        [
+          2165,
+          0
+        ],
+        [
+          2196,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_thread_exit",
+        "parameters": {
+          "tp": "struct thread_info",
+          "silent": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_stopped_data_address (struct target_ops *target, CORE_ADDR *addr_p)\n{\n  siginfo_t siginfo;\n\n  if (!linux_nat_get_siginfo (inferior_ptid, &siginfo))\n    return 0;\n\n  if (siginfo.si_signo != SIGTRAP\n      || (siginfo.si_code & 0xffff) != 0x0004 /* TRAP_HWBKPT */)\n    return 0;\n\n  if (have_ptrace_hwdebug_interface ())\n    {\n      int i;\n      struct thread_points *t;\n      struct hw_break_tuple *hw_breaks;\n      /* The index (or slot) of the *point is passed in the si_errno field.  */\n      int slot = siginfo.si_errno;\n\n      t = hwdebug_find_thread_points_by_tid (ptid_get_lwp (inferior_ptid), 0);\n\n      /* Find out if this *point is a hardware breakpoint.\n\t If so, we should return 0.  */\n      if (t)\n\t{\n\t  hw_breaks = t->hw_breaks;\n\t  for (i = 0; i < max_slots_number; i++)\n\t   if (hw_breaks[i].hw_break && hw_breaks[i].slot == slot\n\t       && hw_breaks[i].hw_break->trigger_type\n\t\t    == PPC_BREAKPOINT_TRIGGER_EXECUTE)\n\t     return 0;\n\t}\n    }\n\n  *addr_p = (CORE_ADDR) (uintptr_t) siginfo.si_addr;\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          2198,
+          0
+        ],
+        [
+          2235,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_stopped_data_address",
+        "parameters": {
+          "target": "struct target_ops",
+          "addr_p": "CORE_ADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_stopped_by_watchpoint (struct target_ops *ops)\n{\n  CORE_ADDR addr;\n  return ppc_linux_stopped_data_address (ops, &addr);\n}",
+      "fn_code_pos": [
+        [
+          2237,
+          0
+        ],
+        [
+          2242,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_stopped_by_watchpoint",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_watchpoint_addr_within_range (struct target_ops *target,\n\t\t\t\t\tCORE_ADDR addr,\n\t\t\t\t\tCORE_ADDR start, int length)\n{\n  int mask;\n\n  if (have_ptrace_hwdebug_interface ()\n      && ppc_linux_get_hwcap () & PPC_FEATURE_BOOKE)\n    return start <= addr && start + length >= addr;\n  else if (ppc_linux_get_hwcap () & PPC_FEATURE_BOOKE)\n    mask = 3;\n  else\n    mask = 7;\n\n  addr &= ~mask;\n\n  /* Check whether [start, start+length-1] intersects [addr, addr+mask].  */\n  return start <= addr + mask && start + length - 1 >= addr;\n}",
+      "fn_code_pos": [
+        [
+          2244,
+          0
+        ],
+        [
+          2263,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_watchpoint_addr_within_range",
+        "parameters": {
+          "target": "struct target_ops",
+          "addr": "CORE_ADDR",
+          "start": "CORE_ADDR",
+          "length": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_masked_watch_num_registers (struct target_ops *target,\n\t\t\t\t      CORE_ADDR addr, CORE_ADDR mask)\n{\n  if (!have_ptrace_hwdebug_interface ()\n\t   || (hwdebug_info.features & PPC_DEBUG_FEATURE_DATA_BP_MASK) == 0)\n    return -1;\n  else if ((mask & 0xC0000000) != 0xC0000000)\n    {\n      warning (_(\"The given mask covers kernel address space \"\n\t\t \"and cannot be used.\\n\"));\n\n      return -2;\n    }\n  else\n    return 2;\n}",
+      "fn_code_pos": [
+        [
+          2267,
+          0
+        ],
+        [
+          2283,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_masked_watch_num_registers",
+        "parameters": {
+          "target": "struct target_ops",
+          "addr": "CORE_ADDR",
+          "mask": "CORE_ADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nppc_linux_store_inferior_registers (struct target_ops *ops,\n\t\t\t\t    struct regcache *regcache, int regno)\n{\n  pid_t tid = get_ptrace_pid (regcache_get_ptid (regcache));\n\n  if (regno >= 0)\n    store_register (regcache, tid, regno);\n  else\n    store_ppc_registers (regcache, tid);\n}",
+      "fn_code_pos": [
+        [
+          2285,
+          0
+        ],
+        [
+          2295,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_store_inferior_registers",
+        "parameters": {
+          "ops": "struct target_ops",
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nsupply_gregset (struct regcache *regcache, const gdb_gregset_t *gregsetp)\n{\n  const struct regset *regset = ppc_linux_gregset (sizeof (long));\n\n  ppc_supply_gregset (regset, regcache, -1, gregsetp, sizeof (*gregsetp));\n}",
+      "fn_code_pos": [
+        [
+          2303,
+          0
+        ],
+        [
+          2309,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "supply_gregset",
+        "parameters": {
+          "regcache": "struct regcache",
+          "gregsetp": "gdb_gregset_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nfill_gregset (const struct regcache *regcache,\n\t      gdb_gregset_t *gregsetp, int regno)\n{\n  const struct regset *regset = ppc_linux_gregset (sizeof (long));\n\n  if (regno == -1)\n    memset (gregsetp, 0, sizeof (*gregsetp));\n  ppc_collect_gregset (regset, regcache, regno, gregsetp, sizeof (*gregsetp));\n}",
+      "fn_code_pos": [
+        [
+          2311,
+          0
+        ],
+        [
+          2320,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fill_gregset",
+        "parameters": {
+          "regcache": "struct regcache",
+          "gregsetp": "gdb_gregset_t",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nsupply_fpregset (struct regcache *regcache, const gdb_fpregset_t * fpregsetp)\n{\n  const struct regset *regset = ppc_linux_fpregset ();\n\n  ppc_supply_fpregset (regset, regcache, -1,\n\t\t       fpregsetp, sizeof (*fpregsetp));\n}",
+      "fn_code_pos": [
+        [
+          2322,
+          0
+        ],
+        [
+          2329,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "supply_fpregset",
+        "parameters": {
+          "regcache": "struct regcache",
+          "fpregsetp": "gdb_fpregset_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nfill_fpregset (const struct regcache *regcache,\n\t       gdb_fpregset_t *fpregsetp, int regno)\n{\n  const struct regset *regset = ppc_linux_fpregset ();\n\n  ppc_collect_fpregset (regset, regcache, regno,\n\t\t\tfpregsetp, sizeof (*fpregsetp));\n}",
+      "fn_code_pos": [
+        [
+          2331,
+          0
+        ],
+        [
+          2339,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fill_fpregset",
+        "parameters": {
+          "regcache": "struct regcache",
+          "fpregsetp": "gdb_fpregset_t",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_target_wordsize (void)\n{\n  int wordsize = 4;\n\n  /* Check for 64-bit inferior process.  This is the case when the host is\n     64-bit, and in addition the top bit of the MSR register is set.  */\n#ifdef __powerpc64__\n  long msr;\n\n  int tid = ptid_get_lwp (inferior_ptid);\n  if (tid == 0)\n    tid = ptid_get_pid (inferior_ptid);\n\n  errno = 0;\n  msr = (long) ptrace (PTRACE_PEEKUSER, tid, PT_MSR * 8, 0);\n  if (errno == 0 && ppc64_64bit_inferior_p (msr))\n    wordsize = 8;\n#endif\n\n  return wordsize;\n}",
+      "fn_code_pos": [
+        [
+          2341,
+          0
+        ],
+        [
+          2362,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_target_wordsize",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nppc_linux_auxv_parse (struct target_ops *ops, gdb_byte **readptr,\n                      gdb_byte *endptr, CORE_ADDR *typep, CORE_ADDR *valp)\n{\n  int sizeof_auxv_field = ppc_linux_target_wordsize ();\n  enum bfd_endian byte_order = gdbarch_byte_order (target_gdbarch ());\n  gdb_byte *ptr = *readptr;\n\n  if (endptr == ptr)\n    return 0;\n\n  if (endptr - ptr < sizeof_auxv_field * 2)\n    return -1;\n\n  *typep = extract_unsigned_integer (ptr, sizeof_auxv_field, byte_order);\n  ptr += sizeof_auxv_field;\n  *valp = extract_unsigned_integer (ptr, sizeof_auxv_field, byte_order);\n  ptr += sizeof_auxv_field;\n\n  *readptr = ptr;\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          2364,
+          0
+        ],
+        [
+          2385,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_auxv_parse",
+        "parameters": {
+          "ops": "struct target_ops",
+          "readptr": "gdb_byte",
+          "endptr": "gdb_byte",
+          "typep": "CORE_ADDR",
+          "valp": "CORE_ADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static const struct target_desc *\nppc_linux_read_description (struct target_ops *ops)\n{\n  int altivec = 0;\n  int vsx = 0;\n  int isa205 = 0;\n  int cell = 0;\n\n  int tid = ptid_get_lwp (inferior_ptid);\n  if (tid == 0)\n    tid = ptid_get_pid (inferior_ptid);\n\n  if (have_ptrace_getsetevrregs)\n    {\n      struct gdb_evrregset_t evrregset;\n\n      if (ptrace (PTRACE_GETEVRREGS, tid, 0, &evrregset) >= 0)\n        return tdesc_powerpc_e500l;\n\n      /* EIO means that the PTRACE_GETEVRREGS request isn't supported.\n\t Anything else needs to be reported.  */\n      else if (errno != EIO)\n\tperror_with_name (_(\"Unable to fetch SPE registers\"));\n    }\n\n  if (have_ptrace_getsetvsxregs\n      && (ppc_linux_get_hwcap () & PPC_FEATURE_HAS_VSX))\n    {\n      gdb_vsxregset_t vsxregset;\n\n      if (ptrace (PTRACE_GETVSXREGS, tid, 0, &vsxregset) >= 0)\n\tvsx = 1;\n\n      /* EIO means that the PTRACE_GETVSXREGS request isn't supported.\n\t Anything else needs to be reported.  */\n      else if (errno != EIO)\n\tperror_with_name (_(\"Unable to fetch VSX registers\"));\n    }\n\n  if (have_ptrace_getvrregs\n      && (ppc_linux_get_hwcap () & PPC_FEATURE_HAS_ALTIVEC))\n    {\n      gdb_vrregset_t vrregset;\n\n      if (ptrace (PTRACE_GETVRREGS, tid, 0, &vrregset) >= 0)\n        altivec = 1;\n\n      /* EIO means that the PTRACE_GETVRREGS request isn't supported.\n\t Anything else needs to be reported.  */\n      else if (errno != EIO)\n\tperror_with_name (_(\"Unable to fetch AltiVec registers\"));\n    }\n\n  /* Power ISA 2.05 (implemented by Power 6 and newer processors) increases\n     the FPSCR from 32 bits to 64 bits.  Even though Power 7 supports this\n     ISA version, it doesn't have PPC_FEATURE_ARCH_2_05 set, only\n     PPC_FEATURE_ARCH_2_06.  Since for now the only bits used in the higher\n     half of the register are for Decimal Floating Point, we check if that\n     feature is available to decide the size of the FPSCR.  */\n  if (ppc_linux_get_hwcap () & PPC_FEATURE_HAS_DFP)\n    isa205 = 1;\n\n  if (ppc_linux_get_hwcap () & PPC_FEATURE_CELL)\n    cell = 1;\n\n  if (ppc_linux_target_wordsize () == 8)\n    {\n      if (cell)\n\treturn tdesc_powerpc_cell64l;\n      else if (vsx)\n\treturn isa205? tdesc_powerpc_isa205_vsx64l : tdesc_powerpc_vsx64l;\n      else if (altivec)\n\treturn isa205\n\t  ? tdesc_powerpc_isa205_altivec64l : tdesc_powerpc_altivec64l;\n\n      return isa205? tdesc_powerpc_isa205_64l : tdesc_powerpc_64l;\n    }\n\n  if (cell)\n    return tdesc_powerpc_cell32l;\n  else if (vsx)\n    return isa205? tdesc_powerpc_isa205_vsx32l : tdesc_powerpc_vsx32l;\n  else if (altivec)\n    return isa205? tdesc_powerpc_isa205_altivec32l : tdesc_powerpc_altivec32l;\n\n  return isa205? tdesc_powerpc_isa205_32l : tdesc_powerpc_32l;\n}",
+      "fn_code_pos": [
+        [
+          2387,
+          0
+        ],
+        [
+          2473,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_read_description",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_ppc_linux_nat (void)\n{\n  struct target_ops *t;\n\n  /* Fill in the generic GNU/Linux methods.  */\n  t = linux_target ();\n\n  /* Add our register access methods.  */\n  t->to_fetch_registers = ppc_linux_fetch_inferior_registers;\n  t->to_store_registers = ppc_linux_store_inferior_registers;\n\n  /* Add our breakpoint/watchpoint methods.  */\n  t->to_can_use_hw_breakpoint = ppc_linux_can_use_hw_breakpoint;\n  t->to_insert_hw_breakpoint = ppc_linux_insert_hw_breakpoint;\n  t->to_remove_hw_breakpoint = ppc_linux_remove_hw_breakpoint;\n  t->to_region_ok_for_hw_watchpoint = ppc_linux_region_ok_for_hw_watchpoint;\n  t->to_insert_watchpoint = ppc_linux_insert_watchpoint;\n  t->to_remove_watchpoint = ppc_linux_remove_watchpoint;\n  t->to_insert_mask_watchpoint = ppc_linux_insert_mask_watchpoint;\n  t->to_remove_mask_watchpoint = ppc_linux_remove_mask_watchpoint;\n  t->to_stopped_by_watchpoint = ppc_linux_stopped_by_watchpoint;\n  t->to_stopped_data_address = ppc_linux_stopped_data_address;\n  t->to_watchpoint_addr_within_range = ppc_linux_watchpoint_addr_within_range;\n  t->to_can_accel_watchpoint_condition\n    = ppc_linux_can_accel_watchpoint_condition;\n  t->to_masked_watch_num_registers = ppc_linux_masked_watch_num_registers;\n  t->to_ranged_break_num_registers = ppc_linux_ranged_break_num_registers;\n\n  t->to_read_description = ppc_linux_read_description;\n  t->to_auxv_parse = ppc_linux_auxv_parse;\n\n  observer_attach_thread_exit (ppc_linux_thread_exit);\n\n  /* Register the target.  */\n  linux_nat_add_target (t);\n  linux_nat_set_new_thread (t, ppc_linux_new_thread);\n}",
+      "fn_code_pos": [
+        [
+          2477,
+          0
+        ],
+        [
+          2514,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_ppc_linux_nat",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "hwdebug_find_thread_points_by_tid (int tid, int alloc_new)",
+      "fn_dec_pos": [
+        [
+          1511,
+          0
+        ],
+        [
+          1511,
+          58
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hwdebug_find_thread_points_by_tid",
+        "parameters": {
+          "tid": "int",
+          "alloc_new": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "ppc_linux_read_description (struct target_ops *ops)",
+      "fn_dec_pos": [
+        [
+          2388,
+          0
+        ],
+        [
+          2388,
+          51
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ppc_linux_read_description",
+        "parameters": {
+          "ops": "struct target_ops"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "_initialize_ppc_linux_nat (void)",
+      "fn_dec_pos": [
+        [
+          2475,
+          5
+        ],
+        [
+          2475,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_ppc_linux_nat",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct ppc_debug_info\n{\n        uint32_t version;               /* Only version 1 exists to date.  */\n        uint32_t num_instruction_bps;\n        uint32_t num_data_bps;\n        uint32_t num_condition_regs;\n        uint32_t data_bp_alignment;\n        uint32_t sizeof_condition;      /* size of the DVC register.  */\n        uint64_t features;\n}",
+      {
+        "version": "uint32_t",
+        "num_instruction_bps": "uint32_t",
+        "num_data_bps": "uint32_t",
+        "num_condition_regs": "uint32_t",
+        "data_bp_alignment": "uint32_t",
+        "sizeof_condition": "uint32_t",
+        "features": "uint64_t"
+      },
+      "ppc_debug_info",
+      [
+        74,
+        0
+      ],
+      [
+        83,
+        1
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint\n{\n        uint32_t version;               /* currently, version must be 1 */\n        uint32_t trigger_type;          /* only some combinations allowed */\n        uint32_t addr_mode;             /* address match mode */\n        uint32_t condition_mode;        /* break/watchpoint condition flags */\n        uint64_t addr;                  /* break/watchpoint address */\n        uint64_t addr2;                 /* range end or mask */\n        uint64_t condition_value;       /* contents of the DVC register */\n}",
+      {
+        "version": "uint32_t",
+        "trigger_type": "uint32_t",
+        "addr_mode": "uint32_t",
+        "condition_mode": "uint32_t",
+        "addr": "uint64_t",
+        "addr2": "uint64_t",
+        "condition_value": "uint64_t"
+      },
+      "ppc_hw_breakpoint",
+      [
+        91,
+        0
+      ],
+      [
+        100,
+        1
+      ]
+    ],
+    [
+      "struct gdb_evrregset_t\n{\n  unsigned long evr[32];\n  unsigned long long acc;\n  unsigned long spefscr;\n}",
+      {
+        "evr[32]": "unsigned long",
+        "acc": "unsigned long long",
+        "spefscr": "unsigned long"
+      },
+      "gdb_evrregset_t",
+      [
+        231,
+        0
+      ],
+      [
+        236,
+        1
+      ]
+    ],
+    [
+      "struct hw_break_tuple\n{\n  long slot;\n  struct ppc_hw_breakpoint *hw_break;\n}",
+      {
+        "slot": "long",
+        "*hw_break": "struct ppc_hw_breakpoint"
+      },
+      "hw_break_tuple",
+      [
+        1322,
+        0
+      ],
+      [
+        1326,
+        1
+      ]
+    ],
+    [
+      "typedef struct thread_points\n  {\n    /* The TID to which this *point relates.  */\n    int tid;\n    /* Information about the *point, such as its address, type, etc.\n\n       Each element inside this vector corresponds to a hardware\n       breakpoint or watchpoint in the thread represented by TID.  The maximum\n       size of these vector is MAX_SLOTS_NUMBER.  If the hw_break element of\n       the tuple is NULL, then the position in the vector is free.  */\n    struct hw_break_tuple *hw_breaks;\n  } *thread_points_p;",
+      {
+        "tid": "int",
+        "*hw_breaks": "struct hw_break_tuple"
+      },
+      "thread_points_p",
+      [
+        1331,
+        0
+      ],
+      [
+        1342,
+        21
+      ]
+    ],
+    [
+      "struct ppc_debug_info\n{\n        uint32_t version;               /* Only version 1 exists to date.  */\n        uint32_t num_instruction_bps;\n        uint32_t num_data_bps;\n        uint32_t num_condition_regs;\n        uint32_t data_bp_alignment;\n        uint32_t sizeof_condition;      /* size of the DVC register.  */\n        uint64_t features;\n}",
+      {
+        "version": "uint32_t",
+        "num_instruction_bps": "uint32_t",
+        "num_data_bps": "uint32_t",
+        "num_condition_regs": "uint32_t",
+        "data_bp_alignment": "uint32_t",
+        "sizeof_condition": "uint32_t",
+        "features": "uint64_t"
+      },
+      "ppc_debug_info",
+      [
+        74,
+        0
+      ],
+      [
+        83,
+        1
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint\n{\n        uint32_t version;               /* currently, version must be 1 */\n        uint32_t trigger_type;          /* only some combinations allowed */\n        uint32_t addr_mode;             /* address match mode */\n        uint32_t condition_mode;        /* break/watchpoint condition flags */\n        uint64_t addr;                  /* break/watchpoint address */\n        uint64_t addr2;                 /* range end or mask */\n        uint64_t condition_value;       /* contents of the DVC register */\n}",
+      {
+        "version": "uint32_t",
+        "trigger_type": "uint32_t",
+        "addr_mode": "uint32_t",
+        "condition_mode": "uint32_t",
+        "addr": "uint64_t",
+        "addr2": "uint64_t",
+        "condition_value": "uint64_t"
+      },
+      "ppc_hw_breakpoint",
+      [
+        91,
+        0
+      ],
+      [
+        100,
+        1
+      ]
+    ],
+    [
+      "struct gdb_evrregset_t\n{\n  unsigned long evr[32];\n  unsigned long long acc;\n  unsigned long spefscr;\n}",
+      {
+        "evr[32]": "unsigned long",
+        "acc": "unsigned long long",
+        "spefscr": "unsigned long"
+      },
+      "gdb_evrregset_t",
+      [
+        231,
+        0
+      ],
+      [
+        236,
+        1
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        287,
+        21
+      ],
+      [
+        287,
+        35
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        290,
+        2
+      ],
+      [
+        290,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        357,
+        20
+      ],
+      [
+        357,
+        35
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        361,
+        2
+      ],
+      [
+        361,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        362,
+        2
+      ],
+      [
+        362,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        385,
+        24
+      ],
+      [
+        385,
+        39
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        390,
+        2
+      ],
+      [
+        390,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        391,
+        2
+      ],
+      [
+        391,
+        21
+      ]
+    ],
+    [
+      "struct gdb_evrregset_t",
+      {},
+      "",
+      [
+        426,
+        28
+      ],
+      [
+        426,
+        50
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        452,
+        20
+      ],
+      [
+        452,
+        35
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        454,
+        2
+      ],
+      [
+        454,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        455,
+        2
+      ],
+      [
+        455,
+        21
+      ]
+    ],
+    [
+      "struct gdb_evrregset_t",
+      {},
+      "",
+      [
+        456,
+        2
+      ],
+      [
+        456,
+        24
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        491,
+        16
+      ],
+      [
+        491,
+        31
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        493,
+        2
+      ],
+      [
+        493,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        494,
+        2
+      ],
+      [
+        494,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        582,
+        18
+      ],
+      [
+        582,
+        33
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        585,
+        2
+      ],
+      [
+        585,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        586,
+        2
+      ],
+      [
+        586,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        597,
+        17
+      ],
+      [
+        597,
+        32
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        600,
+        2
+      ],
+      [
+        600,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        601,
+        2
+      ],
+      [
+        601,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        622,
+        21
+      ],
+      [
+        622,
+        36
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        641,
+        25
+      ],
+      [
+        641,
+        40
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        668,
+        19
+      ],
+      [
+        668,
+        34
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        670,
+        2
+      ],
+      [
+        670,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        671,
+        2
+      ],
+      [
+        671,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        696,
+        15
+      ],
+      [
+        696,
+        30
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        698,
+        2
+      ],
+      [
+        698,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        699,
+        2
+      ],
+      [
+        699,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        722,
+        19
+      ],
+      [
+        722,
+        34
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        748,
+        15
+      ],
+      [
+        748,
+        30
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        750,
+        2
+      ],
+      [
+        750,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        751,
+        2
+      ],
+      [
+        751,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        766,
+        21
+      ],
+      [
+        766,
+        36
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        769,
+        2
+      ],
+      [
+        769,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        770,
+        2
+      ],
+      [
+        770,
+        21
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        809,
+        36
+      ],
+      [
+        809,
+        53
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        810,
+        8
+      ],
+      [
+        810,
+        23
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        822,
+        26
+      ],
+      [
+        822,
+        41
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        826,
+        2
+      ],
+      [
+        826,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        827,
+        2
+      ],
+      [
+        827,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        851,
+        30
+      ],
+      [
+        851,
+        45
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        856,
+        2
+      ],
+      [
+        856,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        857,
+        2
+      ],
+      [
+        857,
+        21
+      ]
+    ],
+    [
+      "struct gdb_evrregset_t",
+      {},
+      "",
+      [
+        894,
+        28
+      ],
+      [
+        894,
+        50
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        918,
+        26
+      ],
+      [
+        918,
+        41
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        920,
+        2
+      ],
+      [
+        920,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        921,
+        2
+      ],
+      [
+        921,
+        21
+      ]
+    ],
+    [
+      "struct gdb_evrregset_t",
+      {},
+      "",
+      [
+        922,
+        2
+      ],
+      [
+        922,
+        24
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        973,
+        22
+      ],
+      [
+        973,
+        37
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        975,
+        2
+      ],
+      [
+        975,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        976,
+        2
+      ],
+      [
+        976,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        1049,
+        22
+      ],
+      [
+        1049,
+        37
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1052,
+        2
+      ],
+      [
+        1052,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        1053,
+        2
+      ],
+      [
+        1053,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        1062,
+        21
+      ],
+      [
+        1062,
+        36
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1065,
+        2
+      ],
+      [
+        1065,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        1066,
+        2
+      ],
+      [
+        1066,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        1085,
+        27
+      ],
+      [
+        1085,
+        42
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        1108,
+        31
+      ],
+      [
+        1108,
+        46
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        1139,
+        25
+      ],
+      [
+        1139,
+        40
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1141,
+        2
+      ],
+      [
+        1141,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        1142,
+        2
+      ],
+      [
+        1142,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        1177,
+        21
+      ],
+      [
+        1177,
+        36
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1179,
+        2
+      ],
+      [
+        1179,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        1180,
+        2
+      ],
+      [
+        1180,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        1203,
+        25
+      ],
+      [
+        1203,
+        40
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        1239,
+        21
+      ],
+      [
+        1239,
+        36
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1241,
+        2
+      ],
+      [
+        1241,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        1242,
+        2
+      ],
+      [
+        1242,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        1257,
+        27
+      ],
+      [
+        1257,
+        42
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1260,
+        2
+      ],
+      [
+        1260,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        1261,
+        2
+      ],
+      [
+        1261,
+        21
+      ]
+    ],
+    [
+      "struct ppc_debug_info",
+      {},
+      "",
+      [
+        1315,
+        7
+      ],
+      [
+        1315,
+        28
+      ]
+    ],
+    [
+      "struct hw_break_tuple\n{\n  long slot;\n  struct ppc_hw_breakpoint *hw_break;\n}",
+      {
+        "slot": "long",
+        "*hw_break": "struct ppc_hw_breakpoint"
+      },
+      "hw_break_tuple",
+      [
+        1322,
+        0
+      ],
+      [
+        1326,
+        1
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1325,
+        2
+      ],
+      [
+        1325,
+        26
+      ]
+    ],
+    [
+      "typedef struct thread_points\n  {\n    /* The TID to which this *point relates.  */\n    int tid;\n    /* Information about the *point, such as its address, type, etc.\n\n       Each element inside this vector corresponds to a hardware\n       breakpoint or watchpoint in the thread represented by TID.  The maximum\n       size of these vector is MAX_SLOTS_NUMBER.  If the hw_break element of\n       the tuple is NULL, then the position in the vector is free.  */\n    struct hw_break_tuple *hw_breaks;\n  } *thread_points_p;",
+      {
+        "tid": "int",
+        "*hw_breaks": "struct hw_break_tuple"
+      },
+      "thread_points_p",
+      [
+        1331,
+        0
+      ],
+      [
+        1342,
+        21
+      ]
+    ],
+    [
+      "struct hw_break_tuple",
+      {},
+      "",
+      [
+        1341,
+        4
+      ],
+      [
+        1341,
+        25
+      ]
+    ],
+    [
+      "struct ppc_debug_info",
+      {},
+      "",
+      [
+        1381,
+        40
+      ],
+      [
+        1381,
+        61
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1388,
+        33
+      ],
+      [
+        1388,
+        50
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1446,
+        39
+      ],
+      [
+        1446,
+        56
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1496,
+        19
+      ],
+      [
+        1496,
+        43
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1496,
+        48
+      ],
+      [
+        1496,
+        72
+      ]
+    ],
+    [
+      "struct thread_points",
+      {},
+      "",
+      [
+        1510,
+        7
+      ],
+      [
+        1510,
+        27
+      ]
+    ],
+    [
+      "struct thread_points",
+      {},
+      "",
+      [
+        1514,
+        2
+      ],
+      [
+        1514,
+        22
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1539,
+        22
+      ],
+      [
+        1539,
+        46
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1543,
+        2
+      ],
+      [
+        1543,
+        26
+      ]
+    ],
+    [
+      "struct hw_break_tuple",
+      {},
+      "",
+      [
+        1544,
+        2
+      ],
+      [
+        1544,
+        23
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        1545,
+        2
+      ],
+      [
+        1545,
+        16
+      ]
+    ],
+    [
+      "struct thread_points",
+      {},
+      "",
+      [
+        1546,
+        2
+      ],
+      [
+        1546,
+        22
+      ]
+    ],
+    [
+      "struct hw_break_tuple",
+      {},
+      "",
+      [
+        1547,
+        2
+      ],
+      [
+        1547,
+        23
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1549,
+        24
+      ],
+      [
+        1549,
+        48
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1579,
+        22
+      ],
+      [
+        1579,
+        46
+      ]
+    ],
+    [
+      "struct hw_break_tuple",
+      {},
+      "",
+      [
+        1582,
+        2
+      ],
+      [
+        1582,
+        23
+      ]
+    ],
+    [
+      "struct thread_points",
+      {},
+      "",
+      [
+        1583,
+        2
+      ],
+      [
+        1583,
+        22
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1611,
+        38
+      ],
+      [
+        1611,
+        55
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1622,
+        32
+      ],
+      [
+        1622,
+        49
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1623,
+        4
+      ],
+      [
+        1623,
+        18
+      ]
+    ],
+    [
+      "struct bp_target_info",
+      {},
+      "",
+      [
+        1624,
+        6
+      ],
+      [
+        1624,
+        27
+      ]
+    ],
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        1626,
+        2
+      ],
+      [
+        1626,
+        17
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1627,
+        2
+      ],
+      [
+        1627,
+        26
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1659,
+        32
+      ],
+      [
+        1659,
+        49
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1660,
+        4
+      ],
+      [
+        1660,
+        18
+      ]
+    ],
+    [
+      "struct bp_target_info",
+      {},
+      "",
+      [
+        1661,
+        6
+      ],
+      [
+        1661,
+        27
+      ]
+    ],
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        1663,
+        2
+      ],
+      [
+        1663,
+        17
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1664,
+        2
+      ],
+      [
+        1664,
+        26
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1716,
+        34
+      ],
+      [
+        1716,
+        51
+      ]
+    ],
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        1719,
+        2
+      ],
+      [
+        1719,
+        17
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1720,
+        2
+      ],
+      [
+        1720,
+        26
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1744,
+        34
+      ],
+      [
+        1744,
+        51
+      ]
+    ],
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        1747,
+        2
+      ],
+      [
+        1747,
+        17
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1748,
+        2
+      ],
+      [
+        1748,
+        26
+      ]
+    ],
+    [
+      "struct thread_points",
+      {},
+      "",
+      [
+        1770,
+        2
+      ],
+      [
+        1770,
+        22
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        1847,
+        21
+      ],
+      [
+        1847,
+        33
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        1850,
+        2
+      ],
+      [
+        1850,
+        14
+      ]
+    ],
+    [
+      "struct expression",
+      {},
+      "",
+      [
+        1895,
+        39
+      ],
+      [
+        1895,
+        56
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        1899,
+        2
+      ],
+      [
+        1899,
+        14
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        1963,
+        42
+      ],
+      [
+        1963,
+        59
+      ]
+    ],
+    [
+      "struct expression",
+      {},
+      "",
+      [
+        1965,
+        7
+      ],
+      [
+        1965,
+        24
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        1980,
+        27
+      ],
+      [
+        1980,
+        51
+      ]
+    ],
+    [
+      "struct expression",
+      {},
+      "",
+      [
+        1982,
+        6
+      ],
+      [
+        1982,
+        23
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        2026,
+        29
+      ],
+      [
+        2026,
+        46
+      ]
+    ],
+    [
+      "struct expression",
+      {},
+      "",
+      [
+        2028,
+        8
+      ],
+      [
+        2028,
+        25
+      ]
+    ],
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        2030,
+        2
+      ],
+      [
+        2030,
+        17
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        2035,
+        6
+      ],
+      [
+        2035,
+        30
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        2095,
+        29
+      ],
+      [
+        2095,
+        46
+      ]
+    ],
+    [
+      "struct expression",
+      {},
+      "",
+      [
+        2097,
+        8
+      ],
+      [
+        2097,
+        25
+      ]
+    ],
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        2099,
+        2
+      ],
+      [
+        2099,
+        17
+      ]
+    ],
+    [
+      "struct ppc_hw_breakpoint",
+      {},
+      "",
+      [
+        2104,
+        6
+      ],
+      [
+        2104,
+        30
+      ]
+    ],
+    [
+      "struct lwp_info",
+      {},
+      "",
+      [
+        2128,
+        22
+      ],
+      [
+        2128,
+        37
+      ]
+    ],
+    [
+      "struct thread_points",
+      {},
+      "",
+      [
+        2135,
+        6
+      ],
+      [
+        2135,
+        26
+      ]
+    ],
+    [
+      "struct hw_break_tuple",
+      {},
+      "",
+      [
+        2136,
+        6
+      ],
+      [
+        2136,
+        27
+      ]
+    ],
+    [
+      "struct thread_info",
+      {},
+      "",
+      [
+        2166,
+        23
+      ],
+      [
+        2166,
+        41
+      ]
+    ],
+    [
+      "struct hw_break_tuple",
+      {},
+      "",
+      [
+        2170,
+        2
+      ],
+      [
+        2170,
+        23
+      ]
+    ],
+    [
+      "struct thread_points",
+      {},
+      "",
+      [
+        2171,
+        2
+      ],
+      [
+        2171,
+        22
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        2199,
+        32
+      ],
+      [
+        2199,
+        49
+      ]
+    ],
+    [
+      "struct thread_points",
+      {},
+      "",
+      [
+        2213,
+        6
+      ],
+      [
+        2213,
+        26
+      ]
+    ],
+    [
+      "struct hw_break_tuple",
+      {},
+      "",
+      [
+        2214,
+        6
+      ],
+      [
+        2214,
+        27
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        2238,
+        33
+      ],
+      [
+        2238,
+        50
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        2245,
+        40
+      ],
+      [
+        2245,
+        57
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        2268,
+        38
+      ],
+      [
+        2268,
+        55
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        2286,
+        36
+      ],
+      [
+        2286,
+        53
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        2287,
+        8
+      ],
+      [
+        2287,
+        23
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        2304,
+        16
+      ],
+      [
+        2304,
+        31
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        2306,
+        8
+      ],
+      [
+        2306,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        2312,
+        20
+      ],
+      [
+        2312,
+        35
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        2315,
+        8
+      ],
+      [
+        2315,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        2323,
+        17
+      ],
+      [
+        2323,
+        32
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        2325,
+        8
+      ],
+      [
+        2325,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        2332,
+        21
+      ],
+      [
+        2332,
+        36
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        2335,
+        8
+      ],
+      [
+        2335,
+        21
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        2365,
+        22
+      ],
+      [
+        2365,
+        39
+      ]
+    ],
+    [
+      "struct target_desc",
+      {},
+      "",
+      [
+        2387,
+        13
+      ],
+      [
+        2387,
+        31
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        2388,
+        28
+      ],
+      [
+        2388,
+        45
+      ]
+    ],
+    [
+      "struct gdb_evrregset_t",
+      {},
+      "",
+      [
+        2401,
+        6
+      ],
+      [
+        2401,
+        28
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        2480,
+        2
+      ],
+      [
+        2480,
+        19
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"observer.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"frame.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbthread.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"target.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"linux-nat.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <sys/user.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ioctl.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_wait.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <sys/procfs.h>\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"nat/gdb_ptrace.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"inf-ptrace.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"gregset.h\"\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"ppc-tdep.h\"\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include \"ppc-linux-tdep.h\"\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include \"elf/common.h\"\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include \"auxv.h\"\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include \"nat/ppc-linux.h\"\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum bptype",
+      {},
+      "",
+      [
+        1389,
+        5
+      ],
+      [
+        1389,
+        16
+      ]
+    ],
+    [
+      "enum target_hw_bp_type",
+      {},
+      "",
+      [
+        1696,
+        18
+      ],
+      [
+        1696,
+        40
+      ]
+    ],
+    [
+      "enum target_hw_bp_type",
+      {},
+      "",
+      [
+        1717,
+        22
+      ],
+      [
+        1717,
+        44
+      ]
+    ],
+    [
+      "enum target_hw_bp_type",
+      {},
+      "",
+      [
+        1745,
+        22
+      ],
+      [
+        1745,
+        44
+      ]
+    ],
+    [
+      "enum target_hw_bp_type",
+      {},
+      "",
+      [
+        1981,
+        15
+      ],
+      [
+        1981,
+        37
+      ]
+    ],
+    [
+      "enum target_hw_bp_type",
+      {},
+      "",
+      [
+        2027,
+        8
+      ],
+      [
+        2027,
+        30
+      ]
+    ],
+    [
+      "enum target_hw_bp_type",
+      {},
+      "",
+      [
+        2096,
+        8
+      ],
+      [
+        2096,
+        30
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        2369,
+        2
+      ],
+      [
+        2369,
+        17
+      ]
+    ]
+  ]
+}

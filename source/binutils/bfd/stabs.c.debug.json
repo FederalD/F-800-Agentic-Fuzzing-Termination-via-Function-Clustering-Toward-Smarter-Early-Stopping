@@ -1,0 +1,855 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static struct bfd_hash_entry *\nstab_link_includes_newfunc (struct bfd_hash_entry *entry,\n\t\t\t    struct bfd_hash_table *table,\n\t\t\t    const char *string)\n{\n  struct stab_link_includes_entry *ret =\n    (struct stab_link_includes_entry *) entry;\n\n  /* Allocate the structure if it has not already been allocated by a\n     subclass.  */\n  if (ret == NULL)\n    ret = (struct stab_link_includes_entry *)\n        bfd_hash_allocate (table, sizeof (struct stab_link_includes_entry));\n  if (ret == NULL)\n    return NULL;\n\n  /* Call the allocation method of the superclass.  */\n  ret = ((struct stab_link_includes_entry *)\n\t bfd_hash_newfunc ((struct bfd_hash_entry *) ret, table, string));\n  if (ret)\n    /* Set local fields.  */\n    ret->totals = NULL;\n\n  return (struct bfd_hash_entry *) ret;\n}",
+      "fn_code_pos": [
+        [
+          117,
+          0
+        ],
+        [
+          141,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "stab_link_includes_newfunc",
+        "parameters": {
+          "entry": "struct bfd_hash_entry",
+          "table": "struct bfd_hash_table",
+          "string": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "bfd_boolean\n_bfd_link_section_stabs (bfd *abfd,\n\t\t\t struct stab_info *sinfo,\n\t\t\t asection *stabsec,\n\t\t\t asection *stabstrsec,\n\t\t\t void * *psecinfo,\n\t\t\t bfd_size_type *pstring_offset)\n{\n  bfd_boolean first;\n  bfd_size_type count, amt;\n  struct stab_section_info *secinfo;\n  bfd_byte *stabbuf = NULL;\n  bfd_byte *stabstrbuf = NULL;\n  bfd_byte *sym, *symend;\n  bfd_size_type stroff, next_stroff, skip;\n  bfd_size_type *pstridx;\n\n  if (stabsec->size == 0\n      || stabstrsec->size == 0)\n    /* This file does not contain stabs debugging information.  */\n    return TRUE;\n\n  if (stabsec->size % STABSIZE != 0)\n    /* Something is wrong with the format of these stab symbols.\n       Don't try to optimize them.  */\n    return TRUE;\n\n  if ((stabstrsec->flags & SEC_RELOC) != 0)\n    /* We shouldn't see relocations in the strings, and we aren't\n       prepared to handle them.  */\n    return TRUE;\n\n  if (bfd_is_abs_section (stabsec->output_section)\n      || bfd_is_abs_section (stabstrsec->output_section))\n    /* At least one of the sections is being discarded from the\n       link, so we should just ignore them.  */\n    return TRUE;\n\n  first = FALSE;\n\n  if (sinfo->stabstr == NULL)\n    {\n      flagword flags;\n\n      /* Initialize the stabs information we need to keep track of.  */\n      first = TRUE;\n      sinfo->strings = _bfd_stringtab_init ();\n      if (sinfo->strings == NULL)\n\tgoto error_return;\n      /* Make sure the first byte is zero.  */\n      (void) _bfd_stringtab_add (sinfo->strings, \"\", TRUE, TRUE);\n      if (! bfd_hash_table_init (&sinfo->includes,\n\t\t\t\t stab_link_includes_newfunc,\n\t\t\t\t sizeof (struct stab_link_includes_entry)))\n\tgoto error_return;\n      flags = (SEC_HAS_CONTENTS | SEC_READONLY | SEC_DEBUGGING\n\t       | SEC_LINKER_CREATED);\n      sinfo->stabstr = bfd_make_section_anyway_with_flags (abfd, \".stabstr\",\n\t\t\t\t\t\t\t   flags);\n      if (sinfo->stabstr == NULL)\n\tgoto error_return;\n    }\n\n  /* Initialize the information we are going to store for this .stab\n     section.  */\n  count = stabsec->size / STABSIZE;\n\n  amt = sizeof (struct stab_section_info);\n  amt += (count - 1) * sizeof (bfd_size_type);\n  *psecinfo = bfd_alloc (abfd, amt);\n  if (*psecinfo == NULL)\n    goto error_return;\n\n  secinfo = (struct stab_section_info *) *psecinfo;\n  secinfo->excls = NULL;\n  stabsec->rawsize = stabsec->size;\n  secinfo->cumulative_skips = NULL;\n  memset (secinfo->stridxs, 0, (size_t) count * sizeof (bfd_size_type));\n\n  /* Read the stabs information from abfd.  */\n  if (!bfd_malloc_and_get_section (abfd, stabsec, &stabbuf)\n      || !bfd_malloc_and_get_section (abfd, stabstrsec, &stabstrbuf))\n    goto error_return;\n\n  /* Look through the stabs symbols, work out the new string indices,\n     and identify N_BINCL symbols which can be eliminated.  */\n  stroff = 0;\n  /* The stabs sections can be split when\n     -split-by-reloc/-split-by-file is used.  We must keep track of\n     each stab section's place in the single concatenated string\n     table.  */\n  next_stroff = pstring_offset ? *pstring_offset : 0;\n  skip = 0;\n\n  symend = stabbuf + stabsec->size;\n  for (sym = stabbuf, pstridx = secinfo->stridxs;\n       sym < symend;\n       sym += STABSIZE, ++pstridx)\n    {\n      bfd_size_type symstroff;\n      int type;\n      const char *string;\n\n      if (*pstridx != 0)\n\t/* This symbol has already been handled by an N_BINCL pass.  */\n\tcontinue;\n\n      type = sym[TYPEOFF];\n\n      if (type == 0)\n\t{\n\t  /* Special type 0 stabs indicate the offset to the next\n\t     string table.  We only copy the very first one.  */\n\t  stroff = next_stroff;\n\t  next_stroff += bfd_get_32 (abfd, sym + 8);\n\t  if (pstring_offset)\n\t    *pstring_offset = next_stroff;\n\t  if (! first)\n\t    {\n\t      *pstridx = (bfd_size_type) -1;\n\t      ++skip;\n\t      continue;\n\t    }\n\t  first = FALSE;\n\t}\n\n      /* Store the string in the hash table, and record the index.  */\n      symstroff = stroff + bfd_get_32 (abfd, sym + STRDXOFF);\n      if (symstroff >= stabstrsec->size)\n\t{\n\t  _bfd_error_handler\n\t    /* xgettext:c-format */\n\t    (_(\"%B(%A+0x%lx): Stabs entry has invalid string index.\"),\n\t     abfd, stabsec, (long) (sym - stabbuf));\n\t  bfd_set_error (bfd_error_bad_value);\n\t  goto error_return;\n\t}\n      string = (char *) stabstrbuf + symstroff;\n      *pstridx = _bfd_stringtab_add (sinfo->strings, string, TRUE, TRUE);\n\n      /* An N_BINCL symbol indicates the start of the stabs entries\n\t for a header file.  We need to scan ahead to the next N_EINCL\n\t symbol, ignoring nesting, adding up all the characters in the\n\t symbol names, not including the file numbers in types (the\n\t first number after an open parenthesis).  */\n      if (type == (int) N_BINCL)\n\t{\n\t  bfd_vma sum_chars;\n\t  bfd_vma num_chars;\n\t  bfd_vma buf_len = 0;\n\t  char * symb;\n\t  char * symb_rover;\n\t  int nest;\n\t  bfd_byte * incl_sym;\n\t  struct stab_link_includes_entry * incl_entry;\n\t  struct stab_link_includes_totals * t;\n\t  struct stab_excl_list * ne;\n\n\t  symb = symb_rover = NULL;\n\t  sum_chars = num_chars = 0;\n\t  nest = 0;\n\n\t  for (incl_sym = sym + STABSIZE;\n\t       incl_sym < symend;\n\t       incl_sym += STABSIZE)\n\t    {\n\t      int incl_type;\n\n\t      incl_type = incl_sym[TYPEOFF];\n\t      if (incl_type == 0)\n\t\tbreak;\n\t      else if (incl_type == (int) N_EXCL)\n\t\tcontinue;\n\t      else if (incl_type == (int) N_EINCL)\n\t\t{\n\t\t  if (nest == 0)\n\t\t    break;\n\t\t  --nest;\n\t\t}\n\t      else if (incl_type == (int) N_BINCL)\n\t\t++nest;\n\t      else if (nest == 0)\n\t\t{\n\t\t  const char *str;\n\n\t\t  str = ((char *) stabstrbuf\n\t\t\t + stroff\n\t\t\t + bfd_get_32 (abfd, incl_sym + STRDXOFF));\n\t\t  for (; *str != '\\0'; str++)\n\t\t    {\n\t\t      if (num_chars >= buf_len)\n\t\t\t{\n\t\t\t  buf_len += 32 * 1024;\n\t\t\t  symb = (char *) bfd_realloc_or_free (symb, buf_len);\n\t\t\t  if (symb == NULL)\n\t\t\t    goto error_return;\n\t\t\t  symb_rover = symb + num_chars;\n\t\t\t}\n\t\t      * symb_rover ++ = * str;\n\t\t      sum_chars += *str;\n\t\t      num_chars ++;\n\t\t      if (*str == '(')\n\t\t\t{\n\t\t\t  /* Skip the file number.  */\n\t\t\t  ++str;\n\t\t\t  while (ISDIGIT (*str))\n\t\t\t    ++str;\n\t\t\t  --str;\n\t\t\t}\n\t\t    }\n\t\t}\n\t    }\n\n\t  BFD_ASSERT (num_chars == (bfd_vma) (symb_rover - symb));\n\n\t  /* If we have already included a header file with the same\n\t     value, then replaced this one with an N_EXCL symbol.  */\n\t  incl_entry = (struct stab_link_includes_entry * )\n\t    bfd_hash_lookup (&sinfo->includes, string, TRUE, TRUE);\n\t  if (incl_entry == NULL)\n\t    goto error_return;\n\n\t  for (t = incl_entry->totals; t != NULL; t = t->next)\n\t    if (t->sum_chars == sum_chars\n\t\t&& t->num_chars == num_chars\n\t\t&& memcmp (t->symb, symb, num_chars) == 0)\n\t      break;\n\n\t  /* Record this symbol, so that we can set the value\n\t     correctly.  */\n\t  amt = sizeof *ne;\n\t  ne = (struct stab_excl_list *) bfd_alloc (abfd, amt);\n\t  if (ne == NULL)\n\t    goto error_return;\n\t  ne->offset = sym - stabbuf;\n\t  ne->val = sum_chars;\n\t  ne->type = (int) N_BINCL;\n\t  ne->next = secinfo->excls;\n\t  secinfo->excls = ne;\n\n\t  if (t == NULL)\n\t    {\n\t      /* This is the first time we have seen this header file\n\t\t with this set of stabs strings.  */\n\t      t = (struct stab_link_includes_totals *)\n                  bfd_hash_allocate (&sinfo->includes, sizeof *t);\n\t      if (t == NULL)\n\t\tgoto error_return;\n\t      t->sum_chars = sum_chars;\n\t      t->num_chars = num_chars;\n              /* Trim data down.  */\n\t      t->symb = symb = (char *) bfd_realloc_or_free (symb, num_chars);\n\t      t->next = incl_entry->totals;\n\t      incl_entry->totals = t;\n\t    }\n\t  else\n\t    {\n\t      bfd_size_type *incl_pstridx;\n\n\t      /* We have seen this header file before.  Tell the final\n\t\t pass to change the type to N_EXCL.  */\n\t      ne->type = (int) N_EXCL;\n\n\t      /* Free off superfluous symbols.  */\n\t      free (symb);\n\n\t      /* Mark the skipped symbols.  */\n\n\t      nest = 0;\n\t      for (incl_sym = sym + STABSIZE, incl_pstridx = pstridx + 1;\n\t\t   incl_sym < symend;\n\t\t   incl_sym += STABSIZE, ++incl_pstridx)\n\t\t{\n\t\t  int incl_type;\n\n\t\t  incl_type = incl_sym[TYPEOFF];\n\n\t\t  if (incl_type == (int) N_EINCL)\n\t\t    {\n\t\t      if (nest == 0)\n\t\t\t{\n\t\t\t  *incl_pstridx = (bfd_size_type) -1;\n\t\t\t  ++skip;\n\t\t\t  break;\n\t\t\t}\n\t\t      --nest;\n\t\t    }\n\t\t  else if (incl_type == (int) N_BINCL)\n\t\t    ++nest;\n\t\t  else if (incl_type == (int) N_EXCL)\n\t\t    /* Keep existing exclusion marks.  */\n\t\t    continue;\n\t\t  else if (nest == 0)\n\t\t    {\n\t\t      *incl_pstridx = (bfd_size_type) -1;\n\t\t      ++skip;\n\t\t    }\n\t\t}\n\t    }\n\t}\n    }\n\n  free (stabbuf);\n  stabbuf = NULL;\n  free (stabstrbuf);\n  stabstrbuf = NULL;\n\n  /* We need to set the section sizes such that the linker will\n     compute the output section sizes correctly.  We set the .stab\n     size to not include the entries we don't want.  We set\n     SEC_EXCLUDE for the .stabstr section, so that it will be dropped\n     from the link.  We record the size of the strtab in the first\n     .stabstr section we saw, and make sure we don't set SEC_EXCLUDE\n     for that section.  */\n  stabsec->size = (count - skip) * STABSIZE;\n  if (stabsec->size == 0)\n    stabsec->flags |= SEC_EXCLUDE | SEC_KEEP;\n  stabstrsec->flags |= SEC_EXCLUDE | SEC_KEEP;\n  sinfo->stabstr->size = _bfd_stringtab_size (sinfo->strings);\n\n  /* Calculate the `cumulative_skips' array now that stabs have been\n     deleted for this section.  */\n\n  if (skip != 0)\n    {\n      bfd_size_type i, offset;\n      bfd_size_type *pskips;\n\n      amt = count * sizeof (bfd_size_type);\n      secinfo->cumulative_skips = (bfd_size_type *) bfd_alloc (abfd, amt);\n      if (secinfo->cumulative_skips == NULL)\n\tgoto error_return;\n\n      pskips = secinfo->cumulative_skips;\n      pstridx = secinfo->stridxs;\n      offset = 0;\n\n      for (i = 0; i < count; i++, pskips++, pstridx++)\n\t{\n\t  *pskips = offset;\n\t  if (*pstridx == (bfd_size_type) -1)\n\t    offset += STABSIZE;\n\t}\n\n      BFD_ASSERT (offset != 0);\n    }\n\n  return TRUE;\n\n error_return:\n  if (stabbuf != NULL)\n    free (stabbuf);\n  if (stabstrbuf != NULL)\n    free (stabstrbuf);\n  return FALSE;\n}",
+      "fn_code_pos": [
+        [
+          146,
+          0
+        ],
+        [
+          501,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_bfd_link_section_stabs",
+        "parameters": {
+          "abfd": "bfd",
+          "sinfo": "struct stab_info",
+          "stabsec": "asection",
+          "stabstrsec": "asection",
+          "psecinfo": "void",
+          "pstring_offset": "bfd_size_type"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "bfd_boolean\n_bfd_discard_section_stabs (bfd *abfd,\n\t\t\t    asection *stabsec,\n\t\t\t    void * psecinfo,\n\t\t\t    bfd_boolean (*reloc_symbol_deleted_p) (bfd_vma, void *),\n\t\t\t    void * cookie)\n{\n  bfd_size_type count, amt;\n  struct stab_section_info *secinfo;\n  bfd_byte *stabbuf = NULL;\n  bfd_byte *sym, *symend;\n  bfd_size_type skip;\n  bfd_size_type *pstridx;\n  int deleting;\n\n  if (stabsec->size == 0)\n    /* This file does not contain stabs debugging information.  */\n    return FALSE;\n\n  if (stabsec->size % STABSIZE != 0)\n    /* Something is wrong with the format of these stab symbols.\n       Don't try to optimize them.  */\n    return FALSE;\n\n  if ((stabsec->output_section != NULL\n       && bfd_is_abs_section (stabsec->output_section)))\n    /* At least one of the sections is being discarded from the\n       link, so we should just ignore them.  */\n    return FALSE;\n\n  /* We should have initialized our data in _bfd_link_section_stabs.\n     If there was some bizarre error reading the string sections, though,\n     we might not have.  Bail rather than asserting.  */\n  if (psecinfo == NULL)\n    return FALSE;\n\n  count = stabsec->rawsize / STABSIZE;\n  secinfo = (struct stab_section_info *) psecinfo;\n\n  /* Read the stabs information from abfd.  */\n  if (!bfd_malloc_and_get_section (abfd, stabsec, &stabbuf))\n    goto error_return;\n\n  /* Look through the stabs symbols and discard any information for\n     discarded functions.  */\n  skip = 0;\n  deleting = -1;\n\n  symend = stabbuf + stabsec->rawsize;\n  for (sym = stabbuf, pstridx = secinfo->stridxs;\n       sym < symend;\n       sym += STABSIZE, ++pstridx)\n    {\n      int type;\n\n      if (*pstridx == (bfd_size_type) -1)\n\t/* This stab was deleted in a previous pass.  */\n\tcontinue;\n\n      type = sym[TYPEOFF];\n\n      if (type == (int) N_FUN)\n\t{\n\t  int strx = bfd_get_32 (abfd, sym + STRDXOFF);\n\n\t  if (strx == 0)\n\t    {\n\t      if (deleting)\n\t\t{\n\t\t  skip++;\n\t\t  *pstridx = -1;\n\t\t}\n\t      deleting = -1;\n\t      continue;\n\t    }\n\t  deleting = 0;\n\t  if ((*reloc_symbol_deleted_p) (sym + VALOFF - stabbuf, cookie))\n\t    deleting = 1;\n\t}\n\n      if (deleting == 1)\n\t{\n\t  *pstridx = -1;\n\t  skip++;\n\t}\n      else if (deleting == -1)\n\t{\n\t  /* Outside of a function.  Check for deleted variables.  */\n\t  if (type == (int) N_STSYM || type == (int) N_LCSYM)\n\t    if ((*reloc_symbol_deleted_p) (sym + VALOFF - stabbuf, cookie))\n\t      {\n\t\t*pstridx = -1;\n\t\tskip ++;\n\t      }\n\t  /* We should also check for N_GSYM entries which reference a\n\t     deleted global, but those are less harmful to debuggers\n\t     and would require parsing the stab strings.  */\n\t}\n    }\n\n  free (stabbuf);\n  stabbuf = NULL;\n\n  /* Shrink the stabsec as needed.  */\n  stabsec->size -= skip * STABSIZE;\n  if (stabsec->size == 0)\n    stabsec->flags |= SEC_EXCLUDE | SEC_KEEP;\n\n  /* Recalculate the `cumulative_skips' array now that stabs have been\n     deleted for this section.  */\n\n  if (skip != 0)\n    {\n      bfd_size_type i, offset;\n      bfd_size_type *pskips;\n\n      if (secinfo->cumulative_skips == NULL)\n\t{\n\t  amt = count * sizeof (bfd_size_type);\n\t  secinfo->cumulative_skips = (bfd_size_type *) bfd_alloc (abfd, amt);\n\t  if (secinfo->cumulative_skips == NULL)\n\t    goto error_return;\n\t}\n\n      pskips = secinfo->cumulative_skips;\n      pstridx = secinfo->stridxs;\n      offset = 0;\n\n      for (i = 0; i < count; i++, pskips++, pstridx++)\n\t{\n\t  *pskips = offset;\n\t  if (*pstridx == (bfd_size_type) -1)\n\t    offset += STABSIZE;\n\t}\n\n      BFD_ASSERT (offset != 0);\n    }\n\n  return skip > 0;\n\n error_return:\n  if (stabbuf != NULL)\n    free (stabbuf);\n  return FALSE;\n}",
+      "fn_code_pos": [
+        [
+          509,
+          0
+        ],
+        [
+          653,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_bfd_discard_section_stabs",
+        "parameters": {
+          "abfd": "bfd",
+          "stabsec": "asection",
+          "psecinfo": "void",
+          "reloc_symbol_deleted_p": "bfd_boolean",
+          "cookie": "void"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "bfd_boolean\n_bfd_write_section_stabs (bfd *output_bfd,\n\t\t\t  struct stab_info *sinfo,\n\t\t\t  asection *stabsec,\n\t\t\t  void * *psecinfo,\n\t\t\t  bfd_byte *contents)\n{\n  struct stab_section_info *secinfo;\n  struct stab_excl_list *e;\n  bfd_byte *sym, *tosym, *symend;\n  bfd_size_type *pstridx;\n\n  secinfo = (struct stab_section_info *) *psecinfo;\n\n  if (secinfo == NULL)\n    return bfd_set_section_contents (output_bfd, stabsec->output_section,\n\t\t\t\t     contents, stabsec->output_offset,\n\t\t\t\t     stabsec->size);\n\n  /* Handle each N_BINCL entry.  */\n  for (e = secinfo->excls; e != NULL; e = e->next)\n    {\n      bfd_byte *excl_sym;\n\n      BFD_ASSERT (e->offset < stabsec->rawsize);\n      excl_sym = contents + e->offset;\n      bfd_put_32 (output_bfd, e->val, excl_sym + VALOFF);\n      excl_sym[TYPEOFF] = e->type;\n    }\n\n  /* Copy over all the stabs symbols, omitting the ones we don't want,\n     and correcting the string indices for those we do want.  */\n  tosym = contents;\n  symend = contents + stabsec->rawsize;\n  for (sym = contents, pstridx = secinfo->stridxs;\n       sym < symend;\n       sym += STABSIZE, ++pstridx)\n    {\n      if (*pstridx != (bfd_size_type) -1)\n\t{\n\t  if (tosym != sym)\n\t    memcpy (tosym, sym, STABSIZE);\n\t  bfd_put_32 (output_bfd, *pstridx, tosym + STRDXOFF);\n\n\t  if (sym[TYPEOFF] == 0)\n\t    {\n\t      /* This is the header symbol for the stabs section.  We\n\t\t don't really need one, since we have merged all the\n\t\t input stabs sections into one, but we generate one\n\t\t for the benefit of readers which expect to see one.  */\n\t      BFD_ASSERT (sym == contents);\n\t      bfd_put_32 (output_bfd, _bfd_stringtab_size (sinfo->strings),\n\t\t\t  tosym + VALOFF);\n\t      bfd_put_16 (output_bfd,\n\t\t\t  stabsec->output_section->size / STABSIZE - 1,\n\t\t\t  tosym + DESCOFF);\n\t    }\n\n\t  tosym += STABSIZE;\n\t}\n    }\n\n  BFD_ASSERT ((bfd_size_type) (tosym - contents) == stabsec->size);\n\n  return bfd_set_section_contents (output_bfd, stabsec->output_section,\n\t\t\t\t   contents, (file_ptr) stabsec->output_offset,\n\t\t\t\t   stabsec->size);\n}",
+      "fn_code_pos": [
+        [
+          658,
+          0
+        ],
+        [
+          725,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_bfd_write_section_stabs",
+        "parameters": {
+          "output_bfd": "bfd",
+          "sinfo": "struct stab_info",
+          "stabsec": "asection",
+          "psecinfo": "void",
+          "contents": "bfd_byte"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "bfd_boolean\n_bfd_write_stab_strings (bfd *output_bfd, struct stab_info *sinfo)\n{\n  if (bfd_is_abs_section (sinfo->stabstr->output_section))\n    /* The section was discarded from the link.  */\n    return TRUE;\n\n  BFD_ASSERT ((sinfo->stabstr->output_offset\n\t       + _bfd_stringtab_size (sinfo->strings))\n\t      <= sinfo->stabstr->output_section->size);\n\n  if (bfd_seek (output_bfd,\n\t\t(file_ptr) (sinfo->stabstr->output_section->filepos\n\t\t\t    + sinfo->stabstr->output_offset),\n\t\tSEEK_SET) != 0)\n    return FALSE;\n\n  if (! _bfd_stringtab_emit (output_bfd, sinfo->strings))\n    return FALSE;\n\n  /* We no longer need the stabs information.  */\n  _bfd_stringtab_free (sinfo->strings);\n  bfd_hash_table_free (&sinfo->includes);\n\n  return TRUE;\n}",
+      "fn_code_pos": [
+        [
+          729,
+          0
+        ],
+        [
+          754,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_bfd_write_stab_strings",
+        "parameters": {
+          "output_bfd": "bfd",
+          "sinfo": "struct stab_info"
+        },
+        "return_type": "bfd_boolean"
+      }
+    },
+    {
+      "fn_code": "bfd_vma\n_bfd_stab_section_offset (asection *stabsec,\n\t\t\t  void * psecinfo,\n\t\t\t  bfd_vma offset)\n{\n  struct stab_section_info *secinfo;\n\n  secinfo = (struct stab_section_info *) psecinfo;\n\n  if (secinfo == NULL)\n    return offset;\n\n  if (offset >= stabsec->rawsize)\n    return offset - stabsec->rawsize + stabsec->size;\n\n  if (secinfo->cumulative_skips)\n    {\n      bfd_vma i;\n\n      i = offset / STABSIZE;\n\n      if (secinfo->stridxs [i] == (bfd_size_type) -1)\n\treturn (bfd_vma) -1;\n\n      return offset - secinfo->cumulative_skips [i];\n    }\n\n  return offset;\n}",
+      "fn_code_pos": [
+        [
+          760,
+          0
+        ],
+        [
+          788,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_bfd_stab_section_offset",
+        "parameters": {
+          "stabsec": "asection",
+          "psecinfo": "void",
+          "offset": "bfd_vma"
+        },
+        "return_type": "bfd_vma"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "stab_link_includes_newfunc (struct bfd_hash_entry *entry,\n\t\t\t    struct bfd_hash_table *table,\n\t\t\t    const char *string)",
+      "fn_dec_pos": [
+        [
+          118,
+          0
+        ],
+        [
+          120,
+          26
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "stab_link_includes_newfunc",
+        "parameters": {
+          "entry": "struct bfd_hash_entry",
+          "table": "struct bfd_hash_table",
+          "string": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*reloc_symbol_deleted_p) (bfd_vma, void *)",
+      "fn_dec_pos": [
+        [
+          513,
+          19
+        ],
+        [
+          513,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "bfd_boolean"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct stab_link_includes_totals\n{\n  struct stab_link_includes_totals *next;\n  bfd_vma sum_chars;  /* Accumulated sum of STABS characters.  */\n  bfd_vma num_chars;  /* Number of STABS characters.  */\n  const char* symb;   /* The STABS characters themselves.  */\n}",
+      {
+        "*next": "struct stab_link_includes_totals",
+        "sum_chars": "bfd_vma",
+        "num_chars": "bfd_vma",
+        "char": "const"
+      },
+      "stab_link_includes_totals",
+      [
+        59,
+        0
+      ],
+      [
+        65,
+        1
+      ]
+    ],
+    [
+      "struct stab_link_includes_entry\n{\n  struct bfd_hash_entry root;\n  /* List of totals we have found for this file.  */\n  struct stab_link_includes_totals *totals;\n}",
+      {
+        "root": "struct bfd_hash_entry",
+        "*totals": "struct stab_link_includes_totals"
+      },
+      "stab_link_includes_entry",
+      [
+        69,
+        0
+      ],
+      [
+        74,
+        1
+      ]
+    ],
+    [
+      "struct stab_excl_list\n{\n  /* The next symbol to convert.  */\n  struct stab_excl_list *next;\n  /* The offset to this symbol in the section contents.  */\n  bfd_size_type offset;\n  /* The value to use for the symbol.  */\n  bfd_vma val;\n  /* The type of this symbol (N_BINCL or N_EXCL).  */\n  int type;\n}",
+      {
+        "*next": "struct stab_excl_list",
+        "offset": "bfd_size_type",
+        "val": "bfd_vma",
+        "type": "int"
+      },
+      "stab_excl_list",
+      [
+        79,
+        0
+      ],
+      [
+        89,
+        1
+      ]
+    ],
+    [
+      "struct stab_section_info\n{\n  /* This is a linked list of N_BINCL symbols which should be\n     converted into N_EXCL symbols.  */\n  struct stab_excl_list *excls;\n\n  /* This is used to map input stab offsets within their sections\n     to output stab offsets, to take into account stabs that have\n     been deleted.  If it is NULL, the output offsets are the same\n     as the input offsets, because no stabs have been deleted from\n     this section.  Otherwise the i'th entry is the number of\n     bytes of stabs that have been deleted prior to the i'th\n     stab.  */\n  bfd_size_type *cumulative_skips;\n\n  /* This is an array of string indices.  For each stab symbol, we\n     store the string index here.  If a stab symbol should not be\n     included in the final output, the string index is -1.  */\n  bfd_size_type stridxs[1];\n}",
+      {
+        "*excls": "struct stab_excl_list",
+        "*cumulative_skips": "bfd_size_type",
+        "stridxs[1]": "bfd_size_type"
+      },
+      "stab_section_info",
+      [
+        93,
+        0
+      ],
+      [
+        112,
+        1
+      ]
+    ],
+    [
+      "struct stab_link_includes_totals\n{\n  struct stab_link_includes_totals *next;\n  bfd_vma sum_chars;  /* Accumulated sum of STABS characters.  */\n  bfd_vma num_chars;  /* Number of STABS characters.  */\n  const char* symb;   /* The STABS characters themselves.  */\n}",
+      {
+        "*next": "struct stab_link_includes_totals",
+        "sum_chars": "bfd_vma",
+        "num_chars": "bfd_vma",
+        "char": "const"
+      },
+      "stab_link_includes_totals",
+      [
+        59,
+        0
+      ],
+      [
+        65,
+        1
+      ]
+    ],
+    [
+      "struct stab_link_includes_totals",
+      {},
+      "",
+      [
+        61,
+        2
+      ],
+      [
+        61,
+        34
+      ]
+    ],
+    [
+      "struct stab_link_includes_entry\n{\n  struct bfd_hash_entry root;\n  /* List of totals we have found for this file.  */\n  struct stab_link_includes_totals *totals;\n}",
+      {
+        "root": "struct bfd_hash_entry",
+        "*totals": "struct stab_link_includes_totals"
+      },
+      "stab_link_includes_entry",
+      [
+        69,
+        0
+      ],
+      [
+        74,
+        1
+      ]
+    ],
+    [
+      "struct bfd_hash_entry",
+      {},
+      "",
+      [
+        71,
+        2
+      ],
+      [
+        71,
+        23
+      ]
+    ],
+    [
+      "struct stab_link_includes_totals",
+      {},
+      "",
+      [
+        73,
+        2
+      ],
+      [
+        73,
+        34
+      ]
+    ],
+    [
+      "struct stab_excl_list\n{\n  /* The next symbol to convert.  */\n  struct stab_excl_list *next;\n  /* The offset to this symbol in the section contents.  */\n  bfd_size_type offset;\n  /* The value to use for the symbol.  */\n  bfd_vma val;\n  /* The type of this symbol (N_BINCL or N_EXCL).  */\n  int type;\n}",
+      {
+        "*next": "struct stab_excl_list",
+        "offset": "bfd_size_type",
+        "val": "bfd_vma",
+        "type": "int"
+      },
+      "stab_excl_list",
+      [
+        79,
+        0
+      ],
+      [
+        89,
+        1
+      ]
+    ],
+    [
+      "struct stab_excl_list",
+      {},
+      "",
+      [
+        82,
+        2
+      ],
+      [
+        82,
+        23
+      ]
+    ],
+    [
+      "struct stab_section_info\n{\n  /* This is a linked list of N_BINCL symbols which should be\n     converted into N_EXCL symbols.  */\n  struct stab_excl_list *excls;\n\n  /* This is used to map input stab offsets within their sections\n     to output stab offsets, to take into account stabs that have\n     been deleted.  If it is NULL, the output offsets are the same\n     as the input offsets, because no stabs have been deleted from\n     this section.  Otherwise the i'th entry is the number of\n     bytes of stabs that have been deleted prior to the i'th\n     stab.  */\n  bfd_size_type *cumulative_skips;\n\n  /* This is an array of string indices.  For each stab symbol, we\n     store the string index here.  If a stab symbol should not be\n     included in the final output, the string index is -1.  */\n  bfd_size_type stridxs[1];\n}",
+      {
+        "*excls": "struct stab_excl_list",
+        "*cumulative_skips": "bfd_size_type",
+        "stridxs[1]": "bfd_size_type"
+      },
+      "stab_section_info",
+      [
+        93,
+        0
+      ],
+      [
+        112,
+        1
+      ]
+    ],
+    [
+      "struct stab_excl_list",
+      {},
+      "",
+      [
+        97,
+        2
+      ],
+      [
+        97,
+        23
+      ]
+    ],
+    [
+      "struct bfd_hash_entry",
+      {},
+      "",
+      [
+        117,
+        7
+      ],
+      [
+        117,
+        28
+      ]
+    ],
+    [
+      "struct bfd_hash_entry",
+      {},
+      "",
+      [
+        118,
+        28
+      ],
+      [
+        118,
+        49
+      ]
+    ],
+    [
+      "struct bfd_hash_table",
+      {},
+      "",
+      [
+        119,
+        7
+      ],
+      [
+        119,
+        28
+      ]
+    ],
+    [
+      "struct stab_link_includes_entry",
+      {},
+      "",
+      [
+        122,
+        2
+      ],
+      [
+        122,
+        33
+      ]
+    ],
+    [
+      "struct stab_link_includes_entry",
+      {},
+      "",
+      [
+        123,
+        5
+      ],
+      [
+        123,
+        36
+      ]
+    ],
+    [
+      "struct stab_link_includes_entry",
+      {},
+      "",
+      [
+        128,
+        11
+      ],
+      [
+        128,
+        42
+      ]
+    ],
+    [
+      "struct stab_link_includes_entry",
+      {},
+      "",
+      [
+        129,
+        42
+      ],
+      [
+        129,
+        73
+      ]
+    ],
+    [
+      "struct stab_link_includes_entry",
+      {},
+      "",
+      [
+        134,
+        10
+      ],
+      [
+        134,
+        41
+      ]
+    ],
+    [
+      "struct bfd_hash_entry",
+      {},
+      "",
+      [
+        135,
+        21
+      ],
+      [
+        135,
+        42
+      ]
+    ],
+    [
+      "struct bfd_hash_entry",
+      {},
+      "",
+      [
+        140,
+        10
+      ],
+      [
+        140,
+        31
+      ]
+    ],
+    [
+      "struct stab_info",
+      {},
+      "",
+      [
+        148,
+        4
+      ],
+      [
+        148,
+        20
+      ]
+    ],
+    [
+      "struct stab_section_info",
+      {},
+      "",
+      [
+        156,
+        2
+      ],
+      [
+        156,
+        26
+      ]
+    ],
+    [
+      "struct stab_link_includes_entry",
+      {},
+      "",
+      [
+        199,
+        13
+      ],
+      [
+        199,
+        44
+      ]
+    ],
+    [
+      "struct stab_section_info",
+      {},
+      "",
+      [
+        213,
+        16
+      ],
+      [
+        213,
+        40
+      ]
+    ],
+    [
+      "struct stab_section_info",
+      {},
+      "",
+      [
+        219,
+        13
+      ],
+      [
+        219,
+        37
+      ]
+    ],
+    [
+      "struct stab_link_includes_entry",
+      {},
+      "",
+      [
+        300,
+        3
+      ],
+      [
+        300,
+        34
+      ]
+    ],
+    [
+      "struct stab_link_includes_totals",
+      {},
+      "",
+      [
+        301,
+        3
+      ],
+      [
+        301,
+        35
+      ]
+    ],
+    [
+      "struct stab_excl_list",
+      {},
+      "",
+      [
+        302,
+        3
+      ],
+      [
+        302,
+        24
+      ]
+    ],
+    [
+      "struct stab_link_includes_entry",
+      {},
+      "",
+      [
+        363,
+        17
+      ],
+      [
+        363,
+        48
+      ]
+    ],
+    [
+      "struct stab_excl_list",
+      {},
+      "",
+      [
+        377,
+        9
+      ],
+      [
+        377,
+        30
+      ]
+    ],
+    [
+      "struct stab_link_includes_totals",
+      {},
+      "",
+      [
+        390,
+        12
+      ],
+      [
+        390,
+        44
+      ]
+    ],
+    [
+      "struct stab_section_info",
+      {},
+      "",
+      [
+        517,
+        2
+      ],
+      [
+        517,
+        26
+      ]
+    ],
+    [
+      "struct stab_section_info",
+      {},
+      "",
+      [
+        546,
+        13
+      ],
+      [
+        546,
+        37
+      ]
+    ],
+    [
+      "struct stab_info",
+      {},
+      "",
+      [
+        660,
+        5
+      ],
+      [
+        660,
+        21
+      ]
+    ],
+    [
+      "struct stab_section_info",
+      {},
+      "",
+      [
+        665,
+        2
+      ],
+      [
+        665,
+        26
+      ]
+    ],
+    [
+      "struct stab_excl_list",
+      {},
+      "",
+      [
+        666,
+        2
+      ],
+      [
+        666,
+        23
+      ]
+    ],
+    [
+      "struct stab_section_info",
+      {},
+      "",
+      [
+        670,
+        13
+      ],
+      [
+        670,
+        37
+      ]
+    ],
+    [
+      "struct stab_info",
+      {},
+      "",
+      [
+        730,
+        42
+      ],
+      [
+        730,
+        58
+      ]
+    ],
+    [
+      "struct stab_section_info",
+      {},
+      "",
+      [
+        765,
+        2
+      ],
+      [
+        765,
+        26
+      ]
+    ],
+    [
+      "struct stab_section_info",
+      {},
+      "",
+      [
+        767,
+        13
+      ],
+      [
+        767,
+        37
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"libbfd.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"aout/stab_gnu.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"safe-ctype.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

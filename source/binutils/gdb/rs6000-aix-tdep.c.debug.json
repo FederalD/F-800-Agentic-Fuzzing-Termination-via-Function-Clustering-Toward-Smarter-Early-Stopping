@@ -1,0 +1,1722 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nrs6000_aix_supply_regset (const struct regset *regset,\n\t\t\t  struct regcache *regcache, int regnum,\n\t\t\t  const void *gregs, size_t len)\n{\n  ppc_supply_gregset (regset, regcache, regnum, gregs, len);\n  ppc_supply_fpregset (regset, regcache, regnum, gregs, len);\n}",
+      "fn_code_pos": [
+        [
+          109,
+          0
+        ],
+        [
+          116,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_aix_supply_regset",
+        "parameters": {
+          "regset": "struct regset",
+          "regcache": "struct regcache",
+          "regnum": "int",
+          "gregs": "void",
+          "len": "size_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nrs6000_aix_collect_regset (const struct regset *regset,\n\t\t\t   const struct regcache *regcache, int regnum,\n\t\t\t   void *gregs, size_t len)\n{\n  ppc_collect_gregset (regset, regcache, regnum, gregs, len);\n  ppc_collect_fpregset (regset, regcache, regnum, gregs, len);\n}",
+      "fn_code_pos": [
+        [
+          123,
+          0
+        ],
+        [
+          130,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_aix_collect_regset",
+        "parameters": {
+          "regset": "struct regset",
+          "regcache": "struct regcache",
+          "regnum": "int",
+          "gregs": "void",
+          "len": "size_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nrs6000_aix_iterate_over_regset_sections (struct gdbarch *gdbarch,\n\t\t\t\t\t iterate_over_regset_sections_cb *cb,\n\t\t\t\t\t void *cb_data,\n\t\t\t\t\t const struct regcache *regcache)\n{\n  if (gdbarch_tdep (gdbarch)->wordsize == 4)\n    cb (\".reg\", 592, &rs6000_aix32_regset, NULL, cb_data);\n  else\n    cb (\".reg\", 576, &rs6000_aix64_regset, NULL, cb_data);\n}",
+      "fn_code_pos": [
+        [
+          150,
+          0
+        ],
+        [
+          160,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_aix_iterate_over_regset_sections",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "cb": "iterate_over_regset_sections_cb",
+          "cb_data": "void",
+          "regcache": "struct regcache"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\nrs6000_push_dummy_call (struct gdbarch *gdbarch, struct value *function,\n\t\t\tstruct regcache *regcache, CORE_ADDR bp_addr,\n\t\t\tint nargs, struct value **args, CORE_ADDR sp,\n\t\t\tint struct_return, CORE_ADDR struct_addr)\n{\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  int ii;\n  int len = 0;\n  int argno;\t\t\t/* current argument number */\n  int argbytes;\t\t\t/* current argument byte */\n  gdb_byte tmp_buffer[50];\n  int f_argno = 0;\t\t/* current floating point argno */\n  int wordsize = gdbarch_tdep (gdbarch)->wordsize;\n  CORE_ADDR func_addr = find_function_addr (function, NULL);\n\n  struct value *arg = 0;\n  struct type *type;\n\n  ULONGEST saved_sp;\n\n  /* The calling convention this function implements assumes the\n     processor has floating-point registers.  We shouldn't be using it\n     on PPC variants that lack them.  */\n  gdb_assert (ppc_floating_point_unit_p (gdbarch));\n\n  /* The first eight words of ther arguments are passed in registers.\n     Copy them appropriately.  */\n  ii = 0;\n\n  /* If the function is returning a `struct', then the first word\n     (which will be passed in r3) is used for struct return address.\n     In that case we should advance one word and start from r4\n     register to copy parameters.  */\n  if (struct_return)\n    {\n      regcache_raw_write_unsigned (regcache, tdep->ppc_gp0_regnum + 3,\n\t\t\t\t   struct_addr);\n      ii++;\n    }\n\n/* effectively indirect call... gcc does...\n\n   return_val example( float, int);\n\n   eabi: \n   float in fp0, int in r3\n   offset of stack on overflow 8/16\n   for varargs, must go by type.\n   power open:\n   float in r3&r4, int in r5\n   offset of stack on overflow different \n   both: \n   return in r3 or f0.  If no float, must study how gcc emulates floats;\n   pay attention to arg promotion.\n   User may have to cast\\args to handle promotion correctly \n   since gdb won't know if prototype supplied or not.  */\n\n  for (argno = 0, argbytes = 0; argno < nargs && ii < 8; ++ii)\n    {\n      int reg_size = register_size (gdbarch, ii + 3);\n\n      arg = args[argno];\n      type = check_typedef (value_type (arg));\n      len = TYPE_LENGTH (type);\n\n      if (TYPE_CODE (type) == TYPE_CODE_FLT)\n\t{\n\t  /* Floating point arguments are passed in fpr's, as well as gpr's.\n\t     There are 13 fpr's reserved for passing parameters.  At this point\n\t     there is no way we would run out of them.\n\n\t     Always store the floating point value using the register's\n\t     floating-point format.  */\n\t  const int fp_regnum = tdep->ppc_fp0_regnum + 1 + f_argno;\n\t  gdb_byte reg_val[PPC_MAX_REGISTER_SIZE];\n\t  struct type *reg_type = register_type (gdbarch, fp_regnum);\n\n\t  gdb_assert (len <= 8);\n\n\t  convert_typed_floating (value_contents (arg), type,\n\t\t\t\t  reg_val, reg_type);\n\t  regcache_cooked_write (regcache, fp_regnum, reg_val);\n\t  ++f_argno;\n\t}\n\n      if (len > reg_size)\n\t{\n\n\t  /* Argument takes more than one register.  */\n\t  while (argbytes < len)\n\t    {\n\t      gdb_byte word[PPC_MAX_REGISTER_SIZE];\n\t      memset (word, 0, reg_size);\n\t      memcpy (word,\n\t\t      ((char *) value_contents (arg)) + argbytes,\n\t\t      (len - argbytes) > reg_size\n\t\t        ? reg_size : len - argbytes);\n\t      regcache_cooked_write (regcache,\n\t                            tdep->ppc_gp0_regnum + 3 + ii,\n\t\t\t\t    word);\n\t      ++ii, argbytes += reg_size;\n\n\t      if (ii >= 8)\n\t\tgoto ran_out_of_registers_for_arguments;\n\t    }\n\t  argbytes = 0;\n\t  --ii;\n\t}\n      else\n\t{\n\t  /* Argument can fit in one register.  No problem.  */\n\t  gdb_byte word[PPC_MAX_REGISTER_SIZE];\n\n\t  memset (word, 0, reg_size);\n\t  memcpy (word, value_contents (arg), len);\n\t  regcache_cooked_write (regcache, tdep->ppc_gp0_regnum + 3 +ii, word);\n\t}\n      ++argno;\n    }\n\nran_out_of_registers_for_arguments:\n\n  regcache_cooked_read_unsigned (regcache,\n\t\t\t\t gdbarch_sp_regnum (gdbarch),\n\t\t\t\t &saved_sp);\n\n  /* Location for 8 parameters are always reserved.  */\n  sp -= wordsize * 8;\n\n  /* Another six words for back chain, TOC register, link register, etc.  */\n  sp -= wordsize * 6;\n\n  /* Stack pointer must be quadword aligned.  */\n  sp &= -16;\n\n  /* If there are more arguments, allocate space for them in \n     the stack, then push them starting from the ninth one.  */\n\n  if ((argno < nargs) || argbytes)\n    {\n      int space = 0, jj;\n\n      if (argbytes)\n\t{\n\t  space += ((len - argbytes + 3) & -4);\n\t  jj = argno + 1;\n\t}\n      else\n\tjj = argno;\n\n      for (; jj < nargs; ++jj)\n\t{\n\t  struct value *val = args[jj];\n\t  space += ((TYPE_LENGTH (value_type (val))) + 3) & -4;\n\t}\n\n      /* Add location required for the rest of the parameters.  */\n      space = (space + 15) & -16;\n      sp -= space;\n\n      /* This is another instance we need to be concerned about\n         securing our stack space.  If we write anything underneath %sp\n         (r1), we might conflict with the kernel who thinks he is free\n         to use this area.  So, update %sp first before doing anything\n         else.  */\n\n      regcache_raw_write_signed (regcache,\n\t\t\t\t gdbarch_sp_regnum (gdbarch), sp);\n\n      /* If the last argument copied into the registers didn't fit there \n         completely, push the rest of it into stack.  */\n\n      if (argbytes)\n\t{\n\t  write_memory (sp + 24 + (ii * 4),\n\t\t\tvalue_contents (arg) + argbytes,\n\t\t\tlen - argbytes);\n\t  ++argno;\n\t  ii += ((len - argbytes + 3) & -4) / 4;\n\t}\n\n      /* Push the rest of the arguments into stack.  */\n      for (; argno < nargs; ++argno)\n\t{\n\n\t  arg = args[argno];\n\t  type = check_typedef (value_type (arg));\n\t  len = TYPE_LENGTH (type);\n\n\n\t  /* Float types should be passed in fpr's, as well as in the\n             stack.  */\n\t  if (TYPE_CODE (type) == TYPE_CODE_FLT && f_argno < 13)\n\t    {\n\n\t      gdb_assert (len <= 8);\n\n\t      regcache_cooked_write (regcache,\n\t\t\t\t     tdep->ppc_fp0_regnum + 1 + f_argno,\n\t\t\t\t     value_contents (arg));\n\t      ++f_argno;\n\t    }\n\n\t  write_memory (sp + 24 + (ii * 4), value_contents (arg), len);\n\t  ii += ((len + 3) & -4) / 4;\n\t}\n    }\n\n  /* Set the stack pointer.  According to the ABI, the SP is meant to\n     be set _before_ the corresponding stack space is used.  On AIX,\n     this even applies when the target has been completely stopped!\n     Not doing this can lead to conflicts with the kernel which thinks\n     that it still has control over this not-yet-allocated stack\n     region.  */\n  regcache_raw_write_signed (regcache, gdbarch_sp_regnum (gdbarch), sp);\n\n  /* Set back chain properly.  */\n  store_unsigned_integer (tmp_buffer, wordsize, byte_order, saved_sp);\n  write_memory (sp, tmp_buffer, wordsize);\n\n  /* Point the inferior function call's return address at the dummy's\n     breakpoint.  */\n  regcache_raw_write_signed (regcache, tdep->ppc_lr_regnum, bp_addr);\n\n  /* Set the TOC register value.  */\n  regcache_raw_write_signed (regcache, tdep->ppc_toc_regnum,\n\t\t\t     solib_aix_get_toc_value (func_addr));\n\n  target_store_registers (regcache, -1);\n  return sp;\n}",
+      "fn_code_pos": [
+        [
+          179,
+          0
+        ],
+        [
+          411,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_push_dummy_call",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "function": "struct value",
+          "regcache": "struct regcache",
+          "bp_addr": "CORE_ADDR",
+          "nargs": "int",
+          "args": "struct value",
+          "sp": "CORE_ADDR",
+          "struct_return": "int",
+          "struct_addr": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static enum return_value_convention\nrs6000_return_value (struct gdbarch *gdbarch, struct value *function,\n\t\t     struct type *valtype, struct regcache *regcache,\n\t\t     gdb_byte *readbuf, const gdb_byte *writebuf)\n{\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n\n  /* The calling convention this function implements assumes the\n     processor has floating-point registers.  We shouldn't be using it\n     on PowerPC variants that lack them.  */\n  gdb_assert (ppc_floating_point_unit_p (gdbarch));\n\n  /* AltiVec extension: Functions that declare a vector data type as a\n     return value place that return value in VR2.  */\n  if (TYPE_CODE (valtype) == TYPE_CODE_ARRAY && TYPE_VECTOR (valtype)\n      && TYPE_LENGTH (valtype) == 16)\n    {\n      if (readbuf)\n\tregcache_cooked_read (regcache, tdep->ppc_vr0_regnum + 2, readbuf);\n      if (writebuf)\n\tregcache_cooked_write (regcache, tdep->ppc_vr0_regnum + 2, writebuf);\n\n      return RETURN_VALUE_REGISTER_CONVENTION;\n    }\n\n  /* If the called subprogram returns an aggregate, there exists an\n     implicit first argument, whose value is the address of a caller-\n     allocated buffer into which the callee is assumed to store its\n     return value.  All explicit parameters are appropriately\n     relabeled.  */\n  if (TYPE_CODE (valtype) == TYPE_CODE_STRUCT\n      || TYPE_CODE (valtype) == TYPE_CODE_UNION\n      || TYPE_CODE (valtype) == TYPE_CODE_ARRAY)\n    return RETURN_VALUE_STRUCT_CONVENTION;\n\n  /* Scalar floating-point values are returned in FPR1 for float or\n     double, and in FPR1:FPR2 for quadword precision.  Fortran\n     complex*8 and complex*16 are returned in FPR1:FPR2, and\n     complex*32 is returned in FPR1:FPR4.  */\n  if (TYPE_CODE (valtype) == TYPE_CODE_FLT\n      && (TYPE_LENGTH (valtype) == 4 || TYPE_LENGTH (valtype) == 8))\n    {\n      struct type *regtype = register_type (gdbarch, tdep->ppc_fp0_regnum);\n      gdb_byte regval[8];\n\n      /* FIXME: kettenis/2007-01-01: Add support for quadword\n\t precision and complex.  */\n\n      if (readbuf)\n\t{\n\t  regcache_cooked_read (regcache, tdep->ppc_fp0_regnum + 1, regval);\n\t  convert_typed_floating (regval, regtype, readbuf, valtype);\n\t}\n      if (writebuf)\n\t{\n\t  convert_typed_floating (writebuf, valtype, regval, regtype);\n\t  regcache_cooked_write (regcache, tdep->ppc_fp0_regnum + 1, regval);\n\t}\n\n      return RETURN_VALUE_REGISTER_CONVENTION;\n  }\n\n  /* Values of the types int, long, short, pointer, and char (length\n     is less than or equal to four bytes), as well as bit values of\n     lengths less than or equal to 32 bits, must be returned right\n     justified in GPR3 with signed values sign extended and unsigned\n     values zero extended, as necessary.  */\n  if (TYPE_LENGTH (valtype) <= tdep->wordsize)\n    {\n      if (readbuf)\n\t{\n\t  ULONGEST regval;\n\n\t  /* For reading we don't have to worry about sign extension.  */\n\t  regcache_cooked_read_unsigned (regcache, tdep->ppc_gp0_regnum + 3,\n\t\t\t\t\t &regval);\n\t  store_unsigned_integer (readbuf, TYPE_LENGTH (valtype), byte_order,\n\t\t\t\t  regval);\n\t}\n      if (writebuf)\n\t{\n\t  /* For writing, use unpack_long since that should handle any\n\t     required sign extension.  */\n\t  regcache_cooked_write_unsigned (regcache, tdep->ppc_gp0_regnum + 3,\n\t\t\t\t\t  unpack_long (valtype, writebuf));\n\t}\n\n      return RETURN_VALUE_REGISTER_CONVENTION;\n    }\n\n  /* Eight-byte non-floating-point scalar values must be returned in\n     GPR3:GPR4.  */\n\n  if (TYPE_LENGTH (valtype) == 8)\n    {\n      gdb_assert (TYPE_CODE (valtype) != TYPE_CODE_FLT);\n      gdb_assert (tdep->wordsize == 4);\n\n      if (readbuf)\n\t{\n\t  gdb_byte regval[8];\n\n\t  regcache_cooked_read (regcache, tdep->ppc_gp0_regnum + 3, regval);\n\t  regcache_cooked_read (regcache, tdep->ppc_gp0_regnum + 4,\n\t\t\t\tregval + 4);\n\t  memcpy (readbuf, regval, 8);\n\t}\n      if (writebuf)\n\t{\n\t  regcache_cooked_write (regcache, tdep->ppc_gp0_regnum + 3, writebuf);\n\t  regcache_cooked_write (regcache, tdep->ppc_gp0_regnum + 4,\n\t\t\t\t writebuf + 4);\n\t}\n\n      return RETURN_VALUE_REGISTER_CONVENTION;\n    }\n\n  return RETURN_VALUE_STRUCT_CONVENTION;\n}",
+      "fn_code_pos": [
+        [
+          413,
+          0
+        ],
+        [
+          532,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_return_value",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "function": "struct value",
+          "valtype": "struct type",
+          "regcache": "struct regcache",
+          "readbuf": "gdb_byte",
+          "writebuf": "gdb_byte"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\nrs6000_convert_from_func_ptr_addr (struct gdbarch *gdbarch,\n\t\t\t\t   CORE_ADDR addr,\n\t\t\t\t   struct target_ops *targ)\n{\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  struct obj_section *s;\n\n  s = find_pc_section (addr);\n\n  /* Normally, functions live inside a section that is executable.\n     So, if ADDR points to a non-executable section, then treat it\n     as a function descriptor and return the target address iff\n     the target address itself points to a section that is executable.  */\n  if (s && (s->the_bfd_section->flags & SEC_CODE) == 0)\n    {\n      CORE_ADDR pc = 0;\n      struct obj_section *pc_section;\n\n      TRY\n        {\n          pc = read_memory_unsigned_integer (addr, tdep->wordsize, byte_order);\n        }\n      CATCH (e, RETURN_MASK_ERROR)\n        {\n          /* An error occured during reading.  Probably a memory error\n             due to the section not being loaded yet.  This address\n             cannot be a function descriptor.  */\n          return addr;\n        }\n      END_CATCH\n\n      pc_section = find_pc_section (pc);\n\n      if (pc_section && (pc_section->the_bfd_section->flags & SEC_CODE))\n        return pc;\n    }",
+      "fn_code_pos": [
+        [
+          553,
+          0
+        ],
+        [
+          590,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_convert_from_func_ptr_addr",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "addr": "CORE_ADDR",
+          "targ": "struct target_ops"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "CATCH (e, RETURN_MASK_ERROR)\n        {\n          /* An error occured during reading.  Probably a memory error\n             due to the section not being loaded yet.  This address\n             cannot be a function descriptor.  */\n          return addr;\n        }",
+      "fn_code_pos": [
+        [
+          577,
+          6
+        ],
+        [
+          583,
+          9
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\nbranch_dest (struct regcache *regcache, int opcode, int instr,\n\t     CORE_ADDR pc, CORE_ADDR safety)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  CORE_ADDR dest;\n  int immediate;\n  int absolute;\n  int ext_op;\n\n  absolute = (int) ((instr >> 1) & 1);\n\n  switch (opcode)\n    {\n    case 18:\n      immediate = ((instr & ~3) << 6) >> 6;\t/* br unconditional */\n      if (absolute)\n\tdest = immediate;\n      else\n\tdest = pc + immediate;\n      break;\n\n    case 16:\n      immediate = ((instr & ~3) << 16) >> 16;\t/* br conditional */\n      if (absolute)\n\tdest = immediate;\n      else\n\tdest = pc + immediate;\n      break;\n\n    case 19:\n      ext_op = (instr >> 1) & 0x3ff;\n\n      if (ext_op == 16)\t\t/* br conditional register */\n\t{\n          dest = regcache_raw_get_unsigned (regcache, tdep->ppc_lr_regnum) & ~3;\n\n\t  /* If we are about to return from a signal handler, dest is\n\t     something like 0x3c90.  The current frame is a signal handler\n\t     caller frame, upon completion of the sigreturn system call\n\t     execution will return to the saved PC in the frame.  */\n\t  if (dest < AIX_TEXT_SEGMENT_BASE)\n\t    {\n\t      struct frame_info *frame = get_current_frame ();\n\n\t      dest = read_memory_unsigned_integer\n\t\t(get_frame_base (frame) + SIG_FRAME_PC_OFFSET,\n\t\t tdep->wordsize, byte_order);\n\t    }\n\t}\n\n      else if (ext_op == 528)\t/* br cond to count reg */\n\t{\n          dest = regcache_raw_get_unsigned (regcache,\n\t\t\t\t\t    tdep->ppc_ctr_regnum) & ~3;\n\n\t  /* If we are about to execute a system call, dest is something\n\t     like 0x22fc or 0x3b00.  Upon completion the system call\n\t     will return to the address in the link register.  */\n\t  if (dest < AIX_TEXT_SEGMENT_BASE)\n            dest = regcache_raw_get_unsigned (regcache,\n\t\t\t\t\t      tdep->ppc_lr_regnum) & ~3;\n\t}\n      else\n\treturn -1;\n      break;\n\n    default:\n      return -1;\n    }\n  return (dest < AIX_TEXT_SEGMENT_BASE) ? safety : dest;\n}",
+      "fn_code_pos": [
+        [
+          598,
+          0
+        ],
+        [
+          671,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "branch_dest",
+        "parameters": {
+          "regcache": "struct regcache",
+          "opcode": "int",
+          "instr": "int",
+          "pc": "CORE_ADDR",
+          "safety": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static std::vector<CORE_ADDR>\nrs6000_software_single_step (struct regcache *regcache)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  int ii, insn;\n  CORE_ADDR loc;\n  CORE_ADDR breaks[2];\n  int opcode;\n\n  loc = regcache_read_pc (regcache);\n\n  insn = read_memory_integer (loc, 4, byte_order);\n\n  std::vector<CORE_ADDR> next_pcs = ppc_deal_with_atomic_sequence (regcache);\n  if (!next_pcs.empty ())\n    return next_pcs;\n  \n  breaks[0] = loc + PPC_INSN_SIZE;\n  opcode = insn >> 26;\n  breaks[1] = branch_dest (regcache, opcode, insn, loc, breaks[0]);\n\n  /* Don't put two breakpoints on the same address.  */\n  if (breaks[1] == breaks[0])\n    breaks[1] = -1;\n\n  for (ii = 0; ii < 2; ++ii)\n    {\n      /* ignore invalid breakpoint.  */\n      if (breaks[ii] == -1)\n\tcontinue;\n\n      next_pcs.push_back (breaks[ii]);\n    }\n\n  errno = 0;\t\t\t/* FIXME, don't ignore errors!  */\n  /* What errors?  {read,write}_memory call error().  */\n  return next_pcs;\n}",
+      "fn_code_pos": [
+        [
+          675,
+          0
+        ],
+        [
+          713,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_software_single_step",
+        "parameters": {
+          "regcache": "struct regcache"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static const char *\nrs6000_aix_auto_wide_charset (void)\n{\n  return \"UTF-16\";\n}",
+      "fn_code_pos": [
+        [
+          717,
+          0
+        ],
+        [
+          721,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_aix_auto_wide_charset",
+        "parameters": {},
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static enum gdb_osabi\nrs6000_aix_osabi_sniffer (bfd *abfd)\n{\n  gdb_assert (bfd_get_flavour (abfd) == bfd_target_xcoff_flavour);\n\n  /* The only noticeable difference between Lynx178 XCOFF files and\n     AIX XCOFF files comes from the fact that there are no shared\n     libraries on Lynx178.  On AIX, we are betting that an executable\n     linked with no shared library will never exist.  */\n  if (xcoff_get_n_import_files (abfd) <= 0)\n    return GDB_OSABI_UNKNOWN;\n\n  return GDB_OSABI_AIX;\n}",
+      "fn_code_pos": [
+        [
+          730,
+          0
+        ],
+        [
+          743,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_aix_osabi_sniffer",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "int\nmain (void)\n{\n  printf (\"static const struct ld_info_desc ld_info32_desc =\\n{\\n\");\n  pinfo (__ld_info32, ldinfo_next);\n  pinfo (__ld_info32, ldinfo_fd);\n  pinfo (__ld_info32, ldinfo_textorg);\n  pinfo (__ld_info32, ldinfo_textsize);\n  pinfo (__ld_info32, ldinfo_dataorg);\n  pinfo (__ld_info32, ldinfo_datasize);\n  pinfo (__ld_info32, ldinfo_filename);\n  printf (\"};\\n\");\n\n  printf (\"\\n\");\n\n  printf (\"static const struct ld_info_desc ld_info64_desc =\\n{\\n\");\n  pinfo (__ld_info64, ldinfo_next);\n  pinfo (__ld_info64, ldinfo_fd);\n  pinfo (__ld_info64, ldinfo_textorg);\n  pinfo (__ld_info64, ldinfo_textsize);\n  pinfo (__ld_info64, ldinfo_dataorg);\n  pinfo (__ld_info64, ldinfo_datasize);\n  pinfo (__ld_info64, ldinfo_filename);\n  printf (\"};\\n\");\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          790,
+          0
+        ],
+        [
+          816,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "main",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static struct ld_info\nrs6000_aix_extract_ld_info (struct gdbarch *gdbarch,\n\t\t\t    const gdb_byte *ldi_buf)\n{\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  struct type *ptr_type = builtin_type (gdbarch)->builtin_data_ptr;\n  const struct ld_info_desc desc\n    = tdep->wordsize == 8 ? ld_info64_desc : ld_info32_desc;\n  struct ld_info info;\n\n  info.next = extract_unsigned_integer (ldi_buf + desc.ldinfo_next.offset,\n\t\t\t\t\tdesc.ldinfo_next.size,\n\t\t\t\t\tbyte_order);\n  info.fd = extract_signed_integer (ldi_buf + desc.ldinfo_fd.offset,\n\t\t\t\t    desc.ldinfo_fd.size,\n\t\t\t\t    byte_order);\n  info.textorg = extract_typed_address (ldi_buf + desc.ldinfo_textorg.offset,\n\t\t\t\t\tptr_type);\n  info.textsize\n    = extract_unsigned_integer (ldi_buf + desc.ldinfo_textsize.offset,\n\t\t\t\tdesc.ldinfo_textsize.size,\n\t\t\t\tbyte_order);\n  info.dataorg = extract_typed_address (ldi_buf + desc.ldinfo_dataorg.offset,\n\t\t\t\t\tptr_type);\n  info.datasize\n    = extract_unsigned_integer (ldi_buf + desc.ldinfo_datasize.offset,\n\t\t\t\tdesc.ldinfo_datasize.size,\n\t\t\t\tbyte_order);\n  info.filename = (char *) ldi_buf + desc.ldinfo_filename.offset;\n  info.member_name = info.filename + strlen (info.filename) + 1;\n\n  return info;\n}",
+      "fn_code_pos": [
+        [
+          867,
+          0
+        ],
+        [
+          900,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_aix_extract_ld_info",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "ldi_buf": "gdb_byte"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nrs6000_aix_shared_library_to_xml (struct ld_info *ldi,\n\t\t\t\t  struct obstack *obstack)\n{\n  char *p;\n\n  obstack_grow_str (obstack, \"<library name=\\\"\");\n  p = xml_escape_text (ldi->filename);\n  obstack_grow_str (obstack, p);\n  xfree (p);\n  obstack_grow_str (obstack, \"\\\"\");\n\n  if (ldi->member_name[0] != '\\0')\n    {\n      obstack_grow_str (obstack, \" member=\\\"\");\n      p = xml_escape_text (ldi->member_name);\n      obstack_grow_str (obstack, p);\n      xfree (p);\n      obstack_grow_str (obstack, \"\\\"\");\n    }\n\n  obstack_grow_str (obstack, \" text_addr=\\\"\");\n  obstack_grow_str (obstack, core_addr_to_string (ldi->textorg));\n  obstack_grow_str (obstack, \"\\\"\");\n\n  obstack_grow_str (obstack, \" text_size=\\\"\");\n  obstack_grow_str (obstack, pulongest (ldi->textsize));\n  obstack_grow_str (obstack, \"\\\"\");\n\n  obstack_grow_str (obstack, \" data_addr=\\\"\");\n  obstack_grow_str (obstack, core_addr_to_string (ldi->dataorg));\n  obstack_grow_str (obstack, \"\\\"\");\n\n  obstack_grow_str (obstack, \" data_size=\\\"\");\n  obstack_grow_str (obstack, pulongest (ldi->datasize));\n  obstack_grow_str (obstack, \"\\\"\");\n\n  obstack_grow_str (obstack, \"></library>\");\n}",
+      "fn_code_pos": [
+        [
+          906,
+          0
+        ],
+        [
+          944,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_aix_shared_library_to_xml",
+        "parameters": {
+          "ldi": "struct ld_info",
+          "obstack": "struct obstack"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "ULONGEST\nrs6000_aix_ld_info_to_xml (struct gdbarch *gdbarch, const gdb_byte *ldi_buf,\n\t\t\t   gdb_byte *readbuf, ULONGEST offset, ULONGEST len,\n\t\t\t   int close_ldinfo_fd)\n{\n  struct obstack obstack;\n  const char *buf;\n  ULONGEST len_avail;\n\n  obstack_init (&obstack);\n  obstack_grow_str (&obstack, \"<library-list-aix version=\\\"1.0\\\">\\n\");\n\n  while (1)\n    {\n      struct ld_info ldi = rs6000_aix_extract_ld_info (gdbarch, ldi_buf);\n\n      rs6000_aix_shared_library_to_xml (&ldi, &obstack);\n      if (close_ldinfo_fd)\n\tclose (ldi.fd);\n\n      if (!ldi.next)\n\tbreak;\n      ldi_buf = ldi_buf + ldi.next;\n    }\n\n  obstack_grow_str0 (&obstack, \"</library-list-aix>\\n\");\n\n  buf = (const char *) obstack_finish (&obstack);\n  len_avail = strlen (buf);\n  if (offset >= len_avail)\n    len= 0;\n  else\n    {\n      if (len > len_avail - offset)\n        len = len_avail - offset;\n      memcpy (readbuf, buf + offset, len);\n    }\n\n  obstack_free (&obstack, NULL);\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          961,
+          0
+        ],
+        [
+          1001,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_aix_ld_info_to_xml",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "ldi_buf": "gdb_byte",
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST",
+          "close_ldinfo_fd": "int"
+        },
+        "return_type": "ULONGEST"
+      }
+    },
+    {
+      "fn_code": "static ULONGEST\nrs6000_aix_core_xfer_shared_libraries_aix (struct gdbarch *gdbarch,\n\t\t\t\t\t   gdb_byte *readbuf,\n\t\t\t\t\t   ULONGEST offset,\n\t\t\t\t\t   ULONGEST len)\n{\n  struct bfd_section *ldinfo_sec;\n  int ldinfo_size;\n  gdb_byte *ldinfo_buf;\n  struct cleanup *cleanup;\n  LONGEST result;\n\n  ldinfo_sec = bfd_get_section_by_name (core_bfd, \".ldinfo\");\n  if (ldinfo_sec == NULL)\n    error (_(\"cannot find .ldinfo section from core file: %s\"),\n\t   bfd_errmsg (bfd_get_error ()));\n  ldinfo_size = bfd_get_section_size (ldinfo_sec);\n\n  ldinfo_buf = (gdb_byte *) xmalloc (ldinfo_size);\n  cleanup = make_cleanup (xfree, ldinfo_buf);\n\n  if (! bfd_get_section_contents (core_bfd, ldinfo_sec,\n\t\t\t\t  ldinfo_buf, 0, ldinfo_size))\n    error (_(\"unable to read .ldinfo section from core file: %s\"),\n\t  bfd_errmsg (bfd_get_error ()));\n\n  result = rs6000_aix_ld_info_to_xml (gdbarch, ldinfo_buf, readbuf,\n\t\t\t\t      offset, len, 0);\n\n  do_cleanups (cleanup);\n  return result;\n}",
+      "fn_code_pos": [
+        [
+          1005,
+          0
+        ],
+        [
+          1036,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_aix_core_xfer_shared_libraries_aix",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "ULONGEST"
+      }
+    },
+    {
+      "fn_code": "static void\nrs6000_aix_init_osabi (struct gdbarch_info info, struct gdbarch *gdbarch)\n{\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n\n  /* RS6000/AIX does not support PT_STEP.  Has to be simulated.  */\n  set_gdbarch_software_single_step (gdbarch, rs6000_software_single_step);\n\n  /* Displaced stepping is currently not supported in combination with\n     software single-stepping.  */\n  set_gdbarch_displaced_step_copy_insn (gdbarch, NULL);\n  set_gdbarch_displaced_step_fixup (gdbarch, NULL);\n  set_gdbarch_displaced_step_location (gdbarch, NULL);\n\n  set_gdbarch_push_dummy_call (gdbarch, rs6000_push_dummy_call);\n  set_gdbarch_return_value (gdbarch, rs6000_return_value);\n  set_gdbarch_long_double_bit (gdbarch, 8 * TARGET_CHAR_BIT);\n\n  /* Handle RS/6000 function pointers (which are really function\n     descriptors).  */\n  set_gdbarch_convert_from_func_ptr_addr\n    (gdbarch, rs6000_convert_from_func_ptr_addr);\n\n  /* Core file support.  */\n  set_gdbarch_iterate_over_regset_sections\n    (gdbarch, rs6000_aix_iterate_over_regset_sections);\n  set_gdbarch_core_xfer_shared_libraries_aix\n    (gdbarch, rs6000_aix_core_xfer_shared_libraries_aix);\n\n  if (tdep->wordsize == 8)\n    tdep->lr_frame_offset = 16;\n  else\n    tdep->lr_frame_offset = 8;\n\n  if (tdep->wordsize == 4)\n    /* PowerOpen / AIX 32 bit.  The saved area or red zone consists of\n       19 4 byte GPRS + 18 8 byte FPRs giving a total of 220 bytes.\n       Problem is, 220 isn't frame (16 byte) aligned.  Round it up to\n       224.  */\n    set_gdbarch_frame_red_zone_size (gdbarch, 224);\n  else\n    set_gdbarch_frame_red_zone_size (gdbarch, 0);\n\n  if (tdep->wordsize == 8)\n    set_gdbarch_wchar_bit (gdbarch, 32);\n  else\n    set_gdbarch_wchar_bit (gdbarch, 16);\n  set_gdbarch_wchar_signed (gdbarch, 0);\n  set_gdbarch_auto_wide_charset (gdbarch, rs6000_aix_auto_wide_charset);\n\n  set_solib_ops (gdbarch, &solib_aix_so_ops);\n}",
+      "fn_code_pos": [
+        [
+          1038,
+          0
+        ],
+        [
+          1089,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_aix_init_osabi",
+        "parameters": {
+          "info": "struct gdbarch_info",
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_rs6000_aix_tdep (void)\n{\n  gdbarch_register_osabi_sniffer (bfd_arch_rs6000,\n                                  bfd_target_xcoff_flavour,\n                                  rs6000_aix_osabi_sniffer);\n  gdbarch_register_osabi_sniffer (bfd_arch_powerpc,\n                                  bfd_target_xcoff_flavour,\n                                  rs6000_aix_osabi_sniffer);\n\n  gdbarch_register_osabi (bfd_arch_rs6000, 0, GDB_OSABI_AIX,\n                          rs6000_aix_init_osabi);\n  gdbarch_register_osabi (bfd_arch_powerpc, 0, GDB_OSABI_AIX,\n                          rs6000_aix_init_osabi);\n}",
+      "fn_code_pos": [
+        [
+          1094,
+          0
+        ],
+        [
+          1108,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_rs6000_aix_tdep",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "rs6000_aix_auto_wide_charset (void)",
+      "fn_dec_pos": [
+        [
+          718,
+          0
+        ],
+        [
+          718,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_aix_auto_wide_charset",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct field_info\n{\n  int offset;\n  int size;\n}",
+      {
+        "offset": "int",
+        "size": "int"
+      },
+      "field_info",
+      [
+        748,
+        0
+      ],
+      [
+        752,
+        1
+      ]
+    ],
+    [
+      "struct ld_info_desc\n{\n  struct field_info ldinfo_next;\n  struct field_info ldinfo_fd;\n  struct field_info ldinfo_textorg;\n  struct field_info ldinfo_textsize;\n  struct field_info ldinfo_dataorg;\n  struct field_info ldinfo_datasize;\n  struct field_info ldinfo_filename;\n}",
+      {
+        "ldinfo_next": "struct field_info",
+        "ldinfo_fd": "struct field_info",
+        "ldinfo_textorg": "struct field_info",
+        "ldinfo_textsize": "struct field_info",
+        "ldinfo_dataorg": "struct field_info",
+        "ldinfo_datasize": "struct field_info",
+        "ldinfo_filename": "struct field_info"
+      },
+      "ld_info_desc",
+      [
+        758,
+        0
+      ],
+      [
+        767,
+        1
+      ]
+    ],
+    [
+      "struct ld_info\n{\n  ULONGEST next;\n  int fd;\n  CORE_ADDR textorg;\n  ULONGEST textsize;\n  CORE_ADDR dataorg;\n  ULONGEST datasize;\n  char *filename;\n  char *member_name;\n}",
+      {
+        "next": "ULONGEST",
+        "fd": "int",
+        "textorg": "CORE_ADDR",
+        "textsize": "ULONGEST",
+        "dataorg": "CORE_ADDR",
+        "datasize": "ULONGEST",
+        "*filename": "char",
+        "*member_name": "char"
+      },
+      "ld_info",
+      [
+        848,
+        0
+      ],
+      [
+        858,
+        1
+      ]
+    ],
+    [
+      "struct ppc_reg_offsets",
+      {},
+      "",
+      [
+        54,
+        7
+      ],
+      [
+        54,
+        29
+      ]
+    ],
+    [
+      "struct ppc_reg_offsets",
+      {},
+      "",
+      [
+        79,
+        7
+      ],
+      [
+        79,
+        29
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        110,
+        32
+      ],
+      [
+        110,
+        45
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        111,
+        5
+      ],
+      [
+        111,
+        20
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        124,
+        33
+      ],
+      [
+        124,
+        46
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        125,
+        12
+      ],
+      [
+        125,
+        27
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        134,
+        13
+      ],
+      [
+        134,
+        26
+      ]
+    ],
+    [
+      "struct regset",
+      {},
+      "",
+      [
+        141,
+        13
+      ],
+      [
+        141,
+        26
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        151,
+        41
+      ],
+      [
+        151,
+        55
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        154,
+        12
+      ],
+      [
+        154,
+        27
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        180,
+        24
+      ],
+      [
+        180,
+        38
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        180,
+        49
+      ],
+      [
+        180,
+        61
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        181,
+        3
+      ],
+      [
+        181,
+        18
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        182,
+        14
+      ],
+      [
+        182,
+        26
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        185,
+        2
+      ],
+      [
+        185,
+        21
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        196,
+        2
+      ],
+      [
+        196,
+        14
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        197,
+        2
+      ],
+      [
+        197,
+        13
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        256,
+        3
+      ],
+      [
+        256,
+        14
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        333,
+        3
+      ],
+      [
+        333,
+        15
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        414,
+        21
+      ],
+      [
+        414,
+        35
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        414,
+        46
+      ],
+      [
+        414,
+        58
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        415,
+        7
+      ],
+      [
+        415,
+        18
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        415,
+        29
+      ],
+      [
+        415,
+        44
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        418,
+        2
+      ],
+      [
+        418,
+        21
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        456,
+        6
+      ],
+      [
+        456,
+        17
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        554,
+        35
+      ],
+      [
+        554,
+        49
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        556,
+        7
+      ],
+      [
+        556,
+        24
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        558,
+        2
+      ],
+      [
+        558,
+        21
+      ]
+    ],
+    [
+      "struct obj_section",
+      {},
+      "",
+      [
+        560,
+        2
+      ],
+      [
+        560,
+        20
+      ]
+    ],
+    [
+      "struct obj_section",
+      {},
+      "",
+      [
+        571,
+        6
+      ],
+      [
+        571,
+        24
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        599,
+        13
+      ],
+      [
+        599,
+        28
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        602,
+        2
+      ],
+      [
+        602,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        603,
+        2
+      ],
+      [
+        603,
+        21
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        643,
+        7
+      ],
+      [
+        643,
+        24
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        676,
+        29
+      ],
+      [
+        676,
+        44
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        678,
+        2
+      ],
+      [
+        678,
+        16
+      ]
+    ],
+    [
+      "struct field_info\n{\n  int offset;\n  int size;\n}",
+      {
+        "offset": "int",
+        "size": "int"
+      },
+      "field_info",
+      [
+        748,
+        0
+      ],
+      [
+        752,
+        1
+      ]
+    ],
+    [
+      "struct ld_info_desc\n{\n  struct field_info ldinfo_next;\n  struct field_info ldinfo_fd;\n  struct field_info ldinfo_textorg;\n  struct field_info ldinfo_textsize;\n  struct field_info ldinfo_dataorg;\n  struct field_info ldinfo_datasize;\n  struct field_info ldinfo_filename;\n}",
+      {
+        "ldinfo_next": "struct field_info",
+        "ldinfo_fd": "struct field_info",
+        "ldinfo_textorg": "struct field_info",
+        "ldinfo_textsize": "struct field_info",
+        "ldinfo_dataorg": "struct field_info",
+        "ldinfo_datasize": "struct field_info",
+        "ldinfo_filename": "struct field_info"
+      },
+      "ld_info_desc",
+      [
+        758,
+        0
+      ],
+      [
+        767,
+        1
+      ]
+    ],
+    [
+      "struct field_info",
+      {},
+      "",
+      [
+        760,
+        2
+      ],
+      [
+        760,
+        19
+      ]
+    ],
+    [
+      "struct field_info",
+      {},
+      "",
+      [
+        761,
+        2
+      ],
+      [
+        761,
+        19
+      ]
+    ],
+    [
+      "struct field_info",
+      {},
+      "",
+      [
+        762,
+        2
+      ],
+      [
+        762,
+        19
+      ]
+    ],
+    [
+      "struct field_info",
+      {},
+      "",
+      [
+        763,
+        2
+      ],
+      [
+        763,
+        19
+      ]
+    ],
+    [
+      "struct field_info",
+      {},
+      "",
+      [
+        764,
+        2
+      ],
+      [
+        764,
+        19
+      ]
+    ],
+    [
+      "struct field_info",
+      {},
+      "",
+      [
+        765,
+        2
+      ],
+      [
+        765,
+        19
+      ]
+    ],
+    [
+      "struct field_info",
+      {},
+      "",
+      [
+        766,
+        2
+      ],
+      [
+        766,
+        19
+      ]
+    ],
+    [
+      "struct ld_info_desc",
+      {},
+      "",
+      [
+        821,
+        13
+      ],
+      [
+        821,
+        32
+      ]
+    ],
+    [
+      "struct ld_info_desc",
+      {},
+      "",
+      [
+        834,
+        13
+      ],
+      [
+        834,
+        32
+      ]
+    ],
+    [
+      "struct ld_info\n{\n  ULONGEST next;\n  int fd;\n  CORE_ADDR textorg;\n  ULONGEST textsize;\n  CORE_ADDR dataorg;\n  ULONGEST datasize;\n  char *filename;\n  char *member_name;\n}",
+      {
+        "next": "ULONGEST",
+        "fd": "int",
+        "textorg": "CORE_ADDR",
+        "textsize": "ULONGEST",
+        "dataorg": "CORE_ADDR",
+        "datasize": "ULONGEST",
+        "*filename": "char",
+        "*member_name": "char"
+      },
+      "ld_info",
+      [
+        848,
+        0
+      ],
+      [
+        858,
+        1
+      ]
+    ],
+    [
+      "struct ld_info",
+      {},
+      "",
+      [
+        867,
+        7
+      ],
+      [
+        867,
+        21
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        868,
+        28
+      ],
+      [
+        868,
+        42
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        871,
+        2
+      ],
+      [
+        871,
+        21
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        873,
+        2
+      ],
+      [
+        873,
+        13
+      ]
+    ],
+    [
+      "struct ld_info_desc",
+      {},
+      "",
+      [
+        874,
+        8
+      ],
+      [
+        874,
+        27
+      ]
+    ],
+    [
+      "struct ld_info",
+      {},
+      "",
+      [
+        876,
+        2
+      ],
+      [
+        876,
+        16
+      ]
+    ],
+    [
+      "struct ld_info",
+      {},
+      "",
+      [
+        907,
+        34
+      ],
+      [
+        907,
+        48
+      ]
+    ],
+    [
+      "struct obstack",
+      {},
+      "",
+      [
+        908,
+        6
+      ],
+      [
+        908,
+        20
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        962,
+        27
+      ],
+      [
+        962,
+        41
+      ]
+    ],
+    [
+      "struct obstack",
+      {},
+      "",
+      [
+        966,
+        2
+      ],
+      [
+        966,
+        16
+      ]
+    ],
+    [
+      "struct ld_info",
+      {},
+      "",
+      [
+        975,
+        6
+      ],
+      [
+        975,
+        20
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1006,
+        43
+      ],
+      [
+        1006,
+        57
+      ]
+    ],
+    [
+      "struct bfd_section",
+      {},
+      "",
+      [
+        1011,
+        2
+      ],
+      [
+        1011,
+        20
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        1014,
+        2
+      ],
+      [
+        1014,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        1039,
+        23
+      ],
+      [
+        1039,
+        42
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1039,
+        49
+      ],
+      [
+        1039,
+        63
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        1041,
+        2
+      ],
+      [
+        1041,
+        21
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"osabi.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"regset.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbtypes.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"target.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"value.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"infcall.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"objfiles.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"breakpoint.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"rs6000-tdep.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"ppc-tdep.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"rs6000-aix-tdep.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"xcoffread.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"solib.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"solib-aix.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"xml-utils.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <stddef.h>\n",
+      [
+        773,
+        0
+      ],
+      [
+        774,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        774,
+        0
+      ],
+      [
+        775,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ldr.h>\n",
+      [
+        777,
+        0
+      ],
+      [
+        778,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        186,
+        2
+      ],
+      [
+        186,
+        17
+      ]
+    ],
+    [
+      "enum return_value_convention",
+      {},
+      "",
+      [
+        413,
+        7
+      ],
+      [
+        413,
+        35
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        419,
+        2
+      ],
+      [
+        419,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        559,
+        2
+      ],
+      [
+        559,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        604,
+        2
+      ],
+      [
+        604,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        679,
+        2
+      ],
+      [
+        679,
+        17
+      ]
+    ],
+    [
+      "enum gdb_osabi",
+      {},
+      "",
+      [
+        730,
+        7
+      ],
+      [
+        730,
+        21
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        872,
+        2
+      ],
+      [
+        872,
+        17
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,657 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "void\nremote_notif_ack (struct notif_client *nc, char *buf)\n{\n  struct notif_event *event = nc->alloc_event ();\n  struct cleanup *old_chain\n    = make_cleanup (do_notif_event_xfree, event);\n\n  if (notif_debug)\n    fprintf_unfiltered (gdb_stdlog, \"notif: ack '%s'\\n\",\n\t\t\tnc->ack_command);\n\n  nc->parse (nc, buf, event);\n  nc->ack (nc, buf, event);\n\n  discard_cleanups (old_chain);\n}",
+      "fn_code_pos": [
+        [
+          59,
+          0
+        ],
+        [
+          74,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remote_notif_ack",
+        "parameters": {
+          "nc": "struct notif_client",
+          "buf": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "struct notif_event *\nremote_notif_parse (struct notif_client *nc, char *buf)\n{\n  struct notif_event *event = nc->alloc_event ();\n  struct cleanup *old_chain\n    = make_cleanup (do_notif_event_xfree, event);\n\n  if (notif_debug)\n    fprintf_unfiltered (gdb_stdlog, \"notif: parse '%s'\\n\", nc->name);\n\n  nc->parse (nc, buf, event);\n\n  discard_cleanups (old_chain);\n  return event;\n}",
+      "fn_code_pos": [
+        [
+          78,
+          0
+        ],
+        [
+          92,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remote_notif_parse",
+        "parameters": {
+          "nc": "struct notif_client",
+          "buf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\nremote_notif_process (struct remote_notif_state *state,\n\t\t      struct notif_client *except)\n{\n  while (!QUEUE_is_empty (notif_client_p, state->notif_queue))\n    {\n      struct notif_client *nc = QUEUE_deque (notif_client_p,\n\t\t\t\t\t     state->notif_queue);\n\n      gdb_assert (nc != except);\n\n      if (nc->can_get_pending_events (nc))\n\tremote_notif_get_pending_events (nc);\n    }\n}",
+      "fn_code_pos": [
+        [
+          99,
+          0
+        ],
+        [
+          113,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remote_notif_process",
+        "parameters": {
+          "state": "struct remote_notif_state",
+          "except": "struct notif_client"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nremote_async_get_pending_events_handler (gdb_client_data data)\n{\n  gdb_assert (target_is_non_stop_p ());\n  remote_notif_process ((struct remote_notif_state *) data, NULL);\n}",
+      "fn_code_pos": [
+        [
+          115,
+          0
+        ],
+        [
+          120,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remote_async_get_pending_events_handler",
+        "parameters": {
+          "data": "gdb_client_data"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nhandle_notification (struct remote_notif_state *state, char *buf)\n{\n  struct notif_client *nc;\n  size_t i;\n\n  for (i = 0; i < ARRAY_SIZE (notifs); i++)\n    {\n      const char *name = notifs[i]->name;\n\n      if (startswith (buf, name)\n\t  && buf[strlen (name)] == ':')\n\tbreak;\n    }\n\n  /* We ignore notifications we don't recognize, for compatibility\n     with newer stubs.  */\n  if (i == ARRAY_SIZE (notifs))\n    return;\n\n  nc =  notifs[i];\n\n  if (state->pending_event[nc->id] != NULL)\n    {\n      /* We've already parsed the in-flight reply, but the stub for some\n\t reason thought we didn't, possibly due to timeout on its side.\n\t Just ignore it.  */\n      if (notif_debug)\n\tfprintf_unfiltered (gdb_stdlog,\n\t\t\t    \"notif: ignoring resent notification\\n\");\n    }\n  else\n    {\n      struct notif_event *event\n\t= remote_notif_parse (nc, buf + strlen (nc->name) + 1);\n\n      /* Be careful to only set it after parsing, since an error\n\t may be thrown then.  */\n      state->pending_event[nc->id] = event;\n\n      /* Notify the event loop there's a stop reply to acknowledge\n\t and that there may be more events to fetch.  */\n      QUEUE_enque (notif_client_p, state->notif_queue, nc);\n      if (target_is_non_stop_p ())\n\t{\n\t  /* In non-stop, We mark REMOTE_ASYNC_GET_PENDING_EVENTS_TOKEN\n\t     in order to go on what we were doing and postpone\n\t     querying notification events to some point safe to do so.\n\t     See details in the function comment of\n\t     remote.c:remote_notif_get_pending_events.\n\n\t     In all-stop, GDB may be blocked to wait for the reply, we\n\t     shouldn't return to event loop until the expected reply\n\t     arrives.  For example:\n\n\t     1.1) --> vCont;c\n\t       GDB expects getting stop reply 'T05 thread:2'.\n\t     1.2) <-- %Notif\n\t       <GDB marks the REMOTE_ASYNC_GET_PENDING_EVENTS_TOKEN>\n\n\t     After step #1.2, we return to the event loop, which\n\t     notices there is a new event on the\n\t     REMOTE_ASYNC_GET_PENDING_EVENTS_TOKEN and calls the\n\t     handler, which will send 'vNotif' packet.\n\t     1.3) --> vNotif\n\t     It is not safe to start a new sequence, because target\n\t     is still running and GDB is expecting the stop reply\n\t     from stub.\n\n\t     To solve this, whenever we parse a notification\n\t     successfully, we don't mark the\n\t     REMOTE_ASYNC_GET_PENDING_EVENTS_TOKEN and let GDB blocked\n\t     there as before to get the sequence done.\n\n\t     2.1) --> vCont;c\n\t       GDB expects getting stop reply 'T05 thread:2'\n\t     2.2) <-- %Notif\n\t       <Don't mark the REMOTE_ASYNC_GET_PENDING_EVENTS_TOKEN>\n\t     2.3) <-- T05 thread:2\n\n\t     These pending notifications can be processed later.  */\n\t  mark_async_event_handler (state->get_pending_events_token);\n\t}\n\n      if (notif_debug)\n\tfprintf_unfiltered (gdb_stdlog,\n\t\t\t    \"notif: Notification '%s' captured\\n\",\n\t\t\t    nc->name);\n    }\n}",
+      "fn_code_pos": [
+        [
+          125,
+          0
+        ],
+        [
+          214,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "handle_notification",
+        "parameters": {
+          "state": "struct remote_notif_state",
+          "buf": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nnotif_event_xfree (struct notif_event *event)\n{\n  if (event != NULL && event->dtr != NULL)\n    event->dtr (event);\n\n  xfree (event);\n}",
+      "fn_code_pos": [
+        [
+          218,
+          0
+        ],
+        [
+          225,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "notif_event_xfree",
+        "parameters": {
+          "event": "struct notif_event"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_notif_event_xfree (void *arg)\n{\n  notif_event_xfree ((struct notif_event *) arg);\n}",
+      "fn_code_pos": [
+        [
+          229,
+          0
+        ],
+        [
+          233,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_notif_event_xfree",
+        "parameters": {
+          "arg": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "struct remote_notif_state *\nremote_notif_state_allocate (void)\n{\n  struct remote_notif_state *notif_state = XCNEW (struct remote_notif_state);\n\n  notif_state->notif_queue = QUEUE_alloc (notif_client_p, NULL);\n\n  /* Register async_event_handler for notification.  */\n\n  notif_state->get_pending_events_token\n    = create_async_event_handler (remote_async_get_pending_events_handler,\n\t\t\t\t  notif_state);\n\n  return notif_state;\n}",
+      "fn_code_pos": [
+        [
+          237,
+          0
+        ],
+        [
+          251,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remote_notif_state_allocate",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\nremote_notif_state_xfree (struct remote_notif_state *state)\n{\n  int i;\n\n  QUEUE_free (notif_client_p, state->notif_queue);\n\n  /* Unregister async_event_handler for notification.  */\n  if (state->get_pending_events_token != NULL)\n    delete_async_event_handler (&state->get_pending_events_token);\n\n  for (i = 0; i < REMOTE_NOTIF_LAST; i++)\n    notif_event_xfree (state->pending_event[i]);\n\n  xfree (state);\n}",
+      "fn_code_pos": [
+        [
+          255,
+          0
+        ],
+        [
+          270,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remote_notif_state_xfree",
+        "parameters": {
+          "state": "struct remote_notif_state"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_notif (void)\n{\n  add_setshow_boolean_cmd (\"notification\", no_class, &notif_debug,\n\t\t\t   _(\"\\\nSet debugging of async remote notification.\"), _(\"\\\nShow debugging of async remote notification.\"), _(\"\\\nWhen non-zero, debugging output about async remote notifications\"\n\" is enabled.\"),\n\t\t\t   NULL,\n\t\t\t   NULL,\n\t\t\t   &setdebuglist, &showdebuglist);\n}",
+      "fn_code_pos": [
+        [
+          275,
+          0
+        ],
+        [
+          287,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_notif",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "do_notif_event_xfree (void *arg)",
+      "fn_dec_pos": [
+        [
+          54,
+          12
+        ],
+        [
+          54,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_notif_event_xfree",
+        "parameters": {
+          "arg": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "remote_notif_parse (struct notif_client *nc, char *buf)",
+      "fn_dec_pos": [
+        [
+          79,
+          0
+        ],
+        [
+          79,
+          55
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remote_notif_parse",
+        "parameters": {
+          "nc": "struct notif_client",
+          "buf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "remote_notif_state_allocate (void)",
+      "fn_dec_pos": [
+        [
+          238,
+          0
+        ],
+        [
+          238,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "remote_notif_state_allocate",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct notif_client",
+      {},
+      "",
+      [
+        47,
+        7
+      ],
+      [
+        47,
+        26
+      ]
+    ],
+    [
+      "struct notif_client",
+      {},
+      "",
+      [
+        60,
+        18
+      ],
+      [
+        60,
+        37
+      ]
+    ],
+    [
+      "struct notif_event",
+      {},
+      "",
+      [
+        62,
+        2
+      ],
+      [
+        62,
+        20
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        63,
+        2
+      ],
+      [
+        63,
+        16
+      ]
+    ],
+    [
+      "struct notif_event",
+      {},
+      "",
+      [
+        78,
+        0
+      ],
+      [
+        78,
+        18
+      ]
+    ],
+    [
+      "struct notif_client",
+      {},
+      "",
+      [
+        79,
+        20
+      ],
+      [
+        79,
+        39
+      ]
+    ],
+    [
+      "struct notif_event",
+      {},
+      "",
+      [
+        81,
+        2
+      ],
+      [
+        81,
+        20
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        82,
+        2
+      ],
+      [
+        82,
+        16
+      ]
+    ],
+    [
+      "struct remote_notif_state",
+      {},
+      "",
+      [
+        100,
+        22
+      ],
+      [
+        100,
+        47
+      ]
+    ],
+    [
+      "struct notif_client",
+      {},
+      "",
+      [
+        101,
+        8
+      ],
+      [
+        101,
+        27
+      ]
+    ],
+    [
+      "struct notif_client",
+      {},
+      "",
+      [
+        105,
+        6
+      ],
+      [
+        105,
+        25
+      ]
+    ],
+    [
+      "struct remote_notif_state",
+      {},
+      "",
+      [
+        119,
+        25
+      ],
+      [
+        119,
+        50
+      ]
+    ],
+    [
+      "struct remote_notif_state",
+      {},
+      "",
+      [
+        126,
+        21
+      ],
+      [
+        126,
+        46
+      ]
+    ],
+    [
+      "struct notif_client",
+      {},
+      "",
+      [
+        128,
+        2
+      ],
+      [
+        128,
+        21
+      ]
+    ],
+    [
+      "struct notif_event",
+      {},
+      "",
+      [
+        158,
+        6
+      ],
+      [
+        158,
+        24
+      ]
+    ],
+    [
+      "struct notif_event",
+      {},
+      "",
+      [
+        219,
+        19
+      ],
+      [
+        219,
+        37
+      ]
+    ],
+    [
+      "struct notif_event",
+      {},
+      "",
+      [
+        232,
+        22
+      ],
+      [
+        232,
+        40
+      ]
+    ],
+    [
+      "struct remote_notif_state",
+      {},
+      "",
+      [
+        237,
+        0
+      ],
+      [
+        237,
+        25
+      ]
+    ],
+    [
+      "struct remote_notif_state",
+      {},
+      "",
+      [
+        240,
+        2
+      ],
+      [
+        240,
+        27
+      ]
+    ],
+    [
+      "struct remote_notif_state",
+      {},
+      "",
+      [
+        256,
+        26
+      ],
+      [
+        256,
+        51
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"remote.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"remote-notif.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"observer.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"event-loop.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"target.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"infrun.h\"\n",
+      [
+        40,
+        0
+      ],
+      [
+        41,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcmd.h\"\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

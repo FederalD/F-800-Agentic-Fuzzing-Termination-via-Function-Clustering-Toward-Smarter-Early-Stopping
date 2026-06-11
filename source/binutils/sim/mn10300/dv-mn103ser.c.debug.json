@@ -1,0 +1,1094 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nattach_mn103ser_regs (struct hw *me,\n\t\t      struct mn103ser *serial)\n{\n  unsigned_word attach_address;\n  int attach_space;\n  unsigned attach_size;\n  reg_property_spec reg;\n\n  if (hw_find_property (me, \"reg\") == NULL)\n    hw_abort (me, \"Missing \\\"reg\\\" property\");\n\n  if (!hw_find_reg_array_property (me, \"reg\", 0, &reg))\n    hw_abort (me, \"\\\"reg\\\" property must contain three addr/size entries\");\n  hw_unit_address_to_attach_address (hw_parent (me),\n\t\t\t\t     &reg.address,\n\t\t\t\t     &attach_space,\n\t\t\t\t     &attach_address,\n\t\t\t\t     me);\n  serial->block.base = attach_address;\n  hw_unit_size_to_attach_size (hw_parent (me),\n\t\t\t       &reg.size,\n\t\t\t       &attach_size, me);\n  serial->block.bound = attach_address + (attach_size - 1);\n  hw_attach_address (hw_parent (me),\n\t\t     0,\n\t\t     attach_space, attach_address, attach_size,\n\t\t     me);\n}",
+      "fn_code_pos": [
+        [
+          127,
+          0
+        ],
+        [
+          155,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_mn103ser_regs",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nmn103ser_finish (struct hw *me)\n{\n  struct mn103ser *serial;\n  int i;\n\n  serial = HW_ZALLOC (me, struct mn103ser);\n  set_hw_data (me, serial);\n  set_hw_io_read_buffer (me, mn103ser_io_read_buffer);\n  set_hw_io_write_buffer (me, mn103ser_io_write_buffer);\n  set_hw_ports (me, mn103ser_ports);\n\n  /* Attach ourself to our parent bus */\n  attach_mn103ser_regs (me, serial);\n\n  /* If so configured, enable polled input */\n  if (hw_find_property (me, \"poll?\") != NULL\n      && hw_find_boolean_property (me, \"poll?\"))\n    {\n      serial->reader = sim_io_poll_read;\n    }\n  else\n    {\n      serial->reader = sim_io_read;\n    }\n\n  /* Initialize the serial device registers. */\n  for ( i=0; i<NR_SERIAL_DEVS; ++i )\n    {\n      serial->device[i].txb = 0;\n      serial->device[i].rxb = 0;\n      serial->device[i].status = 0;\n      serial->device[i].control = 0;\n      serial->device[i].intmode = 0;\n      serial->device[i].event = NULL;\n    }\n}",
+      "fn_code_pos": [
+        [
+          157,
+          0
+        ],
+        [
+          193,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103ser_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ndecode_addr (struct hw *me,\n\t     struct mn103ser *serial,\n\t     unsigned_word address)\n{\n  unsigned_word offset;\n  offset = address - serial->block.base;\n  switch (offset)\n    {\n    case 0x00: return SC0CTR;\n    case 0x04: return SC0ICR;\n    case 0x08: return SC0TXB;\n    case 0x09: return SC0RXB;\n    case 0x0C: return SC0STR;\n    case 0x10: return SC1CTR;\n    case 0x14: return SC1ICR;\n    case 0x18: return SC1TXB;\n    case 0x19: return SC1RXB;\n    case 0x1C: return SC1STR;\n    case 0x20: return SC2CTR;\n    case 0x24: return SC2ICR;\n    case 0x28: return SC2TXB;\n    case 0x29: return SC2RXB;\n    case 0x2C: return SC2STR;\n    case 0x2D: return SC2TIM;\n    default: \n      {\n\thw_abort (me, \"bad address\");\n\treturn -1;\n      }\n    }\n}",
+      "fn_code_pos": [
+        [
+          198,
+          0
+        ],
+        [
+          229,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decode_addr",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser",
+          "address": "unsigned_word"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ndo_polling_event (struct hw *me,\n\t\t  void *data)\n{\n  SIM_DESC sd = hw_system (me);\n  struct mn103ser *serial = hw_data(me);\n  long serial_reg = (long) data;\n  char c;\n  int count, status;\n\n  status = dv_sockser_status (sd);\n  if (!(status & DV_SOCKSER_DISCONNECTED))\n    {\n      int rd;\n      rd = dv_sockser_read (sd);\n      if(rd != -1)\n\t{\n\t  c = (char) rd;\n\t  count = 1;\n\t}\n      else\n\t{\n\t  count = HW_IO_NOT_READY;\n\t}\n    }\n  else\n    {\n      count = do_hw_poll_read (me, serial->reader,\n\t\t\t       0/*STDIN*/, &c, sizeof(c));\n    }\n\n\n  switch (count)\n    {\n    case HW_IO_NOT_READY:\n    case HW_IO_EOF:\n      serial->device[serial_reg].rxb = 0;\n      serial->device[serial_reg].status &= ~SIO_STAT_RRDY;\n      break;\n    default:\n      serial->device[serial_reg].rxb = c;\n      serial->device[serial_reg].status |= SIO_STAT_RRDY;\n      hw_port_event (me, serial_reg+SERIAL0_RECEIVE, 1);\n    }\n\n  /* Schedule next polling event */\n  serial->device[serial_reg].event\n    = hw_event_queue_schedule (me, 1000,\n\t\t\t       do_polling_event, (void *)serial_reg);\n\n}",
+      "fn_code_pos": [
+        [
+          231,
+          0
+        ],
+        [
+          281,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_polling_event",
+        "parameters": {
+          "me": "struct hw",
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nread_control_reg (struct hw *me,\n\t\t  struct mn103ser *serial,\n\t\t  unsigned_word serial_reg,\n\t\t  void *dest,\n\t\t  unsigned  nr_bytes)\n{\n  /* really allow 1 byte read, too */\n  if ( nr_bytes == 2 )\n    {\n      *(unsigned16 *)dest = H2LE_2 (serial->device[serial_reg].control);\n    }\n  else\n    {\n      hw_abort (me, \"bad read size of %d bytes from SC%dCTR.\", nr_bytes, \n\t\tserial_reg);\n    }\n}",
+      "fn_code_pos": [
+        [
+          283,
+          0
+        ],
+        [
+          300,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_control_reg",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser",
+          "serial_reg": "unsigned_word",
+          "dest": "void",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nread_intmode_reg (struct hw *me,\n\t\t  struct mn103ser *serial,\n\t\t  unsigned_word serial_reg,\n\t\t  void *dest,\n\t\t  unsigned  nr_bytes)\n{\n  if ( nr_bytes == 1 )\n    {\n      *(unsigned8 *)dest = serial->device[serial_reg].intmode;\n    }\n  else\n    {\n      hw_abort (me, \"bad read size of %d bytes from SC%dICR.\", nr_bytes, \n\t\tserial_reg);\n    }\n}",
+      "fn_code_pos": [
+        [
+          303,
+          0
+        ],
+        [
+          319,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_intmode_reg",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser",
+          "serial_reg": "unsigned_word",
+          "dest": "void",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nread_txb (struct hw *me,\n\t  struct mn103ser *serial,\n\t  unsigned_word serial_reg,\n\t  void *dest,\n\t  unsigned  nr_bytes)\n{\n  if ( nr_bytes == 1 )\n    {\n      *(unsigned8 *)dest = serial->device[serial_reg].txb;\n    }\n  else\n    {\n      hw_abort (me, \"bad read size of %d bytes from SC%dTXB.\", nr_bytes, \n\t\tserial_reg);\n    }\n}",
+      "fn_code_pos": [
+        [
+          322,
+          0
+        ],
+        [
+          338,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_txb",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser",
+          "serial_reg": "unsigned_word",
+          "dest": "void",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nread_rxb (struct hw *me,\n\t  struct mn103ser *serial,\n\t  unsigned_word serial_reg,\n\t  void *dest,\n\t  unsigned  nr_bytes)\n{\n  if ( nr_bytes == 1 )\n    {\n      *(unsigned8 *)dest = serial->device[serial_reg].rxb;\n      /* Reception buffer is now empty. */\n      serial->device[serial_reg].status &= ~SIO_STAT_RRDY;\n    }\n  else\n    {\n      hw_abort (me, \"bad read size of %d bytes from SC%dRXB.\", nr_bytes, \n\t\tserial_reg);\n    }\n}",
+      "fn_code_pos": [
+        [
+          341,
+          0
+        ],
+        [
+          359,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_rxb",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser",
+          "serial_reg": "unsigned_word",
+          "dest": "void",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nread_status_reg (struct hw *me,\n\t\t struct mn103ser *serial,\n\t\t unsigned_word serial_reg,\n\t\t void *dest,\n\t\t unsigned  nr_bytes)\n{\n  char c;\n  int count;\n\n  if ( (serial->device[serial_reg].status & SIO_STAT_RRDY) == 0 )\n    {\n      SIM_DESC sd = hw_system (me);\n      int status;\n\n      /* FIFO is empty */\n      /* Kill current poll event */\n      if ( NULL != serial->device[serial_reg].event )\n\t{\n\t  hw_event_queue_deschedule (me, serial->device[serial_reg].event);\n\t  serial->device[serial_reg].event = NULL;\n\t}\n\n      status = dv_sockser_status (sd);\n      if (!(status & DV_SOCKSER_DISCONNECTED))\n\t{\n\t  int rd;\n\t  rd = dv_sockser_read (sd);\n\t  if(rd != -1)\n\t    {\n\t      c = (char) rd;\n\t      count = 1;\n\t    }\n\t  else\n\t    {\n\t      count = HW_IO_NOT_READY;\n\t    }\n\t}\n      else\n\t{\n\t  count = do_hw_poll_read (me, serial->reader,\n\t\t\t\t   0/*STDIN*/, &c, sizeof(c));\n\t}\n\n      switch (count)\n\t{\n\tcase HW_IO_NOT_READY:\n\tcase HW_IO_EOF:\n\t  serial->device[serial_reg].rxb = 0;\n\t  serial->device[serial_reg].status &= ~SIO_STAT_RRDY;\n\t  break;\n\tdefault:\n\t  serial->device[serial_reg].rxb = c;\n\t  serial->device[serial_reg].status |= SIO_STAT_RRDY;\n\t  hw_port_event (me, serial_reg+SERIAL0_RECEIVE, 1);\n\t}\n\n      /* schedule polling event */\n      serial->device[serial_reg].event\n\t= hw_event_queue_schedule (me, 1000,\n\t\t\t\t   do_polling_event,\n\t\t\t\t   (void *) (long) serial_reg);\n    }\n\n  if ( nr_bytes == 1 )\n    {\n      *(unsigned8 *)dest = (unsigned8)serial->device[serial_reg].status;\n    }\n  else if ( nr_bytes == 2 && serial_reg != SC2STR )\n    {\n      *(unsigned16 *)dest = H2LE_2 (serial->device[serial_reg].status);\n    }\n  else\n    {\n      hw_abort (me, \"bad read size of %d bytes from SC%dSTR.\", nr_bytes, \n\t\tserial_reg);\n    }\n}",
+      "fn_code_pos": [
+        [
+          362,
+          0
+        ],
+        [
+          439,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_status_reg",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser",
+          "serial_reg": "unsigned_word",
+          "dest": "void",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nread_serial2_timer_reg (struct hw *me,\n\t\t\tstruct mn103ser *serial,\n\t\t\tvoid *dest,\n\t\t\tunsigned  nr_bytes)\n{\n  if ( nr_bytes == 1 )\n    {\n      * (unsigned8 *) dest = (unsigned8) serial->serial2_timer_reg;\n    }\n  else\n    {\n      hw_abort (me, \"bad read size of %d bytes to SC2TIM.\", nr_bytes);\n    }\n}",
+      "fn_code_pos": [
+        [
+          442,
+          0
+        ],
+        [
+          456,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_serial2_timer_reg",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser",
+          "dest": "void",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nmn103ser_io_read_buffer (struct hw *me,\n\t\t\t void *dest,\n\t\t\t int space,\n\t\t\t unsigned_word base,\n\t\t\t unsigned nr_bytes)\n{\n  struct mn103ser *serial = hw_data (me);\n  enum serial_register_types serial_reg;\n  HW_TRACE ((me, \"read 0x%08lx %d\", (long) base, (int) nr_bytes));\n\n  serial_reg = decode_addr (me, serial, base);\n  switch (serial_reg)\n    {\n    /* control registers */\n    case SC0CTR:\n    case SC1CTR:\n    case SC2CTR:\n      read_control_reg(me, serial, serial_reg-SC0CTR, dest, nr_bytes);\n      HW_TRACE ((me, \"read - ctrl reg%d has 0x%x\\n\", serial_reg-SC0CTR,\n\t\t *(unsigned8 *)dest));\n      break;\n\n    /* interrupt mode registers */\n    case SC0ICR:\n    case SC1ICR:\n    case SC2ICR:\n      read_intmode_reg(me, serial, serial_reg-SC0ICR, dest, nr_bytes);\n      HW_TRACE ((me, \"read - intmode reg%d has 0x%x\\n\", serial_reg-SC0ICR,\n\t\t *(unsigned8 *)dest));\n      break;\n\n    /* transmission buffers */\n    case SC0TXB:\n    case SC1TXB:\n    case SC2TXB:\n      read_txb(me, serial, serial_reg-SC0TXB, dest, nr_bytes);\n      HW_TRACE ((me, \"read - txb%d has %c\\n\", serial_reg-SC0TXB,\n\t\t *(char *)dest));\n      break;\n\n    /* reception buffers */\n    case SC0RXB: \n    case SC1RXB:\n    case SC2RXB:\n      read_rxb(me, serial, serial_reg-SC0RXB, dest, nr_bytes);\n      HW_TRACE ((me, \"read - rxb%d has %c\\n\", serial_reg-SC0RXB,\n\t\t *(char *)dest));\n     break;\n\n    /* status registers */\n    case SC0STR: \n    case SC1STR: \n    case SC2STR: \n      read_status_reg(me, serial, serial_reg-SC0STR, dest, nr_bytes);\n      HW_TRACE ((me, \"read - status reg%d has 0x%x\\n\", serial_reg-SC0STR,\n\t\t *(unsigned8 *)dest));\n      break;\n\n    case SC2TIM:\n      read_serial2_timer_reg(me, serial, dest, nr_bytes);\n      HW_TRACE ((me, \"read - serial2 timer reg %d\\n\", *(unsigned8 *)dest));\n      break;\n\n    default:\n      hw_abort(me, \"invalid address\");\n    }\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          459,
+          0
+        ],
+        [
+          528,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103ser_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nwrite_control_reg (struct hw *me,\n\t\t   struct mn103ser *serial,\n\t\t   unsigned_word serial_reg,\n\t\t   const void *source,\n\t\t   unsigned  nr_bytes)\n{\n  unsigned16 val = LE2H_2 (*(unsigned16 *)source);\n\n  /* really allow 1 byte write, too */\n  if ( nr_bytes == 2 )\n    {\n      if ( serial_reg == 2 && (val & 0x0C04) != 0 )\n\t{\n\t  hw_abort(me, \"Cannot write to read-only bits of SC2CTR.\");\n\t}\n      else\n\t{\n\t  serial->device[serial_reg].control = val;\n\t}\n    }\n  else\n    {\n      hw_abort (me, \"bad read size of %d bytes from SC%dSTR.\", nr_bytes, \n\t\tserial_reg);\n    }\n}",
+      "fn_code_pos": [
+        [
+          531,
+          0
+        ],
+        [
+          557,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_control_reg",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser",
+          "serial_reg": "unsigned_word",
+          "source": "void",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nwrite_intmode_reg (struct hw *me,\n\t\t   struct mn103ser *serial,\n\t\t   unsigned_word serial_reg,\n\t\t   const void *source,\n\t\t   unsigned  nr_bytes)\n{\nunsigned8 val = *(unsigned8 *)source;\n\n  if ( nr_bytes == 1 )\n    {\n      /* Check for attempt to write to read-only bits of register. */\n      if ( ( serial_reg == 2 && (val & 0xCA) != 0 )\n\t   || ( serial_reg != 2 && (val & 0x4A) != 0 ) )\n\t{\n\t  hw_abort(me, \"Cannot write to read-only bits of SC%dICR.\",\n\t\t   serial_reg);\n\t}\n      else\n\t{\n\t  serial->device[serial_reg].intmode = val;\n\t}\n    }\n  else\n    {\n      hw_abort (me, \"bad write size of %d bytes to SC%dICR.\", nr_bytes, \n\t\tserial_reg);\n    }\n}",
+      "fn_code_pos": [
+        [
+          560,
+          0
+        ],
+        [
+          588,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_intmode_reg",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser",
+          "serial_reg": "unsigned_word",
+          "source": "void",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nwrite_txb (struct hw *me,\n\t   struct mn103ser *serial,\n\t   unsigned_word serial_reg,\n\t   const void *source,\n\t   unsigned  nr_bytes)\n{\n  if ( nr_bytes == 1 )\n    {\n      SIM_DESC sd = hw_system (me);\n      int status;\n\n      serial->device[serial_reg].txb = *(unsigned8 *)source;\n\n      status = dv_sockser_status (sd);\n      if (!(status & DV_SOCKSER_DISCONNECTED))\n\t{\n\t  dv_sockser_write(sd, * (char*) source);\n\t}\n      else\n\t{\n\t  sim_io_write_stdout(sd, (char *)source, 1);\n\t  sim_io_flush_stdout(sd);\n\t}\n\n      hw_port_event (me, serial_reg+SERIAL0_SEND, 1);\n    }\n  else\n    {\n      hw_abort (me, \"bad write size of %d bytes to SC%dTXB.\", nr_bytes, \n\t\tserial_reg);\n    }\n}",
+      "fn_code_pos": [
+        [
+          591,
+          0
+        ],
+        [
+          623,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_txb",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser",
+          "serial_reg": "unsigned_word",
+          "source": "void",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nwrite_serial2_timer_reg (struct hw *me,\n\t\t\t struct mn103ser *serial,\n\t\t\t const void *source,\n\t\t\t unsigned  nr_bytes)\n{\n  if ( nr_bytes == 1 )\n    {\n      serial->serial2_timer_reg = *(unsigned8 *)source;\n    }\n  else\n    {\n      hw_abort (me, \"bad write size of %d bytes to SC2TIM.\", nr_bytes); \n    }\n}",
+      "fn_code_pos": [
+        [
+          626,
+          0
+        ],
+        [
+          640,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_serial2_timer_reg",
+        "parameters": {
+          "me": "struct hw",
+          "serial": "struct mn103ser",
+          "source": "void",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nmn103ser_io_write_buffer (struct hw *me,\n\t\t\t  const void *source,\n\t\t\t  int space,\n\t\t\t  unsigned_word base,\n\t\t\t  unsigned nr_bytes)\n{\n  struct mn103ser *serial = hw_data (me);\n  enum serial_register_types serial_reg;\n  HW_TRACE ((me, \"write 0x%08lx %d\", (long) base, (int) nr_bytes));\n\n  serial_reg = decode_addr (me, serial, base);\n  switch (serial_reg)\n    {\n    /* control registers */\n    case SC0CTR:\n    case SC1CTR:\n    case SC2CTR:\n      HW_TRACE ((me, \"write - ctrl reg%d has 0x%x, nrbytes=%d.\\n\",\n\t\t serial_reg-SC0CTR, *(unsigned8 *)source, nr_bytes));\n      write_control_reg(me, serial, serial_reg-SC0CTR, source, nr_bytes);\n      break;\n\n    /* interrupt mode registers */\n    case SC0ICR:\n    case SC1ICR:\n    case SC2ICR:\n      HW_TRACE ((me, \"write - intmode reg%d has 0x%x, nrbytes=%d.\\n\",\n\t\t serial_reg-SC0ICR, *(unsigned8 *)source, nr_bytes));\n      write_intmode_reg(me, serial, serial_reg-SC0ICR, source, nr_bytes);\n      break;\n\n    /* transmission buffers */\n    case SC0TXB:\n    case SC1TXB:\n    case SC2TXB:\n      HW_TRACE ((me, \"write - txb%d has %c, nrbytes=%d.\\n\",\n\t\t serial_reg-SC0TXB, *(char *)source, nr_bytes));\n      write_txb(me, serial, serial_reg-SC0TXB, source, nr_bytes);\n      break;\n\n    /* reception buffers */\n    case SC0RXB: \n    case SC1RXB:\n    case SC2RXB:\n      hw_abort(me, \"Cannot write to reception buffer.\");\n     break;\n\n    /* status registers */\n    case SC0STR: \n    case SC1STR: \n    case SC2STR: \n      hw_abort(me, \"Cannot write to status register.\");\n      break;\n\n    case SC2TIM:\n      HW_TRACE ((me, \"read - serial2 timer reg %d (nrbytes=%d)\\n\",\n\t\t *(unsigned8 *)source, nr_bytes));\n      write_serial2_timer_reg(me, serial, source, nr_bytes);\n      break;\n\n    default:\n      hw_abort(me, \"invalid address\");\n    }\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          643,
+          0
+        ],
+        [
+          709,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "mn103ser_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct mn103ser_block {\n  unsigned_word base;\n  unsigned_word bound;\n}",
+      {
+        "base": "unsigned_word",
+        "bound": "unsigned_word"
+      },
+      "mn103ser_block",
+      [
+        49,
+        0
+      ],
+      [
+        52,
+        1
+      ]
+    ],
+    [
+      "typedef struct _mn10300_serial {\n  unsigned16 status, control;\n  unsigned8  txb, rxb, intmode;\n  struct hw_event *event;\n} mn10300_serial;",
+      {
+        "status": "unsigned16",
+        "txb": "unsigned8",
+        "*event": "struct hw_event"
+      },
+      "mn10300_serial",
+      [
+        79,
+        0
+      ],
+      [
+        83,
+        17
+      ]
+    ],
+    [
+      "struct mn103ser {\n  struct mn103ser_block block;\n  mn10300_serial device[NR_SERIAL_DEVS];\n  unsigned8      serial2_timer_reg;\n  do_hw_poll_read_method *reader;\n}",
+      {
+        "block": "struct mn103ser_block",
+        "device[NR_SERIAL_DEVS]": "mn10300_serial",
+        "serial2_timer_reg": "unsigned8",
+        "*reader": "do_hw_poll_read_method"
+      },
+      "mn103ser",
+      [
+        87,
+        0
+      ],
+      [
+        92,
+        1
+      ]
+    ],
+    [
+      "struct mn103ser_block {\n  unsigned_word base;\n  unsigned_word bound;\n}",
+      {
+        "base": "unsigned_word",
+        "bound": "unsigned_word"
+      },
+      "mn103ser_block",
+      [
+        49,
+        0
+      ],
+      [
+        52,
+        1
+      ]
+    ],
+    [
+      "typedef struct _mn10300_serial {\n  unsigned16 status, control;\n  unsigned8  txb, rxb, intmode;\n  struct hw_event *event;\n} mn10300_serial;",
+      {
+        "status": "unsigned16",
+        "txb": "unsigned8",
+        "*event": "struct hw_event"
+      },
+      "mn10300_serial",
+      [
+        79,
+        0
+      ],
+      [
+        83,
+        17
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        82,
+        2
+      ],
+      [
+        82,
+        17
+      ]
+    ],
+    [
+      "struct mn103ser {\n  struct mn103ser_block block;\n  mn10300_serial device[NR_SERIAL_DEVS];\n  unsigned8      serial2_timer_reg;\n  do_hw_poll_read_method *reader;\n}",
+      {
+        "block": "struct mn103ser_block",
+        "device[NR_SERIAL_DEVS]": "mn10300_serial",
+        "serial2_timer_reg": "unsigned8",
+        "*reader": "do_hw_poll_read_method"
+      },
+      "mn103ser",
+      [
+        87,
+        0
+      ],
+      [
+        92,
+        1
+      ]
+    ],
+    [
+      "struct mn103ser_block",
+      {},
+      "",
+      [
+        88,
+        2
+      ],
+      [
+        88,
+        23
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        107,
+        13
+      ],
+      [
+        107,
+        38
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        128,
+        22
+      ],
+      [
+        128,
+        31
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        129,
+        8
+      ],
+      [
+        129,
+        23
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        158,
+        17
+      ],
+      [
+        158,
+        26
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        160,
+        2
+      ],
+      [
+        160,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        199,
+        13
+      ],
+      [
+        199,
+        22
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        200,
+        6
+      ],
+      [
+        200,
+        21
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        232,
+        18
+      ],
+      [
+        232,
+        27
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        236,
+        2
+      ],
+      [
+        236,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        284,
+        18
+      ],
+      [
+        284,
+        27
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        285,
+        4
+      ],
+      [
+        285,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        304,
+        18
+      ],
+      [
+        304,
+        27
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        305,
+        4
+      ],
+      [
+        305,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        323,
+        10
+      ],
+      [
+        323,
+        19
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        324,
+        3
+      ],
+      [
+        324,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        342,
+        10
+      ],
+      [
+        342,
+        19
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        343,
+        3
+      ],
+      [
+        343,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        363,
+        17
+      ],
+      [
+        363,
+        26
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        364,
+        3
+      ],
+      [
+        364,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        443,
+        24
+      ],
+      [
+        443,
+        33
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        444,
+        3
+      ],
+      [
+        444,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        460,
+        25
+      ],
+      [
+        460,
+        34
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        466,
+        2
+      ],
+      [
+        466,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        532,
+        19
+      ],
+      [
+        532,
+        28
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        533,
+        5
+      ],
+      [
+        533,
+        20
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        561,
+        19
+      ],
+      [
+        561,
+        28
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        562,
+        5
+      ],
+      [
+        562,
+        20
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        592,
+        11
+      ],
+      [
+        592,
+        20
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        593,
+        4
+      ],
+      [
+        593,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        627,
+        25
+      ],
+      [
+        627,
+        34
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        628,
+        4
+      ],
+      [
+        628,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        644,
+        26
+      ],
+      [
+        644,
+        35
+      ]
+    ],
+    [
+      "struct mn103ser",
+      {},
+      "",
+      [
+        650,
+        2
+      ],
+      [
+        650,
+        17
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        712,
+        6
+      ],
+      [
+        712,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"dv-sockser.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum serial_register_types {\n    SC0CTR,\n    SC1CTR,\n    SC2CTR,\n    SC0ICR,\n    SC1ICR,\n    SC2ICR,\n    SC0TXB,\n    SC1TXB,\n    SC2TXB,\n    SC0RXB,\n    SC1RXB,\n    SC2RXB,\n    SC0STR,\n    SC1STR,\n    SC2STR,\n    SC2TIM,\n}",
+      {
+        "SC0CTR": "",
+        "SC1CTR": "",
+        "SC2CTR": "",
+        "SC0ICR": "",
+        "SC1ICR": "",
+        "SC2ICR": "",
+        "SC0TXB": "",
+        "SC1TXB": "",
+        "SC2TXB": "",
+        "SC0RXB": "",
+        "SC1RXB": "",
+        "SC2RXB": "",
+        "SC0STR": "",
+        "SC1STR": "",
+        "SC2STR": "",
+        "SC2TIM": ""
+      },
+      "serial_register_types",
+      [
+        56,
+        0
+      ],
+      [
+        73,
+        1
+      ]
+    ],
+    [
+      "enum {\n  SERIAL0_RECEIVE,\n  SERIAL1_RECEIVE,\n  SERIAL2_RECEIVE,\n  SERIAL0_SEND,\n  SERIAL1_SEND,\n  SERIAL2_SEND,\n}",
+      {
+        "SERIAL0_RECEIVE": "",
+        "SERIAL1_RECEIVE": "",
+        "SERIAL2_RECEIVE": "",
+        "SERIAL0_SEND": "",
+        "SERIAL1_SEND": "",
+        "SERIAL2_SEND": ""
+      },
+      "",
+      [
+        97,
+        0
+      ],
+      [
+        104,
+        1
+      ]
+    ],
+    [
+      "enum serial_register_types",
+      {},
+      "",
+      [
+        467,
+        2
+      ],
+      [
+        467,
+        28
+      ]
+    ],
+    [
+      "enum serial_register_types",
+      {},
+      "",
+      [
+        651,
+        2
+      ],
+      [
+        651,
+        28
+      ]
+    ]
+  ]
+}

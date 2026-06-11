@@ -1,0 +1,2140 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\ndtrace_probe_is_linespec (const char **linespecp)\n{\n  static const char *const keywords[] = { \"-pdtrace\", \"-probe-dtrace\", NULL };\n\n  return probe_is_linespec_by_keyword (linespecp, keywords);\n}",
+      "fn_code_pos": [
+        [
+          100,
+          0
+        ],
+        [
+          106,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_probe_is_linespec",
+        "parameters": {
+          "linespecp": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ndtrace_process_dof_probe (struct objfile *objfile,\n\t\t\t  struct gdbarch *gdbarch, VEC (probe_p) **probesp,\n\t\t\t  struct dtrace_dof_hdr *dof,\n\t\t\t  struct dtrace_dof_probe *probe,\n\t\t\t  struct dtrace_dof_provider *provider,\n\t\t\t  char *strtab, char *offtab, char *eofftab,\n\t\t\t  char *argtab, uint64_t strtab_size)\n{\n  int i, j, num_probes, num_enablers;\n  struct cleanup *cleanup;\n  VEC (dtrace_probe_enabler_s) *enablers;\n  char *p;\n\n  /* Each probe section can define zero or more probes of two\n     different types:\n\n     - probe->dofpr_noffs regular probes whose program counters are\n       stored in 32bit words starting at probe->dofpr_addr +\n       offtab[probe->dofpr_offidx].\n\n     - probe->dofpr_nenoffs is-enabled probes whose program counters\n       are stored in 32bit words starting at probe->dofpr_addr +\n       eofftab[probe->dofpr_enoffidx].\n\n     However is-enabled probes are not probes per-se, but an\n     optimization hack that is implemented in the kernel in a very\n     similar way than normal probes.  This is how we support\n     is-enabled probes on GDB:\n\n     - Our probes are always DTrace regular probes.\n\n     - Our probes can be associated with zero or more \"enablers\".  The\n       list of enablers is built from the is-enabled probes defined in\n       the Probe section.\n\n     - Probes having a non-empty list of enablers can be enabled or\n       disabled using the `enable probe' and `disable probe' commands\n       respectively.  The `Enabled' column in the output of `info\n       probes' will read `yes' if the enablers are activated, `no'\n       otherwise.\n\n     - Probes having an empty list of enablers are always enabled.\n       The `Enabled' column in the output of `info probes' will\n       read `always'.\n\n     It follows that if there are DTrace is-enabled probes defined for\n     some provider/name but no DTrace regular probes defined then the\n     GDB user wont be able to enable/disable these conditionals.  */\n\n  num_probes = DOF_UINT (dof, probe->dofpr_noffs);\n  if (num_probes == 0)\n    return;\n\n  /* Build the list of enablers for the probes defined in this Probe\n     DOF section.  */\n  enablers = NULL;\n  cleanup\n    = make_cleanup (VEC_cleanup (dtrace_probe_enabler_s), &enablers);\n  num_enablers = DOF_UINT (dof, probe->dofpr_nenoffs);\n  for (i = 0; i < num_enablers; i++)\n    {\n      struct dtrace_probe_enabler enabler;\n      uint32_t enabler_offset\n\t= ((uint32_t *) eofftab)[DOF_UINT (dof, probe->dofpr_enoffidx) + i];\n\n      enabler.address = DOF_UINT (dof, probe->dofpr_addr)\n\t+ DOF_UINT (dof, enabler_offset);\n      VEC_safe_push (dtrace_probe_enabler_s, enablers, &enabler);\n    }\n\n  for (i = 0; i < num_probes; i++)\n    {\n      uint32_t probe_offset\n\t= ((uint32_t *) offtab)[DOF_UINT (dof, probe->dofpr_offidx) + i];\n      struct dtrace_probe *ret =\n\tXOBNEW (&objfile->per_bfd->storage_obstack, struct dtrace_probe);\n\n      ret->p.pops = &dtrace_probe_ops;\n      ret->p.arch = gdbarch;\n      ret->args_expr_built = 0;\n\n      /* Set the provider and the name of the probe.  */\n      ret->p.provider\n\t= xstrdup (strtab + DOF_UINT (dof, provider->dofpv_name));\n      ret->p.name = xstrdup (strtab + DOF_UINT (dof, probe->dofpr_name));\n\n      /* The probe address.  */\n      ret->p.address\n\t= DOF_UINT (dof, probe->dofpr_addr) + DOF_UINT (dof, probe_offset);\n\n      /* Number of arguments in the probe.  */\n      ret->probe_argc = DOF_UINT (dof, probe->dofpr_nargc);\n\n      /* Store argument type descriptions.  A description of the type\n         of the argument is in the (J+1)th null-terminated string\n         starting at 'strtab' + 'probe->dofpr_nargv'.  */\n      ret->args = NULL;\n      p = strtab + DOF_UINT (dof, probe->dofpr_nargv);\n      for (j = 0; j < ret->probe_argc; j++)\n\t{\n\t  struct dtrace_probe_arg arg;\n\t  expression_up expr;\n\n\t  /* Set arg.expr to ensure all fields in expr are initialized and\n\t     the compiler will not warn when arg is used.  */\n\t  arg.expr = NULL;\n\t  arg.type_str = xstrdup (p);\n\n\t  /* Use strtab_size as a sentinel.  */\n\t  while (*p++ != '\\0' && p - strtab < strtab_size)\n\t    ;\n\n\t  /* Try to parse a type expression from the type string.  If\n\t     this does not work then we set the type to `long\n\t     int'.  */\n          arg.type = builtin_type (gdbarch)->builtin_long;\n\n\t  TRY\n\t    {\n\t      expr = parse_expression_with_language (arg.type_str, language_c);\n\t    }\n\t  CATCH (ex, RETURN_MASK_ERROR)\n\t    {\n\t    }\n\t  END_CATCH\n\n\t  if (expr != NULL && expr->elts[0].opcode == OP_TYPE)\n\t    arg.type = expr->elts[1].type;\n\n\t  VEC_safe_push (dtrace_probe_arg_s, ret->args, &arg);\n\t}\n\n      /* Add the vector of enablers to this probe, if any.  */\n      ret->enablers = VEC_copy (dtrace_probe_enabler_s, enablers);\n\n      /* Successfully created probe.  */\n      VEC_safe_push (probe_p, *probesp, (struct probe *) ret);\n    }",
+      "fn_code_pos": [
+        [
+          313,
+          0
+        ],
+        [
+          451,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_process_dof_probe",
+        "parameters": {
+          "objfile": "struct objfile",
+          "gdbarch": "struct gdbarch",
+          "probesp": "VEC",
+          "dof": "struct dtrace_dof_hdr",
+          "probe": "struct dtrace_dof_probe",
+          "provider": "struct dtrace_dof_provider",
+          "strtab": "char",
+          "offtab": "char",
+          "eofftab": "char",
+          "argtab": "char",
+          "strtab_size": "uint64_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "CATCH (ex, RETURN_MASK_ERROR)\n\t    {\n\t    }",
+      "fn_code_pos": [
+        [
+          435,
+          3
+        ],
+        [
+          437,
+          6
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "CATCH",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndtrace_process_dof (asection *sect, struct objfile *objfile,\n\t\t    VEC (probe_p) **probesp, struct dtrace_dof_hdr *dof)\n{\n  struct gdbarch *gdbarch = get_objfile_arch (objfile);\n  struct dtrace_dof_sect *section;\n  int i;\n\n  /* The first step is to check for the DOF magic number.  If no valid\n     DOF data is found in the section then a complaint is issued to\n     the user and the section skipped.  */\n  if (dof->dofh_ident[DTRACE_DOF_ID_MAG0] != 0x7F\n      || dof->dofh_ident[DTRACE_DOF_ID_MAG1] != 'D'\n      || dof->dofh_ident[DTRACE_DOF_ID_MAG2] != 'O'\n      || dof->dofh_ident[DTRACE_DOF_ID_MAG3] != 'F')\n    goto invalid_dof_data;\n\n  /* Make sure the encoding mark is either DTRACE_DOF_ENCODE_LSB or\n     DTRACE_DOF_ENCODE_MSB.  */\n  if (dof->dofh_ident[DTRACE_DOF_ID_ENCODING] != DTRACE_DOF_ENCODE_LSB\n      && dof->dofh_ident[DTRACE_DOF_ID_ENCODING] != DTRACE_DOF_ENCODE_MSB)\n    goto invalid_dof_data;\n\n  /* Make sure this DOF is not an enabling DOF, i.e. there are no ECB\n     Description sections.  */\n  section = (struct dtrace_dof_sect *) DTRACE_DOF_PTR (dof,\n\t\t\t\t\t\t       DOF_UINT (dof, dof->dofh_secoff));\n  for (i = 0; i < DOF_UINT (dof, dof->dofh_secnum); i++, section++)\n    if (section->dofs_type == DTRACE_DOF_SECT_TYPE_ECBDESC)\n      return;\n\n  /* Iterate over any section of type Provider and extract the probe\n     information from them.  If there are no \"provider\" sections on\n     the DOF then we just return.  */\n  section = (struct dtrace_dof_sect *) DTRACE_DOF_PTR (dof,\n\t\t\t\t\t\t       DOF_UINT (dof, dof->dofh_secoff));\n  for (i = 0; i < DOF_UINT (dof, dof->dofh_secnum); i++, section++)\n    if (DOF_UINT (dof, section->dofs_type) == DTRACE_DOF_SECT_TYPE_PROVIDER)\n      {\n\tstruct dtrace_dof_provider *provider = (struct dtrace_dof_provider *)\n\t  DTRACE_DOF_PTR (dof, DOF_UINT (dof, section->dofs_offset));\n\tstruct dtrace_dof_sect *strtab_s\n\t  = DTRACE_DOF_SECT (dof, DOF_UINT (dof, provider->dofpv_strtab));\n\tstruct dtrace_dof_sect *probes_s\n\t  = DTRACE_DOF_SECT (dof, DOF_UINT (dof, provider->dofpv_probes));\n\tstruct dtrace_dof_sect *args_s\n\t  = DTRACE_DOF_SECT (dof, DOF_UINT (dof, provider->dofpv_prargs));\n\tstruct dtrace_dof_sect *offsets_s\n\t  = DTRACE_DOF_SECT (dof, DOF_UINT (dof, provider->dofpv_proffs));\n\tstruct dtrace_dof_sect *eoffsets_s\n\t  = DTRACE_DOF_SECT (dof, DOF_UINT (dof, provider->dofpv_prenoffs));\n\tchar *strtab  = DTRACE_DOF_PTR (dof, DOF_UINT (dof, strtab_s->dofs_offset));\n\tchar *offtab  = DTRACE_DOF_PTR (dof, DOF_UINT (dof, offsets_s->dofs_offset));\n\tchar *eofftab = DTRACE_DOF_PTR (dof, DOF_UINT (dof, eoffsets_s->dofs_offset));\n\tchar *argtab  = DTRACE_DOF_PTR (dof, DOF_UINT (dof, args_s->dofs_offset));\n\tunsigned int entsize = DOF_UINT (dof, probes_s->dofs_entsize);\n\tint num_probes;\n\n\tif (DOF_UINT (dof, section->dofs_size)\n\t    < sizeof (struct dtrace_dof_provider))\n\t  {\n\t    /* The section is smaller than expected, so do not use it.\n\t       This has been observed on x86-solaris 10.  */\n\t    goto invalid_dof_data;\n\t  }\n\n\t/* Very, unlikely, but could crash gdb if not handled\n\t   properly.  */\n\tif (entsize == 0)\n\t  goto invalid_dof_data;\n\n\tnum_probes = DOF_UINT (dof, probes_s->dofs_size) / entsize;\n\n\tfor (i = 0; i < num_probes; i++)\n\t  {\n\t    struct dtrace_dof_probe *probe = (struct dtrace_dof_probe *)\n\t      DTRACE_DOF_PTR (dof, DOF_UINT (dof, probes_s->dofs_offset)\n\t\t\t      + (i * DOF_UINT (dof, probes_s->dofs_entsize)));\n\n\t    dtrace_process_dof_probe (objfile,\n\t\t\t\t      gdbarch, probesp,\n\t\t\t\t      dof, probe,\n\t\t\t\t      provider, strtab, offtab, eofftab, argtab,\n\t\t\t\t      DOF_UINT (dof, strtab_s->dofs_size));\n\t  }\n      }\n\n  return;\n\t  \n invalid_dof_data:\n  complaint (&symfile_complaints,\n\t     _(\"skipping section '%s' which does not contain valid DOF data.\"),\n\t     sect->name);\n}",
+      "fn_code_pos": [
+        [
+          461,
+          0
+        ],
+        [
+          554,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_process_dof",
+        "parameters": {
+          "sect": "asection",
+          "objfile": "struct objfile",
+          "probesp": "VEC",
+          "dof": "struct dtrace_dof_hdr"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndtrace_build_arg_exprs (struct dtrace_probe *probe,\n\t\t\tstruct gdbarch *gdbarch)\n{\n  struct parser_state pstate;\n  struct dtrace_probe_arg *arg;\n  int i;\n\n  probe->args_expr_built = 1;\n\n  /* Iterate over the arguments in the probe and build the\n     corresponding GDB internal expression that will generate the\n     value of the argument when executed at the PC of the probe.  */\n  for (i = 0; i < probe->probe_argc; i++)\n    {\n      struct cleanup *back_to;\n\n      arg = VEC_index (dtrace_probe_arg_s, probe->args, i);\n\n      /* Initialize the expression buffer in the parser state.  The\n\t language does not matter, since we are using our own\n\t parser.  */\n      initialize_expout (&pstate, 10, current_language, gdbarch);\n      back_to = make_cleanup (free_current_contents, &pstate.expout);\n\n      /* The argument value, which is ABI dependent and casted to\n\t `long int'.  */\n      gdbarch_dtrace_parse_probe_argument (gdbarch, &pstate, i);\n\n      discard_cleanups (back_to);\n\n      /* Casting to the expected type, but only if the type was\n\t recognized at probe load time.  Otherwise the argument will\n\t be evaluated as the long integer passed to the probe.  */\n      if (arg->type != NULL)\n\t{\n\t  write_exp_elt_opcode (&pstate, UNOP_CAST);\n\t  write_exp_elt_type (&pstate, arg->type);\n\t  write_exp_elt_opcode (&pstate, UNOP_CAST);\n\t}\n\n      reallocate_expout (&pstate);\n      arg->expr = pstate.expout;\n      prefixify_expression (arg->expr);\n    }\n}",
+      "fn_code_pos": [
+        [
+          560,
+          0
+        ],
+        [
+          605,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_build_arg_exprs",
+        "parameters": {
+          "probe": "struct dtrace_probe",
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static struct dtrace_probe_arg *\ndtrace_get_arg (struct dtrace_probe *probe, unsigned n,\n\t\tstruct gdbarch *gdbarch)\n{\n  if (!probe->args_expr_built)\n    dtrace_build_arg_exprs (probe, gdbarch);\n\n  return VEC_index (dtrace_probe_arg_s, probe->args, n);\n}",
+      "fn_code_pos": [
+        [
+          609,
+          0
+        ],
+        [
+          617,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_get_arg",
+        "parameters": {
+          "probe": "struct dtrace_probe",
+          "n": "unsigned",
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\ndtrace_probe_is_enabled (struct dtrace_probe *probe)\n{\n  int i;\n  struct gdbarch *gdbarch = probe->p.arch;\n  struct dtrace_probe_enabler *enabler;\n\n  for (i = 0;\n       VEC_iterate (dtrace_probe_enabler_s, probe->enablers, i, enabler);\n       i++)\n    if (!gdbarch_dtrace_probe_is_enabled (gdbarch, enabler->address))\n      return 0;\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          659,
+          0
+        ],
+        [
+          673,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_probe_is_enabled",
+        "parameters": {
+          "probe": "struct dtrace_probe"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\ndtrace_get_probe_address (struct probe *probe, struct objfile *objfile)\n{\n  gdb_assert (probe->pops == &dtrace_probe_ops);\n  return probe->address + ANOFFSET (objfile->section_offsets,\n\t\t\t\t    SECT_OFF_DATA (objfile));\n}",
+      "fn_code_pos": [
+        [
+          677,
+          0
+        ],
+        [
+          683,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_get_probe_address",
+        "parameters": {
+          "probe": "struct probe",
+          "objfile": "struct objfile"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static unsigned\ndtrace_get_probe_argument_count (struct probe *probe_generic,\n\t\t\t\t struct frame_info *frame)\n{\n  struct dtrace_probe *dtrace_probe = (struct dtrace_probe *) probe_generic;\n\n  gdb_assert (probe_generic->pops == &dtrace_probe_ops);\n\n  return dtrace_probe->probe_argc;\n}",
+      "fn_code_pos": [
+        [
+          687,
+          0
+        ],
+        [
+          696,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_get_probe_argument_count",
+        "parameters": {
+          "probe_generic": "struct probe",
+          "frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\ndtrace_can_evaluate_probe_arguments (struct probe *probe_generic)\n{\n  struct gdbarch *gdbarch = probe_generic->arch;\n\n  gdb_assert (probe_generic->pops == &dtrace_probe_ops);\n  return gdbarch_dtrace_parse_probe_argument_p (gdbarch);\n}",
+      "fn_code_pos": [
+        [
+          700,
+          0
+        ],
+        [
+          707,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_can_evaluate_probe_arguments",
+        "parameters": {
+          "probe_generic": "struct probe"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static struct value *\ndtrace_evaluate_probe_argument (struct probe *probe_generic, unsigned n,\n\t\t\t\tstruct frame_info *frame)\n{\n  struct gdbarch *gdbarch = probe_generic->arch;\n  struct dtrace_probe *dtrace_probe = (struct dtrace_probe *) probe_generic;\n  struct dtrace_probe_arg *arg;\n  int pos = 0;\n\n  gdb_assert (probe_generic->pops == &dtrace_probe_ops);\n\n  arg = dtrace_get_arg (dtrace_probe, n, gdbarch);\n  return evaluate_subexp_standard (arg->type, arg->expr, &pos, EVAL_NORMAL);\n}",
+      "fn_code_pos": [
+        [
+          711,
+          0
+        ],
+        [
+          724,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_evaluate_probe_argument",
+        "parameters": {
+          "probe_generic": "struct probe",
+          "n": "unsigned",
+          "frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\ndtrace_compile_to_ax (struct probe *probe_generic, struct agent_expr *expr,\n\t\t      struct axs_value *value, unsigned n)\n{\n  struct dtrace_probe *dtrace_probe = (struct dtrace_probe *) probe_generic;\n  struct dtrace_probe_arg *arg;\n  union exp_element *pc;\n\n  gdb_assert (probe_generic->pops == &dtrace_probe_ops);\n\n  arg = dtrace_get_arg (dtrace_probe, n, expr->gdbarch);\n\n  pc = arg->expr->elts;\n  gen_expr (arg->expr, &pc, expr, value);\n\n  require_rvalue (expr, value);\n  value->type = arg->type;\n}",
+      "fn_code_pos": [
+        [
+          728,
+          0
+        ],
+        [
+          745,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_compile_to_ax",
+        "parameters": {
+          "probe_generic": "struct probe",
+          "expr": "struct agent_expr",
+          "value": "struct axs_value",
+          "n": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndtrace_probe_destroy (struct probe *probe_generic)\n{\n  struct dtrace_probe *probe = (struct dtrace_probe *) probe_generic;\n  struct dtrace_probe_arg *arg;\n  int i;\n\n  gdb_assert (probe_generic->pops == &dtrace_probe_ops);\n\n  for (i = 0; VEC_iterate (dtrace_probe_arg_s, probe->args, i, arg); i++)\n    {\n      xfree (arg->type_str);\n      xfree (arg->expr);\n    }\n\n  VEC_free (dtrace_probe_enabler_s, probe->enablers);\n  VEC_free (dtrace_probe_arg_s, probe->args);\n}",
+      "fn_code_pos": [
+        [
+          749,
+          0
+        ],
+        [
+          766,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_probe_destroy",
+        "parameters": {
+          "probe_generic": "struct probe"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static const char *\ndtrace_type_name (struct probe *probe_generic)\n{\n  gdb_assert (probe_generic->pops == &dtrace_probe_ops);\n  return \"dtrace\";\n}",
+      "fn_code_pos": [
+        [
+          770,
+          0
+        ],
+        [
+          775,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_type_name",
+        "parameters": {
+          "probe_generic": "struct probe"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\ndtrace_gen_info_probes_table_values (struct probe *probe_generic,\n\t\t\t\t     VEC (const_char_ptr) **ret)\n{\n  struct dtrace_probe *probe = (struct dtrace_probe *) probe_generic;\n  const char *val = NULL;\n\n  gdb_assert (probe_generic->pops == &dtrace_probe_ops);\n\n  if (VEC_empty (dtrace_probe_enabler_s, probe->enablers))\n    val = \"always\";\n  else if (!gdbarch_dtrace_probe_is_enabled_p (probe_generic->arch))\n    val = \"unknown\";\n  else if (dtrace_probe_is_enabled (probe))\n    val = \"yes\";\n  else\n    val = \"no\";\n\n  VEC_safe_push (const_char_ptr, *ret, val);\n}",
+      "fn_code_pos": [
+        [
+          792,
+          0
+        ],
+        [
+          811,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_gen_info_probes_table_values",
+        "parameters": {
+          "probe_generic": "struct probe",
+          "ret": "VEC"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndtrace_enable_probe (struct probe *probe)\n{\n  struct gdbarch *gdbarch = probe->arch;\n  struct dtrace_probe *dtrace_probe = (struct dtrace_probe *) probe;\n  struct dtrace_probe_enabler *enabler;\n  int i;\n\n  gdb_assert (probe->pops == &dtrace_probe_ops);\n\n  /* Enabling a dtrace probe implies patching the text section of the\n     running process, so make sure the inferior is indeed running.  */\n  if (ptid_equal (inferior_ptid, null_ptid))\n    error (_(\"No inferior running\"));\n\n  /* Fast path.  */\n  if (dtrace_probe_is_enabled (dtrace_probe))\n    return;\n\n  /* Iterate over all defined enabler in the given probe and enable\n     them all using the corresponding gdbarch hook.  */\n\n  for (i = 0;\n       VEC_iterate (dtrace_probe_enabler_s, dtrace_probe->enablers, i, enabler);\n       i++)\n    if (gdbarch_dtrace_enable_probe_p (gdbarch))\n      gdbarch_dtrace_enable_probe (gdbarch, enabler->address);\n}",
+      "fn_code_pos": [
+        [
+          815,
+          0
+        ],
+        [
+          842,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_enable_probe",
+        "parameters": {
+          "probe": "struct probe"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ndtrace_disable_probe (struct probe *probe)\n{\n  struct gdbarch *gdbarch = probe->arch;\n  struct dtrace_probe *dtrace_probe = (struct dtrace_probe *) probe;\n  struct dtrace_probe_enabler *enabler;\n  int i;\n\n  gdb_assert (probe->pops == &dtrace_probe_ops);\n\n  /* Disabling a dtrace probe implies patching the text section of the\n     running process, so make sure the inferior is indeed running.  */\n  if (ptid_equal (inferior_ptid, null_ptid))\n    error (_(\"No inferior running\"));\n\n  /* Fast path.  */\n  if (!dtrace_probe_is_enabled (dtrace_probe))\n    return;\n\n  /* Are we trying to disable a probe that does not have any enabler\n     associated?  */\n  if (VEC_empty (dtrace_probe_enabler_s, dtrace_probe->enablers))\n    error (_(\"Probe %s:%s cannot be disabled: no enablers.\"), probe->provider, probe->name);\n\n  /* Iterate over all defined enabler in the given probe and disable\n     them all using the corresponding gdbarch hook.  */\n\n  for (i = 0;\n       VEC_iterate (dtrace_probe_enabler_s, dtrace_probe->enablers, i, enabler);\n       i++)\n    if (gdbarch_dtrace_disable_probe_p (gdbarch))\n      gdbarch_dtrace_disable_probe (gdbarch, enabler->address);\n}",
+      "fn_code_pos": [
+        [
+          847,
+          0
+        ],
+        [
+          879,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_disable_probe",
+        "parameters": {
+          "probe": "struct probe"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ninfo_probes_dtrace_command (char *arg, int from_tty)\n{\n  info_probes_for_ops (arg, from_tty, &dtrace_probe_ops);\n}",
+      "fn_code_pos": [
+        [
+          904,
+          0
+        ],
+        [
+          908,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "info_probes_dtrace_command",
+        "parameters": {
+          "arg": "char",
+          "from_tty": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_dtrace_probe (void)\n{\n  VEC_safe_push (probe_ops_cp, all_probe_ops, &dtrace_probe_ops);\n\n  add_cmd (\"dtrace\", class_info, info_probes_dtrace_command,\n\t   _(\"\\\nShow information about DTrace static probes.\\n\\\nUsage: info probes dtrace [PROVIDER [NAME [OBJECT]]]\\n\\\nEach argument is a regular expression, used to select probes.\\n\\\nPROVIDER matches probe provider names.\\n\\\nNAME matches the probe names.\\n\\\nOBJECT matches the executable or shared library name.\"),\n\t   info_probes_cmdlist_get ());\n}",
+      "fn_code_pos": [
+        [
+          912,
+          0
+        ],
+        [
+          926,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_dtrace_probe",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "dtrace_get_arg (struct dtrace_probe *probe, unsigned n,\n\t\tstruct gdbarch *gdbarch)",
+      "fn_dec_pos": [
+        [
+          610,
+          0
+        ],
+        [
+          611,
+          26
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_get_arg",
+        "parameters": {
+          "probe": "struct dtrace_probe",
+          "n": "unsigned",
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "dtrace_evaluate_probe_argument (struct probe *probe_generic, unsigned n,\n\t\t\t\tstruct frame_info *frame)",
+      "fn_dec_pos": [
+        [
+          712,
+          0
+        ],
+        [
+          713,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_evaluate_probe_argument",
+        "parameters": {
+          "probe_generic": "struct probe",
+          "n": "unsigned",
+          "frame": "struct frame_info"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "dtrace_type_name (struct probe *probe_generic)",
+      "fn_dec_pos": [
+        [
+          771,
+          0
+        ],
+        [
+          771,
+          46
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dtrace_type_name",
+        "parameters": {
+          "probe_generic": "struct probe"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "_initialize_dtrace_probe (void)",
+      "fn_dec_pos": [
+        [
+          910,
+          5
+        ],
+        [
+          910,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_dtrace_probe",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct dtrace_probe_arg\n{\n  /* The type of the probe argument.  */\n  struct type *type;\n\n  /* A string describing the type.  */\n  char *type_str;\n\n  /* The argument converted to an internal GDB expression.  */\n  struct expression *expr;\n}",
+      {
+        "*type": "struct type",
+        "*type_str": "char",
+        "*expr": "struct expression"
+      },
+      "dtrace_probe_arg",
+      [
+        50,
+        0
+      ],
+      [
+        60,
+        1
+      ]
+    ],
+    [
+      "struct dtrace_probe_enabler\n{\n  /* Program counter where the is-enabled probe is installed.  The\n     contents (nops, whatever...) stored at this address are\n     architecture dependent.  */\n  CORE_ADDR address;\n}",
+      {
+        "address": "CORE_ADDR"
+      },
+      "dtrace_probe_enabler",
+      [
+        67,
+        0
+      ],
+      [
+        73,
+        1
+      ]
+    ],
+    [
+      "struct dtrace_probe\n{\n  /* Generic information about the probe.  This must be the first\n     element of this struct, in order to maintain binary compatibility\n     with the `struct probe' and be able to fully abstract it.  */\n  struct probe p;\n\n  /* A probe can have zero or more arguments.  */\n  int probe_argc;\n  VEC (dtrace_probe_arg_s) *args;\n\n  /* A probe can have zero or more \"enablers\" associated with it.  */\n  VEC (dtrace_probe_enabler_s) *enablers;\n\n  /* Whether the expressions for the arguments have been built.  */\n  unsigned int args_expr_built : 1;\n}",
+      {
+        "p": "struct probe",
+        "probe_argc": "int",
+        "(dtrace_probe_arg_s)": "VEC",
+        "(dtrace_probe_enabler_s)": "VEC",
+        "args_expr_built": "unsigned int"
+      },
+      "dtrace_probe",
+      [
+        80,
+        0
+      ],
+      [
+        96,
+        1
+      ]
+    ],
+    [
+      "struct dtrace_dof_hdr\n{\n  /* Identification bytes (see above). */\n  uint8_t dofh_ident[16];\n  /* File attribute flags (if any). */\n  uint32_t dofh_flags;   \n  /* Size of file header in bytes. */\n  uint32_t dofh_hdrsize; \n  /* Size of section header in bytes. */\n  uint32_t dofh_secsize; \n  /* Number of section headers. */\n  uint32_t dofh_secnum;  \n  /* File offset of section headers. */\n  uint64_t dofh_secoff;  \n  /* File size of loadable portion. */\n  uint64_t dofh_loadsz;  \n  /* File size of entire DOF file. */\n  uint64_t dofh_filesz;  \n  /* Reserved for future use. */\n  uint64_t dofh_pad;     \n}",
+      {
+        "dofh_ident[16]": "uint8_t",
+        "dofh_flags": "uint32_t",
+        "dofh_hdrsize": "uint32_t",
+        "dofh_secsize": "uint32_t",
+        "dofh_secnum": "uint32_t",
+        "dofh_secoff": "uint64_t",
+        "dofh_loadsz": "uint64_t",
+        "dofh_filesz": "uint64_t",
+        "dofh_pad": "uint64_t"
+      },
+      "dtrace_dof_hdr",
+      [
+        172,
+        0
+      ],
+      [
+        192,
+        1
+      ]
+    ],
+    [
+      "struct dtrace_dof_sect\n{\n  /* Section type (see the define above). */\n  uint32_t dofs_type;\n  /* Section data memory alignment. */\n  uint32_t dofs_align; \n  /* Section flags (if any). */\n  uint32_t dofs_flags; \n  /* Size of section entry (if table). */\n  uint32_t dofs_entsize;\n  /* DOF + offset points to the section data. */\n  uint64_t dofs_offset;\n  /* Size of section data in bytes.  */\n  uint64_t dofs_size;  \n}",
+      {
+        "dofs_type": "uint32_t",
+        "dofs_align": "uint32_t",
+        "dofs_flags": "uint32_t",
+        "dofs_entsize": "uint32_t",
+        "dofs_offset": "uint64_t",
+        "dofs_size": "uint64_t"
+      },
+      "dtrace_dof_sect",
+      [
+        198,
+        0
+      ],
+      [
+        212,
+        1
+      ]
+    ],
+    [
+      "struct dtrace_dof_provider\n{\n  /* Link to a DTRACE_DOF_SECT_TYPE_STRTAB section. */\n  uint32_t dofpv_strtab; \n  /* Link to a DTRACE_DOF_SECT_TYPE_PROBES section. */\n  uint32_t dofpv_probes; \n  /* Link to a DTRACE_DOF_SECT_TYPE_PRARGS section. */\n  uint32_t dofpv_prargs; \n  /* Link to a DTRACE_DOF_SECT_TYPE_PROFFS section. */\n  uint32_t dofpv_proffs; \n  /* Provider name string. */\n  uint32_t dofpv_name;   \n  /* Provider attributes. */\n  uint32_t dofpv_provattr;\n  /* Module attributes. */\n  uint32_t dofpv_modattr; \n  /* Function attributes. */\n  uint32_t dofpv_funcattr;\n  /* Name attributes. */\n  uint32_t dofpv_nameattr;\n  /* Args attributes. */\n  uint32_t dofpv_argsattr;\n  /* Link to a DTRACE_DOF_SECT_PRENOFFS section. */\n  uint32_t dofpv_prenoffs;\n}",
+      {
+        "dofpv_strtab": "uint32_t",
+        "dofpv_probes": "uint32_t",
+        "dofpv_prargs": "uint32_t",
+        "dofpv_proffs": "uint32_t",
+        "dofpv_name": "uint32_t",
+        "dofpv_provattr": "uint32_t",
+        "dofpv_modattr": "uint32_t",
+        "dofpv_funcattr": "uint32_t",
+        "dofpv_nameattr": "uint32_t",
+        "dofpv_argsattr": "uint32_t",
+        "dofpv_prenoffs": "uint32_t"
+      },
+      "dtrace_dof_provider",
+      [
+        216,
+        0
+      ],
+      [
+        240,
+        1
+      ]
+    ],
+    [
+      "struct dtrace_dof_probe\n{\n  /* Probe base address or offset. */\n  uint64_t dofpr_addr;   \n  /* Probe function string. */\n  uint32_t dofpr_func;   \n  /* Probe name string. */\n  uint32_t dofpr_name;   \n  /* Native argument type strings. */\n  uint32_t dofpr_nargv;  \n  /* Translated argument type strings. */\n  uint32_t dofpr_xargv;  \n  /* Index of first argument mapping. */\n  uint32_t dofpr_argidx; \n  /* Index of first offset entry. */\n  uint32_t dofpr_offidx; \n  /* Native argument count. */\n  uint8_t  dofpr_nargc;  \n  /* Translated argument count. */\n  uint8_t  dofpr_xargc;  \n  /* Number of offset entries for probe. */\n  uint16_t dofpr_noffs;  \n  /* Index of first is-enabled offset. */\n  uint32_t dofpr_enoffidx;\n  /* Number of is-enabled offsets. */\n  uint16_t dofpr_nenoffs;\n  /* Reserved for future use. */\n  uint16_t dofpr_pad1;   \n  /* Reserved for future use. */\n  uint32_t dofpr_pad2;   \n}",
+      {
+        "dofpr_addr": "uint64_t",
+        "dofpr_func": "uint32_t",
+        "dofpr_name": "uint32_t",
+        "dofpr_nargv": "uint32_t",
+        "dofpr_xargv": "uint32_t",
+        "dofpr_argidx": "uint32_t",
+        "dofpr_offidx": "uint32_t",
+        "dofpr_nargc": "uint8_t",
+        "dofpr_xargc": "uint8_t",
+        "dofpr_noffs": "uint16_t",
+        "dofpr_enoffidx": "uint32_t",
+        "dofpr_nenoffs": "uint16_t",
+        "dofpr_pad1": "uint16_t",
+        "dofpr_pad2": "uint32_t"
+      },
+      "dtrace_dof_probe",
+      [
+        248,
+        0
+      ],
+      [
+        278,
+        1
+      ]
+    ],
+    [
+      "struct probe_ops",
+      {},
+      "",
+      [
+        45,
+        13
+      ],
+      [
+        45,
+        29
+      ]
+    ],
+    [
+      "struct dtrace_probe_arg\n{\n  /* The type of the probe argument.  */\n  struct type *type;\n\n  /* A string describing the type.  */\n  char *type_str;\n\n  /* The argument converted to an internal GDB expression.  */\n  struct expression *expr;\n}",
+      {
+        "*type": "struct type",
+        "*type_str": "char",
+        "*expr": "struct expression"
+      },
+      "dtrace_probe_arg",
+      [
+        50,
+        0
+      ],
+      [
+        60,
+        1
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        53,
+        2
+      ],
+      [
+        53,
+        13
+      ]
+    ],
+    [
+      "struct expression",
+      {},
+      "",
+      [
+        59,
+        2
+      ],
+      [
+        59,
+        19
+      ]
+    ],
+    [
+      "typedef struct dtrace_probe_arg dtrace_probe_arg_s;",
+      {},
+      "dtrace_probe_arg_s",
+      [
+        62,
+        0
+      ],
+      [
+        62,
+        51
+      ]
+    ],
+    [
+      "struct dtrace_probe_enabler\n{\n  /* Program counter where the is-enabled probe is installed.  The\n     contents (nops, whatever...) stored at this address are\n     architecture dependent.  */\n  CORE_ADDR address;\n}",
+      {
+        "address": "CORE_ADDR"
+      },
+      "dtrace_probe_enabler",
+      [
+        67,
+        0
+      ],
+      [
+        73,
+        1
+      ]
+    ],
+    [
+      "typedef struct dtrace_probe_enabler dtrace_probe_enabler_s;",
+      {},
+      "dtrace_probe_enabler_s",
+      [
+        75,
+        0
+      ],
+      [
+        75,
+        59
+      ]
+    ],
+    [
+      "struct dtrace_probe\n{\n  /* Generic information about the probe.  This must be the first\n     element of this struct, in order to maintain binary compatibility\n     with the `struct probe' and be able to fully abstract it.  */\n  struct probe p;\n\n  /* A probe can have zero or more arguments.  */\n  int probe_argc;\n  VEC (dtrace_probe_arg_s) *args;\n\n  /* A probe can have zero or more \"enablers\" associated with it.  */\n  VEC (dtrace_probe_enabler_s) *enablers;\n\n  /* Whether the expressions for the arguments have been built.  */\n  unsigned int args_expr_built : 1;\n}",
+      {
+        "p": "struct probe",
+        "probe_argc": "int",
+        "(dtrace_probe_arg_s)": "VEC",
+        "(dtrace_probe_enabler_s)": "VEC",
+        "args_expr_built": "unsigned int"
+      },
+      "dtrace_probe",
+      [
+        80,
+        0
+      ],
+      [
+        96,
+        1
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        85,
+        2
+      ],
+      [
+        85,
+        14
+      ]
+    ],
+    [
+      "struct dtrace_dof_hdr\n{\n  /* Identification bytes (see above). */\n  uint8_t dofh_ident[16];\n  /* File attribute flags (if any). */\n  uint32_t dofh_flags;   \n  /* Size of file header in bytes. */\n  uint32_t dofh_hdrsize; \n  /* Size of section header in bytes. */\n  uint32_t dofh_secsize; \n  /* Number of section headers. */\n  uint32_t dofh_secnum;  \n  /* File offset of section headers. */\n  uint64_t dofh_secoff;  \n  /* File size of loadable portion. */\n  uint64_t dofh_loadsz;  \n  /* File size of entire DOF file. */\n  uint64_t dofh_filesz;  \n  /* Reserved for future use. */\n  uint64_t dofh_pad;     \n}",
+      {
+        "dofh_ident[16]": "uint8_t",
+        "dofh_flags": "uint32_t",
+        "dofh_hdrsize": "uint32_t",
+        "dofh_secsize": "uint32_t",
+        "dofh_secnum": "uint32_t",
+        "dofh_secoff": "uint64_t",
+        "dofh_loadsz": "uint64_t",
+        "dofh_filesz": "uint64_t",
+        "dofh_pad": "uint64_t"
+      },
+      "dtrace_dof_hdr",
+      [
+        172,
+        0
+      ],
+      [
+        192,
+        1
+      ]
+    ],
+    [
+      "struct dtrace_dof_sect\n{\n  /* Section type (see the define above). */\n  uint32_t dofs_type;\n  /* Section data memory alignment. */\n  uint32_t dofs_align; \n  /* Section flags (if any). */\n  uint32_t dofs_flags; \n  /* Size of section entry (if table). */\n  uint32_t dofs_entsize;\n  /* DOF + offset points to the section data. */\n  uint64_t dofs_offset;\n  /* Size of section data in bytes.  */\n  uint64_t dofs_size;  \n}",
+      {
+        "dofs_type": "uint32_t",
+        "dofs_align": "uint32_t",
+        "dofs_flags": "uint32_t",
+        "dofs_entsize": "uint32_t",
+        "dofs_offset": "uint64_t",
+        "dofs_size": "uint64_t"
+      },
+      "dtrace_dof_sect",
+      [
+        198,
+        0
+      ],
+      [
+        212,
+        1
+      ]
+    ],
+    [
+      "struct dtrace_dof_provider\n{\n  /* Link to a DTRACE_DOF_SECT_TYPE_STRTAB section. */\n  uint32_t dofpv_strtab; \n  /* Link to a DTRACE_DOF_SECT_TYPE_PROBES section. */\n  uint32_t dofpv_probes; \n  /* Link to a DTRACE_DOF_SECT_TYPE_PRARGS section. */\n  uint32_t dofpv_prargs; \n  /* Link to a DTRACE_DOF_SECT_TYPE_PROFFS section. */\n  uint32_t dofpv_proffs; \n  /* Provider name string. */\n  uint32_t dofpv_name;   \n  /* Provider attributes. */\n  uint32_t dofpv_provattr;\n  /* Module attributes. */\n  uint32_t dofpv_modattr; \n  /* Function attributes. */\n  uint32_t dofpv_funcattr;\n  /* Name attributes. */\n  uint32_t dofpv_nameattr;\n  /* Args attributes. */\n  uint32_t dofpv_argsattr;\n  /* Link to a DTRACE_DOF_SECT_PRENOFFS section. */\n  uint32_t dofpv_prenoffs;\n}",
+      {
+        "dofpv_strtab": "uint32_t",
+        "dofpv_probes": "uint32_t",
+        "dofpv_prargs": "uint32_t",
+        "dofpv_proffs": "uint32_t",
+        "dofpv_name": "uint32_t",
+        "dofpv_provattr": "uint32_t",
+        "dofpv_modattr": "uint32_t",
+        "dofpv_funcattr": "uint32_t",
+        "dofpv_nameattr": "uint32_t",
+        "dofpv_argsattr": "uint32_t",
+        "dofpv_prenoffs": "uint32_t"
+      },
+      "dtrace_dof_provider",
+      [
+        216,
+        0
+      ],
+      [
+        240,
+        1
+      ]
+    ],
+    [
+      "struct dtrace_dof_probe\n{\n  /* Probe base address or offset. */\n  uint64_t dofpr_addr;   \n  /* Probe function string. */\n  uint32_t dofpr_func;   \n  /* Probe name string. */\n  uint32_t dofpr_name;   \n  /* Native argument type strings. */\n  uint32_t dofpr_nargv;  \n  /* Translated argument type strings. */\n  uint32_t dofpr_xargv;  \n  /* Index of first argument mapping. */\n  uint32_t dofpr_argidx; \n  /* Index of first offset entry. */\n  uint32_t dofpr_offidx; \n  /* Native argument count. */\n  uint8_t  dofpr_nargc;  \n  /* Translated argument count. */\n  uint8_t  dofpr_xargc;  \n  /* Number of offset entries for probe. */\n  uint16_t dofpr_noffs;  \n  /* Index of first is-enabled offset. */\n  uint32_t dofpr_enoffidx;\n  /* Number of is-enabled offsets. */\n  uint16_t dofpr_nenoffs;\n  /* Reserved for future use. */\n  uint16_t dofpr_pad1;   \n  /* Reserved for future use. */\n  uint32_t dofpr_pad2;   \n}",
+      {
+        "dofpr_addr": "uint64_t",
+        "dofpr_func": "uint32_t",
+        "dofpr_name": "uint32_t",
+        "dofpr_nargv": "uint32_t",
+        "dofpr_xargv": "uint32_t",
+        "dofpr_argidx": "uint32_t",
+        "dofpr_offidx": "uint32_t",
+        "dofpr_nargc": "uint8_t",
+        "dofpr_xargc": "uint8_t",
+        "dofpr_noffs": "uint16_t",
+        "dofpr_enoffidx": "uint32_t",
+        "dofpr_nenoffs": "uint16_t",
+        "dofpr_pad1": "uint16_t",
+        "dofpr_pad2": "uint32_t"
+      },
+      "dtrace_dof_probe",
+      [
+        248,
+        0
+      ],
+      [
+        278,
+        1
+      ]
+    ],
+    [
+      "struct objfile",
+      {},
+      "",
+      [
+        314,
+        26
+      ],
+      [
+        314,
+        40
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        315,
+        5
+      ],
+      [
+        315,
+        19
+      ]
+    ],
+    [
+      "struct dtrace_dof_hdr",
+      {},
+      "",
+      [
+        316,
+        5
+      ],
+      [
+        316,
+        26
+      ]
+    ],
+    [
+      "struct dtrace_dof_probe",
+      {},
+      "",
+      [
+        317,
+        5
+      ],
+      [
+        317,
+        28
+      ]
+    ],
+    [
+      "struct dtrace_dof_provider",
+      {},
+      "",
+      [
+        318,
+        5
+      ],
+      [
+        318,
+        31
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        323,
+        2
+      ],
+      [
+        323,
+        16
+      ]
+    ],
+    [
+      "struct dtrace_probe_enabler",
+      {},
+      "",
+      [
+        375,
+        6
+      ],
+      [
+        375,
+        33
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        388,
+        6
+      ],
+      [
+        388,
+        25
+      ]
+    ],
+    [
+      "struct dtrace_probe_arg",
+      {},
+      "",
+      [
+        414,
+        3
+      ],
+      [
+        414,
+        26
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        450,
+        41
+      ],
+      [
+        450,
+        53
+      ]
+    ],
+    [
+      "struct objfile",
+      {},
+      "",
+      [
+        462,
+        36
+      ],
+      [
+        462,
+        50
+      ]
+    ],
+    [
+      "struct dtrace_dof_hdr",
+      {},
+      "",
+      [
+        463,
+        31
+      ],
+      [
+        463,
+        52
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        465,
+        2
+      ],
+      [
+        465,
+        16
+      ]
+    ],
+    [
+      "struct dtrace_dof_sect",
+      {},
+      "",
+      [
+        466,
+        2
+      ],
+      [
+        466,
+        24
+      ]
+    ],
+    [
+      "struct dtrace_dof_sect",
+      {},
+      "",
+      [
+        486,
+        13
+      ],
+      [
+        486,
+        35
+      ]
+    ],
+    [
+      "struct dtrace_dof_sect",
+      {},
+      "",
+      [
+        495,
+        13
+      ],
+      [
+        495,
+        35
+      ]
+    ],
+    [
+      "struct dtrace_dof_provider",
+      {},
+      "",
+      [
+        500,
+        1
+      ],
+      [
+        500,
+        27
+      ]
+    ],
+    [
+      "struct dtrace_dof_provider",
+      {},
+      "",
+      [
+        500,
+        41
+      ],
+      [
+        500,
+        67
+      ]
+    ],
+    [
+      "struct dtrace_dof_sect",
+      {},
+      "",
+      [
+        502,
+        1
+      ],
+      [
+        502,
+        23
+      ]
+    ],
+    [
+      "struct dtrace_dof_sect",
+      {},
+      "",
+      [
+        504,
+        1
+      ],
+      [
+        504,
+        23
+      ]
+    ],
+    [
+      "struct dtrace_dof_sect",
+      {},
+      "",
+      [
+        506,
+        1
+      ],
+      [
+        506,
+        23
+      ]
+    ],
+    [
+      "struct dtrace_dof_sect",
+      {},
+      "",
+      [
+        508,
+        1
+      ],
+      [
+        508,
+        23
+      ]
+    ],
+    [
+      "struct dtrace_dof_sect",
+      {},
+      "",
+      [
+        510,
+        1
+      ],
+      [
+        510,
+        23
+      ]
+    ],
+    [
+      "struct dtrace_dof_provider",
+      {},
+      "",
+      [
+        520,
+        15
+      ],
+      [
+        520,
+        41
+      ]
+    ],
+    [
+      "struct dtrace_dof_probe",
+      {},
+      "",
+      [
+        536,
+        5
+      ],
+      [
+        536,
+        28
+      ]
+    ],
+    [
+      "struct dtrace_dof_probe",
+      {},
+      "",
+      [
+        536,
+        39
+      ],
+      [
+        536,
+        62
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        561,
+        24
+      ],
+      [
+        561,
+        43
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        562,
+        3
+      ],
+      [
+        562,
+        17
+      ]
+    ],
+    [
+      "struct parser_state",
+      {},
+      "",
+      [
+        564,
+        2
+      ],
+      [
+        564,
+        21
+      ]
+    ],
+    [
+      "struct dtrace_probe_arg",
+      {},
+      "",
+      [
+        565,
+        2
+      ],
+      [
+        565,
+        25
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        575,
+        6
+      ],
+      [
+        575,
+        20
+      ]
+    ],
+    [
+      "struct dtrace_probe_arg",
+      {},
+      "",
+      [
+        609,
+        7
+      ],
+      [
+        609,
+        30
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        610,
+        16
+      ],
+      [
+        610,
+        35
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        611,
+        2
+      ],
+      [
+        611,
+        16
+      ]
+    ],
+    [
+      "struct dtrace_dof_hdr",
+      {},
+      "",
+      [
+        649,
+        10
+      ],
+      [
+        649,
+        31
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        660,
+        25
+      ],
+      [
+        660,
+        44
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        663,
+        2
+      ],
+      [
+        663,
+        16
+      ]
+    ],
+    [
+      "struct dtrace_probe_enabler",
+      {},
+      "",
+      [
+        664,
+        2
+      ],
+      [
+        664,
+        29
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        678,
+        26
+      ],
+      [
+        678,
+        38
+      ]
+    ],
+    [
+      "struct objfile",
+      {},
+      "",
+      [
+        678,
+        47
+      ],
+      [
+        678,
+        61
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        688,
+        33
+      ],
+      [
+        688,
+        45
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        689,
+        5
+      ],
+      [
+        689,
+        22
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        691,
+        2
+      ],
+      [
+        691,
+        21
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        691,
+        39
+      ],
+      [
+        691,
+        58
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        701,
+        37
+      ],
+      [
+        701,
+        49
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        703,
+        2
+      ],
+      [
+        703,
+        16
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        711,
+        7
+      ],
+      [
+        711,
+        19
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        712,
+        32
+      ],
+      [
+        712,
+        44
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        713,
+        4
+      ],
+      [
+        713,
+        21
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        715,
+        2
+      ],
+      [
+        715,
+        16
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        716,
+        2
+      ],
+      [
+        716,
+        21
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        716,
+        39
+      ],
+      [
+        716,
+        58
+      ]
+    ],
+    [
+      "struct dtrace_probe_arg",
+      {},
+      "",
+      [
+        717,
+        2
+      ],
+      [
+        717,
+        25
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        729,
+        22
+      ],
+      [
+        729,
+        34
+      ]
+    ],
+    [
+      "struct agent_expr",
+      {},
+      "",
+      [
+        729,
+        51
+      ],
+      [
+        729,
+        68
+      ]
+    ],
+    [
+      "struct axs_value",
+      {},
+      "",
+      [
+        730,
+        8
+      ],
+      [
+        730,
+        24
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        732,
+        2
+      ],
+      [
+        732,
+        21
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        732,
+        39
+      ],
+      [
+        732,
+        58
+      ]
+    ],
+    [
+      "struct dtrace_probe_arg",
+      {},
+      "",
+      [
+        733,
+        2
+      ],
+      [
+        733,
+        25
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        750,
+        22
+      ],
+      [
+        750,
+        34
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        752,
+        2
+      ],
+      [
+        752,
+        21
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        752,
+        32
+      ],
+      [
+        752,
+        51
+      ]
+    ],
+    [
+      "struct dtrace_probe_arg",
+      {},
+      "",
+      [
+        753,
+        2
+      ],
+      [
+        753,
+        25
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        771,
+        18
+      ],
+      [
+        771,
+        30
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        793,
+        37
+      ],
+      [
+        793,
+        49
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        796,
+        2
+      ],
+      [
+        796,
+        21
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        796,
+        32
+      ],
+      [
+        796,
+        51
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        816,
+        21
+      ],
+      [
+        816,
+        33
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        818,
+        2
+      ],
+      [
+        818,
+        16
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        819,
+        2
+      ],
+      [
+        819,
+        21
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        819,
+        39
+      ],
+      [
+        819,
+        58
+      ]
+    ],
+    [
+      "struct dtrace_probe_enabler",
+      {},
+      "",
+      [
+        820,
+        2
+      ],
+      [
+        820,
+        29
+      ]
+    ],
+    [
+      "struct probe",
+      {},
+      "",
+      [
+        848,
+        22
+      ],
+      [
+        848,
+        34
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        850,
+        2
+      ],
+      [
+        850,
+        16
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        851,
+        2
+      ],
+      [
+        851,
+        21
+      ]
+    ],
+    [
+      "struct dtrace_probe",
+      {},
+      "",
+      [
+        851,
+        39
+      ],
+      [
+        851,
+        58
+      ]
+    ],
+    [
+      "struct dtrace_probe_enabler",
+      {},
+      "",
+      [
+        852,
+        2
+      ],
+      [
+        852,
+        29
+      ]
+    ],
+    [
+      "struct probe_ops",
+      {},
+      "",
+      [
+        883,
+        6
+      ],
+      [
+        883,
+        22
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"probe.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"vec.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"elf-bfd.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbtypes.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"obstack.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"objfiles.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"complaints.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"value.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"ax.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"ax-gdb.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"language.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"parser-defs.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum dtrace_dof_sect_type\n{\n  /* Null section.  */\n  DTRACE_DOF_SECT_TYPE_NONE = 0,\n  /* A dof_ecbdesc_t. */\n  DTRACE_DOF_SECT_TYPE_ECBDESC = 3,\n  /* A string table.  */\n  DTRACE_DOF_SECT_TYPE_STRTAB = 8,\n  /* A dof_provider_t  */\n  DTRACE_DOF_SECT_TYPE_PROVIDER = 15,\n  /* Array of dof_probe_t  */\n  DTRACE_DOF_SECT_TYPE_PROBES = 16,\n  /* An array of probe arg mappings.  */\n  DTRACE_DOF_SECT_TYPE_PRARGS = 17,\n  /* An array of probe arg offsets.  */\n  DTRACE_DOF_SECT_TYPE_PROFFS = 18,\n  /* An array of probe is-enabled offsets.  */\n  DTRACE_DOF_SECT_TYPE_PRENOFFS = 26\n}",
+      {
+        "DTRACE_DOF_SECT_TYPE_NONE": "",
+        "DTRACE_DOF_SECT_TYPE_ECBDESC": "",
+        "DTRACE_DOF_SECT_TYPE_STRTAB": "",
+        "DTRACE_DOF_SECT_TYPE_PROVIDER": "",
+        "DTRACE_DOF_SECT_TYPE_PROBES": "",
+        "DTRACE_DOF_SECT_TYPE_PRARGS": "",
+        "DTRACE_DOF_SECT_TYPE_PROFFS": "",
+        "DTRACE_DOF_SECT_TYPE_PRENOFFS": ""
+      },
+      "dtrace_dof_sect_type",
+      [
+        116,
+        0
+      ],
+      [
+        134,
+        1
+      ]
+    ],
+    [
+      "enum dtrace_dof_ident\n{\n  /* First byte of the magic number.  */\n  DTRACE_DOF_ID_MAG0 = 0,\n  /* Second byte of the magic number.  */\n  DTRACE_DOF_ID_MAG1 = 1,\n  /* Third byte of the magic number.  */\n  DTRACE_DOF_ID_MAG2 = 2,\n  /* Fourth byte of the magic number.  */\n  DTRACE_DOF_ID_MAG3 = 3,\n  /* An enum_dof_encoding value.  */\n  DTRACE_DOF_ID_ENCODING = 5\n}",
+      {
+        "DTRACE_DOF_ID_MAG0": "",
+        "DTRACE_DOF_ID_MAG1": "",
+        "DTRACE_DOF_ID_MAG2": "",
+        "DTRACE_DOF_ID_MAG3": "",
+        "DTRACE_DOF_ID_ENCODING": ""
+      },
+      "dtrace_dof_ident",
+      [
+        145,
+        0
+      ],
+      [
+        157,
+        1
+      ]
+    ],
+    [
+      "enum dtrace_dof_encoding\n{\n  /* The DOF program is little-endian.  */\n  DTRACE_DOF_ENCODE_LSB = 1,\n  /* The DOF program is big-endian.  */\n  DTRACE_DOF_ENCODE_MSB = 2\n}",
+      {
+        "DTRACE_DOF_ENCODE_LSB": "",
+        "DTRACE_DOF_ENCODE_MSB": ""
+      },
+      "dtrace_dof_encoding",
+      [
+        161,
+        0
+      ],
+      [
+        167,
+        1
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,1699 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\namd64_windows_passed_by_integer_register (struct type *type)\n{\n  switch (TYPE_CODE (type))\n    {\n      case TYPE_CODE_INT:\n      case TYPE_CODE_ENUM:\n      case TYPE_CODE_BOOL:\n      case TYPE_CODE_RANGE:\n      case TYPE_CODE_CHAR:\n      case TYPE_CODE_PTR:\n      case TYPE_CODE_REF:\n      case TYPE_CODE_RVALUE_REF:\n      case TYPE_CODE_STRUCT:\n      case TYPE_CODE_UNION:\n\treturn (TYPE_LENGTH (type) == 1\n\t\t|| TYPE_LENGTH (type) == 2\n\t\t|| TYPE_LENGTH (type) == 4\n\t\t|| TYPE_LENGTH (type) == 8);\n\n      default:\n\treturn 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          46,
+          0
+        ],
+        [
+          69,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_passed_by_integer_register",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\namd64_windows_passed_by_xmm_register (struct type *type)\n{\n  return ((TYPE_CODE (type) == TYPE_CODE_FLT\n\t   || TYPE_CODE (type) == TYPE_CODE_DECFLOAT)\n          && (TYPE_LENGTH (type) == 4 || TYPE_LENGTH (type) == 8));\n}",
+      "fn_code_pos": [
+        [
+          74,
+          0
+        ],
+        [
+          80,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_passed_by_xmm_register",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\namd64_windows_passed_by_pointer (struct type *type)\n{\n  if (amd64_windows_passed_by_integer_register (type))\n    return 0;\n\n  if (amd64_windows_passed_by_xmm_register (type))\n    return 0;\n\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          85,
+          0
+        ],
+        [
+          95,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_passed_by_pointer",
+        "parameters": {
+          "type": "struct type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\namd64_windows_adjust_args_passed_by_pointer (struct value **args,\n\t\t\t\t\t     int nargs, CORE_ADDR sp)\n{\n  int i;\n\n  for (i = 0; i < nargs; i++)\n    if (amd64_windows_passed_by_pointer (value_type (args[i])))\n      {\n\tstruct type *type = value_type (args[i]);\n\tconst gdb_byte *valbuf = value_contents (args[i]);\n\tconst int len = TYPE_LENGTH (type);\n\n\t/* Store a copy of that argument on the stack, aligned to\n\t   a 16 bytes boundary, and then use the copy's address as\n\t   the argument.  */\n\n\tsp -= len;\n\tsp &= ~0xf;\n\twrite_memory (sp, valbuf, len);\n\n\targs[i]\n\t  = value_addr (value_from_contents_and_address (type, valbuf, sp));\n      }\n\n  return sp;\n}",
+      "fn_code_pos": [
+        [
+          104,
+          0
+        ],
+        [
+          130,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_adjust_args_passed_by_pointer",
+        "parameters": {
+          "args": "struct value",
+          "nargs": "int",
+          "sp": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static void\namd64_windows_store_arg_in_reg (struct regcache *regcache,\n\t\t\t\tstruct value *arg, int regno)\n{\n  struct type *type = value_type (arg);\n  const gdb_byte *valbuf = value_contents (arg);\n  gdb_byte buf[8];\n\n  gdb_assert (TYPE_LENGTH (type) <= 8);\n  memset (buf, 0, sizeof buf);\n  memcpy (buf, valbuf, std::min (TYPE_LENGTH (type), (unsigned int) 8));\n  regcache_cooked_write (regcache, regno, buf);\n}",
+      "fn_code_pos": [
+        [
+          135,
+          0
+        ],
+        [
+          147,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_store_arg_in_reg",
+        "parameters": {
+          "regcache": "struct regcache",
+          "arg": "struct value",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\namd64_windows_push_arguments (struct regcache *regcache, int nargs,\n\t\t\t      struct value **args, CORE_ADDR sp,\n\t\t\t      int struct_return)\n{\n  int reg_idx = 0;\n  int i;\n  struct value **stack_args = XALLOCAVEC (struct value *, nargs);\n  int num_stack_args = 0;\n  int num_elements = 0;\n  int element = 0;\n\n  /* First, handle the arguments passed by pointer.\n\n     These arguments are replaced by pointers to a copy we are making\n     in inferior memory.  So use a copy of the ARGS table, to avoid\n     modifying the original one.  */\n  {\n    struct value **args1 = XALLOCAVEC (struct value *, nargs);\n\n    memcpy (args1, args, nargs * sizeof (struct value *));\n    sp = amd64_windows_adjust_args_passed_by_pointer (args1, nargs, sp);\n    args = args1;\n  }\n\n  /* Reserve a register for the \"hidden\" argument.  */\n  if (struct_return)\n    reg_idx++;\n\n  for (i = 0; i < nargs; i++)\n    {\n      struct type *type = value_type (args[i]);\n      int len = TYPE_LENGTH (type);\n      int on_stack_p = 1;\n\n      if (reg_idx < ARRAY_SIZE (amd64_windows_dummy_call_integer_regs))\n\t{\n\t  if (amd64_windows_passed_by_integer_register (type))\n\t    {\n\t      amd64_windows_store_arg_in_reg\n\t\t(regcache, args[i],\n\t\t amd64_windows_dummy_call_integer_regs[reg_idx]);\n\t      on_stack_p = 0;\n\t      reg_idx++;\n\t    }\n\t  else if (amd64_windows_passed_by_xmm_register (type))\n\t    {\n\t      amd64_windows_store_arg_in_reg\n\t        (regcache, args[i], AMD64_XMM0_REGNUM + reg_idx);\n\t      /* In case of varargs, these parameters must also be\n\t\t passed via the integer registers.  */\n\t      amd64_windows_store_arg_in_reg\n\t\t(regcache, args[i],\n\t\t amd64_windows_dummy_call_integer_regs[reg_idx]);\n\t      on_stack_p = 0;\n\t      reg_idx++;\n\t    }\n\t}\n\n      if (on_stack_p)\n\t{\n\t  num_elements += ((len + 7) / 8);\n\t  stack_args[num_stack_args++] = args[i];\n\t}\n    }\n\n  /* Allocate space for the arguments on the stack, keeping it\n     aligned on a 16 byte boundary.  */\n  sp -= num_elements * 8;\n  sp &= ~0xf;\n\n  /* Write out the arguments to the stack.  */\n  for (i = 0; i < num_stack_args; i++)\n    {\n      struct type *type = value_type (stack_args[i]);\n      const gdb_byte *valbuf = value_contents (stack_args[i]);\n\n      write_memory (sp + element * 8, valbuf, TYPE_LENGTH (type));\n      element += ((TYPE_LENGTH (type) + 7) / 8);\n    }\n\n  return sp;\n}",
+      "fn_code_pos": [
+        [
+          155,
+          0
+        ],
+        [
+          237,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_push_arguments",
+        "parameters": {
+          "regcache": "struct regcache",
+          "nargs": "int",
+          "args": "struct value",
+          "sp": "CORE_ADDR",
+          "struct_return": "int"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\namd64_windows_push_dummy_call\n  (struct gdbarch *gdbarch, struct value *function,\n   struct regcache *regcache, CORE_ADDR bp_addr,\n   int nargs, struct value **args,\n   CORE_ADDR sp, int struct_return, CORE_ADDR struct_addr)\n{\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  gdb_byte buf[8];\n\n  /* Pass arguments.  */\n  sp = amd64_windows_push_arguments (regcache, nargs, args, sp,\n\t\t\t\t     struct_return);\n\n  /* Pass \"hidden\" argument\".  */\n  if (struct_return)\n    {\n      /* The \"hidden\" argument is passed throught the first argument\n         register.  */\n      const int arg_regnum = amd64_windows_dummy_call_integer_regs[0];\n\n      store_unsigned_integer (buf, 8, byte_order, struct_addr);\n      regcache_cooked_write (regcache, arg_regnum, buf);\n    }\n\n  /* Reserve some memory on the stack for the integer-parameter\n     registers, as required by the ABI.  */\n  sp -= ARRAY_SIZE (amd64_windows_dummy_call_integer_regs) * 8;\n\n  /* Store return address.  */\n  sp -= 8;\n  store_unsigned_integer (buf, 8, byte_order, bp_addr);\n  write_memory (sp, buf, 8);\n\n  /* Update the stack pointer...  */\n  store_unsigned_integer (buf, 8, byte_order, sp);\n  regcache_cooked_write (regcache, AMD64_RSP_REGNUM, buf);\n\n  /* ...and fake a frame pointer.  */\n  regcache_cooked_write (regcache, AMD64_RBP_REGNUM, buf);\n\n  return sp + 16;\n}",
+      "fn_code_pos": [
+        [
+          241,
+          0
+        ],
+        [
+          283,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_push_dummy_call",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "function": "struct value",
+          "regcache": "struct regcache",
+          "bp_addr": "CORE_ADDR",
+          "nargs": "int",
+          "args": "struct value",
+          "sp": "CORE_ADDR",
+          "struct_return": "int",
+          "struct_addr": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static enum return_value_convention\namd64_windows_return_value (struct gdbarch *gdbarch, struct value *function,\n\t\t\t    struct type *type, struct regcache *regcache,\n\t\t\t    gdb_byte *readbuf, const gdb_byte *writebuf)\n{\n  int len = TYPE_LENGTH (type);\n  int regnum = -1;\n\n  /* See if our value is returned through a register.  If it is, then\n     store the associated register number in REGNUM.  */\n  switch (TYPE_CODE (type))\n    {\n      case TYPE_CODE_FLT:\n      case TYPE_CODE_DECFLOAT:\n        /* __m128, __m128i, __m128d, floats, and doubles are returned\n           via XMM0.  */\n        if (len == 4 || len == 8 || len == 16)\n          regnum = AMD64_XMM0_REGNUM;\n        break;\n      default:\n        /* All other values that are 1, 2, 4 or 8 bytes long are returned\n           via RAX.  */\n        if (len == 1 || len == 2 || len == 4 || len == 8)\n          regnum = AMD64_RAX_REGNUM;\n        break;\n    }\n\n  if (regnum < 0)\n    {\n      /* RAX contains the address where the return value has been stored.  */\n      if (readbuf)\n        {\n\t  ULONGEST addr;\n\n\t  regcache_raw_read_unsigned (regcache, AMD64_RAX_REGNUM, &addr);\n\t  read_memory (addr, readbuf, TYPE_LENGTH (type));\n\t}\n      return RETURN_VALUE_ABI_RETURNS_ADDRESS;\n    }\n  else\n    {\n      /* Extract the return value from the register where it was stored.  */\n      if (readbuf)\n\tregcache_raw_read_part (regcache, regnum, 0, len, readbuf);\n      if (writebuf)\n\tregcache_raw_write_part (regcache, regnum, 0, len, writebuf);\n      return RETURN_VALUE_REGISTER_CONVENTION;\n    }\n}",
+      "fn_code_pos": [
+        [
+          287,
+          0
+        ],
+        [
+          335,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_return_value",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "function": "struct value",
+          "type": "struct type",
+          "regcache": "struct regcache",
+          "readbuf": "gdb_byte",
+          "writebuf": "gdb_byte"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\namd64_skip_main_prologue (struct gdbarch *gdbarch, CORE_ADDR pc)\n{\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  gdb_byte op;\n\n  target_read_memory (pc, &op, 1);\n  if (op == 0xe8)\n    {\n      gdb_byte buf[4];\n\n      if (target_read_memory (pc + 1, buf, sizeof buf) == 0)\n \t{\n \t  struct bound_minimal_symbol s;\n \t  CORE_ADDR call_dest;\n\n\t  call_dest = pc + 5 + extract_signed_integer (buf, 4, byte_order);\n \t  s = lookup_minimal_symbol_by_pc (call_dest);\n \t  if (s.minsym != NULL\n \t      && MSYMBOL_LINKAGE_NAME (s.minsym) != NULL\n \t      && strcmp (MSYMBOL_LINKAGE_NAME (s.minsym), \"__main\") == 0)\n \t    pc += 5;\n \t}\n    }\n\n  return pc;\n}",
+      "fn_code_pos": [
+        [
+          340,
+          0
+        ],
+        [
+          366,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_skip_main_prologue",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "pc": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static int\npc_in_range (CORE_ADDR pc, const struct amd64_windows_frame_cache *cache)\n{\n  return (pc >= cache->image_base + cache->start_rva\n\t  && pc < cache->image_base + cache->end_rva);\n}",
+      "fn_code_pos": [
+        [
+          423,
+          0
+        ],
+        [
+          428,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pc_in_range",
+        "parameters": {
+          "pc": "CORE_ADDR",
+          "cache": "struct amd64_windows_frame_cache"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\namd64_windows_frame_decode_epilogue (struct frame_info *this_frame,\n\t\t\t\t     struct amd64_windows_frame_cache *cache)\n{\n  /* According to MSDN an epilogue \"must consist of either an add RSP,constant\n     or lea RSP,constant[FPReg], followed by a series of zero or more 8-byte\n     register pops and a return or a jmp\".\n\n     Furthermore, according to RtlVirtualUnwind, the complete list of\n     epilog marker is:\n     - ret                      [c3]\n     - ret n                    [c2 imm16]\n     - rep ret                  [f3 c3]\n     - jmp imm8 | imm32         [eb rel8] or [e9 rel32]\n     - jmp qword ptr imm32                 - not handled\n     - rex.w jmp reg            [4X ff eY]\n  */\n\n  CORE_ADDR pc = cache->pc;\n  CORE_ADDR cur_sp = cache->sp;\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  gdb_byte op;\n  gdb_byte rex;\n\n  /* We don't care about the instruction deallocating the frame:\n     if it hasn't been executed, the pc is still in the body,\n     if it has been executed, the following epilog decoding will work.  */\n\n  /* First decode:\n     -  pop reg                 [41 58-5f] or [58-5f].  */\n\n  while (1)\n    {\n      /* Read opcode. */\n      if (target_read_memory (pc, &op, 1) != 0)\n\treturn -1;\n\n      if (op >= 0x40 && op <= 0x4f)\n\t{\n\t  /* REX prefix.  */\n\t  rex = op;\n\n\t  /* Read opcode. */\n\t  if (target_read_memory (pc + 1, &op, 1) != 0)\n\t    return -1;\n\t}\n      else\n\trex = 0;\n\n      if (op >= 0x58 && op <= 0x5f)\n\t{\n\t  /* pop reg  */\n\t  gdb_byte reg = (op & 0x0f) | ((rex & 1) << 3);\n\n\t  cache->prev_reg_addr[amd64_windows_w2gdb_regnum[reg]] = cur_sp;\n\t  cur_sp += 8;\n\t  pc += rex ? 2 : 1;\n\t}\n      else\n\tbreak;\n\n      /* Allow the user to break this loop.  This shouldn't happen as the\n\t number of consecutive pop should be small.  */\n      QUIT;\n    }\n\n  /* Then decode the marker.  */\n\n  /* Read opcode.  */\n  if (target_read_memory (pc, &op, 1) != 0)\n    return -1;\n\n  switch (op)\n    {\n    case 0xc3:\n      /* Ret.  */\n      cache->prev_rip_addr = cur_sp;\n      cache->prev_sp = cur_sp + 8;\n      return 1;\n\n    case 0xeb:\n      {\n\t/* jmp rel8  */\n\tgdb_byte rel8;\n\tCORE_ADDR npc;\n\n\tif (target_read_memory (pc + 1, &rel8, 1) != 0)\n\t  return -1;\n\tnpc = pc + 2 + (signed char) rel8;\n\n\t/* If the jump is within the function, then this is not a marker,\n\t   otherwise this is a tail-call.  */\n\treturn !pc_in_range (npc, cache);\n      }\n\n    case 0xec:\n      {\n\t/* jmp rel32  */\n\tgdb_byte rel32[4];\n\tCORE_ADDR npc;\n\n\tif (target_read_memory (pc + 1, rel32, 4) != 0)\n\t  return -1;\n\tnpc = pc + 5 + extract_signed_integer (rel32, 4, byte_order);\n\n\t/* If the jump is within the function, then this is not a marker,\n\t   otherwise this is a tail-call.  */\n\treturn !pc_in_range (npc, cache);\n      }\n\n    case 0xc2:\n      {\n\t/* ret n  */\n\tgdb_byte imm16[2];\n\n\tif (target_read_memory (pc + 1, imm16, 2) != 0)\n\t  return -1;\n\tcache->prev_rip_addr = cur_sp;\n\tcache->prev_sp = cur_sp\n\t  + extract_unsigned_integer (imm16, 4, byte_order);\n\treturn 1;\n      }\n\n    case 0xf3:\n      {\n\t/* rep; ret  */\n\tgdb_byte op1;\n\n\tif (target_read_memory (pc + 2, &op1, 1) != 0)\n\t  return -1;\n\tif (op1 != 0xc3)\n\t  return 0;\n\n\tcache->prev_rip_addr = cur_sp;\n\tcache->prev_sp = cur_sp + 8;\n\treturn 1;\n      }\n\n    case 0x40:\n    case 0x41:\n    case 0x42:\n    case 0x43:\n    case 0x44:\n    case 0x45:\n    case 0x46:\n    case 0x47:\n    case 0x48:\n    case 0x49:\n    case 0x4a:\n    case 0x4b:\n    case 0x4c:\n    case 0x4d:\n    case 0x4e:\n    case 0x4f:\n      /* Got a REX prefix, read next byte.  */\n      rex = op;\n      if (target_read_memory (pc + 1, &op, 1) != 0)\n\treturn -1;\n\n      if (op == 0xff)\n\t{\n\t  /* rex jmp reg  */\n\t  gdb_byte op1;\n\n\t  if (target_read_memory (pc + 2, &op1, 1) != 0)\n\t    return -1;\n\t  return (op1 & 0xf8) == 0xe0;\n\t}\n      else\n\treturn 0;\n\n    default:\n      /* Not REX, so unknown.  */\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          435,
+          0
+        ],
+        [
+          611,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_frame_decode_epilogue",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "cache": "struct amd64_windows_frame_cache"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\namd64_windows_frame_decode_insns (struct frame_info *this_frame,\n\t\t\t\t  struct amd64_windows_frame_cache *cache,\n\t\t\t\t  CORE_ADDR unwind_info)\n{\n  CORE_ADDR save_addr = 0;\n  CORE_ADDR cur_sp = cache->sp;\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  int first = 1;\n\n  /* There are at least 3 possibilities to share an unwind info entry:\n     1. Two different runtime_function entries (in .pdata) can point to the\n\tsame unwind info entry.  There is no such indication while unwinding,\n\tso we don't really care about that case.  We suppose this scheme is\n\tused to save memory when the unwind entries are exactly the same.\n     2. Chained unwind_info entries, with no unwind codes (no prologue).\n\tThere is a major difference with the previous case: the pc range for\n\tthe function is different (in case 1, the pc range comes from the\n\truntime_function entry; in case 2, the pc range for the chained entry\n\tcomes from the first unwind entry).  Case 1 cannot be used instead as\n\tthe pc is not in the prologue.  This case is officially documented.\n\t(There might be unwind code in the first unwind entry to handle\n\tadditional unwinding).  GCC (at least until gcc 5.0) doesn't chain\n\tentries.\n     3. Undocumented unwind info redirection.  Hard to know the exact purpose,\n\tso it is considered as a memory optimization of case 2.\n  */\n\n  if (unwind_info & 1)\n    {\n      /* Unofficially documented unwind info redirection, when UNWIND_INFO\n\t address is odd (http://www.codemachine.com/article_x64deepdive.html).\n      */\n      struct external_pex64_runtime_function d;\n\n      if (target_read_memory (cache->image_base + (unwind_info & ~1),\n\t\t\t      (gdb_byte *) &d, sizeof (d)) != 0)\n\treturn;\n\n      cache->start_rva\n\t= extract_unsigned_integer (d.rva_BeginAddress, 4, byte_order);\n      cache->end_rva\n\t= extract_unsigned_integer (d.rva_EndAddress, 4, byte_order);\n      unwind_info\n\t= extract_unsigned_integer (d.rva_UnwindData, 4, byte_order);\n    }\n\n  while (1)\n    {\n      struct external_pex64_unwind_info ex_ui;\n      /* There are at most 256 16-bit unwind insns.  */\n      gdb_byte insns[2 * 256];\n      gdb_byte *p;\n      gdb_byte *end_insns;\n      unsigned char codes_count;\n      unsigned char frame_reg;\n      CORE_ADDR start;\n\n      /* Read and decode header.  */\n      if (target_read_memory (cache->image_base + unwind_info,\n\t\t\t      (gdb_byte *) &ex_ui, sizeof (ex_ui)) != 0)\n\treturn;\n\n      if (frame_debug)\n\tfprintf_unfiltered\n\t  (gdb_stdlog,\n\t   \"amd64_windows_frame_decodes_insn: \"\n\t   \"%s: ver: %02x, plgsz: %02x, cnt: %02x, frame: %02x\\n\",\n\t   paddress (gdbarch, unwind_info),\n\t   ex_ui.Version_Flags, ex_ui.SizeOfPrologue,\n\t   ex_ui.CountOfCodes, ex_ui.FrameRegisterOffset);\n\n      /* Check version.  */\n      if (PEX64_UWI_VERSION (ex_ui.Version_Flags) != 1\n\t  && PEX64_UWI_VERSION (ex_ui.Version_Flags) != 2)\n\treturn;\n\n      start = cache->image_base + cache->start_rva;\n      if (first\n\t  && !(cache->pc >= start && cache->pc < start + ex_ui.SizeOfPrologue))\n\t{\n\t  /* We want to detect if the PC points to an epilogue.  This needs\n\t     to be checked only once, and an epilogue can be anywhere but in\n\t     the prologue.  If so, the epilogue detection+decoding function is\n\t     sufficient.  Otherwise, the unwinder will consider that the PC\n\t     is in the body of the function and will need to decode unwind\n\t     info.  */\n\t  if (amd64_windows_frame_decode_epilogue (this_frame, cache) == 1)\n\t    return;\n\n\t  /* Not in an epilog.  Clear possible side effects.  */\n\t  memset (cache->prev_reg_addr, 0, sizeof (cache->prev_reg_addr));\n\t}\n\n      codes_count = ex_ui.CountOfCodes;\n      frame_reg = PEX64_UWI_FRAMEREG (ex_ui.FrameRegisterOffset);\n\n      if (frame_reg != 0)\n\t{\n\t  /* According to msdn:\n\t     If an FP reg is used, then any unwind code taking an offset must\n\t     only be used after the FP reg is established in the prolog.  */\n\t  gdb_byte buf[8];\n\t  int frreg = amd64_windows_w2gdb_regnum[frame_reg];\n\n\t  get_frame_register (this_frame, frreg, buf);\n\t  save_addr = extract_unsigned_integer (buf, 8, byte_order);\n\n\t  if (frame_debug)\n\t    fprintf_unfiltered (gdb_stdlog, \"   frame_reg=%s, val=%s\\n\",\n\t\t\t\tgdbarch_register_name (gdbarch, frreg),\n\t\t\t\tpaddress (gdbarch, save_addr));\n\t}\n\n      /* Read opcodes.  */\n      if (codes_count != 0\n\t  && target_read_memory (cache->image_base + unwind_info\n\t\t\t\t + sizeof (ex_ui),\n\t\t\t\t insns, codes_count * 2) != 0)\n\treturn;\n\n      end_insns = &insns[codes_count * 2];\n      p = insns;\n\n      /* Skip opcodes 6 of version 2.  This opcode is not documented.  */\n      if (PEX64_UWI_VERSION (ex_ui.Version_Flags) == 2)\n\t{\n\t  for (; p < end_insns; p += 2)\n\t    if (PEX64_UNWCODE_CODE (p[1]) != 6)\n\t      break;\n\t}\n\n      for (; p < end_insns; p += 2)\n\t{\n\t  int reg;\n\n\t  /* Virtually execute the operation if the pc is after the\n\t     corresponding instruction (that does matter in case of break\n\t     within the prologue).  Note that for chained info (!first), the\n\t     prologue has been fully executed.  */\n\t  if (cache->pc >= start + p[0] || cache->pc < start)\n\t    {\n\t      if (frame_debug)\n\t\tfprintf_unfiltered\n\t\t  (gdb_stdlog, \"   op #%u: off=0x%02x, insn=0x%02x\\n\",\n\t\t   (unsigned) (p - insns), p[0], p[1]);\n\n\t      /* If there is no frame registers defined, the current value of\n\t\t rsp is used instead.  */\n\t      if (frame_reg == 0)\n\t\tsave_addr = cur_sp;\n\n\t      reg = -1;\n\n\t      switch (PEX64_UNWCODE_CODE (p[1]))\n\t\t{\n\t\tcase UWOP_PUSH_NONVOL:\n\t\t  /* Push pre-decrements RSP.  */\n\t\t  reg = amd64_windows_w2gdb_regnum[PEX64_UNWCODE_INFO (p[1])];\n\t\t  cache->prev_reg_addr[reg] = cur_sp;\n\t\t  cur_sp += 8;\n\t\t  break;\n\t\tcase UWOP_ALLOC_LARGE:\n\t\t  if (PEX64_UNWCODE_INFO (p[1]) == 0)\n\t\t    cur_sp +=\n\t\t      8 * extract_unsigned_integer (p + 2, 2, byte_order);\n\t\t  else if (PEX64_UNWCODE_INFO (p[1]) == 1)\n\t\t    cur_sp += extract_unsigned_integer (p + 2, 4, byte_order);\n\t\t  else\n\t\t    return;\n\t\t  break;\n\t\tcase UWOP_ALLOC_SMALL:\n\t\t  cur_sp += 8 + 8 * PEX64_UNWCODE_INFO (p[1]);\n\t\t  break;\n\t\tcase UWOP_SET_FPREG:\n\t\t  cur_sp = save_addr\n\t\t    - PEX64_UWI_FRAMEOFF (ex_ui.FrameRegisterOffset) * 16;\n\t\t  break;\n\t\tcase UWOP_SAVE_NONVOL:\n\t\t  reg = amd64_windows_w2gdb_regnum[PEX64_UNWCODE_INFO (p[1])];\n\t\t  cache->prev_reg_addr[reg] = save_addr\n\t\t    + 8 * extract_unsigned_integer (p + 2, 2, byte_order);\n\t\t  break;\n\t\tcase UWOP_SAVE_NONVOL_FAR:\n\t\t  reg = amd64_windows_w2gdb_regnum[PEX64_UNWCODE_INFO (p[1])];\n\t\t  cache->prev_reg_addr[reg] = save_addr\n\t\t    + 8 * extract_unsigned_integer (p + 2, 4, byte_order);\n\t\t  break;\n\t\tcase UWOP_SAVE_XMM128:\n\t\t  cache->prev_xmm_addr[PEX64_UNWCODE_INFO (p[1])] =\n\t\t    save_addr\n\t\t    - 16 * extract_unsigned_integer (p + 2, 2, byte_order);\n\t\t  break;\n\t\tcase UWOP_SAVE_XMM128_FAR:\n\t\t  cache->prev_xmm_addr[PEX64_UNWCODE_INFO (p[1])] =\n\t\t    save_addr\n\t\t    - 16 * extract_unsigned_integer (p + 2, 4, byte_order);\n\t\t  break;\n\t\tcase UWOP_PUSH_MACHFRAME:\n\t\t  if (PEX64_UNWCODE_INFO (p[1]) == 0)\n\t\t    {\n\t\t      cache->prev_rip_addr = cur_sp + 0;\n\t\t      cache->prev_rsp_addr = cur_sp + 24;\n\t\t      cur_sp += 40;\n\t\t    }\n\t\t  else if (PEX64_UNWCODE_INFO (p[1]) == 1)\n\t\t    {\n\t\t      cache->prev_rip_addr = cur_sp + 8;\n\t\t      cache->prev_rsp_addr = cur_sp + 32;\n\t\t      cur_sp += 48;\n\t\t    }\n\t\t  else\n\t\t    return;\n\t\t  break;\n\t\tdefault:\n\t\t  return;\n\t\t}\n\n\t      /* Display address where the register was saved.  */\n\t      if (frame_debug && reg >= 0)\n\t\tfprintf_unfiltered\n\t\t  (gdb_stdlog, \"     [reg %s at %s]\\n\",\n\t\t   gdbarch_register_name (gdbarch, reg),\n\t\t   paddress (gdbarch, cache->prev_reg_addr[reg]));\n\t    }\n\n\t  /* Adjust with the length of the opcode.  */\n\t  switch (PEX64_UNWCODE_CODE (p[1]))\n\t    {\n\t    case UWOP_PUSH_NONVOL:\n\t    case UWOP_ALLOC_SMALL:\n\t    case UWOP_SET_FPREG:\n\t    case UWOP_PUSH_MACHFRAME:\n\t      break;\n\t    case UWOP_ALLOC_LARGE:\n\t      if (PEX64_UNWCODE_INFO (p[1]) == 0)\n\t\tp += 2;\n\t      else if (PEX64_UNWCODE_INFO (p[1]) == 1)\n\t\tp += 4;\n\t      else\n\t\treturn;\n\t      break;\n\t    case UWOP_SAVE_NONVOL:\n\t    case UWOP_SAVE_XMM128:\n\t      p += 2;\n\t      break;\n\t    case UWOP_SAVE_NONVOL_FAR:\n\t    case UWOP_SAVE_XMM128_FAR:\n\t      p += 4;\n\t      break;\n\t    default:\n\t      return;\n\t    }\n\t}\n      if (PEX64_UWI_FLAGS (ex_ui.Version_Flags) != UNW_FLAG_CHAININFO)\n\t{\n\t  /* End of unwind info.  */\n\t  break;\n\t}\n      else\n\t{\n\t  /* Read the chained unwind info.  */\n\t  struct external_pex64_runtime_function d;\n\t  CORE_ADDR chain_vma;\n\n\t  /* Not anymore the first entry.  */\n\t  first = 0;\n\n\t  /* Stay aligned on word boundary.  */\n\t  chain_vma = cache->image_base + unwind_info\n\t    + sizeof (ex_ui) + ((codes_count + 1) & ~1) * 2;\n\n\t  if (target_read_memory (chain_vma, (gdb_byte *) &d, sizeof (d)) != 0)\n\t    return;\n\n\t  /* Decode begin/end.  This may be different from .pdata index, as\n\t     an unwind info may be shared by several functions (in particular\n\t     if many functions have the same prolog and handler.  */\n\t  cache->start_rva =\n\t    extract_unsigned_integer (d.rva_BeginAddress, 4, byte_order);\n\t  cache->end_rva =\n\t    extract_unsigned_integer (d.rva_EndAddress, 4, byte_order);\n\t  unwind_info =\n\t    extract_unsigned_integer (d.rva_UnwindData, 4, byte_order);\n\n\t  if (frame_debug)\n\t    fprintf_unfiltered\n\t      (gdb_stdlog,\n\t       \"amd64_windows_frame_decodes_insn (next in chain):\"\n\t       \" unwind_data=%s, start_rva=%s, end_rva=%s\\n\",\n\t       paddress (gdbarch, unwind_info),\n\t       paddress (gdbarch, cache->start_rva),\n\t       paddress (gdbarch, cache->end_rva));\n\t}\n\n      /* Allow the user to break this loop.  */\n      QUIT;\n    }\n  /* PC is saved by the call.  */\n  if (cache->prev_rip_addr == 0)\n    cache->prev_rip_addr = cur_sp;\n  cache->prev_sp = cur_sp + 8;\n\n  if (frame_debug)\n    fprintf_unfiltered (gdb_stdlog, \"   prev_sp: %s, prev_pc @%s\\n\",\n\t\t\tpaddress (gdbarch, cache->prev_sp),\n\t\t\tpaddress (gdbarch, cache->prev_rip_addr));\n}",
+      "fn_code_pos": [
+        [
+          615,
+          0
+        ],
+        [
+          923,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_frame_decode_insns",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "cache": "struct amd64_windows_frame_cache",
+          "unwind_info": "CORE_ADDR"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\namd64_windows_find_unwind_info (struct gdbarch *gdbarch, CORE_ADDR pc,\n\t\t\t\tCORE_ADDR *unwind_info,\n\t\t\t\tCORE_ADDR *image_base,\n\t\t\t\tCORE_ADDR *start_rva,\n\t\t\t\tCORE_ADDR *end_rva)\n{\n  struct obj_section *sec;\n  pe_data_type *pe;\n  IMAGE_DATA_DIRECTORY *dir;\n  struct objfile *objfile;\n  unsigned long lo, hi;\n  CORE_ADDR base;\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n\n  /* Get the corresponding exception directory.  */\n  sec = find_pc_section (pc);\n  if (sec == NULL)\n    return -1;\n  objfile = sec->objfile;\n  pe = pe_data (sec->objfile->obfd);\n  dir = &pe->pe_opthdr.DataDirectory[PE_EXCEPTION_TABLE];\n\n  base = pe->pe_opthdr.ImageBase\n    + ANOFFSET (objfile->section_offsets, SECT_OFF_TEXT (objfile));\n  *image_base = base;\n\n  /* Find the entry.\n\n     Note: This does not handle dynamically added entries (for JIT\n     engines).  For this, we would need to ask the kernel directly,\n     which means getting some info from the native layer.  For the\n     rest of the code, however, it's probably faster to search\n     the entry ourselves.  */\n  lo = 0;\n  hi = dir->Size / sizeof (struct external_pex64_runtime_function);\n  *unwind_info = 0;\n  while (lo <= hi)\n    {\n      unsigned long mid = lo + (hi - lo) / 2;\n      struct external_pex64_runtime_function d;\n      CORE_ADDR sa, ea;\n\n      if (target_read_memory (base + dir->VirtualAddress + mid * sizeof (d),\n\t\t\t      (gdb_byte *) &d, sizeof (d)) != 0)\n\treturn -1;\n\n      sa = extract_unsigned_integer (d.rva_BeginAddress, 4, byte_order);\n      ea = extract_unsigned_integer (d.rva_EndAddress, 4, byte_order);\n      if (pc < base + sa)\n\thi = mid - 1;\n      else if (pc >= base + ea)\n\tlo = mid + 1;\n      else if (pc >= base + sa && pc < base + ea)\n\t{\n\t  /* Got it.  */\n\t  *start_rva = sa;\n\t  *end_rva = ea;\n\t  *unwind_info =\n\t    extract_unsigned_integer (d.rva_UnwindData, 4, byte_order);\n\t  break;\n\t}\n      else\n\tbreak;\n    }\n\n  if (frame_debug)\n    fprintf_unfiltered\n      (gdb_stdlog,\n       \"amd64_windows_find_unwind_data:  image_base=%s, unwind_data=%s\\n\",\n       paddress (gdbarch, base), paddress (gdbarch, *unwind_info));\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          931,
+          0
+        ],
+        [
+          1004,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_find_unwind_info",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "pc": "CORE_ADDR",
+          "unwind_info": "CORE_ADDR",
+          "image_base": "CORE_ADDR",
+          "start_rva": "CORE_ADDR",
+          "end_rva": "CORE_ADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static struct amd64_windows_frame_cache *\namd64_windows_frame_cache (struct frame_info *this_frame, void **this_cache)\n{\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n  struct amd64_windows_frame_cache *cache;\n  gdb_byte buf[8];\n  CORE_ADDR pc;\n  CORE_ADDR unwind_info = 0;\n\n  if (*this_cache)\n    return (struct amd64_windows_frame_cache *) *this_cache;\n\n  cache = FRAME_OBSTACK_ZALLOC (struct amd64_windows_frame_cache);\n  *this_cache = cache;\n\n  /* Get current PC and SP.  */\n  pc = get_frame_pc (this_frame);\n  get_frame_register (this_frame, AMD64_RSP_REGNUM, buf);\n  cache->sp = extract_unsigned_integer (buf, 8, byte_order);\n  cache->pc = pc;\n\n  if (amd64_windows_find_unwind_info (gdbarch, pc, &unwind_info,\n\t\t\t\t      &cache->image_base,\n\t\t\t\t      &cache->start_rva,\n\t\t\t\t      &cache->end_rva))\n    return cache;\n\n  if (unwind_info == 0)\n    {\n      /* Assume a leaf function.  */\n      cache->prev_sp = cache->sp + 8;\n      cache->prev_rip_addr = cache->sp;\n    }\n  else\n    {\n      /* Decode unwind insns to compute saved addresses.  */\n      amd64_windows_frame_decode_insns (this_frame, cache, unwind_info);\n    }\n  return cache;\n}",
+      "fn_code_pos": [
+        [
+          1009,
+          0
+        ],
+        [
+          1049,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_frame_cache",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static struct value *\namd64_windows_frame_prev_register (struct frame_info *this_frame,\n\t\t\t\t   void **this_cache, int regnum)\n{\n  struct gdbarch *gdbarch = get_frame_arch (this_frame);\n  struct amd64_windows_frame_cache *cache =\n    amd64_windows_frame_cache (this_frame, this_cache);\n  CORE_ADDR prev;\n\n  if (frame_debug)\n    fprintf_unfiltered (gdb_stdlog,\n\t\t\t\"amd64_windows_frame_prev_register %s for sp=%s\\n\",\n\t\t\tgdbarch_register_name (gdbarch, regnum),\n\t\t\tpaddress (gdbarch, cache->prev_sp));\n\n  if (regnum >= AMD64_XMM0_REGNUM && regnum <= AMD64_XMM0_REGNUM + 15)\n      prev = cache->prev_xmm_addr[regnum - AMD64_XMM0_REGNUM];\n  else if (regnum == AMD64_RSP_REGNUM)\n    {\n      prev = cache->prev_rsp_addr;\n      if (prev == 0)\n\treturn frame_unwind_got_constant (this_frame, regnum, cache->prev_sp);\n    }\n  else if (regnum >= AMD64_RAX_REGNUM && regnum <= AMD64_R15_REGNUM)\n    prev = cache->prev_reg_addr[regnum - AMD64_RAX_REGNUM];\n  else if (regnum == AMD64_RIP_REGNUM)\n    prev = cache->prev_rip_addr;\n  else\n    prev = 0;\n\n  if (prev && frame_debug)\n    fprintf_unfiltered (gdb_stdlog, \"  -> at %s\\n\", paddress (gdbarch, prev));\n\n  if (prev)\n    {\n      /* Register was saved.  */\n      return frame_unwind_got_memory (this_frame, regnum, prev);\n    }\n  else\n    {\n      /* Register is either volatile or not modified.  */\n      return frame_unwind_got_register (this_frame, regnum, regnum);\n    }\n}",
+      "fn_code_pos": [
+        [
+          1054,
+          0
+        ],
+        [
+          1097,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\namd64_windows_frame_this_id (struct frame_info *this_frame, void **this_cache,\n\t\t   struct frame_id *this_id)\n{\n  struct amd64_windows_frame_cache *cache =\n    amd64_windows_frame_cache (this_frame, this_cache);\n\n  *this_id = frame_id_build (cache->prev_sp,\n\t\t\t     cache->image_base + cache->start_rva);\n}",
+      "fn_code_pos": [
+        [
+          1102,
+          0
+        ],
+        [
+          1111,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_frame_this_id",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "this_id": "struct frame_id"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\namd64_windows_skip_prologue (struct gdbarch *gdbarch, CORE_ADDR pc)\n{\n  CORE_ADDR func_addr;\n  CORE_ADDR unwind_info = 0;\n  CORE_ADDR image_base, start_rva, end_rva;\n  struct external_pex64_unwind_info ex_ui;\n\n  /* Use prologue size from unwind info.  */\n  if (amd64_windows_find_unwind_info (gdbarch, pc, &unwind_info,\n\t\t\t\t      &image_base, &start_rva, &end_rva) == 0)\n    {\n      if (unwind_info == 0)\n\t{\n\t  /* Leaf function.  */\n\t  return pc;\n\t}\n      else if (target_read_memory (image_base + unwind_info,\n\t\t\t\t   (gdb_byte *) &ex_ui, sizeof (ex_ui)) == 0\n\t       && PEX64_UWI_VERSION (ex_ui.Version_Flags) == 1)\n\treturn std::max (pc, image_base + start_rva + ex_ui.SizeOfPrologue);\n    }\n\n  /* See if we can determine the end of the prologue via the symbol\n     table.  If so, then return either the PC, or the PC after\n     the prologue, whichever is greater.  */\n  if (find_pc_partial_function (pc, NULL, &func_addr, NULL))\n    {\n      CORE_ADDR post_prologue_pc\n\t= skip_prologue_using_sal (gdbarch, func_addr);\n\n      if (post_prologue_pc != 0)\n\treturn std::max (pc, post_prologue_pc);\n    }\n\n  return pc;\n}",
+      "fn_code_pos": [
+        [
+          1127,
+          0
+        ],
+        [
+          1163,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_skip_prologue",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "pc": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static CORE_ADDR\namd64_windows_skip_trampoline_code (struct frame_info *frame, CORE_ADDR pc)\n{\n  CORE_ADDR destination = 0;\n  struct gdbarch *gdbarch = get_frame_arch (frame);\n  enum bfd_endian byte_order = gdbarch_byte_order (gdbarch);\n\n  /* Check for jmp *<offset>(%rip) (jump near, absolute indirect (/4)).  */\n  if (pc && read_memory_unsigned_integer (pc, 2, byte_order) == 0x25ff)\n    {\n      /* Get opcode offset and see if we can find a reference in our data.  */\n      ULONGEST offset\n\t= read_memory_unsigned_integer (pc + 2, 4, byte_order);\n\n      /* Get address of function pointer at end of pc.  */\n      CORE_ADDR indirect_addr = pc + offset + 6;\n\n      struct minimal_symbol *indsym\n\t= (indirect_addr\n\t   ? lookup_minimal_symbol_by_pc (indirect_addr).minsym\n\t   : NULL);\n      const char *symname = indsym ? MSYMBOL_LINKAGE_NAME (indsym) : NULL;\n\n      if (symname)\n\t{\n\t  if (startswith (symname, \"__imp_\")\n\t      || startswith (symname, \"_imp_\"))\n\t    destination\n\t      = read_memory_unsigned_integer (indirect_addr, 8, byte_order);\n\t}\n    }\n\n  return destination;\n}",
+      "fn_code_pos": [
+        [
+          1167,
+          0
+        ],
+        [
+          1200,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_skip_trampoline_code",
+        "parameters": {
+          "frame": "struct frame_info",
+          "pc": "CORE_ADDR"
+        },
+        "return_type": "CORE_ADDR"
+      }
+    },
+    {
+      "fn_code": "static const char *\namd64_windows_auto_wide_charset (void)\n{\n  return \"UTF-16\";\n}",
+      "fn_code_pos": [
+        [
+          1204,
+          0
+        ],
+        [
+          1208,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_auto_wide_charset",
+        "parameters": {},
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\namd64_windows_init_abi (struct gdbarch_info info, struct gdbarch *gdbarch)\n{\n  /* The dwarf2 unwinder (appended very early by i386_gdbarch_init) is\n     preferred over the SEH one.  The reasons are:\n     - binaries without SEH but with dwarf2 debug info are correcly handled\n       (although they aren't ABI compliant, gcc before 4.7 didn't emit SEH\n       info).\n     - dwarf3 DW_OP_call_frame_cfa is correctly handled (it can only be\n       handled if the dwarf2 unwinder is used).\n\n    The call to amd64_init_abi appends default unwinders, that aren't\n    compatible with the SEH one.\n  */\n  frame_unwind_append_unwinder (gdbarch, &amd64_windows_frame_unwind);\n\n  amd64_init_abi (info, gdbarch);\n\n  windows_init_abi (info, gdbarch);\n\n  /* On Windows, \"long\"s are only 32bit.  */\n  set_gdbarch_long_bit (gdbarch, 32);\n\n  /* Function calls.  */\n  set_gdbarch_push_dummy_call (gdbarch, amd64_windows_push_dummy_call);\n  set_gdbarch_return_value (gdbarch, amd64_windows_return_value);\n  set_gdbarch_skip_main_prologue (gdbarch, amd64_skip_main_prologue);\n  set_gdbarch_skip_trampoline_code (gdbarch,\n\t\t\t\t    amd64_windows_skip_trampoline_code);\n\n  set_gdbarch_skip_prologue (gdbarch, amd64_windows_skip_prologue);\n\n  set_gdbarch_auto_wide_charset (gdbarch, amd64_windows_auto_wide_charset);\n}",
+      "fn_code_pos": [
+        [
+          1210,
+          0
+        ],
+        [
+          1243,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_init_abi",
+        "parameters": {
+          "info": "struct gdbarch_info",
+          "gdbarch": "struct gdbarch"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_amd64_windows_tdep (void)\n{\n  gdbarch_register_osabi (bfd_arch_i386, bfd_mach_x86_64, GDB_OSABI_CYGWIN,\n                          amd64_windows_init_abi);\n}",
+      "fn_code_pos": [
+        [
+          1248,
+          0
+        ],
+        [
+          1253,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_amd64_windows_tdep",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "amd64_windows_frame_cache (struct frame_info *this_frame, void **this_cache)",
+      "fn_dec_pos": [
+        [
+          1010,
+          0
+        ],
+        [
+          1010,
+          76
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_frame_cache",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "amd64_windows_frame_prev_register (struct frame_info *this_frame,\n\t\t\t\t   void **this_cache, int regnum)",
+      "fn_dec_pos": [
+        [
+          1055,
+          0
+        ],
+        [
+          1056,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_frame_prev_register",
+        "parameters": {
+          "this_frame": "struct frame_info",
+          "this_cache": "void",
+          "regnum": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "amd64_windows_auto_wide_charset (void)",
+      "fn_dec_pos": [
+        [
+          1205,
+          0
+        ],
+        [
+          1205,
+          38
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "amd64_windows_auto_wide_charset",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct amd64_windows_frame_cache\n{\n  /* ImageBase for the module.  */\n  CORE_ADDR image_base;\n\n  /* Function start and end rva.  */\n  CORE_ADDR start_rva;\n  CORE_ADDR end_rva;\n\n  /* Next instruction to be executed.  */\n  CORE_ADDR pc;\n\n  /* Current sp.  */\n  CORE_ADDR sp;\n\n  /* Address of saved integer and xmm registers.  */\n  CORE_ADDR prev_reg_addr[16];\n  CORE_ADDR prev_xmm_addr[16];\n\n  /* These two next fields are set only for machine info frames.  */\n\n  /* Likewise for RIP.  */\n  CORE_ADDR prev_rip_addr;\n\n  /* Likewise for RSP.  */\n  CORE_ADDR prev_rsp_addr;\n\n  /* Address of the previous frame.  */\n  CORE_ADDR prev_sp;\n}",
+      {
+        "image_base": "CORE_ADDR",
+        "start_rva": "CORE_ADDR",
+        "end_rva": "CORE_ADDR",
+        "pc": "CORE_ADDR",
+        "sp": "CORE_ADDR",
+        "prev_reg_addr[16]": "CORE_ADDR",
+        "prev_xmm_addr[16]": "CORE_ADDR",
+        "prev_rip_addr": "CORE_ADDR",
+        "prev_rsp_addr": "CORE_ADDR",
+        "prev_sp": "CORE_ADDR"
+      },
+      "amd64_windows_frame_cache",
+      [
+        368,
+        0
+      ],
+      [
+        397,
+        1
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        47,
+        42
+      ],
+      [
+        47,
+        53
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        75,
+        38
+      ],
+      [
+        75,
+        49
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        86,
+        33
+      ],
+      [
+        86,
+        44
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        105,
+        45
+      ],
+      [
+        105,
+        57
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        113,
+        1
+      ],
+      [
+        113,
+        12
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        136,
+        32
+      ],
+      [
+        136,
+        47
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        137,
+        4
+      ],
+      [
+        137,
+        16
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        139,
+        2
+      ],
+      [
+        139,
+        13
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        156,
+        30
+      ],
+      [
+        156,
+        45
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        157,
+        9
+      ],
+      [
+        157,
+        21
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        162,
+        2
+      ],
+      [
+        162,
+        14
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        173,
+        4
+      ],
+      [
+        173,
+        16
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        175,
+        41
+      ],
+      [
+        175,
+        53
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        186,
+        6
+      ],
+      [
+        186,
+        17
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        229,
+        6
+      ],
+      [
+        229,
+        17
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        243,
+        3
+      ],
+      [
+        243,
+        17
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        243,
+        28
+      ],
+      [
+        243,
+        40
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        244,
+        3
+      ],
+      [
+        244,
+        18
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        245,
+        14
+      ],
+      [
+        245,
+        26
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        288,
+        28
+      ],
+      [
+        288,
+        42
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        288,
+        53
+      ],
+      [
+        288,
+        65
+      ]
+    ],
+    [
+      "struct type",
+      {},
+      "",
+      [
+        289,
+        7
+      ],
+      [
+        289,
+        18
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        289,
+        26
+      ],
+      [
+        289,
+        41
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        341,
+        26
+      ],
+      [
+        341,
+        40
+      ]
+    ],
+    [
+      "struct bound_minimal_symbol",
+      {},
+      "",
+      [
+        353,
+        4
+      ],
+      [
+        353,
+        31
+      ]
+    ],
+    [
+      "struct amd64_windows_frame_cache\n{\n  /* ImageBase for the module.  */\n  CORE_ADDR image_base;\n\n  /* Function start and end rva.  */\n  CORE_ADDR start_rva;\n  CORE_ADDR end_rva;\n\n  /* Next instruction to be executed.  */\n  CORE_ADDR pc;\n\n  /* Current sp.  */\n  CORE_ADDR sp;\n\n  /* Address of saved integer and xmm registers.  */\n  CORE_ADDR prev_reg_addr[16];\n  CORE_ADDR prev_xmm_addr[16];\n\n  /* These two next fields are set only for machine info frames.  */\n\n  /* Likewise for RIP.  */\n  CORE_ADDR prev_rip_addr;\n\n  /* Likewise for RSP.  */\n  CORE_ADDR prev_rsp_addr;\n\n  /* Address of the previous frame.  */\n  CORE_ADDR prev_sp;\n}",
+      {
+        "image_base": "CORE_ADDR",
+        "start_rva": "CORE_ADDR",
+        "end_rva": "CORE_ADDR",
+        "pc": "CORE_ADDR",
+        "sp": "CORE_ADDR",
+        "prev_reg_addr[16]": "CORE_ADDR",
+        "prev_xmm_addr[16]": "CORE_ADDR",
+        "prev_rip_addr": "CORE_ADDR",
+        "prev_rsp_addr": "CORE_ADDR",
+        "prev_sp": "CORE_ADDR"
+      },
+      "amd64_windows_frame_cache",
+      [
+        368,
+        0
+      ],
+      [
+        397,
+        1
+      ]
+    ],
+    [
+      "struct amd64_windows_frame_cache",
+      {},
+      "",
+      [
+        424,
+        33
+      ],
+      [
+        424,
+        65
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        436,
+        37
+      ],
+      [
+        436,
+        54
+      ]
+    ],
+    [
+      "struct amd64_windows_frame_cache",
+      {},
+      "",
+      [
+        437,
+        9
+      ],
+      [
+        437,
+        41
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        455,
+        2
+      ],
+      [
+        455,
+        16
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        616,
+        34
+      ],
+      [
+        616,
+        51
+      ]
+    ],
+    [
+      "struct amd64_windows_frame_cache",
+      {},
+      "",
+      [
+        617,
+        6
+      ],
+      [
+        617,
+        38
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        622,
+        2
+      ],
+      [
+        622,
+        16
+      ]
+    ],
+    [
+      "struct external_pex64_runtime_function",
+      {},
+      "",
+      [
+        649,
+        6
+      ],
+      [
+        649,
+        44
+      ]
+    ],
+    [
+      "struct external_pex64_unwind_info",
+      {},
+      "",
+      [
+        665,
+        6
+      ],
+      [
+        665,
+        39
+      ]
+    ],
+    [
+      "struct external_pex64_runtime_function",
+      {},
+      "",
+      [
+        878,
+        3
+      ],
+      [
+        878,
+        41
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        932,
+        32
+      ],
+      [
+        932,
+        46
+      ]
+    ],
+    [
+      "struct obj_section",
+      {},
+      "",
+      [
+        938,
+        2
+      ],
+      [
+        938,
+        20
+      ]
+    ],
+    [
+      "struct objfile",
+      {},
+      "",
+      [
+        941,
+        2
+      ],
+      [
+        941,
+        16
+      ]
+    ],
+    [
+      "struct external_pex64_runtime_function",
+      {},
+      "",
+      [
+        966,
+        27
+      ],
+      [
+        966,
+        65
+      ]
+    ],
+    [
+      "struct external_pex64_runtime_function",
+      {},
+      "",
+      [
+        971,
+        6
+      ],
+      [
+        971,
+        44
+      ]
+    ],
+    [
+      "struct amd64_windows_frame_cache",
+      {},
+      "",
+      [
+        1009,
+        7
+      ],
+      [
+        1009,
+        39
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1010,
+        27
+      ],
+      [
+        1010,
+        44
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1012,
+        2
+      ],
+      [
+        1012,
+        16
+      ]
+    ],
+    [
+      "struct amd64_windows_frame_cache",
+      {},
+      "",
+      [
+        1014,
+        2
+      ],
+      [
+        1014,
+        34
+      ]
+    ],
+    [
+      "struct amd64_windows_frame_cache",
+      {},
+      "",
+      [
+        1020,
+        12
+      ],
+      [
+        1020,
+        44
+      ]
+    ],
+    [
+      "struct value",
+      {},
+      "",
+      [
+        1054,
+        7
+      ],
+      [
+        1054,
+        19
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1055,
+        35
+      ],
+      [
+        1055,
+        52
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1058,
+        2
+      ],
+      [
+        1058,
+        16
+      ]
+    ],
+    [
+      "struct amd64_windows_frame_cache",
+      {},
+      "",
+      [
+        1059,
+        2
+      ],
+      [
+        1059,
+        34
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1103,
+        29
+      ],
+      [
+        1103,
+        46
+      ]
+    ],
+    [
+      "struct frame_id",
+      {},
+      "",
+      [
+        1104,
+        5
+      ],
+      [
+        1104,
+        20
+      ]
+    ],
+    [
+      "struct amd64_windows_frame_cache",
+      {},
+      "",
+      [
+        1106,
+        2
+      ],
+      [
+        1106,
+        34
+      ]
+    ],
+    [
+      "struct frame_unwind",
+      {},
+      "",
+      [
+        1115,
+        13
+      ],
+      [
+        1115,
+        32
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1128,
+        29
+      ],
+      [
+        1128,
+        43
+      ]
+    ],
+    [
+      "struct external_pex64_unwind_info",
+      {},
+      "",
+      [
+        1133,
+        2
+      ],
+      [
+        1133,
+        35
+      ]
+    ],
+    [
+      "struct frame_info",
+      {},
+      "",
+      [
+        1168,
+        36
+      ],
+      [
+        1168,
+        53
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1171,
+        2
+      ],
+      [
+        1171,
+        16
+      ]
+    ],
+    [
+      "struct minimal_symbol",
+      {},
+      "",
+      [
+        1184,
+        6
+      ],
+      [
+        1184,
+        27
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        1211,
+        24
+      ],
+      [
+        1211,
+        43
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        1211,
+        50
+      ],
+      [
+        1211,
+        64
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        17,
+        0
+      ],
+      [
+        18,
+        0
+      ]
+    ],
+    [
+      "#include \"osabi.h\"\n",
+      [
+        18,
+        0
+      ],
+      [
+        19,
+        0
+      ]
+    ],
+    [
+      "#include \"amd64-tdep.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbtypes.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"windows-tdep.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"frame.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"objfiles.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"frame-unwind.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"coff/internal.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"coff/i386.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"coff/pe.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"libcoff.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"value.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <algorithm>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        248,
+        2
+      ],
+      [
+        248,
+        17
+      ]
+    ],
+    [
+      "enum return_value_convention",
+      {},
+      "",
+      [
+        287,
+        7
+      ],
+      [
+        287,
+        35
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        343,
+        2
+      ],
+      [
+        343,
+        17
+      ]
+    ],
+    [
+      "enum amd64_regnum",
+      {},
+      "",
+      [
+        400,
+        13
+      ],
+      [
+        400,
+        30
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        456,
+        2
+      ],
+      [
+        456,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        623,
+        2
+      ],
+      [
+        623,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        944,
+        2
+      ],
+      [
+        944,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        1013,
+        2
+      ],
+      [
+        1013,
+        17
+      ]
+    ],
+    [
+      "enum bfd_endian",
+      {},
+      "",
+      [
+        1172,
+        2
+      ],
+      [
+        1172,
+        17
+      ]
+    ]
+  ]
+}

@@ -1,0 +1,457 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nfp_raise (int mask)\n{\n  regs.r_fpsw |= mask;\n  if (mask != FPSWBITS_CE)\n    {\n      if (regs.r_fpsw & (mask << FPSW_CESH))\n\tregs.r_fpsw |= (mask << FPSW_CFSH);\n      if (regs.r_fpsw & FPSWBITS_FMASK)\n\tregs.r_fpsw |= FPSWBITS_FSUM;\n      else\n\tregs.r_fpsw &= ~FPSWBITS_FSUM;\n    }\n}",
+      "fn_code_pos": [
+        [
+          61,
+          0
+        ],
+        [
+          74,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fp_raise",
+        "parameters": {
+          "mask": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfp_explode (fp_t f, FP_Parts *p)\n{\n  int exp, mant, sign;\n\n  exp = ((f & 0x7f800000UL) >> 23);\n  mant = f & 0x007fffffUL;\n  sign = f & 0x80000000UL;\n  /*printf(\"explode: %08x %x %2x %6x\\n\", f, sign, exp, mant);*/\n\n  p->sign = sign ? -1 : 1;\n  p->exp = exp - EXP_BIAS;\n  p->orig_value = f;\n  p->mant = mant | 0x00800000UL;\n\n  if (p->exp == EXP_ZERO)\n    {\n      if (regs.r_fpsw & FPSWBITS_DN)\n\tmant = 0;\n      if (mant)\n\tp->type = FP_DENORMAL;\n      else\n\t{\n\t  p->mant = 0;\n\t  p->type = sign ? FP_NZERO : FP_PZERO;\n\t}\n    }\n  else if (p->exp == EXP_INF)\n    {\n      if (mant == 0)\n\tp->type = sign ? FP_NINFINITY : FP_PINFINITY;\n      else if (mant & 0x00400000UL)\n\tp->type = FP_QNAN;\n      else\n\tp->type = FP_SNAN;\n    }\n  else\n    p->type = FP_NORMAL;\n}",
+      "fn_code_pos": [
+        [
+          109,
+          0
+        ],
+        [
+          147,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fp_explode",
+        "parameters": {
+          "f": "fp_t",
+          "p": "FP_Parts"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static fp_t\nfp_implode (FP_Parts *p)\n{\n  int exp, mant;\n\n  exp = p->exp + EXP_BIAS;\n  mant = p->mant;\n  /*printf(\"implode: exp %d mant 0x%x\\n\", exp, mant);*/\n  if (p->type == FP_NORMAL)\n    {\n      while (mant\n\t     && exp > 0\n\t     && mant < 0x00800000UL)\n\t{\n\t  mant <<= 1;\n\t  exp --;\n\t}\n      while (mant > 0x00ffffffUL)\n\t{\n\t  mant >>= 1;\n\t  exp ++;\n\t}\n      if (exp < 0)\n\t{\n\t  /* underflow */\n\t  exp = 0;\n\t  mant = 0;\n\t  FP_RAISE (E);\n\t}\n      if (exp >= 255)\n\t{\n\t  /* overflow */\n\t  exp = 255;\n\t  mant = 0;\n\t  FP_RAISE (O);\n\t}\n    }\n  mant &= 0x007fffffUL;\n  exp &= 0xff;\n  mant |= exp << 23;\n  if (p->sign < 0)\n    mant |= 0x80000000UL;\n\n  return mant;\n}",
+      "fn_code_pos": [
+        [
+          149,
+          0
+        ],
+        [
+          193,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fp_implode",
+        "parameters": {
+          "p": "FP_Parts"
+        },
+        "return_type": "fp_t"
+      }
+    },
+    {
+      "fn_code": "static double\nfp_to_double (FP_Parts *p)\n{\n  U_d_ll u;\n\n  if (!checked_format)\n    {\n      u.d = 1.5;\n      if (u.ll != 0x3ff8000000000000ULL)\n\tabort ();\n      u.d = -225;\n      if (u.ll != 0xc06c200000000000ULL)\n\tabort ();\n      u.d = 10.1;\n      if (u.ll != 0x4024333333333333ULL)\n\tabort ();\n      checked_format = 1;\n    }\n\n  u.ll = 0;\n  if (p->sign < 0)\n    u.ll |= (1ULL << 63);\n  /* Make sure a zero encoding stays a zero.  */\n  if (p->exp != -EXP_BIAS)\n    u.ll |= ((unsigned long long)p->exp + 1023ULL) << 52;\n  u.ll |= (unsigned long long) (p->mant & 0x007fffffUL) << (52 - 23);\n  return u.d;\n}",
+      "fn_code_pos": [
+        [
+          206,
+          0
+        ],
+        [
+          233,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fp_to_double",
+        "parameters": {
+          "p": "FP_Parts"
+        },
+        "return_type": "double"
+      }
+    },
+    {
+      "fn_code": "static void\ndouble_to_fp (double d, FP_Parts *p)\n{\n  int exp;\n  U_d_ll u;\n  int sign;\n\n  u.d = d;\n\n  sign = (u.ll & 0x8000000000000000ULL) ? 1 : 0;\n  exp = u.ll >> 52;\n  exp = (exp & 0x7ff);\n\n  if (exp == 0)\n    {\n      /* A generated denormal should show up as an underflow, not\n\t here.  */\n      if (sign)\n\tfp_explode (MINUS_ZERO, p);\n      else\n\tfp_explode (PLUS_ZERO, p);\n      return;\n    }\n\n  exp = exp - 1023;\n  if ((exp + EXP_BIAS) > 254)\n    {\n      FP_RAISE (O);\n      switch (regs.r_fpsw & FPSWBITS_RM)\n\t{\n\tcase FPRM_NEAREST:\n\t  if (sign)\n\t    fp_explode (MINUS_INF, p);\n\t  else\n\t    fp_explode (PLUS_INF, p);\n\t  break;\n\tcase FPRM_ZERO:\n\t  if (sign)\n\t    fp_explode (MINUS_MAX, p);\n\t  else\n\t    fp_explode (PLUS_MAX, p);\n\t  break;\n\tcase FPRM_PINF:\n\t  if (sign)\n\t    fp_explode (MINUS_MAX, p);\n\t  else\n\t    fp_explode (PLUS_INF, p);\n\t  break;\n\tcase FPRM_NINF:\n\t  if (sign)\n\t    fp_explode (MINUS_INF, p);\n\t  else\n\t    fp_explode (PLUS_MAX, p);\n\t  break;\n\t}\n      return;\n    }\n  if ((exp + EXP_BIAS) < 1)\n    {\n      if (sign)\n\tfp_explode (MINUS_ZERO, p);\n      else\n\tfp_explode (PLUS_ZERO, p);\n      FP_RAISE (U);\n    }\n\n  p->sign = sign ? -1 : 1;\n  p->exp = exp;\n  p->mant = u.ll >> (52-23) & 0x007fffffUL;\n  p->mant |= 0x00800000UL;\n  p->type = FP_NORMAL;\n\n  if (u.ll & 0x1fffffffULL)\n    {\n      switch (regs.r_fpsw & FPSWBITS_RM)\n\t{\n\tcase FPRM_NEAREST:\n\t  if (u.ll & 0x10000000ULL)\n\t    p->mant ++;\n\t  break;\n\tcase FPRM_ZERO:\n\t  break;\n\tcase FPRM_PINF:\n\t  if (sign == 1)\n\t    p->mant ++;\n\t  break;\n\tcase FPRM_NINF:\n\t  if (sign == -1)\n\t    p->mant ++;\n\t  break;\n\t}\n      FP_RAISE (X);\n    }\n\n}",
+      "fn_code_pos": [
+        [
+          235,
+          0
+        ],
+        [
+          329,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "double_to_fp",
+        "parameters": {
+          "d": "double",
+          "p": "FP_Parts"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\ncheck_exceptions (FP_Parts *a, FP_Parts *b, fp_t *c,\n\t\t  FP_ExceptionCases ex_tab[5][5], \n\t\t  FP_ExceptionCases *case_ret)\n{\n  FP_ExceptionCases fpec;\n\n  if (a->type == FP_SNAN\n      || b->type == FP_SNAN)\n    fpec = eIn;\n  else if (a->type == FP_QNAN\n\t   || b->type == FP_QNAN)\n    fpec = eQN;\n  else if (a->type == FP_DENORMAL\n\t   || b->type == FP_DENORMAL)\n    fpec = eUn;\n  else\n    fpec = ex_tab[(int)(a->type)][(int)(b->type)];\n\n  /*printf(\"%s %s -> %s\\n\", fpt_names[(int)(a->type)], fpt_names[(int)(b->type)], ex_names[(int)(fpec)]);*/\n\n  if (case_ret)\n    *case_ret = fpec;\n\n  switch (fpec)\n    {\n    case eNR:\t/* Use the normal result.  */\n      return 0;\n\n    case ePZ:\t/* + zero */\n      *c = 0x00000000;\n      return 1;\n\n    case eNZ:\t/* - zero */\n      *c = 0x80000000;\n      return 1;\n\n    case eSZ:\t/* signed zero */\n      *c = (a->sign == b->sign) ? PLUS_ZERO : MINUS_ZERO;\n      return 1;\n\n    case eRZ:\t/* +- zero depending on rounding mode.  */\n      if ((regs.r_fpsw & FPSWBITS_RM) == FPRM_NINF)\n\t*c = 0x80000000;\n      else\n\t*c = 0x00000000;\n      return 1;\n\n    case ePI:\t/* + Infinity */\n      *c = 0x7F800000;\n      return 1;\n\n    case eNI:\t/* - Infinity */\n      *c = 0xFF800000;\n      return 1;\n\n    case eSI:\t/* sign Infinity */\n      *c = (a->sign == b->sign) ? PLUS_INF : MINUS_INF;\n      return 1;\n\n    case eQN:\t/* Quiet NANs */\n      if (a->type == FP_QNAN)\n\t*c = a->orig_value;\n      else\n\t*c = b->orig_value;\n      return 1;\n\n    case eSN:\t/* Signalling NANs */\n      if (a->type == FP_SNAN)\n\t*c = a->orig_value;\n      else\n\t*c = b->orig_value;\n      FP_RAISE (V);\n      return 1;\n\n    case eIn:\t/* Invalid.  */\n      FP_RAISE (V);\n      if (a->type == FP_SNAN)\n\t*c = a->orig_value | 0x00400000;\n      else if  (b->type == FP_SNAN)\n\t*c = b->orig_value | 0x00400000;\n      else\n\t*c = 0x7fc00000;\n      return 1;\n\n    case eUn:\t/* Unimplemented.  */\n      FP_RAISE (E);\n      return 1;\n\n    case eDZ:\t/* Division-by-zero.  */\n      *c = (a->sign == b->sign) ? PLUS_INF : MINUS_INF;\n      FP_RAISE (Z);\n      return 1;\n\n    default:\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          356,
+          0
+        ],
+        [
+          453,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "check_exceptions",
+        "parameters": {
+          "a": "FP_Parts",
+          "b": "FP_Parts",
+          "c": "fp_t",
+          "ex_tab": "FP_ExceptionCases",
+          "case_ret": "FP_ExceptionCases"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "fp_t\nrxfp_add (fp_t fa, fp_t fb)\n{\n  FP_Parts a, b, c;\n  fp_t rv;\n  double da, db;\n\n  fp_explode (fa, &a);\n  fp_explode (fb, &b);\n  CHECK_EXCEPTIONS (a, b, rv, ex_add_tab);\n\n  da = fp_to_double (&a);\n  db = fp_to_double (&b);\n  tprintf(\"%g + %g = %g\\n\", da, db, da+db);\n\n  double_to_fp (da+db, &c);\n  rv = fp_implode (&c);\n  return rv;\n}",
+      "fn_code_pos": [
+        [
+          472,
+          0
+        ],
+        [
+          490,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rxfp_add",
+        "parameters": {
+          "fa": "fp_t",
+          "fb": "fp_t"
+        },
+        "return_type": "fp_t"
+      }
+    },
+    {
+      "fn_code": "fp_t\nrxfp_sub (fp_t fa, fp_t fb)\n{\n  FP_Parts a, b, c;\n  fp_t rv;\n  double da, db;\n\n  fp_explode (fa, &a);\n  fp_explode (fb, &b);\n  CHECK_EXCEPTIONS (a, b, rv, ex_sub_tab);\n\n  da = fp_to_double (&a);\n  db = fp_to_double (&b);\n  tprintf(\"%g - %g = %g\\n\", da, db, da-db);\n\n  double_to_fp (da-db, &c);\n  rv = fp_implode (&c);\n\n  return rv;\n}",
+      "fn_code_pos": [
+        [
+          501,
+          0
+        ],
+        [
+          520,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rxfp_sub",
+        "parameters": {
+          "fa": "fp_t",
+          "fb": "fp_t"
+        },
+        "return_type": "fp_t"
+      }
+    },
+    {
+      "fn_code": "fp_t\nrxfp_mul (fp_t fa, fp_t fb)\n{\n  FP_Parts a, b, c;\n  fp_t rv;\n  double da, db;\n\n  fp_explode (fa, &a);\n  fp_explode (fb, &b);\n  CHECK_EXCEPTIONS (a, b, rv, ex_mul_tab);\n\n  da = fp_to_double (&a);\n  db = fp_to_double (&b);\n  tprintf(\"%g x %g = %g\\n\", da, db, da*db);\n\n  double_to_fp (da*db, &c);\n  rv = fp_implode (&c);\n\n  return rv;\n}",
+      "fn_code_pos": [
+        [
+          531,
+          0
+        ],
+        [
+          550,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rxfp_mul",
+        "parameters": {
+          "fa": "fp_t",
+          "fb": "fp_t"
+        },
+        "return_type": "fp_t"
+      }
+    },
+    {
+      "fn_code": "fp_t\nrxfp_div (fp_t fa, fp_t fb)\n{\n  FP_Parts a, b, c;\n  fp_t rv;\n  double da, db;\n\n  fp_explode (fa, &a);\n  fp_explode (fb, &b);\n  CHECK_EXCEPTIONS (a, b, rv, ex_div_tab);\n\n  da = fp_to_double (&a);\n  db = fp_to_double (&b);\n  tprintf(\"%g / %g = %g\\n\", da, db, da/db);\n\n  double_to_fp (da/db, &c);\n  rv = fp_implode (&c);\n\n  return rv;\n}",
+      "fn_code_pos": [
+        [
+          561,
+          0
+        ],
+        [
+          580,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rxfp_div",
+        "parameters": {
+          "fa": "fp_t",
+          "fb": "fp_t"
+        },
+        "return_type": "fp_t"
+      }
+    },
+    {
+      "fn_code": "void\nrxfp_cmp (fp_t fa, fp_t fb)\n{\n  FP_Parts a, b;\n  fp_t c;\n  FP_ExceptionCases reason;\n  int flags = 0;\n  double da, db;\n\n  fp_explode (fa, &a);\n  fp_explode (fb, &b);\n\n  if (check_exceptions (&a, &b, &c, ex_cmp_tab, &reason))\n    {\n      if (reason == eQN)\n\t{\n\t  /* Special case - incomparable.  */\n\t  set_flags (FLAGBIT_Z | FLAGBIT_S | FLAGBIT_O, FLAGBIT_O);\n\t  return;\n\t}\n      return;\n    }\n\n  switch (reason)\n    {\n    case eEQ:\n      flags = FLAGBIT_Z;\n      break;\n    case eLT:\n      flags = FLAGBIT_S;\n      break;\n    case eGT:\n      flags = 0;\n      break;\n    case eNR:\n      da = fp_to_double (&a);\n      db = fp_to_double (&b);\n      tprintf(\"fcmp: %g cmp %g\\n\", da, db);\n      if (da < db)\n\tflags = FLAGBIT_S;\n      else if (da == db)\n\tflags = FLAGBIT_Z;\n      else\n\tflags = 0;\n      break;\n    default:\n      abort();\n    }\n\n  set_flags (FLAGBIT_Z | FLAGBIT_S | FLAGBIT_O, flags);\n}",
+      "fn_code_pos": [
+        [
+          591,
+          0
+        ],
+        [
+          641,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rxfp_cmp",
+        "parameters": {
+          "fa": "fp_t",
+          "fb": "fp_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "long\nrxfp_ftoi (fp_t fa, int round_mode)\n{\n  FP_Parts a;\n  fp_t rv;\n  int sign;\n  int whole_bits, frac_bits;\n\n  fp_explode (fa, &a);\n  sign = fa & 0x80000000UL;\n\n  switch (a.type)\n    {\n    case FP_NORMAL:\n      break;\n    case FP_PZERO:\n    case FP_NZERO:\n      return 0;\n    case FP_PINFINITY:\n      FP_RAISE (V);\n      return 0x7fffffffL;\n    case FP_NINFINITY:\n      FP_RAISE (V);\n      return 0x80000000L;\n    case FP_DENORMAL:\n      FP_RAISE (E);\n      return 0;\n    case FP_QNAN:\n    case FP_SNAN:\n      FP_RAISE (V);\n      return sign ? 0x80000000U : 0x7fffffff;\n    }\n\n  if (a.exp >= 31)\n    {\n      FP_RAISE (V);\n      return sign ? 0x80000000U : 0x7fffffff;\n    }\n\n  a.exp -= 23;\n\n  if (a.exp <= -25)\n    {\n      /* Less than 0.49999 */\n      frac_bits = a.mant;\n      whole_bits = 0;\n    }\n  else if (a.exp < 0)\n    {\n      frac_bits = a.mant << (32 + a.exp);\n      whole_bits = a.mant >> (-a.exp);\n    }\n  else\n    {\n      frac_bits = 0;\n      whole_bits = a.mant << a.exp;\n    }\n\n  if (frac_bits)\n    {\n      switch (round_mode & 3)\n\t{\n\tcase FPRM_NEAREST:\n\t  if (frac_bits & 0x80000000UL)\n\t    whole_bits ++;\n\t  break;\n\tcase FPRM_ZERO:\n\t  break;\n\tcase FPRM_PINF:\n\t  if (!sign)\n\t    whole_bits ++;\n\t  break;\n\tcase FPRM_NINF:\n\t  if (sign)\n\t    whole_bits ++;\n\t  break;\n\t}\n    }\n\n  rv = sign ? -whole_bits : whole_bits;\n  \n  return rv;\n}",
+      "fn_code_pos": [
+        [
+          643,
+          0
+        ],
+        [
+          725,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rxfp_ftoi",
+        "parameters": {
+          "fa": "fp_t",
+          "round_mode": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "fp_t\nrxfp_itof (long fa, int round_mode)\n{\n  fp_t rv;\n  int sign = 0;\n  unsigned int frac_bits;\n  volatile unsigned int whole_bits;\n  FP_Parts a;\n\n  if (fa == 0)\n    return PLUS_ZERO;\n\n  if (fa < 0)\n    {\n      fa = -fa;\n      sign = 1;\n      a.sign = -1;\n    }\n  else\n    a.sign = 1;\n\n  whole_bits = fa;\n  a.exp = 31;\n\n  while (! (whole_bits & 0x80000000UL))\n    {\n      a.exp --;\n      whole_bits <<= 1;\n    }\n  frac_bits = whole_bits & 0xff;\n  whole_bits = whole_bits >> 8;\n\n  if (frac_bits)\n    {\n      /* We must round */\n      switch (round_mode & 3)\n\t{\n\tcase FPRM_NEAREST:\n\t  if (frac_bits & 0x80)\n\t    whole_bits ++;\n\t  break;\n\tcase FPRM_ZERO:\n\t  break;\n\tcase FPRM_PINF:\n\t  if (!sign)\n\t    whole_bits ++;\n\t  break;\n\tcase FPRM_NINF:\n\t  if (sign)\n\t    whole_bits ++;\n\t  break;\n\t}\n    }\n\n  a.mant = whole_bits;\n  if (whole_bits & 0xff000000UL)\n    {\n      a.mant >>= 1;\n      a.exp ++;\n    }\n\n  rv = fp_implode (&a);\n  return rv;\n}",
+      "fn_code_pos": [
+        [
+          727,
+          0
+        ],
+        [
+          790,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rxfp_itof",
+        "parameters": {
+          "fa": "long",
+          "round_mode": "int"
+        },
+        "return_type": "fp_t"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct {\n  int exp;\n  unsigned int mant; /* 24 bits */\n  char type;\n  char sign;\n  fp_t orig_value;\n} FP_Parts;",
+      {
+        "exp": "int",
+        "mant": "unsigned int",
+        "type": "char",
+        "sign": "char",
+        "orig_value": "fp_t"
+      },
+      "FP_Parts",
+      [
+        101,
+        0
+      ],
+      [
+        107,
+        11
+      ]
+    ],
+    [
+      "typedef struct {\n  int exp;\n  unsigned int mant; /* 24 bits */\n  char type;\n  char sign;\n  fp_t orig_value;\n} FP_Parts;",
+      {
+        "exp": "int",
+        "mant": "unsigned int",
+        "type": "char",
+        "sign": "char",
+        "orig_value": "fp_t"
+      },
+      "FP_Parts",
+      [
+        101,
+        0
+      ],
+      [
+        107,
+        11
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"cpu.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"fpu.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "typedef enum {\n  FP_NORMAL,\n  FP_PZERO,\n  FP_NZERO,\n  FP_PINFINITY,\n  FP_NINFINITY,\n  FP_DENORMAL,\n  FP_QNAN,\n  FP_SNAN\n} FP_Type;",
+      {
+        "FP_NORMAL": "",
+        "FP_PZERO": "",
+        "FP_NZERO": "",
+        "FP_PINFINITY": "",
+        "FP_NINFINITY": "",
+        "FP_DENORMAL": "",
+        "FP_QNAN": "",
+        "FP_SNAN": ""
+      },
+      "FP_Type",
+      [
+        78,
+        0
+      ],
+      [
+        87,
+        10
+      ]
+    ],
+    [
+      "typedef enum {\n  eNR,\t\t/* Use the normal result.  */\n  ePZ, eNZ,\t/* +- zero */\n  eSZ,\t\t/* signed zero - XOR signs of ops together.  */\n  eRZ,\t\t/* +- zero depending on rounding mode.  */\n  ePI, eNI,\t/* +- Infinity */\n  eSI,\t\t/* signed infinity - XOR signs of ops together.  */\n  eQN, eSN,\t/* Quiet/Signalling NANs */\n  eIn,\t\t/* Invalid.  */\n  eUn,\t\t/* Unimplemented.  */\n  eDZ,\t\t/* Divide-by-zero.  */\n  eLT,\t\t/* less than */\n  eGT,\t\t/* greater than */\n  eEQ,\t\t/* equal to */\n} FP_ExceptionCases;",
+      {
+        "eNR": "",
+        "ePZ": "",
+        "eNZ": "",
+        "eSZ": "",
+        "eRZ": "",
+        "ePI": "",
+        "eNI": "",
+        "eSI": "",
+        "eQN": "",
+        "eSN": "",
+        "eIn": "",
+        "eUn": "",
+        "eDZ": "",
+        "eLT": "",
+        "eGT": "",
+        "eEQ": ""
+      },
+      "FP_ExceptionCases",
+      [
+        331,
+        0
+      ],
+      [
+        345,
+        20
+      ]
+    ]
+  ]
+}

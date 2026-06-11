@@ -1,0 +1,515 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "local int bits(struct state *s, int need)\n{\n    long val;           /* bit accumulator (can use up to 20 bits) */\n\n    /* load at least need bits into val */\n    val = s->bitbuf;\n    while (s->bitcnt < need) {\n        if (s->incnt == s->inlen)\n            longjmp(s->env, 1);         /* out of input */\n        val |= (long)(s->in[s->incnt++]) << s->bitcnt;  /* load eight bits */\n        s->bitcnt += 8;\n    }\n\n    /* drop need bits and update buffer, always zero to seven bits left */\n    s->bitbuf = (int)(val >> need);\n    s->bitcnt -= need;\n\n    /* return need bits, zeroing the bits above that */\n    return (int)(val & ((1L << need) - 1));\n}",
+      "fn_code_pos": [
+        [
+          125,
+          0
+        ],
+        [
+          144,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bits",
+        "parameters": {
+          "s": "struct state",
+          "need": "int"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int stored(struct state *s)\n{\n    unsigned len;       /* length of stored block */\n\n    /* discard leftover bits from current byte (assumes s->bitcnt < 8) */\n    s->bitbuf = 0;\n    s->bitcnt = 0;\n\n    /* get length and check against its one's complement */\n    if (s->incnt + 4 > s->inlen)\n        return 2;                               /* not enough input */\n    len = s->in[s->incnt++];\n    len |= s->in[s->incnt++] << 8;\n    if (s->in[s->incnt++] != (~len & 0xff) ||\n        s->in[s->incnt++] != ((~len >> 8) & 0xff))\n        return -2;                              /* didn't match complement! */\n\n    /* copy len bytes from in to out */\n    if (s->incnt + len > s->inlen)\n        return 2;                               /* not enough input */\n    if (s->out != NIL) {\n        if (s->outcnt + len > s->outlen)\n            return 1;                           /* not enough output space */\n        while (len--)\n            s->out[s->outcnt++] = s->in[s->incnt++];\n    }\n    else {                                      /* just scanning */\n        s->outcnt += len;\n        s->incnt += len;\n    }\n\n    /* done with a valid stored block */\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          163,
+          0
+        ],
+        [
+          196,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "stored",
+        "parameters": {
+          "s": "struct state"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int decode(struct state *s, const struct huffman *h)\n{\n    int len;            /* current number of bits in code */\n    int code;           /* len bits being decoded */\n    int first;          /* first code of length len */\n    int count;          /* number of codes of length len */\n    int index;          /* index of first code of length len in symbol table */\n\n    code = first = index = 0;\n    for (len = 1; len <= MAXBITS; len++) {\n        code |= bits(s, 1);             /* get next bit */\n        count = h->count[len];\n        if (code - count < first)       /* if length len, return symbol */\n            return h->symbol[index + (code - first)];\n        index += count;                 /* else update for next length */\n        first += count;\n        first <<= 1;\n        code <<= 1;\n    }\n    return -10;                         /* ran out of codes */\n}",
+      "fn_code_pos": [
+        [
+          234,
+          0
+        ],
+        [
+          254,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decode",
+        "parameters": {
+          "s": "struct state",
+          "h": "struct huffman"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int decode(struct state *s, const struct huffman *h)\n{\n    int len;            /* current number of bits in code */\n    int code;           /* len bits being decoded */\n    int first;          /* first code of length len */\n    int count;          /* number of codes of length len */\n    int index;          /* index of first code of length len in symbol table */\n    int bitbuf;         /* bits from stream */\n    int left;           /* bits left in next or left to process */\n    short *next;        /* next number of codes */\n\n    bitbuf = s->bitbuf;\n    left = s->bitcnt;\n    code = first = index = 0;\n    len = 1;\n    next = h->count + 1;\n    while (1) {\n        while (left--) {\n            code |= bitbuf & 1;\n            bitbuf >>= 1;\n            count = *next++;\n            if (code - count < first) { /* if length len, return symbol */\n                s->bitbuf = bitbuf;\n                s->bitcnt = (s->bitcnt - len) & 7;\n                return h->symbol[index + (code - first)];\n            }\n            index += count;             /* else update for next length */\n            first += count;\n            first <<= 1;\n            code <<= 1;\n            len++;\n        }\n        left = (MAXBITS+1) - len;\n        if (left == 0)\n            break;\n        if (s->incnt == s->inlen)\n            longjmp(s->env, 1);         /* out of input */\n        bitbuf = s->in[s->incnt++];\n        if (left > 8)\n            left = 8;\n    }\n    return -10;                         /* ran out of codes */\n}",
+      "fn_code_pos": [
+        [
+          262,
+          0
+        ],
+        [
+          304,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decode",
+        "parameters": {
+          "s": "struct state",
+          "h": "struct huffman"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int construct(struct huffman *h, const short *length, int n)\n{\n    int symbol;         /* current symbol when stepping through length[] */\n    int len;            /* current length when stepping through h->count[] */\n    int left;           /* number of possible codes left of current length */\n    short offs[MAXBITS+1];      /* offsets in symbol table for each length */\n\n    /* count number of codes of each length */\n    for (len = 0; len <= MAXBITS; len++)\n        h->count[len] = 0;\n    for (symbol = 0; symbol < n; symbol++)\n        (h->count[length[symbol]])++;   /* assumes lengths are within bounds */\n    if (h->count[0] == n)               /* no codes! */\n        return 0;                       /* complete, but decode() will fail */\n\n    /* check for an over-subscribed or incomplete set of lengths */\n    left = 1;                           /* one possible code of zero length */\n    for (len = 1; len <= MAXBITS; len++) {\n        left <<= 1;                     /* one more bit, double codes left */\n        left -= h->count[len];          /* deduct count from possible codes */\n        if (left < 0)\n            return left;                /* over-subscribed--return negative */\n    }                                   /* left > 0 means incomplete */\n\n    /* generate offsets into symbol table for each length for sorting */\n    offs[1] = 0;\n    for (len = 1; len < MAXBITS; len++)\n        offs[len + 1] = offs[len] + h->count[len];\n\n    /*\n     * put symbols in table sorted by length, by symbol order within each\n     * length\n     */\n    for (symbol = 0; symbol < n; symbol++)\n        if (length[symbol] != 0)\n            h->symbol[offs[length[symbol]]++] = symbol;\n\n    /* return zero for complete set, positive for incomplete set */\n    return left;\n}",
+      "fn_code_pos": [
+        [
+          339,
+          0
+        ],
+        [
+          378,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "construct",
+        "parameters": {
+          "h": "struct huffman",
+          "length": "short",
+          "n": "int"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int codes(struct state *s,\n                const struct huffman *lencode,\n                const struct huffman *distcode)\n{\n    int symbol;         /* decoded symbol */\n    int len;            /* length for copy */\n    unsigned dist;      /* distance for copy */\n    static const short lens[29] = { /* Size base for length codes 257..285 */\n        3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,\n        35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258};\n    static const short lext[29] = { /* Extra bits for length codes 257..285 */\n        0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,\n        3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0};\n    static const short dists[30] = { /* Offset base for distance codes 0..29 */\n        1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,\n        257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145,\n        8193, 12289, 16385, 24577};\n    static const short dext[30] = { /* Extra bits for distance codes 0..29 */\n        0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,\n        7, 7, 8, 8, 9, 9, 10, 10, 11, 11,\n        12, 12, 13, 13};\n\n    /* decode literals and length/distance pairs */\n    do {\n        symbol = decode(s, lencode);\n        if (symbol < 0)\n            return symbol;              /* invalid symbol */\n        if (symbol < 256) {             /* literal: symbol is the byte */\n            /* write out the literal */\n            if (s->out != NIL) {\n                if (s->outcnt == s->outlen)\n                    return 1;\n                s->out[s->outcnt] = symbol;\n            }\n            s->outcnt++;\n        }\n        else if (symbol > 256) {        /* length */\n            /* get and compute length */\n            symbol -= 257;\n            if (symbol >= 29)\n                return -10;             /* invalid fixed code */\n            len = lens[symbol] + bits(s, lext[symbol]);\n\n            /* get and check distance */\n            symbol = decode(s, distcode);\n            if (symbol < 0)\n                return symbol;          /* invalid symbol */\n            dist = dists[symbol] + bits(s, dext[symbol]);\n#ifndef INFLATE_ALLOW_INVALID_DISTANCE_TOOFAR_ARRR\n            if (dist > s->outcnt)\n                return -11;     /* distance too far back */\n#endif\n\n            /* copy length bytes from distance bytes back */\n            if (s->out != NIL) {\n                if (s->outcnt + len > s->outlen)\n                    return 1;\n                while (len--) {\n                    s->out[s->outcnt] =\n#ifdef INFLATE_ALLOW_INVALID_DISTANCE_TOOFAR_ARRR\n                        dist > s->outcnt ?\n                            0 :\n#endif\n                            s->out[s->outcnt - dist];\n                    s->outcnt++;\n                }\n            }\n            else\n                s->outcnt += len;\n        }\n    } while (symbol != 256);            /* end of block symbol */\n\n    /* done with a valid fixed or dynamic block */\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          435,
+          0
+        ],
+        [
+          509,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "codes",
+        "parameters": {
+          "s": "struct state",
+          "lencode": "struct huffman",
+          "distcode": "struct huffman"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int fixed(struct state *s)\n{\n    static int virgin = 1;\n    static short lencnt[MAXBITS+1], lensym[FIXLCODES];\n    static short distcnt[MAXBITS+1], distsym[MAXDCODES];\n    static struct huffman lencode, distcode;\n\n    /* build fixed huffman tables if first call (may not be thread safe) */\n    if (virgin) {\n        int symbol;\n        short lengths[FIXLCODES];\n\n        /* construct lencode and distcode */\n        lencode.count = lencnt;\n        lencode.symbol = lensym;\n        distcode.count = distcnt;\n        distcode.symbol = distsym;\n\n        /* literal/length table */\n        for (symbol = 0; symbol < 144; symbol++)\n            lengths[symbol] = 8;\n        for (; symbol < 256; symbol++)\n            lengths[symbol] = 9;\n        for (; symbol < 280; symbol++)\n            lengths[symbol] = 7;\n        for (; symbol < FIXLCODES; symbol++)\n            lengths[symbol] = 8;\n        construct(&lencode, lengths, FIXLCODES);\n\n        /* distance table */\n        for (symbol = 0; symbol < MAXDCODES; symbol++)\n            lengths[symbol] = 5;\n        construct(&distcode, lengths, MAXDCODES);\n\n        /* do this just once */\n        virgin = 0;\n    }\n\n    /* decode data until end-of-block code */\n    return codes(s, &lencode, &distcode);\n}",
+      "fn_code_pos": [
+        [
+          535,
+          0
+        ],
+        [
+          575,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fixed",
+        "parameters": {
+          "s": "struct state"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "local int dynamic(struct state *s)\n{\n    int nlen, ndist, ncode;             /* number of lengths in descriptor */\n    int index;                          /* index of lengths[] */\n    int err;                            /* construct() return value */\n    short lengths[MAXCODES];            /* descriptor code lengths */\n    short lencnt[MAXBITS+1], lensym[MAXLCODES];         /* lencode memory */\n    short distcnt[MAXBITS+1], distsym[MAXDCODES];       /* distcode memory */\n    struct huffman lencode, distcode;   /* length and distance codes */\n    static const short order[19] =      /* permutation of code length codes */\n        {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};\n\n    /* construct lencode and distcode */\n    lencode.count = lencnt;\n    lencode.symbol = lensym;\n    distcode.count = distcnt;\n    distcode.symbol = distsym;\n\n    /* get number of lengths in each table, check lengths */\n    nlen = bits(s, 5) + 257;\n    ndist = bits(s, 5) + 1;\n    ncode = bits(s, 4) + 4;\n    if (nlen > MAXLCODES || ndist > MAXDCODES)\n        return -3;                      /* bad counts */\n\n    /* read code length code lengths (really), missing lengths are zero */\n    for (index = 0; index < ncode; index++)\n        lengths[order[index]] = bits(s, 3);\n    for (; index < 19; index++)\n        lengths[order[index]] = 0;\n\n    /* build huffman table for code lengths codes (use lencode temporarily) */\n    err = construct(&lencode, lengths, 19);\n    if (err != 0)               /* require complete code set here */\n        return -4;\n\n    /* read length/literal and distance code length tables */\n    index = 0;\n    while (index < nlen + ndist) {\n        int symbol;             /* decoded value */\n        int len;                /* last length to repeat */\n\n        symbol = decode(s, &lencode);\n        if (symbol < 0)\n            return symbol;          /* invalid symbol */\n        if (symbol < 16)                /* length in 0..15 */\n            lengths[index++] = symbol;\n        else {                          /* repeat instruction */\n            len = 0;                    /* assume repeating zeros */\n            if (symbol == 16) {         /* repeat last length 3..6 times */\n                if (index == 0)\n                    return -5;          /* no last length! */\n                len = lengths[index - 1];       /* last length */\n                symbol = 3 + bits(s, 2);\n            }\n            else if (symbol == 17)      /* repeat zero 3..10 times */\n                symbol = 3 + bits(s, 3);\n            else                        /* == 18, repeat zero 11..138 times */\n                symbol = 11 + bits(s, 7);\n            if (index + symbol > nlen + ndist)\n                return -6;              /* too many lengths! */\n            while (symbol--)            /* repeat last or zero symbol times */\n                lengths[index++] = len;\n        }\n    }\n\n    /* check for end-of-block code -- there better be one! */\n    if (lengths[256] == 0)\n        return -9;\n\n    /* build huffman table for literal/length codes */\n    err = construct(&lencode, lengths, nlen);\n    if (err && (err < 0 || nlen != lencode.count[0] + lencode.count[1]))\n        return -7;      /* incomplete code ok only for single length 1 code */\n\n    /* build huffman table for distance codes */\n    err = construct(&distcode, lengths + nlen, ndist);\n    if (err && (err < 0 || ndist != distcode.count[0] + distcode.count[1]))\n        return -8;      /* incomplete code ok only for single length 1 code */\n\n    /* decode data until end-of-block code */\n    return codes(s, &lencode, &distcode);\n}",
+      "fn_code_pos": [
+        [
+          664,
+          0
+        ],
+        [
+          746,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dynamic",
+        "parameters": {
+          "s": "struct state"
+        },
+        "return_type": "local"
+      }
+    },
+    {
+      "fn_code": "int puff(unsigned char *dest,           /* pointer to destination pointer */\n         unsigned long *destlen,        /* amount of output space */\n         const unsigned char *source,   /* pointer to source data pointer */\n         unsigned long *sourcelen)      /* amount of input available */\n{\n    struct state s;             /* input/output state */\n    int last, type;             /* block information */\n    int err;                    /* return value */\n\n    /* initialize output state */\n    s.out = dest;\n    s.outlen = *destlen;                /* ignored if dest is NIL */\n    s.outcnt = 0;\n\n    /* initialize input state */\n    s.in = source;\n    s.inlen = *sourcelen;\n    s.incnt = 0;\n    s.bitbuf = 0;\n    s.bitcnt = 0;\n\n    /* return if bits() or decode() tries to read past available input */\n    if (setjmp(s.env) != 0)             /* if came back here via longjmp() */\n        err = 2;                        /* then skip do-loop, return error */\n    else {\n        /* process blocks until last block or error */\n        do {\n            last = bits(&s, 1);         /* one if last block */\n            type = bits(&s, 2);         /* block type 0..3 */\n            err = type == 0 ?\n                    stored(&s) :\n                    (type == 1 ?\n                        fixed(&s) :\n                        (type == 2 ?\n                            dynamic(&s) :\n                            -1));       /* type == 3, invalid */\n            if (err != 0)\n                break;                  /* return with error */\n        } while (!last);\n    }\n\n    /* update the lengths and return */\n    if (err <= 0) {\n        *destlen = s.outcnt;\n        *sourcelen = s.incnt;\n    }\n    return err;\n}",
+      "fn_code_pos": [
+        [
+          792,
+          0
+        ],
+        [
+          839,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "puff",
+        "parameters": {
+          "dest": "unsigned char",
+          "destlen": "unsigned long",
+          "source": "unsigned char",
+          "sourcelen": "unsigned long"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct state {\n    /* output state */\n    unsigned char *out;         /* output buffer */\n    unsigned long outlen;       /* available space at out */\n    unsigned long outcnt;       /* bytes written to out so far */\n\n    /* input state */\n    const unsigned char *in;    /* input buffer */\n    unsigned long inlen;        /* available input at in */\n    unsigned long incnt;        /* bytes read so far */\n    int bitbuf;                 /* bit buffer */\n    int bitcnt;                 /* number of bits in bit buffer */\n\n    /* input limit error return state for bits() and decode() */\n    jmp_buf env;\n}",
+      {
+        "*out": "unsigned char",
+        "outlen": "unsigned long",
+        "outcnt": "unsigned long",
+        "unsigned char": "const",
+        "inlen": "unsigned long",
+        "incnt": "unsigned long",
+        "bitbuf": "int",
+        "bitcnt": "int",
+        "env": "jmp_buf"
+      },
+      "state",
+      [
+        97,
+        0
+      ],
+      [
+        112,
+        1
+      ]
+    ],
+    [
+      "struct huffman {\n    short *count;       /* number of symbols of each length */\n    short *symbol;      /* canonically ordered symbols */\n}",
+      {
+        "*count": "short",
+        "*symbol": "short"
+      },
+      "huffman",
+      [
+        205,
+        0
+      ],
+      [
+        208,
+        1
+      ]
+    ],
+    [
+      "struct state {\n    /* output state */\n    unsigned char *out;         /* output buffer */\n    unsigned long outlen;       /* available space at out */\n    unsigned long outcnt;       /* bytes written to out so far */\n\n    /* input state */\n    const unsigned char *in;    /* input buffer */\n    unsigned long inlen;        /* available input at in */\n    unsigned long incnt;        /* bytes read so far */\n    int bitbuf;                 /* bit buffer */\n    int bitcnt;                 /* number of bits in bit buffer */\n\n    /* input limit error return state for bits() and decode() */\n    jmp_buf env;\n}",
+      {
+        "*out": "unsigned char",
+        "outlen": "unsigned long",
+        "outcnt": "unsigned long",
+        "unsigned char": "const",
+        "inlen": "unsigned long",
+        "incnt": "unsigned long",
+        "bitbuf": "int",
+        "bitcnt": "int",
+        "env": "jmp_buf"
+      },
+      "state",
+      [
+        97,
+        0
+      ],
+      [
+        112,
+        1
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        125,
+        15
+      ],
+      [
+        125,
+        27
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        163,
+        17
+      ],
+      [
+        163,
+        29
+      ]
+    ],
+    [
+      "struct huffman {\n    short *count;       /* number of symbols of each length */\n    short *symbol;      /* canonically ordered symbols */\n}",
+      {
+        "*count": "short",
+        "*symbol": "short"
+      },
+      "huffman",
+      [
+        205,
+        0
+      ],
+      [
+        208,
+        1
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        234,
+        17
+      ],
+      [
+        234,
+        29
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        234,
+        40
+      ],
+      [
+        234,
+        54
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        262,
+        17
+      ],
+      [
+        262,
+        29
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        262,
+        40
+      ],
+      [
+        262,
+        54
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        339,
+        20
+      ],
+      [
+        339,
+        34
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        435,
+        16
+      ],
+      [
+        435,
+        28
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        436,
+        22
+      ],
+      [
+        436,
+        36
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        437,
+        22
+      ],
+      [
+        437,
+        36
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        535,
+        16
+      ],
+      [
+        535,
+        28
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        540,
+        11
+      ],
+      [
+        540,
+        25
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        664,
+        18
+      ],
+      [
+        664,
+        30
+      ]
+    ],
+    [
+      "struct huffman",
+      {},
+      "",
+      [
+        672,
+        4
+      ],
+      [
+        672,
+        18
+      ]
+    ],
+    [
+      "struct state",
+      {},
+      "",
+      [
+        797,
+        4
+      ],
+      [
+        797,
+        16
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <setjmp.h>             /* for setjmp(), longjmp(), and jmp_buf */\n",
+      [
+        81,
+        0
+      ],
+      [
+        82,
+        0
+      ]
+    ],
+    [
+      "#include \"puff.h\"               /* prototype for puff() */\n",
+      [
+        82,
+        0
+      ],
+      [
+        83,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

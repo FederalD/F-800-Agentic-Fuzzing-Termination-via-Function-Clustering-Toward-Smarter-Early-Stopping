@@ -1,0 +1,867 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static Flag decBiStr(const char *targ, const char *str1, const char *str2) {\n  for (;;targ++, str1++, str2++) {\n    if (*targ!=*str1 && *targ!=*str2) return 0;\n    /* *targ has a match in one (or both, if terminator) */\n    if (*targ=='\\0') break;\n    } /* forever */\n  return 1;\n  }",
+      "fn_code_pos": [
+        [
+          201,
+          0
+        ],
+        [
+          208,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decBiStr",
+        "parameters": {
+          "targ": "char",
+          "str1": "char",
+          "str2": "char"
+        },
+        "return_type": "Flag"
+      }
+    },
+    {
+      "fn_code": "static decFloat * decFinalize(decFloat *df, bcdnum *num,\n\t\t\t      decContext *set) {\n  uByte *ub;\t\t      /* work */\n  uInt\t dpd;\t\t      /* .. */\n  uInt\t uiwork;\t      /* for macros */\n  uByte *umsd=num->msd;       /* local copy */\n  uByte *ulsd=num->lsd;       /* .. */\n  uInt\t encode;\t      /* encoding accumulator */\n  Int\t length;\t      /* coefficient length */\n\n  #if DECCHECK\n  Int clen=ulsd-umsd+1;\n  #if QUAD\n    #define COEXTRA 2\t\t\t     /* extra-long coefficent */\n  #else\n    #define COEXTRA 0\n  #endif\n  if (clen<1 || clen>DECPMAX*3+2+COEXTRA)\n    printf(\"decFinalize: suspect coefficient [length=%ld]\\n\", (LI)clen);\n  if (num->sign!=0 && num->sign!=DECFLOAT_Sign)\n    printf(\"decFinalize: bad sign [%08lx]\\n\", (LI)num->sign);\n  if (!EXPISSPECIAL(num->exponent)\n      && (num->exponent>1999999999 || num->exponent<-1999999999))\n    printf(\"decFinalize: improbable exponent [%ld]\\n\", (LI)num->exponent);\n  /* decShowNum(num, \"final\"); */\n  #endif\n\n  /* A special will have an 'exponent' which is very positive and a */\n  /* coefficient < DECPMAX */\n  length=(uInt)(ulsd-umsd+1);\t\t     /* coefficient length */\n\n  if (!NUMISSPECIAL(num)) {\n    Int   drop; \t\t\t     /* digits to be dropped */\n    /* skip leading insignificant zeros to calculate an exact length */\n    /* [this is quite expensive] */\n    if (*umsd==0) {\n      for (; umsd+3<ulsd && UBTOUI(umsd)==0;) umsd+=4;\n      for (; *umsd==0 && umsd<ulsd;) umsd++;\n      length=ulsd-umsd+1;\t\t     /* recalculate */\n      }\n    drop=MAXI(length-DECPMAX, DECQTINY-num->exponent);\n    /* drop can now be > digits for bottom-clamp (subnormal) cases */\n    if (drop>0) {\t\t\t     /* rounding needed */\n      /* (decFloatQuantize has very similar code to this, so any */\n      /* changes may need to be made there, too) */\n      uByte *roundat;\t\t\t     /* -> re-round digit */\n      uByte reround;\t\t\t     /* reround value */\n      /* printf(\"Rounding; drop=%ld\\n\", (LI)drop); */\n\n      num->exponent+=drop;\t\t     /* always update exponent */\n\n      /* Three cases here: */\n      /*   1. new LSD is in coefficient (almost always) */\n      /*   2. new LSD is digit to left of coefficient (so MSD is */\n      /*      round-for-reround digit) */\n      /*   3. new LSD is to left of case 2 (whole coefficient is sticky) */\n      /* [duplicate check-stickies code to save a test] */\n      /* [by-digit check for stickies as runs of zeros are rare] */\n      if (drop<length) {\t\t     /* NB lengths not addresses */\n\troundat=umsd+length-drop;\n\treround=*roundat;\n\tfor (ub=roundat+1; ub<=ulsd; ub++) {\n\t  if (*ub!=0) { \t\t     /* non-zero to be discarded */\n\t    reround=DECSTICKYTAB[reround];   /* apply sticky bit */\n\t    break;\t\t\t     /* [remainder don't-care] */\n\t    }\n\t  } /* check stickies */\n\tulsd=roundat-1; \t\t     /* new LSD */\n\t}\n       else {\t\t\t\t     /* edge case */\n\tif (drop==length) {\n\t  roundat=umsd;\n\t  reround=*roundat;\n\t  }\n\t else {\n\t  roundat=umsd-1;\n\t  reround=0;\n\t  }\n\tfor (ub=roundat+1; ub<=ulsd; ub++) {\n\t  if (*ub!=0) { \t\t     /* non-zero to be discarded */\n\t    reround=DECSTICKYTAB[reround];   /* apply sticky bit */\n\t    break;\t\t\t     /* [remainder don't-care] */\n\t    }\n\t  } /* check stickies */\n\t*umsd=0;\t\t\t     /* coefficient is a 0 */\n\tulsd=umsd;\t\t\t     /* .. */\n\t}\n\n      if (reround!=0) { \t\t     /* discarding non-zero */\n\tuInt bump=0;\n\tset->status|=DEC_Inexact;\n\t/* if adjusted exponent [exp+digits-1] is < EMIN then num is */\n\t/* subnormal -- so raise Underflow */\n\tif (num->exponent<DECEMIN && (num->exponent+(ulsd-umsd+1)-1)<DECEMIN)\n\t  set->status|=DEC_Underflow;\n\n\t/* next decide whether increment of the coefficient is needed */\n\tif (set->round==DEC_ROUND_HALF_EVEN) {\t  /* fastpath slowest case */\n\t  if (reround>5) bump=1;\t\t  /* >0.5 goes up */\n\t   else if (reround==5) \t\t  /* exactly 0.5000 .. */\n\t    bump=*ulsd & 0x01;\t\t\t  /* .. up iff [new] lsd is odd */\n\t  } /* r-h-e */\n\t else switch (set->round) {\n\t  case DEC_ROUND_DOWN: {\n\t    /* no change */\n\t    break;} /* r-d */\n\t  case DEC_ROUND_HALF_DOWN: {\n\t    if (reround>5) bump=1;\n\t    break;} /* r-h-d */\n\t  case DEC_ROUND_HALF_UP: {\n\t    if (reround>=5) bump=1;\n\t    break;} /* r-h-u */\n\t  case DEC_ROUND_UP: {\n\t    if (reround>0) bump=1;\n\t    break;} /* r-u */\n\t  case DEC_ROUND_CEILING: {\n\t    /* same as _UP for positive numbers, and as _DOWN for negatives */\n\t    if (!num->sign && reround>0) bump=1;\n\t    break;} /* r-c */\n\t  case DEC_ROUND_FLOOR: {\n\t    /* same as _UP for negative numbers, and as _DOWN for positive */\n\t    /* [negative reround cannot occur on 0] */\n\t    if (num->sign && reround>0) bump=1;\n\t    break;} /* r-f */\n\t  case DEC_ROUND_05UP: {\n\t    if (reround>0) { /* anything out there is 'sticky' */\n\t      /* bump iff lsd=0 or 5; this cannot carry so it could be */\n\t      /* effected immediately with no bump -- but the code */\n\t      /* is clearer if this is done the same way as the others */\n\t      if (*ulsd==0 || *ulsd==5) bump=1;\n\t      }\n\t    break;} /* r-r */\n\t  default: {\t  /* e.g., DEC_ROUND_MAX */\n\t    set->status|=DEC_Invalid_context;\n\t    #if DECCHECK\n\t    printf(\"Unknown rounding mode: %ld\\n\", (LI)set->round);\n\t    #endif\n\t    break;}\n\t  } /* switch (not r-h-e) */\n\t/* printf(\"ReRound: %ld  bump: %ld\\n\", (LI)reround, (LI)bump); */\n\n\tif (bump!=0) {\t\t\t     /* need increment */\n\t  /* increment the coefficient; this might end up with 1000... */\n\t  /* (after the all nines case) */\n\t  ub=ulsd;\n\t  for(; ub-3>=umsd && UBTOUI(ub-3)==0x09090909; ub-=4)\t{\n\t    UBFROMUI(ub-3, 0);\t\t     /* to 00000000 */\n\t    }\n\t  /* [note ub could now be to left of msd, and it is not safe */\n\t  /* to write to the the left of the msd] */\n\t  /* now at most 3 digits left to non-9 (usually just the one) */\n\t  for (; ub>=umsd; *ub=0, ub--) {\n\t    if (*ub==9) continue;\t     /* carry */\n\t    *ub+=1;\n\t    break;\n\t    }\n\t  if (ub<umsd) {\t\t     /* had all-nines */\n\t    *umsd=1;\t\t\t     /* coefficient to 1000... */\n\t    /* usually the 1000... coefficient can be used as-is */\n\t    if ((ulsd-umsd+1)==DECPMAX) {\n\t      num->exponent++;\n\t      }\n\t     else {\n\t      /* if coefficient is shorter than Pmax then num is */\n\t      /* subnormal, so extend it; this is safe as drop>0 */\n\t      /* (or, if the coefficient was supplied above, it could */\n\t      /* not be 9); this may make the result normal. */\n\t      ulsd++;\n\t      *ulsd=0;\n\t      /* [exponent unchanged] */\n\t      #if DECCHECK\n\t      if (num->exponent!=DECQTINY) /* sanity check */\n\t\tprintf(\"decFinalize: bad all-nines extend [^%ld, %ld]\\n\",\n\t\t       (LI)num->exponent, (LI)(ulsd-umsd+1));\n\t      #endif\n\t      } /* subnormal extend */\n\t    } /* had all-nines */\n\t  } /* bump needed */\n\t} /* inexact rounding */\n\n      length=ulsd-umsd+1;\t\t/* recalculate (may be <DECPMAX) */\n      } /* need round (drop>0) */\n\n    /* The coefficient will now fit and has final length unless overflow */\n    /* decShowNum(num, \"rounded\"); */\n\n    /* if exponent is >=emax may have to clamp, overflow, or fold-down */\n    if (num->exponent>DECEMAX-(DECPMAX-1)) { /* is edge case */\n      /* printf(\"overflow checks...\\n\"); */\n      if (*ulsd==0 && ulsd==umsd) {\t/* have zero */\n\tnum->exponent=DECEMAX-(DECPMAX-1); /* clamp to max */\n\t}\n       else if ((num->exponent+length-1)>DECEMAX) { /* > Nmax */\n\t/* Overflow -- these could go straight to encoding, here, but */\n\t/* instead num is adjusted to keep the code cleaner */\n\tFlag needmax=0; \t\t/* 1 for finite result */\n\tset->status|=(DEC_Overflow | DEC_Inexact);\n\tswitch (set->round) {\n\t  case DEC_ROUND_DOWN: {\n\t    needmax=1;\t\t\t/* never Infinity */\n\t    break;} /* r-d */\n\t  case DEC_ROUND_05UP: {\n\t    needmax=1;\t\t\t/* never Infinity */\n\t    break;} /* r-05 */\n\t  case DEC_ROUND_CEILING: {\n\t    if (num->sign) needmax=1;\t/* Infinity iff non-negative */\n\t    break;} /* r-c */\n\t  case DEC_ROUND_FLOOR: {\n\t    if (!num->sign) needmax=1;\t/* Infinity iff negative */\n\t    break;} /* r-f */\n\t  default: break;\t\t/* Infinity in all other cases */\n\t  }\n\tif (!needmax) { \t\t/* easy .. set Infinity */\n\t  num->exponent=DECFLOAT_Inf;\n\t  *umsd=0;\t\t\t/* be clean: coefficient to 0 */\n\t  ulsd=umsd;\t\t\t/* .. */\n\t  }\n\t else { \t\t\t/* return Nmax */\n\t  umsd=allnines;\t\t/* use constant array */\n\t  ulsd=allnines+DECPMAX-1;\n\t  num->exponent=DECEMAX-(DECPMAX-1);\n\t  }\n\t}\n       else { /* no overflow but non-zero and may have to fold-down */\n\tInt shift=num->exponent-(DECEMAX-(DECPMAX-1));\n\tif (shift>0) {\t\t\t/* fold-down needed */\n\t  /* fold down needed; must copy to buffer in order to pad */\n\t  /* with zeros safely; fortunately this is not the worst case */\n\t  /* path because cannot have had a round */\n\t  uByte buffer[ROUNDUP(DECPMAX+3, 4)]; /* [+3 allows uInt padding] */\n\t  uByte *s=umsd;\t\t/* source */\n\t  uByte *t=buffer;\t\t/* safe target */\n\t  uByte *tlsd=buffer+(ulsd-umsd)+shift; /* target LSD */\n\t  /* printf(\"folddown shift=%ld\\n\", (LI)shift); */\n\t  for (; s<=ulsd; s+=4, t+=4) UBFROMUI(t, UBTOUI(s));\n\t  for (t=tlsd-shift+1; t<=tlsd; t+=4) UBFROMUI(t, 0);  /* pad 0s */\n\t  num->exponent-=shift;\n\t  umsd=buffer;\n\t  ulsd=tlsd;\n\t  }\n\t} /* fold-down? */\n      length=ulsd-umsd+1;\t\t/* recalculate length */\n      } /* high-end edge case */\n    } /* finite number */\n\n  /*------------------------------------------------------------------*/\n  /* At this point the result will properly fit the decFloat\t      */\n  /* encoding, and it can be encoded with no possibility of error     */\n  /*------------------------------------------------------------------*/\n  /* Following code does not alter coefficient (could be allnines array) */\n\n  /* fast path possible when DECPMAX digits */\n  if (length==DECPMAX) {\n    return decFloatFromBCD(df, num->exponent, umsd, num->sign);\n    } /* full-length */\n\n  /* slower path when not a full-length number; must care about length */\n  /* [coefficient length here will be < DECPMAX] */\n  if (!NUMISSPECIAL(num)) {\t\t/* is still finite */\n    /* encode the combination field and exponent continuation */\n    uInt uexp=(uInt)(num->exponent+DECBIAS); /* biased exponent */\n    uInt code=(uexp>>DECECONL)<<4;\t/* top two bits of exp */\n    /* [msd==0] */\n    /* look up the combination field and make high word */\n    encode=DECCOMBFROM[code];\t\t/* indexed by (0-2)*16+msd */\n    encode|=(uexp<<(32-6-DECECONL)) & 0x03ffffff; /* exponent continuation */\n    }\n   else encode=num->exponent;\t\t/* special [already in word] */\n  encode|=num->sign;\t\t\t/* add sign */\n\n  /* private macro to extract a declet, n (where 0<=n<DECLETS and 0 */\n  /* refers to the declet from the least significant three digits) */\n  /* and put the corresponding DPD code into dpd.  Access to umsd and */\n  /* ulsd (pointers to the most and least significant digit of the */\n  /* variable-length coefficient) is assumed, along with use of a */\n  /* working pointer, uInt *ub. */\n  /* As not full-length then chances are there are many leading zeros */\n  /* [and there may be a partial triad] */\n  #define getDPDt(dpd, n) ub=ulsd-(3*(n))-2;\t\t\t      \\\n    if (ub<umsd-2) dpd=0;\t\t\t\t\t      \\\n     else if (ub>=umsd) dpd=BCD2DPD[(*ub*256)+(*(ub+1)*16)+*(ub+2)];  \\\n     else {dpd=*(ub+2); if (ub+1==umsd) dpd+=*(ub+1)*16; dpd=BCD2DPD[dpd];}\n\n  /* place the declets in the encoding words and copy to result (df), */\n  /* according to endianness; in all cases complete the sign word */\n  /* first */\n  #if DECPMAX==7\n    getDPDt(dpd, 1);\n    encode|=dpd<<10;\n    getDPDt(dpd, 0);\n    encode|=dpd;\n    DFWORD(df, 0)=encode;     /* just the one word */\n\n  #elif DECPMAX==16\n    getDPDt(dpd, 4); encode|=dpd<<8;\n    getDPDt(dpd, 3); encode|=dpd>>2;\n    DFWORD(df, 0)=encode;\n    encode=dpd<<30;\n    getDPDt(dpd, 2); encode|=dpd<<20;\n    getDPDt(dpd, 1); encode|=dpd<<10;\n    getDPDt(dpd, 0); encode|=dpd;\n    DFWORD(df, 1)=encode;\n\n  #elif DECPMAX==34\n    getDPDt(dpd,10); encode|=dpd<<4;\n    getDPDt(dpd, 9); encode|=dpd>>6;\n    DFWORD(df, 0)=encode;\n\n    encode=dpd<<26;\n    getDPDt(dpd, 8); encode|=dpd<<16;\n    getDPDt(dpd, 7); encode|=dpd<<6;\n    getDPDt(dpd, 6); encode|=dpd>>4;\n    DFWORD(df, 1)=encode;\n\n    encode=dpd<<28;\n    getDPDt(dpd, 5); encode|=dpd<<18;\n    getDPDt(dpd, 4); encode|=dpd<<8;\n    getDPDt(dpd, 3); encode|=dpd>>2;\n    DFWORD(df, 2)=encode;\n\n    encode=dpd<<30;\n    getDPDt(dpd, 2); encode|=dpd<<20;\n    getDPDt(dpd, 1); encode|=dpd<<10;\n    getDPDt(dpd, 0); encode|=dpd;\n    DFWORD(df, 3)=encode;\n  #endif\n\n  /* printf(\"Status: %08lx\\n\", (LI)set->status); */\n  /* decFloatShow(df, \"final2\"); */\n  return df;\n  }",
+      "fn_code_pos": [
+        [
+          241,
+          0
+        ],
+        [
+          571,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFinalize",
+        "parameters": {
+          "df": "decFloat",
+          "num": "bcdnum",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatFromBCD(decFloat *df, Int exp, const uByte *bcdar,\n\t\t\t   Int sig) {\n  uInt encode, dpd;\t\t\t/* work */\n  const uByte *ub;\t\t\t/* .. */\n\n  if (EXPISSPECIAL(exp)) encode=exp|sig;/* specials already encoded */\n   else {\t\t\t\t/* is finite */\n    /* encode the combination field and exponent continuation */\n    uInt uexp=(uInt)(exp+DECBIAS);\t/* biased exponent */\n    uInt code=(uexp>>DECECONL)<<4;\t/* top two bits of exp */\n    code+=bcdar[0];\t\t\t/* add msd */\n    /* look up the combination field and make high word */\n    encode=DECCOMBFROM[code]|sig;\t/* indexed by (0-2)*16+msd */\n    encode|=(uexp<<(32-6-DECECONL)) & 0x03ffffff; /* exponent continuation */\n    }\n\n  /* private macro to extract a declet, n (where 0<=n<DECLETS and 0 */\n  /* refers to the declet from the least significant three digits) */\n  /* and put the corresponding DPD code into dpd. */\n  /* Use of a working pointer, uInt *ub, is assumed. */\n\n  #define getDPDb(dpd, n) ub=bcdar+DECPMAX-1-(3*(n))-2;     \\\n    dpd=BCD2DPD[(*ub*256)+(*(ub+1)*16)+*(ub+2)];\n\n  /* place the declets in the encoding words and copy to result (df), */\n  /* according to endianness; in all cases complete the sign word */\n  /* first */\n  #if DECPMAX==7\n    getDPDb(dpd, 1);\n    encode|=dpd<<10;\n    getDPDb(dpd, 0);\n    encode|=dpd;\n    DFWORD(df, 0)=encode;     /* just the one word */\n\n  #elif DECPMAX==16\n    getDPDb(dpd, 4); encode|=dpd<<8;\n    getDPDb(dpd, 3); encode|=dpd>>2;\n    DFWORD(df, 0)=encode;\n    encode=dpd<<30;\n    getDPDb(dpd, 2); encode|=dpd<<20;\n    getDPDb(dpd, 1); encode|=dpd<<10;\n    getDPDb(dpd, 0); encode|=dpd;\n    DFWORD(df, 1)=encode;\n\n  #elif DECPMAX==34\n    getDPDb(dpd,10); encode|=dpd<<4;\n    getDPDb(dpd, 9); encode|=dpd>>6;\n    DFWORD(df, 0)=encode;\n\n    encode=dpd<<26;\n    getDPDb(dpd, 8); encode|=dpd<<16;\n    getDPDb(dpd, 7); encode|=dpd<<6;\n    getDPDb(dpd, 6); encode|=dpd>>4;\n    DFWORD(df, 1)=encode;\n\n    encode=dpd<<28;\n    getDPDb(dpd, 5); encode|=dpd<<18;\n    getDPDb(dpd, 4); encode|=dpd<<8;\n    getDPDb(dpd, 3); encode|=dpd>>2;\n    DFWORD(df, 2)=encode;\n\n    encode=dpd<<30;\n    getDPDb(dpd, 2); encode|=dpd<<20;\n    getDPDb(dpd, 1); encode|=dpd<<10;\n    getDPDb(dpd, 0); encode|=dpd;\n    DFWORD(df, 3)=encode;\n  #endif\n  /* decFloatShow(df, \"fromB\"); */\n  return df;\n  }",
+      "fn_code_pos": [
+        [
+          588,
+          0
+        ],
+        [
+          657,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromBCD",
+        "parameters": {
+          "df": "decFloat",
+          "exp": "Int",
+          "bcdar": "uByte",
+          "sig": "Int"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatFromPacked(decFloat *df, Int exp, const uByte *packed) {\n  uByte bcdar[DECPMAX+2];\t\t/* work [+1 for pad, +1 for sign] */\n  const uByte *ip;\t\t\t/* .. */\n  uByte *op;\t\t\t\t/* .. */\n  Int\tsig=0;\t\t\t\t/* sign */\n\n  /* expand coefficient and sign to BCDAR */\n  #if SINGLE\n  op=bcdar+1;\t\t\t\t/* no pad digit */\n  #else\n  op=bcdar;\t\t\t\t/* first (pad) digit ignored */\n  #endif\n  for (ip=packed; ip<packed+((DECPMAX+2)/2); ip++) {\n    *op++=*ip>>4;\n    *op++=(uByte)(*ip&0x0f);\t\t/* [final nibble is sign] */\n    }\n  op--; \t\t\t\t/* -> sign byte */\n  if (*op==DECPMINUS || *op==DECPMINUSALT) sig=DECFLOAT_Sign;\n\n  if (EXPISSPECIAL(exp)) {\t\t/* Infinity or NaN */\n    if (!EXPISINF(exp)) bcdar[1]=0;\t/* a NaN: ignore MSD */\n     else memset(bcdar+1, 0, DECPMAX);\t/* Infinite: coefficient to 0 */\n    }\n  return decFloatFromBCD(df, exp, bcdar+1, sig);\n  }",
+      "fn_code_pos": [
+        [
+          675,
+          0
+        ],
+        [
+          699,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromPacked",
+        "parameters": {
+          "df": "decFloat",
+          "exp": "Int",
+          "packed": "uByte"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatFromPackedChecked(decFloat *df, Int exp,\n\t\t\t\t     const uByte *packed) {\n  uByte bcdar[DECPMAX+2];\t\t/* work [+1 for pad, +1 for sign] */\n  const uByte *ip;\t\t\t/* .. */\n  uByte *op;\t\t\t\t/* .. */\n  Int\tsig=0;\t\t\t\t/* sign */\n\n  /* expand coefficient and sign to BCDAR */\n  #if SINGLE\n  op=bcdar+1;\t\t\t\t/* no pad digit */\n  #else\n  op=bcdar;\t\t\t\t/* first (pad) digit here */\n  #endif\n  for (ip=packed; ip<packed+((DECPMAX+2)/2); ip++) {\n    *op=*ip>>4;\n    if (*op>9) return NULL;\n    op++;\n    *op=(uByte)(*ip&0x0f);\t\t/* [final nibble is sign] */\n    if (*op>9 && ip<packed+((DECPMAX+2)/2)-1) return NULL;\n    op++;\n    }\n  op--; \t\t\t\t/* -> sign byte */\n  if (*op<=9) return NULL;\t\t/* bad sign */\n  if (*op==DECPMINUS || *op==DECPMINUSALT) sig=DECFLOAT_Sign;\n\n  #if !SINGLE\n  if (bcdar[0]!=0) return NULL; \t/* bad pad nibble */\n  #endif\n\n  if (EXPISNAN(exp)) {\t\t\t/* a NaN */\n    if (bcdar[1]!=0) return NULL;\t/* bad msd */\n    } /* NaN */\n   else if (EXPISINF(exp)) {\t\t/* is infinite */\n    Int i;\n    for (i=0; i<DECPMAX; i++) {\n      if (bcdar[i+1]!=0) return NULL;\t/* should be all zeros */\n      }\n    } /* infinity */\n   else {\t\t\t\t/* finite */\n    /* check the exponent is in range */\n    if (exp>DECEMAX-DECPMAX+1) return NULL;\n    if (exp<DECEMIN-DECPMAX+1) return NULL;\n    }\n  return decFloatFromBCD(df, exp, bcdar+1, sig);\n  }",
+      "fn_code_pos": [
+        [
+          719,
+          0
+        ],
+        [
+          763,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromPackedChecked",
+        "parameters": {
+          "df": "decFloat",
+          "exp": "Int",
+          "packed": "uByte"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatFromString(decFloat *result, const char *string,\n\t\t\t      decContext *set) {\n  Int\t digits;\t\t   /* count of digits in coefficient */\n  const  char *dotchar=NULL;\t   /* where dot was found [NULL if none] */\n  const  char *cfirst=string;\t   /* -> first character of decimal part */\n  const  char *c;\t\t   /* work */\n  uByte *ub;\t\t\t   /* .. */\n  uInt\t uiwork;\t\t   /* for macros */\n  bcdnum num;\t\t\t   /* collects data for finishing */\n  uInt\t error=DEC_Conversion_syntax;\t/* assume the worst */\n  uByte  buffer[ROUNDUP(DECSTRING+11, 8)]; /* room for most coefficents, */\n\t\t\t\t   /* some common rounding, +3, & pad */\n  #if DECTRACE\n  /* printf(\"FromString %s ...\\n\", string); */\n  #endif\n\n  for(;;) {\t\t\t\t/* once-only 'loop' */\n    num.sign=0; \t\t\t/* assume non-negative */\n    num.msd=buffer;\t\t\t/* MSD is here always */\n\n    /* detect and validate the coefficient, including any leading, */\n    /* trailing, or embedded '.' */\n    /* [could test four-at-a-time here (saving 10% for decQuads), */\n    /* but that risks storage violation because the position of the */\n    /* terminator is unknown] */\n    for (c=string;; c++) {\t\t/* -> input character */\n      if (((unsigned)(*c-'0'))<=9) continue; /* '0' through '9' is good */\n      if (*c=='\\0') break;\t\t/* most common non-digit */\n      if (*c=='.') {\n\tif (dotchar!=NULL) break;\t/* not first '.' */\n\tdotchar=c;\t\t\t/* record offset into decimal part */\n\tcontinue;}\n      if (c==string) {\t\t\t/* first in string... */\n\tif (*c=='-') {\t\t\t/* valid - sign */\n\t  cfirst++;\n\t  num.sign=DECFLOAT_Sign;\n\t  continue;}\n\tif (*c=='+') {\t\t\t/* valid + sign */\n\t  cfirst++;\n\t  continue;}\n\t}\n      /* *c is not a digit, terminator, or a valid +, -, or '.' */\n      break;\n      } /* c loop */\n\n    digits=(uInt)(c-cfirst);\t\t/* digits (+1 if a dot) */\n\n    if (digits>0) {\t\t\t/* had digits and/or dot */\n      const char *clast=c-1;\t\t/* note last coefficient char position */\n      Int exp=0;\t\t\t/* exponent accumulator */\n      if (*c!='\\0') {\t\t\t/* something follows the coefficient */\n\tuInt edig;\t\t\t/* unsigned work */\n\t/* had some digits and more to come; expect E[+|-]nnn now */\n\tconst char *firstexp;\t\t/* exponent first non-zero */\n\tif (*c!='E' && *c!='e') break;\n\tc++;\t\t\t\t/* to (optional) sign */\n\tif (*c=='-' || *c=='+') c++;\t/* step over sign (c=clast+2) */\n\tif (*c=='\\0') break;\t\t/* no digits!  (e.g., '1.2E') */\n\tfor (; *c=='0';) c++;\t\t/* skip leading zeros [even last] */\n\tfirstexp=c;\t\t\t/* remember start [maybe '\\0'] */\n\t/* gather exponent digits */\n\tedig=(uInt)*c-(uInt)'0';\n\tif (edig<=9) {\t\t\t/* [check not bad or terminator] */\n\t  exp+=edig;\t\t\t/* avoid initial X10 */\n\t  c++;\n\t  for (;; c++) {\n\t    edig=(uInt)*c-(uInt)'0';\n\t    if (edig>9) break;\n\t    exp=exp*10+edig;\n\t    }\n\t  }\n\t/* if not now on the '\\0', *c must not be a digit */\n\tif (*c!='\\0') break;\n\n\t/* (this next test must be after the syntax checks) */\n\t/* if definitely more than the possible digits for format then */\n\t/* the exponent may have wrapped, so simply set it to a certain */\n\t/* over/underflow value */\n\tif (c>firstexp+DECEMAXD) exp=DECEMAX*2;\n\tif (*(clast+2)=='-') exp=-exp;\t/* was negative */\n\t} /* digits>0 */\n\n      if (dotchar!=NULL) {\t\t/* had a '.' */\n\tdigits--;\t\t\t/* remove from digits count */\n\tif (digits==0) break;\t\t/* was dot alone: bad syntax */\n\texp-=(Int)(clast-dotchar);\t/* adjust exponent */\n\t/* [the '.' can now be ignored] */\n\t}\n      num.exponent=exp; \t\t/* exponent is good; store it */\n\n      /* Here when whole string has been inspected and syntax is good */\n      /* cfirst->first digit or dot, clast->last digit or dot */\n      error=0;\t\t\t\t/* no error possible now */\n\n      /* if the number of digits in the coefficient will fit in buffer */\n      /* then it can simply be converted to bcd8 and copied -- decFinalize */\n      /* will take care of leading zeros and rounding; the buffer is big */\n      /* enough for all canonical coefficients, including 0.00000nn... */\n      ub=buffer;\n      if (digits<=(Int)(sizeof(buffer)-3)) { /* [-3 allows by-4s copy] */\n\tc=cfirst;\n\tif (dotchar!=NULL) {\t\t     /* a dot to worry about */\n\t  if (*(c+1)=='.') {\t\t     /* common canonical case */\n\t    *ub++=(uByte)(*c-'0');\t     /* copy leading digit */\n\t    c+=2;\t\t\t     /* prepare to handle rest */\n\t    }\n\t   else for (; c<=clast;) {\t     /* '.' could be anywhere */\n\t    /* as usual, go by fours when safe; NB it has been asserted */\n\t    /* that a '.' does not have the same mask as a digit */\n\t    if (c<=clast-3\t\t\t       /* safe for four */\n\t     && (UBTOUI(c)&0xf0f0f0f0)==CHARMASK) {    /* test four */\n\t      UBFROMUI(ub, UBTOUI(c)&0x0f0f0f0f);      /* to BCD8 */\n\t      ub+=4;\n\t      c+=4;\n\t      continue;\n\t      }\n\t    if (*c=='.') {\t\t     /* found the dot */\n\t      c++;\t\t\t     /* step over it .. */\n\t      break;\t\t\t     /* .. and handle the rest */\n\t      }\n\t    *ub++=(uByte)(*c++-'0');\n\t    }\n\t  } /* had dot */\n\t/* Now no dot; do this by fours (where safe) */\n\tfor (; c<=clast-3; c+=4, ub+=4) UBFROMUI(ub, UBTOUI(c)&0x0f0f0f0f);\n\tfor (; c<=clast; c++, ub++) *ub=(uByte)(*c-'0');\n\tnum.lsd=buffer+digits-1;\t     /* record new LSD */\n\t} /* fits */\n\n       else {\t\t\t\t     /* too long for buffer */\n\t/* [This is a rare and unusual case; arbitrary-length input] */\n\t/* strip leading zeros [but leave final 0 if all 0's] */\n\tif (*cfirst=='.') cfirst++;\t     /* step past dot at start */\n\tif (*cfirst=='0') {\t\t     /* [cfirst always -> digit] */\n\t  for (; cfirst<clast; cfirst++) {\n\t    if (*cfirst!='0') { \t     /* non-zero found */\n\t      if (*cfirst=='.') continue;    /* [ignore] */\n\t      break;\t\t\t     /* done */\n\t      }\n\t    digits--;\t\t\t     /* 0 stripped */\n\t    } /* cfirst */\n\t  } /* at least one leading 0 */\n\n\t/* the coefficient is now as short as possible, but may still */\n\t/* be too long; copy up to Pmax+1 digits to the buffer, then */\n\t/* just record any non-zeros (set round-for-reround digit) */\n\tfor (c=cfirst; c<=clast && ub<=buffer+DECPMAX; c++) {\n\t  /* (see commentary just above) */\n\t  if (c<=clast-3\t\t\t  /* safe for four */\n\t   && (UBTOUI(c)&0xf0f0f0f0)==CHARMASK) { /* four digits */\n\t    UBFROMUI(ub, UBTOUI(c)&0x0f0f0f0f);   /* to BCD8 */\n\t    ub+=4;\n\t    c+=3;\t\t\t     /* [will become 4] */\n\t    continue;\n\t    }\n\t  if (*c=='.') continue;\t     /* [ignore] */\n\t  *ub++=(uByte)(*c-'0');\n\t  }\n\tub--;\t\t\t\t     /* -> LSD */\n\tfor (; c<=clast; c++) { \t     /* inspect remaining chars */\n\t  if (*c!='0') {\t\t     /* sticky bit needed */\n\t    if (*c=='.') continue;\t     /* [ignore] */\n\t    *ub=DECSTICKYTAB[*ub];\t     /* update round-for-reround */\n\t    break;\t\t\t     /* no need to look at more */\n\t    }\n\t  }\n\tnum.lsd=ub;\t\t\t     /* record LSD */\n\t/* adjust exponent for dropped digits */\n\tnum.exponent+=digits-(Int)(ub-buffer+1);\n\t} /* too long for buffer */\n      } /* digits or dot */\n\n     else {\t\t\t\t/* no digits or dot were found */\n      if (*c=='\\0') break;\t\t/* nothing to come is bad */\n      /* only Infinities and NaNs are allowed, here */\n      buffer[0]=0;\t\t\t/* default a coefficient of 0 */\n      num.lsd=buffer;\t\t\t/* .. */\n      if (decBiStr(c, \"infinity\", \"INFINITY\")\n       || decBiStr(c, \"inf\", \"INF\")) num.exponent=DECFLOAT_Inf;\n       else {\t\t\t\t/* should be a NaN */\n\tnum.exponent=DECFLOAT_qNaN;\t/* assume quiet NaN */\n\tif (*c=='s' || *c=='S') {\t/* probably an sNaN */\n\t  c++;\n\t  num.exponent=DECFLOAT_sNaN;\t/* assume is in fact sNaN */\n\t  }\n\tif (*c!='N' && *c!='n') break;\t/* check caseless \"NaN\" */\n\tc++;\n\tif (*c!='a' && *c!='A') break;\t/* .. */\n\tc++;\n\tif (*c!='N' && *c!='n') break;\t/* .. */\n\tc++;\n\t/* now either nothing, or nnnn payload (no dots), expected */\n\t/* -> start of integer, and skip leading 0s [including plain 0] */\n\tfor (cfirst=c; *cfirst=='0';) cfirst++;\n\tif (*cfirst!='\\0') {\t\t/* not empty or all-0, payload */\n\t  /* payload found; check all valid digits and copy to buffer as bcd8 */\n\t  ub=buffer;\n\t  for (c=cfirst;; c++, ub++) {\n\t    if ((unsigned)(*c-'0')>9) break; /* quit if not 0-9 */\n\t    if (c-cfirst==DECPMAX-1) break;  /* too many digits */\n\t    *ub=(uByte)(*c-'0');\t/* good bcd8 */\n\t    }\n\t  if (*c!='\\0') break;\t\t/* not all digits, or too many */\n\t  num.lsd=ub-1; \t\t/* record new LSD */\n\t  }\n\t} /* NaN or sNaN */\n      error=0;\t\t\t\t/* syntax is OK */\n      break;\t\t\t\t/* done with specials */\n      } /* digits=0 (special expected) */\n    break;\n    }\t\t\t\t\t/* [for(;;) break] */\n\n  /* decShowNum(&num, \"fromStr\"); */\n\n  if (error!=0) {\n    set->status|=error;\n    num.exponent=DECFLOAT_qNaN; \t/* set up quiet NaN */\n    num.sign=0; \t\t\t/* .. with 0 sign */\n    buffer[0]=0;\t\t\t/* .. and coefficient */\n    num.lsd=buffer;\t\t\t/* .. */\n    /* decShowNum(&num, \"oops\"); */\n    }\n\n  /* decShowNum(&num, \"dffs\"); */\n  decFinalize(result, &num, set);\t/* round, check, and lay out */\n  /* decFloatShow(result, \"fromString\"); */\n  return result;\n  }",
+      "fn_code_pos": [
+        [
+          787,
+          0
+        ],
+        [
+          1014,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromString",
+        "parameters": {
+          "result": "decFloat",
+          "string": "char",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatFromWider(decFloat *result, const decFloatWider *wider,\n\t\t\t     decContext *set) {\n  bcdnum num;\t\t\t\t/* collects data for finishing */\n  uByte  bcdar[DECWPMAX];\t\t/* room for wider coefficient */\n  uInt\t widerhi=DFWWORD(wider, 0);\t/* top word */\n  Int\t exp;\n\n  GETWCOEFF(wider, bcdar);\n\n  num.msd=bcdar;\t\t\t/* MSD is here always */\n  num.lsd=bcdar+DECWPMAX-1;\t\t/* LSD is here always */\n  num.sign=widerhi&0x80000000;\t\t/* extract sign [DECFLOAT_Sign=Neg] */\n\n  /* decode the wider combination field to exponent */\n  exp=DECCOMBWEXP[widerhi>>26]; \t/* decode from wider combination field */\n  /* if it is a special there's nothing to do unless sNaN; if it's */\n  /* finite then add the (wider) exponent continuation and unbias */\n  if (EXPISSPECIAL(exp)) exp=widerhi&0x7e000000; /* include sNaN selector */\n   else exp+=GETWECON(wider)-DECWBIAS;\n  num.exponent=exp;\n\n  /* decShowNum(&num, \"dffw\"); */\n  return decFinalize(result, &num, set);/* round, check, and lay out */\n  }",
+      "fn_code_pos": [
+        [
+          1030,
+          0
+        ],
+        [
+          1053,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromWider",
+        "parameters": {
+          "result": "decFloat",
+          "wider": "decFloatWider",
+          "set": "decContext"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "Int decFloatGetCoefficient(const decFloat *df, uByte *bcdar) {\n  if (DFISINF(df)) memset(bcdar, 0, DECPMAX);\n   else {\n    GETCOEFF(df, bcdar);\t   /* use macro */\n    if (DFISNAN(df)) bcdar[0]=0;   /* MSD needs correcting */\n    }\n  return DFISSIGNED(df);\n  }",
+      "fn_code_pos": [
+        [
+          1070,
+          0
+        ],
+        [
+          1077,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatGetCoefficient",
+        "parameters": {
+          "df": "decFloat",
+          "bcdar": "uByte"
+        },
+        "return_type": "Int"
+      }
+    },
+    {
+      "fn_code": "Int decFloatGetExponent(const decFloat *df) {\n  if (DFISSPECIAL(df)) return DFWORD(df, 0)&0x7e000000;\n  return GETEXPUN(df);\n  }",
+      "fn_code_pos": [
+        [
+          1090,
+          0
+        ],
+        [
+          1093,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatGetExponent",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "Int"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatSetCoefficient(decFloat *df, const uByte *bcdar,\n\t\t\t\t  Int sig) {\n  uInt exp;\t\t\t   /* for exponent */\n  uByte bcdzero[DECPMAX];\t   /* for infinities */\n\n  /* Exponent/special code is extracted from df */\n  if (DFISSPECIAL(df)) {\n    exp=DFWORD(df, 0)&0x7e000000;\n    if (DFISINF(df)) {\n      memset(bcdzero, 0, DECPMAX);\n      return decFloatFromBCD(df, exp, bcdzero, sig);\n      }\n    }\n   else exp=GETEXPUN(df);\n  return decFloatFromBCD(df, exp, bcdar, sig);\n  }",
+      "fn_code_pos": [
+        [
+          1107,
+          0
+        ],
+        [
+          1122,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatSetCoefficient",
+        "parameters": {
+          "df": "decFloat",
+          "bcdar": "uByte",
+          "sig": "Int"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatSetExponent(decFloat *df, decContext *set, Int exp) {\n  uByte  bcdcopy[DECPMAX];\t   /* for coefficient */\n  bcdnum num;\t\t\t   /* work */\n  num.exponent=exp;\n  num.sign=decFloatGetCoefficient(df, bcdcopy); /* extract coefficient */\n  if (DFISSPECIAL(df)) {\t   /* MSD or more needs correcting */\n    if (DFISINF(df)) memset(bcdcopy, 0, DECPMAX);\n    bcdcopy[0]=0;\n    }\n  num.msd=bcdcopy;\n  num.lsd=bcdcopy+DECPMAX-1;\n  return decFinalize(df, &num, set);\n  }",
+      "fn_code_pos": [
+        [
+          1135,
+          0
+        ],
+        [
+          1147,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatSetExponent",
+        "parameters": {
+          "df": "decFloat",
+          "set": "decContext",
+          "exp": "Int"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "uInt decFloatRadix(const decFloat *df) {\n  if (df) return 10;\t\t\t     /* to placate compiler */\n  return 10;\n  }",
+      "fn_code_pos": [
+        [
+          1154,
+          0
+        ],
+        [
+          1157,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatRadix",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "uInt"
+      }
+    },
+    {
+      "fn_code": "void decFloatShow(const decFloat *df, const char *tag) {\n  char hexbuf[DECBYTES*2+DECBYTES/4+1]; /* NB blank after every fourth */\n  char buff[DECSTRING]; \t\t/* for value in decimal */\n  Int i, j=0;\n\n  for (i=0; i<DECBYTES; i++) {\n    #if DECLITEND\n      sprintf(&hexbuf[j], \"%02x\", df->bytes[DECBYTES-1-i]);\n    #else\n      sprintf(&hexbuf[j], \"%02x\", df->bytes[i]);\n    #endif\n    j+=2;\n    /* the next line adds blank (and terminator) after final pair, too */\n    if ((i+1)%4==0) {strcpy(&hexbuf[j], \" \"); j++;}\n    }\n  decFloatToString(df, buff);\n  printf(\">%s> %s [big-endian]\t%s\\n\", tag, hexbuf, buff);\n  return;\n  }",
+      "fn_code_pos": [
+        [
+          1167,
+          0
+        ],
+        [
+          1185,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatShow",
+        "parameters": {
+          "df": "decFloat",
+          "tag": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "Int decFloatToBCD(const decFloat *df, Int *exp, uByte *bcdar) {\n  if (DFISINF(df)) {\n    memset(bcdar, 0, DECPMAX);\n    *exp=DFWORD(df, 0)&0x7e000000;\n    }\n   else {\n    GETCOEFF(df, bcdar);\t   /* use macro */\n    if (DFISNAN(df)) {\n      bcdar[0]=0;\t\t   /* MSD needs correcting */\n      *exp=DFWORD(df, 0)&0x7e000000;\n      }\n     else {\t\t\t   /* finite */\n      *exp=GETEXPUN(df);\n      }\n    }\n  return DFISSIGNED(df);\n  }",
+      "fn_code_pos": [
+        [
+          1202,
+          0
+        ],
+        [
+          1218,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToBCD",
+        "parameters": {
+          "df": "decFloat",
+          "exp": "Int",
+          "bcdar": "uByte"
+        },
+        "return_type": "Int"
+      }
+    },
+    {
+      "fn_code": "char * decFloatToEngString(const decFloat *df, char *string){\n  uInt msd;\t\t\t   /* coefficient MSD */\n  Int  exp;\t\t\t   /* exponent top two bits or full */\n  uInt comb;\t\t\t   /* combination field */\n  char *cstart; \t\t   /* coefficient start */\n  char *c;\t\t\t   /* output pointer in string */\n  char *s, *t;\t\t\t   /* .. (source, target) */\n  Int  pre, e;\t\t\t   /* work */\n  const uByte *u;\t\t   /* .. */\n  uInt\tuiwork; \t\t   /* for macros [one compiler needs */\n\t\t\t\t   /* volatile here to avoid bug, but */\n\t\t\t\t   /* that doubles execution time] */\n\n  /* Source words; macro handles endianness */\n  uInt sourhi=DFWORD(df, 0);\t   /* word with sign */\n  #if DECPMAX==16\n  uInt sourlo=DFWORD(df, 1);\n  #elif DECPMAX==34\n  uInt sourmh=DFWORD(df, 1);\n  uInt sourml=DFWORD(df, 2);\n  uInt sourlo=DFWORD(df, 3);\n  #endif\n\n  c=string;\t\t\t   /* where result will go */\n  if (((Int)sourhi)<0) *c++='-';   /* handle sign */\n  comb=sourhi>>26;\t\t   /* sign+combination field */\n  msd=DECCOMBMSD[comb]; \t   /* decode the combination field */\n  exp=DECCOMBEXP[comb]; \t   /* .. */\n\n  if (EXPISSPECIAL(exp)) {\t   /* special */\n    if (exp==DECFLOAT_Inf) {\t   /* infinity */\n      strcpy(c,   \"Inf\");\n      strcpy(c+3, \"inity\");\n      return string;\t\t   /* easy */\n      }\n    if (sourhi&0x02000000) *c++='s'; /* sNaN */\n    strcpy(c, \"NaN\");\t\t   /* complete word */\n    c+=3;\t\t\t   /* step past */\n    /* quick exit if the payload is zero */\n    #if DECPMAX==7\n    if ((sourhi&0x000fffff)==0) return string;\n    #elif DECPMAX==16\n    if (sourlo==0 && (sourhi&0x0003ffff)==0) return string;\n    #elif DECPMAX==34\n    if (sourlo==0 && sourml==0 && sourmh==0\n     && (sourhi&0x00003fff)==0) return string;\n    #endif\n    /* otherwise drop through to add integer; set correct exp etc. */\n    exp=0; msd=0;\t\t   /* setup for following code */\n    }\n   else { /* complete exponent; top two bits are in place */\n    exp+=GETECON(df)-DECBIAS;\t   /* .. + continuation and unbias */\n    }\n\n  /* convert the digits of the significand to characters */\n  cstart=c;\t\t\t   /* save start of coefficient */\n  if (msd) *c++=(char)('0'+(char)msd);\t/* non-zero most significant digit */\n\n  /* Decode the declets.  After extracting each declet, it is */\n  /* decoded to a 4-uByte sequence by table lookup; the four uBytes */\n  /* are the three encoded BCD8 digits followed by a 1-byte length */\n  /* (significant digits, except that 000 has length 0).  This allows */\n  /* us to left-align the first declet with non-zero content, then */\n  /* the remaining ones are full 3-char length.  Fixed-length copies */\n  /* are used because variable-length memcpy causes a subroutine call */\n  /* in at least two compilers.  (The copies are length 4 for speed */\n  /* and are safe because the last item in the array is of length */\n  /* three and has the length byte following.) */\n  #define dpd2char(dpdin) u=&DPD2BCD8[((dpdin)&0x3ff)*4];\t \\\n\t if (c!=cstart) {UBFROMUI(c, UBTOUI(u)|CHARMASK); c+=3;} \\\n\t  else if (*(u+3)) {\t\t\t\t\t \\\n\t   UBFROMUI(c, UBTOUI(u+3-*(u+3))|CHARMASK); c+=*(u+3);}\n\n  #if DECPMAX==7\n  dpd2char(sourhi>>10); \t\t/* declet 1 */\n  dpd2char(sourhi);\t\t\t/* declet 2 */\n\n  #elif DECPMAX==16\n  dpd2char(sourhi>>8);\t\t\t/* declet 1 */\n  dpd2char((sourhi<<2) | (sourlo>>30)); /* declet 2 */\n  dpd2char(sourlo>>20); \t\t/* declet 3 */\n  dpd2char(sourlo>>10); \t\t/* declet 4 */\n  dpd2char(sourlo);\t\t\t/* declet 5 */\n\n  #elif DECPMAX==34\n  dpd2char(sourhi>>4);\t\t\t/* declet 1 */\n  dpd2char((sourhi<<6) | (sourmh>>26)); /* declet 2 */\n  dpd2char(sourmh>>16); \t\t/* declet 3 */\n  dpd2char(sourmh>>6);\t\t\t/* declet 4 */\n  dpd2char((sourmh<<4) | (sourml>>28)); /* declet 5 */\n  dpd2char(sourml>>18); \t\t/* declet 6 */\n  dpd2char(sourml>>8);\t\t\t/* declet 7 */\n  dpd2char((sourml<<2) | (sourlo>>30)); /* declet 8 */\n  dpd2char(sourlo>>20); \t\t/* declet 9 */\n  dpd2char(sourlo>>10); \t\t/* declet 10 */\n  dpd2char(sourlo);\t\t\t/* declet 11 */\n  #endif\n\n  if (c==cstart) *c++='0';\t   /* all zeros, empty -- make \"0\" */\n\n  if (exp==0) { \t\t   /* integer or NaN case -- easy */\n    *c='\\0';\t\t\t   /* terminate */\n    return string;\n    }\n  /* non-0 exponent */\n\n  e=0;\t\t\t\t   /* assume no E */\n  pre=(Int)(c-cstart)+exp;\t   /* length+exp  [c->LSD+1] */\n  /* [here, pre-exp is the digits count (==1 for zero)] */\n\n  if (exp>0 || pre<-5) {\t   /* need exponential form */\n    e=pre-1;\t\t\t   /* calculate E value */\n    pre=1;\t\t\t   /* assume one digit before '.' */\n    if (e!=0) { \t\t   /* engineering: may need to adjust */\n      Int adj;\t\t\t   /* adjustment */\n      /* The C remainder operator is undefined for negative numbers, so */\n      /* a positive remainder calculation must be used here */\n      if (e<0) {\n\tadj=(-e)%3;\n\tif (adj!=0) adj=3-adj;\n\t}\n       else { /* e>0 */\n\tadj=e%3;\n\t}\n      e=e-adj;\n      /* if dealing with zero still produce an exponent which is a */\n      /* multiple of three, as expected, but there will only be the */\n      /* one zero before the E, still.\tOtherwise note the padding. */\n      if (!DFISZERO(df)) pre+=adj;\n       else {  /* is zero */\n\tif (adj!=0) {\t\t   /* 0.00Esnn needed */\n\t  e=e+3;\n\t  pre=-(2-adj);\n\t  }\n\t} /* zero */\n      } /* engineering adjustment */\n    } /* exponential form */\n  /* printf(\"e=%ld pre=%ld exp=%ld\\n\", (LI)e, (LI)pre, (LI)exp); */\n\n  /* modify the coefficient, adding 0s, '.', and E+nn as needed */\n  if (pre>0) {\t\t\t   /* ddd.ddd (plain), perhaps with E */\n\t\t\t\t   /* or dd00 padding for engineering */\n    char *dotat=cstart+pre;\n    if (dotat<c) {\t\t\t/* if embedded dot needed... */\n      /* move by fours; there must be space for junk at the end */\n      /* because there is still space for exponent */\n      s=dotat+ROUNDDOWN4(c-dotat);\t/* source */\n      t=s+1;\t\t\t\t/* target */\n      /* open the gap [cannot use memcpy] */\n      for (; s>=dotat; s-=4, t-=4) UBFROMUI(t, UBTOUI(s));\n      *dotat='.';\n      c++;\t\t\t\t/* length increased by one */\n      } /* need dot? */\n     else for (; c<dotat; c++) *c='0';\t/* pad for engineering */\n    } /* pre>0 */\n   else {\n    /* -5<=pre<=0: here for plain 0.ddd or 0.000ddd forms (may have\n       E, but only for 0.00E+3 kind of case -- with plenty of spare\n       space in this case */\n    pre=-pre+2; \t\t\t/* gap width, including \"0.\" */\n    t=cstart+ROUNDDOWN4(c-cstart)+pre;\t/* preferred first target point */\n    /* backoff if too far to the right */\n    if (t>string+DECSTRING-5) t=string+DECSTRING-5; /* adjust to fit */\n    /* now shift the entire coefficient to the right, being careful not */\n    /* to access to the left of string [cannot use memcpy] */\n    for (s=t-pre; s>=string; s-=4, t-=4) UBFROMUI(t, UBTOUI(s));\n    /* for Quads and Singles there may be a character or two left... */\n    s+=3;\t\t\t\t/* where next would come from */\n    for(; s>=cstart; s--, t--) *(t+3)=*(s);\n    /* now have fill 0. through 0.00000; use overlaps to avoid tests */\n    if (pre>=4) {\n      memcpy(cstart+pre-4, \"0000\", 4);\n      memcpy(cstart, \"0.00\", 4);\n      }\n     else { /* 2 or 3 */\n      *(cstart+pre-1)='0';\n      memcpy(cstart, \"0.\", 2);\n      }\n    c+=pre;\t\t\t\t/* to end */\n    }\n\n  /* finally add the E-part, if needed; it will never be 0, and has */\n  /* a maximum length of 3 or 4 digits (asserted above) */\n  if (e!=0) {\n    memcpy(c, \"E+\", 2); \t\t/* starts with E, assume + */\n    c++;\n    if (e<0) {\n      *c='-';\t\t\t\t/* oops, need '-' */\n      e=-e;\t\t\t\t/* uInt, please */\n      }\n    c++;\n    /* Three-character exponents are easy; 4-character a little trickier */\n    #if DECEMAXD<=3\n      u=&BIN2BCD8[e*4]; \t\t/* -> 3 digits + length byte */\n      /* copy fixed 4 characters [is safe], starting at non-zero */\n      /* and with character mask to convert BCD to char */\n      UBFROMUI(c, UBTOUI(u+3-*(u+3))|CHARMASK);\n      c+=*(u+3);\t\t\t/* bump pointer appropriately */\n    #elif DECEMAXD==4\n      if (e<1000) {\t\t\t/* 3 (or fewer) digits case */\n\tu=&BIN2BCD8[e*4];\t\t/* -> 3 digits + length byte */\n\tUBFROMUI(c, UBTOUI(u+3-*(u+3))|CHARMASK); /* [as above] */\n\tc+=*(u+3);\t\t\t/* bump pointer appropriately */\n\t}\n       else {\t\t\t\t/* 4-digits */\n\tInt thou=((e>>3)*1049)>>17;\t/* e/1000 */\n\tInt rem=e-(1000*thou);\t\t/* e%1000 */\n\t*c++=(char)('0'+(char)thou);\t/* the thousands digit */\n\tu=&BIN2BCD8[rem*4];\t\t/* -> 3 digits + length byte */\n\tUBFROMUI(c, UBTOUI(u)|CHARMASK);/* copy fixed 3+1 characters [is safe] */\n\tc+=3;\t\t\t\t/* bump pointer, always 3 digits */\n\t}\n    #endif\n    }\n  *c='\\0';\t\t\t\t/* terminate */\n  /*printf(\"res %s\\n\", string); */\n  return string;\n  }",
+      "fn_code_pos": [
+        [
+          1232,
+          0
+        ],
+        [
+          1449,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToEngString",
+        "parameters": {
+          "df": "decFloat",
+          "string": "char"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "Int decFloatToPacked(const decFloat *df, Int *exp, uByte *packed) {\n  uByte bcdar[DECPMAX+2];\t   /* work buffer */\n  uByte *ip=bcdar, *op=packed;\t   /* work pointers */\n  if (DFISINF(df)) {\n    memset(bcdar, 0, DECPMAX+2);\n    *exp=DECFLOAT_Inf;\n    }\n   else {\n    GETCOEFF(df, bcdar+1);\t   /* use macro */\n    if (DFISNAN(df)) {\n      bcdar[1]=0;\t\t   /* MSD needs clearing */\n      *exp=DFWORD(df, 0)&0x7e000000;\n      }\n     else {\t\t\t   /* finite */\n      *exp=GETEXPUN(df);\n      }\n    }\n  /* now pack; coefficient currently at bcdar+1 */\n  #if SINGLE\n    ip++;\t\t\t   /* ignore first byte */\n  #else\n    *ip=0;\t\t\t   /* need leading zero */\n  #endif\n  /* set final byte to Packed BCD sign value */\n  bcdar[DECPMAX+1]=(DFISSIGNED(df) ? DECPMINUS : DECPPLUS);\n  /* pack an even number of bytes... */\n  for (; op<packed+((DECPMAX+2)/2); op++, ip+=2) {\n    *op=(uByte)((*ip<<4)+*(ip+1));\n    }\n  return (bcdar[DECPMAX+1]==DECPMINUS ? DECFLOAT_Sign : 0);\n  }",
+      "fn_code_pos": [
+        [
+          1467,
+          0
+        ],
+        [
+          1497,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToPacked",
+        "parameters": {
+          "df": "decFloat",
+          "exp": "Int",
+          "packed": "uByte"
+        },
+        "return_type": "Int"
+      }
+    },
+    {
+      "fn_code": "char * decFloatToString(const decFloat *df, char *string){\n  uInt msd;\t\t\t   /* coefficient MSD */\n  Int  exp;\t\t\t   /* exponent top two bits or full */\n  uInt comb;\t\t\t   /* combination field */\n  char *cstart; \t\t   /* coefficient start */\n  char *c;\t\t\t   /* output pointer in string */\n  char *s, *t;\t\t\t   /* .. (source, target) */\n  Int  pre, e;\t\t\t   /* work */\n  const uByte *u;\t\t   /* .. */\n  uInt\tuiwork; \t\t   /* for macros [one compiler needs */\n\t\t\t\t   /* volatile here to avoid bug, but */\n\t\t\t\t   /* that doubles execution time] */\n\n  /* Source words; macro handles endianness */\n  uInt sourhi=DFWORD(df, 0);\t   /* word with sign */\n  #if DECPMAX==16\n  uInt sourlo=DFWORD(df, 1);\n  #elif DECPMAX==34\n  uInt sourmh=DFWORD(df, 1);\n  uInt sourml=DFWORD(df, 2);\n  uInt sourlo=DFWORD(df, 3);\n  #endif\n\n  c=string;\t\t\t   /* where result will go */\n  if (((Int)sourhi)<0) *c++='-';   /* handle sign */\n  comb=sourhi>>26;\t\t   /* sign+combination field */\n  msd=DECCOMBMSD[comb]; \t   /* decode the combination field */\n  exp=DECCOMBEXP[comb]; \t   /* .. */\n\n  if (!EXPISSPECIAL(exp)) {\t   /* finite */\n    /* complete exponent; top two bits are in place */\n    exp+=GETECON(df)-DECBIAS;\t   /* .. + continuation and unbias */\n    }\n   else {\t\t\t   /* IS special */\n    if (exp==DECFLOAT_Inf) {\t   /* infinity */\n      strcpy(c, \"Infinity\");\n      return string;\t\t   /* easy */\n      }\n    if (sourhi&0x02000000) *c++='s'; /* sNaN */\n    strcpy(c, \"NaN\");\t\t   /* complete word */\n    c+=3;\t\t\t   /* step past */\n    /* quick exit if the payload is zero */\n    #if DECPMAX==7\n    if ((sourhi&0x000fffff)==0) return string;\n    #elif DECPMAX==16\n    if (sourlo==0 && (sourhi&0x0003ffff)==0) return string;\n    #elif DECPMAX==34\n    if (sourlo==0 && sourml==0 && sourmh==0\n     && (sourhi&0x00003fff)==0) return string;\n    #endif\n    /* otherwise drop through to add integer; set correct exp etc. */\n    exp=0; msd=0;\t\t   /* setup for following code */\n    }\n\n  /* convert the digits of the significand to characters */\n  cstart=c;\t\t\t   /* save start of coefficient */\n  if (msd) *c++=(char)('0'+(char)msd);\t/* non-zero most significant digit */\n\n  /* Decode the declets.  After extracting each declet, it is */\n  /* decoded to a 4-uByte sequence by table lookup; the four uBytes */\n  /* are the three encoded BCD8 digits followed by a 1-byte length */\n  /* (significant digits, except that 000 has length 0).  This allows */\n  /* us to left-align the first declet with non-zero content, then */\n  /* the remaining ones are full 3-char length.  Fixed-length copies */\n  /* are used because variable-length memcpy causes a subroutine call */\n  /* in at least two compilers.  (The copies are length 4 for speed */\n  /* and are safe because the last item in the array is of length */\n  /* three and has the length byte following.) */\n  #define dpd2char(dpdin) u=&DPD2BCD8[((dpdin)&0x3ff)*4];\t \\\n\t if (c!=cstart) {UBFROMUI(c, UBTOUI(u)|CHARMASK); c+=3;} \\\n\t  else if (*(u+3)) {\t\t\t\t\t \\\n\t   UBFROMUI(c, UBTOUI(u+3-*(u+3))|CHARMASK); c+=*(u+3);}\n\n  #if DECPMAX==7\n  dpd2char(sourhi>>10); \t\t/* declet 1 */\n  dpd2char(sourhi);\t\t\t/* declet 2 */\n\n  #elif DECPMAX==16\n  dpd2char(sourhi>>8);\t\t\t/* declet 1 */\n  dpd2char((sourhi<<2) | (sourlo>>30)); /* declet 2 */\n  dpd2char(sourlo>>20); \t\t/* declet 3 */\n  dpd2char(sourlo>>10); \t\t/* declet 4 */\n  dpd2char(sourlo);\t\t\t/* declet 5 */\n\n  #elif DECPMAX==34\n  dpd2char(sourhi>>4);\t\t\t/* declet 1 */\n  dpd2char((sourhi<<6) | (sourmh>>26)); /* declet 2 */\n  dpd2char(sourmh>>16); \t\t/* declet 3 */\n  dpd2char(sourmh>>6);\t\t\t/* declet 4 */\n  dpd2char((sourmh<<4) | (sourml>>28)); /* declet 5 */\n  dpd2char(sourml>>18); \t\t/* declet 6 */\n  dpd2char(sourml>>8);\t\t\t/* declet 7 */\n  dpd2char((sourml<<2) | (sourlo>>30)); /* declet 8 */\n  dpd2char(sourlo>>20); \t\t/* declet 9 */\n  dpd2char(sourlo>>10); \t\t/* declet 10 */\n  dpd2char(sourlo);\t\t\t/* declet 11 */\n  #endif\n\n  if (c==cstart) *c++='0';\t   /* all zeros, empty -- make \"0\" */\n\n  /*[This fast path is valid but adds 3-5 cycles to worst case length] */\n  /*if (exp==0) {\t\t   // integer or NaN case -- easy */\n  /*  *c='\\0';\t\t\t   // terminate */\n  /*  return string; */\n  /*  } */\n\n  e=0;\t\t\t\t   /* assume no E */\n  pre=(Int)(c-cstart)+exp;\t   /* length+exp  [c->LSD+1] */\n  /* [here, pre-exp is the digits count (==1 for zero)] */\n\n  if (exp>0 || pre<-5) {\t   /* need exponential form */\n    e=pre-1;\t\t\t   /* calculate E value */\n    pre=1;\t\t\t   /* assume one digit before '.' */\n    } /* exponential form */\n\n  /* modify the coefficient, adding 0s, '.', and E+nn as needed */\n  if (pre>0) {\t\t\t   /* ddd.ddd (plain), perhaps with E */\n    char *dotat=cstart+pre;\n    if (dotat<c) {\t\t\t/* if embedded dot needed... */\n      /* [memmove is a disaster, here] */\n      /* move by fours; there must be space for junk at the end */\n      /* because exponent is still possible */\n      s=dotat+ROUNDDOWN4(c-dotat);\t/* source */\n      t=s+1;\t\t\t\t/* target */\n      /* open the gap [cannot use memcpy] */\n      for (; s>=dotat; s-=4, t-=4) UBFROMUI(t, UBTOUI(s));\n      *dotat='.';\n      c++;\t\t\t\t/* length increased by one */\n      } /* need dot? */\n\n    /* finally add the E-part, if needed; it will never be 0, and has */\n    /* a maximum length of 3 or 4 digits (asserted above) */\n    if (e!=0) {\n      memcpy(c, \"E+\", 2);\t\t/* starts with E, assume + */\n      c++;\n      if (e<0) {\n\t*c='-'; \t\t\t/* oops, need '-' */\n\te=-e;\t\t\t\t/* uInt, please */\n\t}\n      c++;\n      /* Three-character exponents are easy; 4-character a little trickier */\n      #if DECEMAXD<=3\n\tu=&BIN2BCD8[e*4];\t\t/* -> 3 digits + length byte */\n\t/* copy fixed 4 characters [is safe], starting at non-zero */\n\t/* and with character mask to convert BCD to char */\n\tUBFROMUI(c, UBTOUI(u+3-*(u+3))|CHARMASK);\n\tc+=*(u+3);\t\t\t/* bump pointer appropriately */\n      #elif DECEMAXD==4\n\tif (e<1000) {\t\t\t/* 3 (or fewer) digits case */\n\t  u=&BIN2BCD8[e*4];\t\t/* -> 3 digits + length byte */\n\t  UBFROMUI(c, UBTOUI(u+3-*(u+3))|CHARMASK); /* [as above] */\n\t  c+=*(u+3);\t\t\t/* bump pointer appropriately */\n\t  }\n\t else { \t\t\t/* 4-digits */\n\t  Int thou=((e>>3)*1049)>>17;\t/* e/1000 */\n\t  Int rem=e-(1000*thou);\t/* e%1000 */\n\t  *c++=(char)('0'+(char)thou);\t/* the thousands digit */\n\t  u=&BIN2BCD8[rem*4];\t\t/* -> 3 digits + length byte */\n\t  UBFROMUI(c, UBTOUI(u)|CHARMASK); /* copy fixed 3+1 characters [is safe] */\n\t  c+=3; \t\t\t/* bump pointer, always 3 digits */\n\t  }\n      #endif\n      }\n    *c='\\0';\t\t\t\t/* add terminator */\n    /*printf(\"res %s\\n\", string); */\n    return string;\n    } /* pre>0 */\n\n  /* -5<=pre<=0: here for plain 0.ddd or 0.000ddd forms (can never have E) */\n  /* Surprisingly, this is close to being the worst-case path, so the */\n  /* shift is done by fours; this is a little tricky because the */\n  /* rightmost character to be written must not be beyond where the */\n  /* rightmost terminator could be -- so backoff to not touch */\n  /* terminator position if need be (this can make exact alignments */\n  /* for full Doubles, but in some cases needs care not to access too */\n  /* far to the left) */\n\n  pre=-pre+2;\t\t\t\t/* gap width, including \"0.\" */\n  t=cstart+ROUNDDOWN4(c-cstart)+pre;\t/* preferred first target point */\n  /* backoff if too far to the right */\n  if (t>string+DECSTRING-5) t=string+DECSTRING-5; /* adjust to fit */\n  /* now shift the entire coefficient to the right, being careful not */\n  /* to access to the left of string [cannot use memcpy] */\n  for (s=t-pre; s>=string; s-=4, t-=4) UBFROMUI(t, UBTOUI(s));\n  /* for Quads and Singles there may be a character or two left... */\n  s+=3; \t\t\t\t/* where next would come from */\n  for(; s>=cstart; s--, t--) *(t+3)=*(s);\n  /* now have fill 0. through 0.00000; use overlaps to avoid tests */\n  if (pre>=4) {\n    memcpy(cstart+pre-4, \"0000\", 4);\n    memcpy(cstart, \"0.00\", 4);\n    }\n   else { /* 2 or 3 */\n    *(cstart+pre-1)='0';\n    memcpy(cstart, \"0.\", 2);\n    }\n  *(c+pre)='\\0';\t\t\t/* terminate */\n  return string;\n  }",
+      "fn_code_pos": [
+        [
+          1511,
+          0
+        ],
+        [
+          1709,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToString",
+        "parameters": {
+          "df": "decFloat",
+          "string": "char"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "decFloatWider * decFloatToWider(const decFloat *source, decFloatWider *wider) {\n  uInt msd;\n\n  /* Construct and copy the sign word */\n  if (DFISSPECIAL(source)) {\n    /* copy sign, combination, and first bit of exponent (sNaN selector) */\n    DFWWORD(wider, 0)=DFWORD(source, 0)&0xfe000000;\n    msd=0;\n    }\n   else { /* is finite number */\n    uInt exp=GETEXPUN(source)+DECWBIAS; /* get unbiased exponent and rebias */\n    uInt code=(exp>>DECWECONL)<<29;\t/* set two bits of exp [msd=0] */\n    code|=(exp<<(32-6-DECWECONL)) & 0x03ffffff; /* add exponent continuation */\n    code|=DFWORD(source, 0)&0x80000000; /* add sign */\n    DFWWORD(wider, 0)=code;\t\t/* .. and place top word in wider */\n    msd=GETMSD(source); \t\t/* get source coefficient MSD [0-9] */\n    }\n  /* Copy the coefficient and clear any 'unused' words to left */\n  #if SINGLE\n    DFWWORD(wider, 1)=(DFWORD(source, 0)&0x000fffff)|(msd<<20);\n  #elif DOUBLE\n    DFWWORD(wider, 2)=(DFWORD(source, 0)&0x0003ffff)|(msd<<18);\n    DFWWORD(wider, 3)=DFWORD(source, 1);\n    DFWWORD(wider, 1)=0;\n  #endif\n  return wider;\n  }",
+      "fn_code_pos": [
+        [
+          1725,
+          0
+        ],
+        [
+          1751,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToWider",
+        "parameters": {
+          "source": "decFloat",
+          "wider": "decFloatWider"
+        },
+        "return_type": "decFloatWider"
+      }
+    },
+    {
+      "fn_code": "const char *decFloatVersion(void) {\n  return DECVERSION;\n  }",
+      "fn_code_pos": [
+        [
+          1759,
+          0
+        ],
+        [
+          1761,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatVersion",
+        "parameters": {},
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "decFloat * decFloatZero(decFloat *df){\n  DFWORD(df, 0)=ZEROWORD;     /* set appropriate top word */\n  #if DOUBLE || QUAD\n    DFWORD(df, 1)=0;\n    #if QUAD\n      DFWORD(df, 2)=0;\n      DFWORD(df, 3)=0;\n    #endif\n  #endif\n  /* decFloatShow(df, \"zero\"); */\n  return df;\n  }",
+      "fn_code_pos": [
+        [
+          1771,
+          0
+        ],
+        [
+          1782,
+          3
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatZero",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": "decFloat"
+      }
+    },
+    {
+      "fn_code": "void decShowNum(const bcdnum *num, const char *tag) {\n    const char *csign=\"+\";\t\t/* sign character */\n    uByte *ub;\t\t\t\t/* work */\n    uInt  uiwork;\t\t\t/* for macros */\n    if (num->sign==DECFLOAT_Sign) csign=\"-\";\n\n    printf(\">%s> \", tag);\n    if (num->exponent==DECFLOAT_Inf) printf(\"%sInfinity\", csign);\n    else if (num->exponent==DECFLOAT_qNaN) printf(\"%sqNaN\", csign);\n    else if (num->exponent==DECFLOAT_sNaN) printf(\"%ssNaN\", csign);\n    else {\t\t\t\t/* finite */\n     char qbuf[10];\t\t\t/* for right-aligned q */\n     char *c;\t\t\t\t/* work */\n     const uByte *u;\t\t\t/* .. */\n     Int e=num->exponent;\t\t/* .. exponent */\n     strcpy(qbuf, \"q=\");\n     c=&qbuf[2];\t\t\t/* where exponent will go */\n     /* lay out the exponent */\n     if (e<0) {\n       *c++='-';\t\t\t/* add '-' */\n       e=-e;\t\t\t\t/* uInt, please */\n       }\n     #if DECEMAXD>4\n       #error Exponent form is too long for ShowNum to lay out\n     #endif\n     if (e==0) *c++='0';\t\t/* 0-length case */\n      else if (e<1000) {\t\t/* 3 (or fewer) digits case */\n       u=&BIN2BCD8[e*4];\t\t/* -> 3 digits + length byte */\n       UBFROMUI(c, UBTOUI(u+3-*(u+3))|CHARMASK); /* [as above] */\n       c+=*(u+3);\t\t\t/* bump pointer appropriately */\n       }\n      else {\t\t\t\t/* 4-digits */\n       Int thou=((e>>3)*1049)>>17;\t/* e/1000 */\n       Int rem=e-(1000*thou);\t\t/* e%1000 */\n       *c++=(char)('0'+(char)thou);\t/* the thousands digit */\n       u=&BIN2BCD8[rem*4];\t\t/* -> 3 digits + length byte */\n       UBFROMUI(c, UBTOUI(u)|CHARMASK); /* copy fixed 3+1 characters [is safe] */\n       c+=3;\t\t\t\t/* bump pointer, always 3 digits */\n       }\n     *c='\\0';\t\t\t\t/* add terminator */\n     printf(\"%7s c=%s\", qbuf, csign);\n     }\n\n    if (!EXPISSPECIAL(num->exponent) || num->msd!=num->lsd || *num->lsd!=0) {\n      for (ub=num->msd; ub<=num->lsd; ub++) { /* coefficient... */\n\tprintf(\"%1x\", *ub);\n\tif ((num->lsd-ub)%3==0 && ub!=num->lsd) printf(\" \"); /* 4-space */\n\t}\n      }\n    printf(\"\\n\");\n    }",
+      "fn_code_pos": [
+        [
+          1795,
+          2
+        ],
+        [
+          1845,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decShowNum",
+        "parameters": {
+          "num": "bcdnum",
+          "tag": "char"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "decFinalize(decFloat *, bcdnum *, decContext *)",
+      "fn_dec_pos": [
+        [
+          97,
+          18
+        ],
+        [
+          97,
+          65
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFinalize",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decBiStr(const char *, const char *, const char *)",
+      "fn_dec_pos": [
+        [
+          98,
+          12
+        ],
+        [
+          98,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decBiStr",
+        "parameters": {},
+        "return_type": "Flag"
+      }
+    },
+    {
+      "fn_code": "decFinalize(decFloat *df, bcdnum *num,\n\t\t\t      decContext *set)",
+      "fn_dec_pos": [
+        [
+          241,
+          18
+        ],
+        [
+          242,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFinalize",
+        "parameters": {
+          "df": "decFloat",
+          "num": "bcdnum",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatFromBCD(decFloat *df, Int exp, const uByte *bcdar,\n\t\t\t   Int sig)",
+      "fn_dec_pos": [
+        [
+          588,
+          11
+        ],
+        [
+          589,
+          14
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromBCD",
+        "parameters": {
+          "df": "decFloat",
+          "exp": "Int",
+          "bcdar": "uByte",
+          "sig": "Int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatFromPacked(decFloat *df, Int exp, const uByte *packed)",
+      "fn_dec_pos": [
+        [
+          675,
+          11
+        ],
+        [
+          675,
+          73
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromPacked",
+        "parameters": {
+          "df": "decFloat",
+          "exp": "Int",
+          "packed": "uByte"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatFromPackedChecked(decFloat *df, Int exp,\n\t\t\t\t     const uByte *packed)",
+      "fn_dec_pos": [
+        [
+          719,
+          11
+        ],
+        [
+          720,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromPackedChecked",
+        "parameters": {
+          "df": "decFloat",
+          "exp": "Int",
+          "packed": "uByte"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatFromString(decFloat *result, const char *string,\n\t\t\t      decContext *set)",
+      "fn_dec_pos": [
+        [
+          787,
+          11
+        ],
+        [
+          788,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromString",
+        "parameters": {
+          "result": "decFloat",
+          "string": "char",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatFromWider(decFloat *result, const decFloatWider *wider,\n\t\t\t     decContext *set)",
+      "fn_dec_pos": [
+        [
+          1030,
+          11
+        ],
+        [
+          1031,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatFromWider",
+        "parameters": {
+          "result": "decFloat",
+          "wider": "decFloatWider",
+          "set": "decContext"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatSetCoefficient(decFloat *df, const uByte *bcdar,\n\t\t\t\t  Int sig)",
+      "fn_dec_pos": [
+        [
+          1107,
+          11
+        ],
+        [
+          1108,
+          14
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatSetCoefficient",
+        "parameters": {
+          "df": "decFloat",
+          "bcdar": "uByte",
+          "sig": "Int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatSetExponent(decFloat *df, decContext *set, Int exp)",
+      "fn_dec_pos": [
+        [
+          1135,
+          11
+        ],
+        [
+          1135,
+          70
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatSetExponent",
+        "parameters": {
+          "df": "decFloat",
+          "set": "decContext",
+          "exp": "Int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatToEngString(const decFloat *df, char *string)",
+      "fn_dec_pos": [
+        [
+          1232,
+          7
+        ],
+        [
+          1232,
+          60
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToEngString",
+        "parameters": {
+          "df": "decFloat",
+          "string": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatToString(const decFloat *df, char *string)",
+      "fn_dec_pos": [
+        [
+          1511,
+          7
+        ],
+        [
+          1511,
+          57
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToString",
+        "parameters": {
+          "df": "decFloat",
+          "string": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatToWider(const decFloat *source, decFloatWider *wider)",
+      "fn_dec_pos": [
+        [
+          1725,
+          16
+        ],
+        [
+          1725,
+          77
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatToWider",
+        "parameters": {
+          "source": "decFloat",
+          "wider": "decFloatWider"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatVersion(void)",
+      "fn_dec_pos": [
+        [
+          1759,
+          12
+        ],
+        [
+          1759,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatVersion",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "decFloatZero(decFloat *df)",
+      "fn_dec_pos": [
+        [
+          1771,
+          11
+        ],
+        [
+          1771,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "decFloatZero",
+        "parameters": {
+          "df": "decFloat"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"decCommonSymbols.h\"\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ],
+    [
+      "#include \"decDPD.h\"\t      /* source of the lookup tables */\n",
+      [
+        182,
+        0
+      ],
+      [
+        183,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

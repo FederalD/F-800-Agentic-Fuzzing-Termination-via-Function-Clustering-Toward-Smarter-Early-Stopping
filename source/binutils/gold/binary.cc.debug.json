@@ -1,0 +1,278 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "template<int size, bool big_endian>\nbool\nBinary_to_elf::sized_convert(const Task* task)\n{\n  // Read the input file.\n\n  File_read f;\n  if (!f.open(task, this->filename_))\n    {\n      gold_error(_(\"cannot open %s: %s:\"), this->filename_.c_str(),\n\t\t strerror(errno));\n      return false;\n    }\n\n  section_size_type filesize = convert_to_section_size_type(f.filesize());\n  const unsigned char* fileview;\n  if (filesize == 0)\n    fileview = NULL;\n  else\n    fileview = f.get_view(0, 0, filesize, false, false);\n\n  unsigned int align;\n  if (size == 32)\n    align = 4;\n  else if (size == 64)\n    align = 8;\n  else\n    gold_unreachable();\n  section_size_type aligned_filesize = align_address(filesize, align);\n\n  // Build the stringpool for the symbol table.\n\n  std::string mangled_name = this->filename_;\n  for (std::string::iterator p = mangled_name.begin();\n       p != mangled_name.end();\n       ++p)\n    if (!ISALNUM(*p))\n      *p = '_';\n  mangled_name = \"_binary_\" + mangled_name;\n  std::string start_symbol_name = mangled_name + \"_start\";\n  std::string end_symbol_name = mangled_name + \"_end\";\n  std::string size_symbol_name = mangled_name + \"_size\";\n\n  Stringpool strtab;\n  strtab.add(start_symbol_name.c_str(), false, NULL);\n  strtab.add(end_symbol_name.c_str(), false, NULL);\n  strtab.add(size_symbol_name.c_str(), false, NULL);\n  strtab.set_string_offsets();\n\n  // Build the stringpool for the section name table.\n\n  Stringpool shstrtab;\n  shstrtab.add(\".data\", false, NULL);\n  shstrtab.add(\".symtab\", false, NULL);\n  shstrtab.add(\".strtab\", false, NULL);\n  shstrtab.add(\".shstrtab\", false, NULL);\n  shstrtab.set_string_offsets();\n\n  // Work out the size of the generated file, and the offsets of the\n  // various sections, and allocate a buffer.\n\n  const int sym_size = elfcpp::Elf_sizes<size>::sym_size;\n\n  size_t output_size = (elfcpp::Elf_sizes<size>::ehdr_size\n\t\t\t+ 5 * elfcpp::Elf_sizes<size>::shdr_size);\n  size_t data_offset = output_size;\n  output_size += aligned_filesize;\n  size_t symtab_offset = output_size;\n  output_size += 4 * sym_size;\n  size_t strtab_offset = output_size;\n  output_size += strtab.get_strtab_size();\n  size_t shstrtab_offset = output_size;\n  output_size += shstrtab.get_strtab_size();\n\n  unsigned char* buffer = new unsigned char[output_size];\n\n  // Write out the data.\n\n  unsigned char* pout = buffer;\n\n  this->write_file_header<size, big_endian>(&pout);\n\n  this->write_section_header<size, big_endian>(\"\", &shstrtab, elfcpp::SHT_NULL,\n\t\t\t\t\t       0, 0, 0, 0, 0,\n\t\t\t\t\t       0, 0, &pout);\n  // Having the section be named \".data\", having it be writable, and\n  // giving it an alignment of 1 is because the GNU linker does it\n  // that way, and existing linker script expect it.\n  this->write_section_header<size, big_endian>(\".data\", &shstrtab,\n\t\t\t\t\t       elfcpp::SHT_PROGBITS,\n\t\t\t\t\t       (elfcpp::SHF_ALLOC\n\t\t\t\t\t\t| elfcpp::SHF_WRITE),\n\t\t\t\t\t       data_offset,\n\t\t\t\t\t       filesize, 0, 0,\n\t\t\t\t\t       1, 0, &pout);\n  this->write_section_header<size, big_endian>(\".symtab\", &shstrtab,\n\t\t\t\t\t       elfcpp::SHT_SYMTAB,\n\t\t\t\t\t       0, symtab_offset, 4 * sym_size,\n\t\t\t\t\t       3, 1, align, sym_size, &pout);\n  this->write_section_header<size, big_endian>(\".strtab\", &shstrtab,\n\t\t\t\t\t       elfcpp::SHT_STRTAB,\n\t\t\t\t\t       0, strtab_offset,\n\t\t\t\t\t       strtab.get_strtab_size(),\n\t\t\t\t\t       0, 0, 1, 0, &pout);\n  this->write_section_header<size, big_endian>(\".shstrtab\", &shstrtab,\n\t\t\t\t\t       elfcpp::SHT_STRTAB,\n\t\t\t\t\t       0, shstrtab_offset,\n\t\t\t\t\t       shstrtab.get_strtab_size(),\n\t\t\t\t\t       0, 0, 1, 0, &pout);\n\n  if (filesize > 0)\n    {\n      memcpy(pout, fileview, filesize);\n      pout += filesize;\n      memset(pout, 0, aligned_filesize - filesize);\n      pout += aligned_filesize - filesize;\n    }\n\n  this->write_symbol<size, big_endian>(\"\", &strtab, 0, 0, 0, &pout);\n  this->write_symbol<size, big_endian>(start_symbol_name, &strtab, 0, filesize,\n\t\t\t\t       1, &pout);\n  this->write_symbol<size, big_endian>(end_symbol_name, &strtab, filesize, 0,\n\t\t\t\t       1, &pout);\n  this->write_symbol<size, big_endian>(size_symbol_name, &strtab, filesize, 0,\n\t\t\t\t       elfcpp::SHN_ABS, &pout);\n\n  strtab.write_to_buffer(pout, strtab.get_strtab_size());\n  pout += strtab.get_strtab_size();\n\n  shstrtab.write_to_buffer(pout, shstrtab.get_strtab_size());\n  pout += shstrtab.get_strtab_size();\n\n  gold_assert(static_cast<size_t>(pout - buffer) == output_size);\n\n  this->data_ = buffer;\n  this->filesize_ = output_size;\n\n  f.unlock(task);\n\n  return true;\n}",
+      "fn_code_pos": [
+        [
+          125,
+          0
+        ],
+        [
+          265,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nBinary_to_elf::write_file_header(unsigned char** ppout)\n{\n  elfcpp::Ehdr_write<size, big_endian> oehdr(*ppout);\n\n  unsigned char e_ident[elfcpp::EI_NIDENT];\n  memset(e_ident, 0, elfcpp::EI_NIDENT);\n  e_ident[elfcpp::EI_MAG0] = elfcpp::ELFMAG0;\n  e_ident[elfcpp::EI_MAG1] = elfcpp::ELFMAG1;\n  e_ident[elfcpp::EI_MAG2] = elfcpp::ELFMAG2;\n  e_ident[elfcpp::EI_MAG3] = elfcpp::ELFMAG3;\n  if (size == 32)\n    e_ident[elfcpp::EI_CLASS] = elfcpp::ELFCLASS32;\n  else if (size == 64)\n    e_ident[elfcpp::EI_CLASS] = elfcpp::ELFCLASS64;\n  else\n    gold_unreachable();\n  e_ident[elfcpp::EI_DATA] = (big_endian\n\t\t\t      ? elfcpp::ELFDATA2MSB\n\t\t\t      : elfcpp::ELFDATA2LSB);\n  e_ident[elfcpp::EI_VERSION] = elfcpp::EV_CURRENT;\n  oehdr.put_e_ident(e_ident);\n\n  oehdr.put_e_type(elfcpp::ET_REL);\n  oehdr.put_e_machine(this->elf_machine_);\n  oehdr.put_e_version(elfcpp::EV_CURRENT);\n  oehdr.put_e_entry(0);\n  oehdr.put_e_phoff(0);\n  oehdr.put_e_shoff(elfcpp::Elf_sizes<size>::ehdr_size);\n  oehdr.put_e_flags(0);\n  oehdr.put_e_ehsize(elfcpp::Elf_sizes<size>::ehdr_size);\n  oehdr.put_e_phentsize(0);\n  oehdr.put_e_phnum(0);\n  oehdr.put_e_shentsize(elfcpp::Elf_sizes<size>::shdr_size);\n  oehdr.put_e_shnum(5);\n  oehdr.put_e_shstrndx(4);\n\n  *ppout += elfcpp::Elf_sizes<size>::ehdr_size;\n}",
+      "fn_code_pos": [
+        [
+          269,
+          0
+        ],
+        [
+          308,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nBinary_to_elf::write_section_header(\n    const char* name,\n    const Stringpool* shstrtab,\n    elfcpp::SHT type,\n    unsigned int flags,\n    section_size_type offset,\n    section_size_type section_size,\n    unsigned int link,\n    unsigned int info,\n    unsigned int addralign,\n    unsigned int entsize,\n    unsigned char** ppout)\n{\n  elfcpp::Shdr_write<size, big_endian> oshdr(*ppout);\n\n  oshdr.put_sh_name(*name == '\\0' ? 0 : shstrtab->get_offset(name));\n  oshdr.put_sh_type(type);\n  oshdr.put_sh_flags(flags);\n  oshdr.put_sh_addr(0);\n  oshdr.put_sh_offset(offset);\n  oshdr.put_sh_size(section_size);\n  oshdr.put_sh_link(link);\n  oshdr.put_sh_info(info);\n  oshdr.put_sh_addralign(addralign);\n  oshdr.put_sh_entsize(entsize);\n\n  *ppout += elfcpp::Elf_sizes<size>::shdr_size;\n}",
+      "fn_code_pos": [
+        [
+          312,
+          0
+        ],
+        [
+          341,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "template<int size, bool big_endian>\nvoid\nBinary_to_elf::write_symbol(\n    const std::string& name,\n    const Stringpool* strtab,\n    section_size_type value,\n    typename elfcpp::Elf_types<32>::Elf_WXword st_size,\n    unsigned int shndx,\n    unsigned char** ppout)\n{\n  unsigned char* pout = *ppout;\n\n  elfcpp::Sym_write<size, big_endian> osym(pout);\n  osym.put_st_name(name.empty() ? 0 : strtab->get_offset(name.c_str()));\n  osym.put_st_value(value);\n  osym.put_st_size(st_size);\n  osym.put_st_info(name.empty() ? elfcpp::STB_LOCAL : elfcpp::STB_GLOBAL,\n\t\t   elfcpp::STT_NOTYPE);\n  osym.put_st_other(elfcpp::STV_DEFAULT, 0);\n  osym.put_st_shndx(shndx);\n\n  *ppout += elfcpp::Elf_sizes<size>::sym_size;\n}",
+      "fn_code_pos": [
+        [
+          345,
+          0
+        ],
+        [
+          367,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Binary_to_elf::Binary_to_elf(elfcpp::EM machine, int size, bool big_endian,\n\t\t\t     const std::string& filename)\n  : elf_machine_(machine), size_(size), big_endian_(big_endian),\n    filename_(filename), data_(NULL), filesize_(0)\n{\n}",
+      "fn_code_pos": [
+        [
+          54,
+          0
+        ],
+        [
+          59,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Binary_to_elf::Binary_to_elf",
+        "parameters": {
+          "machine": "elfcpp::EM",
+          "size": "int",
+          "big_endian": "bool",
+          "filename": "std::string"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "Binary_to_elf::~Binary_to_elf()\n{\n  if (this->data_ != NULL)\n    delete[] this->data_;\n}",
+      "fn_code_pos": [
+        [
+          61,
+          0
+        ],
+        [
+          65,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Binary_to_elf::~Binary_to_elf",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "bool\nBinary_to_elf::convert(const Task* task)\n{\n  if (this->size_ == 32)\n    {\n      if (!this->big_endian_)\n\t{\n#ifdef HAVE_TARGET_32_LITTLE\n\t  return this->sized_convert<32, false>(task);\n#else\n\t  gold_unreachable();\n#endif\n\t}\n      else\n\t{\n#ifdef HAVE_TARGET_32_BIG\n\t  return this->sized_convert<32, true>(task);\n#else\n\t  gold_unreachable();\n#endif\n\t}\n    }\n  else if (this->size_ == 64)\n    {\n      if (!this->big_endian_)\n\t{\n#ifdef HAVE_TARGET_64_LITTLE\n\t  return this->sized_convert<64, false>(task);\n#else\n\t  gold_unreachable();\n#endif\n\t}\n      else\n\t{\n#ifdef HAVE_TARGET_64_BIG\n\t  return this->sized_convert<64, true>(task);\n#else\n\t  gold_unreachable();\n#endif\n\t}\n    }\n  else\n    gold_unreachable();\n}",
+      "fn_code_pos": [
+        [
+          72,
+          0
+        ],
+        [
+          115,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "Binary_to_elf::convert",
+        "parameters": {
+          "task": "Task"
+        },
+        "return_type": "bool"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "osym(pout)",
+      "fn_dec_pos": [
+        [
+          357,
+          38
+        ],
+        [
+          357,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "osym",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [],
+  "include_list": [
+    [
+      "#include \"gold.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <cerrno>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <cstring>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"elfcpp.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"stringpool.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"fileread.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"output.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"binary.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"safe-ctype.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

@@ -1,0 +1,420 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\npipe_open (struct serial *scb, const char *name)\n{\n#if !HAVE_SOCKETPAIR\n  return -1;\n#else\n  struct pipe_state *state;\n  /* This chunk: */\n  /* Copyright (c) 1988, 1993\n   *      The Regents of the University of California.  All rights reserved.\n   *\n   * This code is derived from software written by Ken Arnold and\n   * published in UNIX Review, Vol. 6, No. 8.\n   */\n  int pdes[2];\n  int err_pdes[2];\n  int pid;\n\n  if (gdb_socketpair_cloexec (AF_UNIX, SOCK_STREAM, 0, pdes) < 0)\n    return -1;\n  if (gdb_socketpair_cloexec (AF_UNIX, SOCK_STREAM, 0, err_pdes) < 0)\n    {\n      close (pdes[0]);\n      close (pdes[1]);\n      return -1;\n    }\n\n  /* Create the child process to run the command in.  Note that the\n     apparent call to vfork() below *might* actually be a call to\n     fork() due to the fact that autoconf will ``#define vfork fork''\n     on certain platforms.  */\n  pid = vfork ();\n  \n  /* Error.  */\n  if (pid == -1)\n    {\n      close (pdes[0]);\n      close (pdes[1]);\n      close (err_pdes[0]);\n      close (err_pdes[1]);\n      return -1;\n    }\n\n  if (fcntl (err_pdes[0], F_SETFL, O_NONBLOCK) == -1)\n    {\n      close (err_pdes[0]);\n      close (err_pdes[1]);\n      err_pdes[0] = err_pdes[1] = -1;\n    }\n\n  /* Child.  */\n  if (pid == 0)\n    {\n      /* We don't want ^c to kill the connection.  */\n#ifdef HAVE_SETSID\n      pid_t sid = setsid ();\n      if (sid == -1)\n\tsignal (SIGINT, SIG_IGN);\n#else\n      signal (SIGINT, SIG_IGN);\n#endif\n\n      /* Re-wire pdes[1] to stdin/stdout.  */\n      close (pdes[0]);\n      if (pdes[1] != STDOUT_FILENO)\n\t{\n\t  dup2 (pdes[1], STDOUT_FILENO);\n\t  close (pdes[1]);\n\t}\n      dup2 (STDOUT_FILENO, STDIN_FILENO);\n\n      if (err_pdes[0] != -1)\n\t{\n\t  close (err_pdes[0]);\n\t  dup2 (err_pdes[1], STDERR_FILENO);\n\t  close (err_pdes[1]);\n\t}\n\n      close_most_fds ();\n      execl (\"/bin/sh\", \"sh\", \"-c\", name, (char *) 0);\n      _exit (127);\n    }\n\n  /* Parent.  */\n  close (pdes[1]);\n  if (err_pdes[1] != -1)\n    close (err_pdes[1]);\n  /* :end chunk */\n  state = XNEW (struct pipe_state);\n  state->pid = pid;\n  scb->fd = pdes[0];\n  scb->error_fd = err_pdes[0];\n  scb->state = state;\n\n  /* If we don't do this, GDB simply exits when the remote side dies.  */\n  signal (SIGPIPE, SIG_IGN);\n  return 0;\n#endif\n}",
+      "fn_code_pos": [
+        [
+          47,
+          0
+        ],
+        [
+          145,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pipe_open",
+        "parameters": {
+          "scb": "struct serial",
+          "name": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\npipe_close (struct serial *scb)\n{\n  struct pipe_state *state = (struct pipe_state *) scb->state;\n\n  close (scb->fd);\n  scb->fd = -1;\n\n  if (state != NULL)\n    {\n      int wait_result, status;\n\n      /* Don't kill the task right away, give it a chance to shut down cleanly.\n\t But don't wait forever though.  */\n#define PIPE_CLOSE_TIMEOUT 5\n\n      /* Assume the program will exit after SIGTERM.  Might be\n\t useful to print any remaining stderr output from\n\t scb->error_fd while waiting.  */\n#define SIGTERM_TIMEOUT INT_MAX\n\n      wait_result = -1;\n#ifdef HAVE_WAITPID\n      wait_result = wait_to_die_with_timeout (state->pid, &status,\n\t\t\t\t\t      PIPE_CLOSE_TIMEOUT);\n#endif\n      if (wait_result == -1)\n\t{\n\t  kill (state->pid, SIGTERM);\n#ifdef HAVE_WAITPID\n\t  wait_to_die_with_timeout (state->pid, &status, SIGTERM_TIMEOUT);\n#endif\n\t}\n\n      if (scb->error_fd != -1)\n\tclose (scb->error_fd);\n      scb->error_fd = -1;\n      xfree (state);\n      scb->state = NULL;\n    }\n}",
+      "fn_code_pos": [
+        [
+          147,
+          0
+        ],
+        [
+          187,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pipe_close",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\ngdb_pipe (int pdes[2])\n{\n#if !HAVE_SOCKETPAIR\n  errno = ENOSYS;\n  return -1;\n#else\n\n  if (gdb_socketpair_cloexec (AF_UNIX, SOCK_STREAM, 0, pdes) < 0)\n    return -1;\n\n  /* If we don't do this, GDB simply exits when the remote side\n     dies.  */\n  signal (SIGPIPE, SIG_IGN);\n  return 0;\n#endif\n}",
+      "fn_code_pos": [
+        [
+          189,
+          0
+        ],
+        [
+          205,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "gdb_pipe",
+        "parameters": {
+          "pdes": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_ser_pipe (void)\n{\n  serial_add_interface (&pipe_ops);\n}",
+      "fn_code_pos": [
+        [
+          233,
+          0
+        ],
+        [
+          237,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_ser_pipe",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "pipe_open (struct serial *scb, const char *name)",
+      "fn_dec_pos": [
+        [
+          35,
+          11
+        ],
+        [
+          35,
+          59
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pipe_open",
+        "parameters": {
+          "scb": "struct serial",
+          "name": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pipe_close (struct serial *scb)",
+      "fn_dec_pos": [
+        [
+          36,
+          12
+        ],
+        [
+          36,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pipe_close",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "_initialize_ser_pipe (void)",
+      "fn_dec_pos": [
+        [
+          38,
+          12
+        ],
+        [
+          38,
+          39
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_ser_pipe",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pipe_state\n  {\n    int pid;\n  }",
+      {
+        "pid": "int"
+      },
+      "pipe_state",
+      [
+        40,
+        0
+      ],
+      [
+        43,
+        3
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        35,
+        22
+      ],
+      [
+        35,
+        35
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        36,
+        24
+      ],
+      [
+        36,
+        37
+      ]
+    ],
+    [
+      "struct pipe_state\n  {\n    int pid;\n  }",
+      {
+        "pid": "int"
+      },
+      "pipe_state",
+      [
+        40,
+        0
+      ],
+      [
+        43,
+        3
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        48,
+        11
+      ],
+      [
+        48,
+        24
+      ]
+    ],
+    [
+      "struct pipe_state",
+      {},
+      "",
+      [
+        53,
+        2
+      ],
+      [
+        53,
+        19
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        148,
+        12
+      ],
+      [
+        148,
+        25
+      ]
+    ],
+    [
+      "struct pipe_state",
+      {},
+      "",
+      [
+        150,
+        2
+      ],
+      [
+        150,
+        19
+      ]
+    ],
+    [
+      "struct pipe_state",
+      {},
+      "",
+      [
+        150,
+        30
+      ],
+      [
+        150,
+        47
+      ]
+    ],
+    [
+      "struct serial_ops",
+      {},
+      "",
+      [
+        207,
+        13
+      ],
+      [
+        207,
+        30
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"serial.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"ser-base.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"ser-unix.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_vfork.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_sys_time.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"filestuff.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

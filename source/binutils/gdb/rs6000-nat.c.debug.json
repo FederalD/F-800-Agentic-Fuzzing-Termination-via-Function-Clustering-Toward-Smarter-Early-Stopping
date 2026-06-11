@@ -1,0 +1,1131 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static int\nregmap (struct gdbarch *gdbarch, int regno, int *isfloat)\n{\n  struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n\n  *isfloat = 0;\n  if (tdep->ppc_gp0_regnum <= regno\n      && regno < tdep->ppc_gp0_regnum + ppc_num_gprs)\n    return regno;\n  else if (tdep->ppc_fp0_regnum >= 0\n           && tdep->ppc_fp0_regnum <= regno\n           && regno < tdep->ppc_fp0_regnum + ppc_num_fprs)\n    {\n      *isfloat = 1;\n      return regno - tdep->ppc_fp0_regnum + FPR0;\n    }\n  else if (regno == gdbarch_pc_regnum (gdbarch))\n    return IAR;\n  else if (regno == tdep->ppc_ps_regnum)\n    return MSR;\n  else if (regno == tdep->ppc_cr_regnum)\n    return CR;\n  else if (regno == tdep->ppc_lr_regnum)\n    return LR;\n  else if (regno == tdep->ppc_ctr_regnum)\n    return CTR;\n  else if (regno == tdep->ppc_xer_regnum)\n    return XER;\n  else if (tdep->ppc_fpscr_regnum >= 0\n           && regno == tdep->ppc_fpscr_regnum)\n    return FPSCR;\n  else if (tdep->ppc_mq_regnum >= 0 && regno == tdep->ppc_mq_regnum)\n    return MQ;\n  else\n    return -1;\n}",
+      "fn_code_pos": [
+        [
+          83,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "regmap",
+        "parameters": {
+          "gdbarch": "struct gdbarch",
+          "regno": "int",
+          "isfloat": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nrs6000_ptrace32 (int req, int id, int *addr, int data, int *buf)\n{\n#ifdef HAVE_PTRACE64\n  int ret = ptrace64 (req, id, (uintptr_t) addr, data, buf);\n#else\n  int ret = ptrace (req, id, (int *)addr, data, buf);\n#endif\n#if 0\n  printf (\"rs6000_ptrace32 (%d, %d, 0x%x, %08x, 0x%x) = 0x%x\\n\",\n\t  req, id, (unsigned int)addr, data, (unsigned int)buf, ret);\n#endif\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          122,
+          0
+        ],
+        [
+          135,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_ptrace32",
+        "parameters": {
+          "req": "int",
+          "id": "int",
+          "addr": "int",
+          "data": "int",
+          "buf": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nrs6000_ptrace64 (int req, int id, long long addr, int data, void *buf)\n{\n#ifdef ARCH3264\n#  ifdef HAVE_PTRACE64\n  int ret = ptrace64 (req, id, addr, data, (PTRACE_TYPE_ARG5) buf);\n#  else\n  int ret = ptracex (req, id, addr, data, (PTRACE_TYPE_ARG5) buf);\n#  endif\n#else\n  int ret = 0;\n#endif\n#if 0\n  printf (\"rs6000_ptrace64 (%d, %d, %s, %08x, 0x%x) = 0x%x\\n\",\n\t  req, id, hex_string (addr), data, (unsigned int)buf, ret);\n#endif\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          139,
+          0
+        ],
+        [
+          156,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_ptrace64",
+        "parameters": {
+          "req": "int",
+          "id": "int",
+          "addr": "long long",
+          "data": "int",
+          "buf": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nfetch_register (struct regcache *regcache, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  int addr[PPC_MAX_REGISTER_SIZE];\n  int nr, isfloat;\n  pid_t pid = ptid_get_pid (regcache_get_ptid (regcache));\n\n  /* Retrieved values may be -1, so infer errors from errno.  */\n  errno = 0;\n\n  nr = regmap (gdbarch, regno, &isfloat);\n\n  /* Floating-point registers.  */\n  if (isfloat)\n    rs6000_ptrace32 (PT_READ_FPR, pid, addr, nr, 0);\n\n  /* Bogus register number.  */\n  else if (nr < 0)\n    {\n      if (regno >= gdbarch_num_regs (gdbarch))\n\tfprintf_unfiltered (gdb_stderr,\n\t\t\t    \"gdb error: register no %d not implemented.\\n\",\n\t\t\t    regno);\n      return;\n    }\n\n  /* Fixed-point registers.  */\n  else\n    {\n      if (!ARCH64 ())\n\t*addr = rs6000_ptrace32 (PT_READ_GPR, pid, (int *) nr, 0, 0);\n      else\n\t{\n\t  /* PT_READ_GPR requires the buffer parameter to point to long long,\n\t     even if the register is really only 32 bits.  */\n\t  long long buf;\n\t  rs6000_ptrace64 (PT_READ_GPR, pid, nr, 0, &buf);\n\t  if (register_size (gdbarch, regno) == 8)\n\t    memcpy (addr, &buf, 8);\n\t  else\n\t    *addr = buf;\n\t}\n    }\n\n  if (!errno)\n    regcache_raw_supply (regcache, regno, (char *) addr);\n  else\n    {\n#if 0\n      /* FIXME: this happens 3 times at the start of each 64-bit program.  */\n      perror (_(\"ptrace read\"));\n#endif\n      errno = 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          160,
+          0
+        ],
+        [
+          215,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fetch_register",
+        "parameters": {
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nstore_register (struct regcache *regcache, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  int addr[PPC_MAX_REGISTER_SIZE];\n  int nr, isfloat;\n  pid_t pid = ptid_get_pid (regcache_get_ptid (regcache));\n\n  /* Fetch the register's value from the register cache.  */\n  regcache_raw_collect (regcache, regno, addr);\n\n  /* -1 can be a successful return value, so infer errors from errno.  */\n  errno = 0;\n\n  nr = regmap (gdbarch, regno, &isfloat);\n\n  /* Floating-point registers.  */\n  if (isfloat)\n    rs6000_ptrace32 (PT_WRITE_FPR, pid, addr, nr, 0);\n\n  /* Bogus register number.  */\n  else if (nr < 0)\n    {\n      if (regno >= gdbarch_num_regs (gdbarch))\n\tfprintf_unfiltered (gdb_stderr,\n\t\t\t    \"gdb error: register no %d not implemented.\\n\",\n\t\t\t    regno);\n    }\n\n  /* Fixed-point registers.  */\n  else\n    {\n      /* The PT_WRITE_GPR operation is rather odd.  For 32-bit inferiors,\n         the register's value is passed by value, but for 64-bit inferiors,\n\t the address of a buffer containing the value is passed.  */\n      if (!ARCH64 ())\n\trs6000_ptrace32 (PT_WRITE_GPR, pid, (int *) nr, *addr, 0);\n      else\n\t{\n\t  /* PT_WRITE_GPR requires the buffer parameter to point to an 8-byte\n\t     area, even if the register is really only 32 bits.  */\n\t  long long buf;\n\t  if (register_size (gdbarch, regno) == 8)\n\t    memcpy (&buf, addr, 8);\n\t  else\n\t    buf = *addr;\n\t  rs6000_ptrace64 (PT_WRITE_GPR, pid, nr, 0, &buf);\n\t}\n    }\n\n  if (errno)\n    {\n      perror (_(\"ptrace write\"));\n      errno = 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          219,
+          0
+        ],
+        [
+          274,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "store_register",
+        "parameters": {
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nrs6000_fetch_inferior_registers (struct target_ops *ops,\n\t\t\t\t struct regcache *regcache, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  if (regno != -1)\n    fetch_register (regcache, regno);\n\n  else\n    {\n      struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n\n      /* Read 32 general purpose registers.  */\n      for (regno = tdep->ppc_gp0_regnum;\n           regno < tdep->ppc_gp0_regnum + ppc_num_gprs;\n\t   regno++)\n\t{\n\t  fetch_register (regcache, regno);\n\t}\n\n      /* Read general purpose floating point registers.  */\n      if (tdep->ppc_fp0_regnum >= 0)\n        for (regno = 0; regno < ppc_num_fprs; regno++)\n          fetch_register (regcache, tdep->ppc_fp0_regnum + regno);\n\n      /* Read special registers.  */\n      fetch_register (regcache, gdbarch_pc_regnum (gdbarch));\n      fetch_register (regcache, tdep->ppc_ps_regnum);\n      fetch_register (regcache, tdep->ppc_cr_regnum);\n      fetch_register (regcache, tdep->ppc_lr_regnum);\n      fetch_register (regcache, tdep->ppc_ctr_regnum);\n      fetch_register (regcache, tdep->ppc_xer_regnum);\n      if (tdep->ppc_fpscr_regnum >= 0)\n        fetch_register (regcache, tdep->ppc_fpscr_regnum);\n      if (tdep->ppc_mq_regnum >= 0)\n\tfetch_register (regcache, tdep->ppc_mq_regnum);\n    }\n}",
+      "fn_code_pos": [
+        [
+          279,
+          0
+        ],
+        [
+          316,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_fetch_inferior_registers",
+        "parameters": {
+          "ops": "struct target_ops",
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nrs6000_store_inferior_registers (struct target_ops *ops,\n\t\t\t\t struct regcache *regcache, int regno)\n{\n  struct gdbarch *gdbarch = get_regcache_arch (regcache);\n  if (regno != -1)\n    store_register (regcache, regno);\n\n  else\n    {\n      struct gdbarch_tdep *tdep = gdbarch_tdep (gdbarch);\n\n      /* Write general purpose registers first.  */\n      for (regno = tdep->ppc_gp0_regnum;\n           regno < tdep->ppc_gp0_regnum + ppc_num_gprs;\n\t   regno++)\n\t{\n\t  store_register (regcache, regno);\n\t}\n\n      /* Write floating point registers.  */\n      if (tdep->ppc_fp0_regnum >= 0)\n        for (regno = 0; regno < ppc_num_fprs; regno++)\n          store_register (regcache, tdep->ppc_fp0_regnum + regno);\n\n      /* Write special registers.  */\n      store_register (regcache, gdbarch_pc_regnum (gdbarch));\n      store_register (regcache, tdep->ppc_ps_regnum);\n      store_register (regcache, tdep->ppc_cr_regnum);\n      store_register (regcache, tdep->ppc_lr_regnum);\n      store_register (regcache, tdep->ppc_ctr_regnum);\n      store_register (regcache, tdep->ppc_xer_regnum);\n      if (tdep->ppc_fpscr_regnum >= 0)\n        store_register (regcache, tdep->ppc_fpscr_regnum);\n      if (tdep->ppc_mq_regnum >= 0)\n\tstore_register (regcache, tdep->ppc_mq_regnum);\n    }\n}",
+      "fn_code_pos": [
+        [
+          322,
+          0
+        ],
+        [
+          359,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_store_inferior_registers",
+        "parameters": {
+          "ops": "struct target_ops",
+          "regcache": "struct regcache",
+          "regno": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static enum target_xfer_status\nrs6000_xfer_partial (struct target_ops *ops, enum target_object object,\n\t\t     const char *annex, gdb_byte *readbuf,\n\t\t     const gdb_byte *writebuf,\n\t\t     ULONGEST offset, ULONGEST len, ULONGEST *xfered_len)\n{\n  pid_t pid = ptid_get_pid (inferior_ptid);\n  int arch64 = ARCH64 ();\n\n  switch (object)\n    {\n    case TARGET_OBJECT_LIBRARIES_AIX:\n      return rs6000_xfer_shared_libraries (ops, object, annex,\n\t\t\t\t\t   readbuf, writebuf,\n\t\t\t\t\t   offset, len, xfered_len);\n    case TARGET_OBJECT_MEMORY:\n      {\n\tunion\n\t{\n\t  PTRACE_TYPE_RET word;\n\t  gdb_byte byte[sizeof (PTRACE_TYPE_RET)];\n\t} buffer;\n\tULONGEST rounded_offset;\n\tLONGEST partial_len;\n\n\t/* Round the start offset down to the next long word\n\t   boundary.  */\n\trounded_offset = offset & -(ULONGEST) sizeof (PTRACE_TYPE_RET);\n\n\t/* Since ptrace will transfer a single word starting at that\n\t   rounded_offset the partial_len needs to be adjusted down to\n\t   that (remember this function only does a single transfer).\n\t   Should the required length be even less, adjust it down\n\t   again.  */\n\tpartial_len = (rounded_offset + sizeof (PTRACE_TYPE_RET)) - offset;\n\tif (partial_len > len)\n\t  partial_len = len;\n\n\tif (writebuf)\n\t  {\n\t    /* If OFFSET:PARTIAL_LEN is smaller than\n\t       ROUNDED_OFFSET:WORDSIZE then a read/modify write will\n\t       be needed.  Read in the entire word.  */\n\t    if (rounded_offset < offset\n\t\t|| (offset + partial_len\n\t\t    < rounded_offset + sizeof (PTRACE_TYPE_RET)))\n\t      {\n\t\t/* Need part of initial word -- fetch it.  */\n\t\tif (arch64)\n\t\t  buffer.word = rs6000_ptrace64 (PT_READ_I, pid,\n\t\t\t\t\t\t rounded_offset, 0, NULL);\n\t\telse\n\t\t  buffer.word = rs6000_ptrace32 (PT_READ_I, pid,\n\t\t\t\t\t\t (int *) (uintptr_t)\n\t\t\t\t\t\t rounded_offset,\n\t\t\t\t\t\t 0, NULL);\n\t      }\n\n\t    /* Copy data to be written over corresponding part of\n\t       buffer.  */\n\t    memcpy (buffer.byte + (offset - rounded_offset),\n\t\t    writebuf, partial_len);\n\n\t    errno = 0;\n\t    if (arch64)\n\t      rs6000_ptrace64 (PT_WRITE_D, pid,\n\t\t\t       rounded_offset, buffer.word, NULL);\n\t    else\n\t      rs6000_ptrace32 (PT_WRITE_D, pid,\n\t\t\t       (int *) (uintptr_t) rounded_offset,\n\t\t\t       buffer.word, NULL);\n\t    if (errno)\n\t      return TARGET_XFER_EOF;\n\t  }\n\n\tif (readbuf)\n\t  {\n\t    errno = 0;\n\t    if (arch64)\n\t      buffer.word = rs6000_ptrace64 (PT_READ_I, pid,\n\t\t\t\t\t     rounded_offset, 0, NULL);\n\t    else\n\t      buffer.word = rs6000_ptrace32 (PT_READ_I, pid,\n\t\t\t\t\t     (int *)(uintptr_t)rounded_offset,\n\t\t\t\t\t     0, NULL);\n\t    if (errno)\n\t      return TARGET_XFER_EOF;\n\n\t    /* Copy appropriate bytes out of the buffer.  */\n\t    memcpy (readbuf, buffer.byte + (offset - rounded_offset),\n\t\t    partial_len);\n\t  }\n\n\t*xfered_len = (ULONGEST) partial_len;\n\treturn TARGET_XFER_OK;\n      }\n\n    default:\n      return TARGET_XFER_E_IO;\n    }\n}",
+      "fn_code_pos": [
+        [
+          363,
+          0
+        ],
+        [
+          463,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_xfer_partial",
+        "parameters": {
+          "ops": "struct target_ops",
+          "object": "enum target_object",
+          "annex": "char",
+          "readbuf": "gdb_byte",
+          "writebuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST",
+          "xfered_len": "ULONGEST"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static ptid_t\nrs6000_wait (struct target_ops *ops,\n\t     ptid_t ptid, struct target_waitstatus *ourstatus, int options)\n{\n  pid_t pid;\n  int status, save_errno;\n\n  do\n    {\n      set_sigint_trap ();\n\n      do\n\t{\n\t  pid = waitpid (ptid_get_pid (ptid), &status, 0);\n\t  save_errno = errno;\n\t}\n      while (pid == -1 && errno == EINTR);\n\n      clear_sigint_trap ();\n\n      if (pid == -1)\n\t{\n\t  fprintf_unfiltered (gdb_stderr,\n\t\t\t      _(\"Child process unexpectedly missing: %s.\\n\"),\n\t\t\t      safe_strerror (save_errno));\n\n\t  /* Claim it exited with unknown signal.  */\n\t  ourstatus->kind = TARGET_WAITKIND_SIGNALLED;\n\t  ourstatus->value.sig = GDB_SIGNAL_UNKNOWN;\n\t  return inferior_ptid;\n\t}\n\n      /* Ignore terminated detached child processes.  */\n      if (!WIFSTOPPED (status) && pid != ptid_get_pid (inferior_ptid))\n\tpid = -1;\n    }\n  while (pid == -1);\n\n  /* AIX has a couple of strange returns from wait().  */\n\n  /* stop after load\" status.  */\n  if (status == 0x57c)\n    ourstatus->kind = TARGET_WAITKIND_LOADED;\n  /* signal 0.  I have no idea why wait(2) returns with this status word.  */\n  else if (status == 0x7f)\n    ourstatus->kind = TARGET_WAITKIND_SPURIOUS;\n  /* A normal waitstatus.  Let the usual macros deal with it.  */\n  else\n    store_waitstatus (ourstatus, status);\n\n  return pid_to_ptid (pid);\n}",
+      "fn_code_pos": [
+        [
+          469,
+          0
+        ],
+        [
+          520,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_wait",
+        "parameters": {
+          "ops": "struct target_ops",
+          "ptid": "ptid_t",
+          "ourstatus": "struct target_waitstatus",
+          "options": "int"
+        },
+        "return_type": "ptid_t"
+      }
+    },
+    {
+      "fn_code": "static void\nrs6000_create_inferior (struct target_ops * ops, const char *exec_file,\n\t\t\tconst std::string &allargs, char **env, int from_tty)\n{\n  enum bfd_architecture arch;\n  unsigned long mach;\n  bfd abfd;\n  struct gdbarch_info info;\n\n  super_create_inferior (ops, exec_file, allargs, env, from_tty);\n\n  if (__power_rs ())\n    {\n      arch = bfd_arch_rs6000;\n      mach = bfd_mach_rs6k;\n    }\n  else\n    {\n      arch = bfd_arch_powerpc;\n      mach = bfd_mach_ppc;\n    }\n\n  /* FIXME: schauer/2002-02-25:\n     We don't know if we are executing a 32 or 64 bit executable,\n     and have no way to pass the proper word size to rs6000_gdbarch_init.\n     So we have to avoid switching to a new architecture, if the architecture\n     matches already.\n     Blindly calling rs6000_gdbarch_init used to work in older versions of\n     GDB, as rs6000_gdbarch_init incorrectly used the previous tdep to\n     determine the wordsize.  */\n  if (exec_bfd)\n    {\n      const struct bfd_arch_info *exec_bfd_arch_info;\n\n      exec_bfd_arch_info = bfd_get_arch_info (exec_bfd);\n      if (arch == exec_bfd_arch_info->arch)\n\treturn;\n    }\n\n  bfd_default_set_arch_mach (&abfd, arch, mach);\n\n  gdbarch_info_init (&info);\n  info.bfd_arch_info = bfd_get_arch_info (&abfd);\n  info.abfd = exec_bfd;\n\n  if (!gdbarch_update_p (info))\n    internal_error (__FILE__, __LINE__,\n\t\t    _(\"rs6000_create_inferior: failed \"\n\t\t      \"to select architecture\"));\n}",
+      "fn_code_pos": [
+        [
+          530,
+          0
+        ],
+        [
+          579,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_create_inferior",
+        "parameters": {
+          "ops": "struct target_ops",
+          "exec_file": "char",
+          "allargs": "std::string",
+          "env": "char",
+          "from_tty": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static gdb_byte *\nrs6000_ptrace_ldinfo (ptid_t ptid)\n{\n  const int pid = ptid_get_pid (ptid);\n  int ldi_size = 1024;\n  void *ldi = xmalloc (ldi_size);\n  int rc = -1;\n\n  while (1)\n    {\n      if (ARCH64 ())\n\trc = rs6000_ptrace64 (PT_LDINFO, pid, (unsigned long) ldi, ldi_size,\n\t\t\t      NULL);\n      else\n\trc = rs6000_ptrace32 (PT_LDINFO, pid, (int *) ldi, ldi_size, NULL);\n\n      if (rc != -1)\n\tbreak; /* Success, we got the entire ld_info data.  */\n\n      if (errno != ENOMEM)\n\tperror_with_name (_(\"ptrace ldinfo\"));\n\n      /* ldi is not big enough.  Double it and try again.  */\n      ldi_size *= 2;\n      ldi = xrealloc (ldi, ldi_size);\n    }\n\n  return (gdb_byte *) ldi;\n}",
+      "fn_code_pos": [
+        [
+          589,
+          0
+        ],
+        [
+          617,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_ptrace_ldinfo",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": "gdb_byte"
+      }
+    },
+    {
+      "fn_code": "static enum target_xfer_status\nrs6000_xfer_shared_libraries\n  (struct target_ops *ops, enum target_object object,\n   const char *annex, gdb_byte *readbuf, const gdb_byte *writebuf,\n   ULONGEST offset, ULONGEST len, ULONGEST *xfered_len)\n{\n  gdb_byte *ldi_buf;\n  ULONGEST result;\n  struct cleanup *cleanup;\n\n  /* This function assumes that it is being run with a live process.\n     Core files are handled via gdbarch.  */\n  gdb_assert (target_has_execution);\n\n  if (writebuf)\n    return TARGET_XFER_E_IO;\n\n  ldi_buf = rs6000_ptrace_ldinfo (inferior_ptid);\n  gdb_assert (ldi_buf != NULL);\n  cleanup = make_cleanup (xfree, ldi_buf);\n  result = rs6000_aix_ld_info_to_xml (target_gdbarch (), ldi_buf,\n\t\t\t\t      readbuf, offset, len, 1);\n  xfree (ldi_buf);\n\n  do_cleanups (cleanup);\n\n  if (result == 0)\n    return TARGET_XFER_EOF;\n  else\n    {\n      *xfered_len = result;\n      return TARGET_XFER_OK;\n    }\n}",
+      "fn_code_pos": [
+        [
+          622,
+          0
+        ],
+        [
+          655,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_xfer_shared_libraries",
+        "parameters": {
+          "ops": "struct target_ops",
+          "object": "enum target_object",
+          "annex": "char",
+          "readbuf": "gdb_byte",
+          "writebuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST",
+          "xfered_len": "ULONGEST"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\n_initialize_rs6000_nat (void)\n{\n  struct target_ops *t;\n\n  t = inf_ptrace_target ();\n  t->to_fetch_registers = rs6000_fetch_inferior_registers;\n  t->to_store_registers = rs6000_store_inferior_registers;\n  t->to_xfer_partial = rs6000_xfer_partial;\n\n  super_create_inferior = t->to_create_inferior;\n  t->to_create_inferior = rs6000_create_inferior;\n\n  t->to_wait = rs6000_wait;\n\n  add_target (t);\n}",
+      "fn_code_pos": [
+        [
+          659,
+          0
+        ],
+        [
+          675,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_rs6000_nat",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "(*super_create_inferior) (struct target_ops *,\n\t\t\t\t      const char *exec_file,\n\t\t\t\t      const std::string &allargs,\n\t\t\t\t      char **env, int from_tty)",
+      "fn_dec_pos": [
+        [
+          526,
+          12
+        ],
+        [
+          529,
+          35
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "exec_file": "char",
+          "allargs": "std::string",
+          "env": "char",
+          "from_tty": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "rs6000_ptrace_ldinfo (ptid_t ptid)",
+      "fn_dec_pos": [
+        [
+          590,
+          0
+        ],
+        [
+          590,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "rs6000_ptrace_ldinfo",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "_initialize_rs6000_nat (void)",
+      "fn_dec_pos": [
+        [
+          657,
+          5
+        ],
+        [
+          657,
+          34
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_initialize_rs6000_nat",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        84,
+        8
+      ],
+      [
+        84,
+        22
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        86,
+        2
+      ],
+      [
+        86,
+        21
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        161,
+        16
+      ],
+      [
+        161,
+        31
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        163,
+        2
+      ],
+      [
+        163,
+        16
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        220,
+        16
+      ],
+      [
+        220,
+        31
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        222,
+        2
+      ],
+      [
+        222,
+        16
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        280,
+        33
+      ],
+      [
+        280,
+        50
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        281,
+        5
+      ],
+      [
+        281,
+        20
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        283,
+        2
+      ],
+      [
+        283,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        289,
+        6
+      ],
+      [
+        289,
+        25
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        323,
+        33
+      ],
+      [
+        323,
+        50
+      ]
+    ],
+    [
+      "struct regcache",
+      {},
+      "",
+      [
+        324,
+        5
+      ],
+      [
+        324,
+        20
+      ]
+    ],
+    [
+      "struct gdbarch",
+      {},
+      "",
+      [
+        326,
+        2
+      ],
+      [
+        326,
+        16
+      ]
+    ],
+    [
+      "struct gdbarch_tdep",
+      {},
+      "",
+      [
+        332,
+        6
+      ],
+      [
+        332,
+        25
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        364,
+        21
+      ],
+      [
+        364,
+        38
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        470,
+        13
+      ],
+      [
+        470,
+        30
+      ]
+    ],
+    [
+      "struct target_waitstatus",
+      {},
+      "",
+      [
+        471,
+        19
+      ],
+      [
+        471,
+        43
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        526,
+        38
+      ],
+      [
+        526,
+        55
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        531,
+        24
+      ],
+      [
+        531,
+        41
+      ]
+    ],
+    [
+      "struct gdbarch_info",
+      {},
+      "",
+      [
+        537,
+        2
+      ],
+      [
+        537,
+        21
+      ]
+    ],
+    [
+      "struct bfd_arch_info",
+      {},
+      "",
+      [
+        562,
+        12
+      ],
+      [
+        562,
+        32
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        624,
+        3
+      ],
+      [
+        624,
+        20
+      ]
+    ],
+    [
+      "struct cleanup",
+      {},
+      "",
+      [
+        630,
+        2
+      ],
+      [
+        630,
+        16
+      ]
+    ],
+    [
+      "struct target_ops",
+      {},
+      "",
+      [
+        662,
+        2
+      ],
+      [
+        662,
+        19
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"inferior.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"target.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"gdbcore.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"symfile.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"objfiles.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb-stabs.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"regcache.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"arch-utils.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"inf-child.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"inf-ptrace.h\"\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"ppc-tdep.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"rs6000-tdep.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"rs6000-aix-tdep.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"exec.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"observer.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"xcoffread.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ptrace.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <sys/reg.h>\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include <sys/dir.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ],
+    [
+      "#include <sys/user.h>\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        43,
+        0
+      ],
+      [
+        44,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ioctl.h>\n",
+      [
+        44,
+        0
+      ],
+      [
+        45,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <a.out.h>\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ],
+    [
+      "#include <sys/file.h>\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include <sys/stat.h>\n",
+      [
+        49,
+        0
+      ],
+      [
+        50,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_bfd.h\"\n",
+      [
+        50,
+        0
+      ],
+      [
+        51,
+        0
+      ]
+    ],
+    [
+      "#include <sys/core.h>\n",
+      [
+        51,
+        0
+      ],
+      [
+        52,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ldr.h>\n",
+      [
+        54,
+        0
+      ],
+      [
+        55,
+        0
+      ]
+    ],
+    [
+      "#include <sys/systemcfg.h>\n",
+      [
+        55,
+        0
+      ],
+      [
+        56,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum target_xfer_status",
+      {},
+      "",
+      [
+        363,
+        7
+      ],
+      [
+        363,
+        30
+      ]
+    ],
+    [
+      "enum target_object",
+      {},
+      "",
+      [
+        364,
+        45
+      ],
+      [
+        364,
+        63
+      ]
+    ],
+    [
+      "enum bfd_architecture",
+      {},
+      "",
+      [
+        534,
+        2
+      ],
+      [
+        534,
+        23
+      ]
+    ],
+    [
+      "enum target_xfer_status",
+      {},
+      "",
+      [
+        622,
+        7
+      ],
+      [
+        622,
+        30
+      ]
+    ],
+    [
+      "enum target_object",
+      {},
+      "",
+      [
+        624,
+        27
+      ],
+      [
+        624,
+        45
+      ]
+    ]
+  ]
+}

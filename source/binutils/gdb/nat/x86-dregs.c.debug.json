@@ -1,0 +1,682 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nx86_show_dr (struct x86_debug_reg_state *state,\n\t     const char *func, CORE_ADDR addr,\n\t     int len, enum target_hw_bp_type type)\n{\n  int i;\n\n  debug_printf (\"%s\", func);\n  if (addr || len)\n    debug_printf (\" (addr=%s, len=%d, type=%s)\",\n\t\t  phex (addr, 8), len,\n\t\t  type == hw_write ? \"data-write\"\n\t\t  : (type == hw_read ? \"data-read\"\n\t\t     : (type == hw_access ? \"data-read/write\"\n\t\t\t: (type == hw_execute ? \"instruction-execute\"\n\t\t\t   /* FIXME: if/when I/O read/write\n\t\t\t      watchpoints are supported, add them\n\t\t\t      here.  */\n\t\t\t   : \"??unknown??\"))));\n  debug_printf (\":\\n\");\n\n  debug_printf (\"\\tCONTROL (DR7): 0x%s\\n\", phex (state->dr_control_mirror, 8));\n  debug_printf (\"\\tSTATUS (DR6): 0x%s\\n\", phex (state->dr_status_mirror, 8));\n\n  ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      debug_printf (\"\\tDR%d: addr=0x%s, ref.count=%d\\n\",\n\t\t    i, phex (state->dr_mirror[i],\n\t\t\t     x86_get_debug_register_length ()),\n\t\t    state->dr_ref_count[i]);\n    }\n}",
+      "fn_code_pos": [
+        [
+          175,
+          0
+        ],
+        [
+          206,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_show_dr",
+        "parameters": {
+          "state": "struct x86_debug_reg_state",
+          "func": "char",
+          "addr": "CORE_ADDR",
+          "len": "int",
+          "type": "enum target_hw_bp_type"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      debug_printf (\"\\tDR%d: addr=0x%s, ref.count=%d\\n\",\n\t\t    i, phex (state->dr_mirror[i],\n\t\t\t     x86_get_debug_register_length ()),\n\t\t    state->dr_ref_count[i]);\n    }",
+      "fn_code_pos": [
+        [
+          199,
+          2
+        ],
+        [
+          205,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ALL_DEBUG_ADDRESS_REGISTERS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nx86_length_and_rw_bits (int len, enum target_hw_bp_type type)\n{\n  unsigned rw;\n\n  switch (type)\n    {\n      case hw_execute:\n\trw = DR_RW_EXECUTE;\n\tbreak;\n      case hw_write:\n\trw = DR_RW_WRITE;\n\tbreak;\n      case hw_read:\n\tinternal_error (__FILE__, __LINE__,\n\t\t\t_(\"The i386 doesn't support \"\n\t\t\t  \"data-read watchpoints.\\n\"));\n      case hw_access:\n\trw = DR_RW_READ;\n\tbreak;\n#if 0\n\t/* Not yet supported.  */\n      case hw_io_access:\n\trw = DR_RW_IORW;\n\tbreak;\n#endif\n      default:\n\tinternal_error (__FILE__, __LINE__, _(\"\\\nInvalid hardware breakpoint type %d in x86_length_and_rw_bits.\\n\"),\n\t\t\t(int) type);\n    }\n\n  switch (len)\n    {\n      case 1:\n\treturn (DR_LEN_1 | rw);\n      case 2:\n\treturn (DR_LEN_2 | rw);\n      case 4:\n\treturn (DR_LEN_4 | rw);\n      case 8:\n        if (TARGET_HAS_DR_LEN_8)\n \t  return (DR_LEN_8 | rw);\n\t/* ELSE FALL THROUGH */\n      default:\n\tinternal_error (__FILE__, __LINE__, _(\"\\\nInvalid hardware breakpoint length %d in x86_length_and_rw_bits.\\n\"), len);\n    }\n}",
+      "fn_code_pos": [
+        [
+          212,
+          0
+        ],
+        [
+          260,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_length_and_rw_bits",
+        "parameters": {
+          "len": "int",
+          "type": "enum target_hw_bp_type"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nx86_insert_aligned_watchpoint (struct x86_debug_reg_state *state,\n\t\t\t       CORE_ADDR addr, unsigned len_rw_bits)\n{\n  int i;\n\n  if (!x86_dr_low_can_set_addr () || !x86_dr_low_can_set_control ())\n    return -1;\n\n  /* First, look for an occupied debug register with the same address\n     and the same RW and LEN definitions.  If we find one, we can\n     reuse it for this watchpoint as well (and save a register).  */\n  ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      if (!X86_DR_VACANT (state, i)\n\t  && state->dr_mirror[i] == addr\n\t  && X86_DR_GET_RW_LEN (state->dr_control_mirror, i) == len_rw_bits)\n\t{\n\t  state->dr_ref_count[i]++;\n\t  return 0;\n\t}\n    }\n\n  /* Next, look for a vacant debug register.  */\n  ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      if (X86_DR_VACANT (state, i))\n\tbreak;\n    }\n\n  /* No more debug registers!  */\n  if (i >= DR_NADDR)\n    return -1;\n\n  /* Now set up the register I to watch our region.  */\n\n  /* Record the info in our local mirrored array.  */\n  state->dr_mirror[i] = addr;\n  state->dr_ref_count[i] = 1;\n  X86_DR_SET_RW_LEN (state, i, len_rw_bits);\n  /* Note: we only enable the watchpoint locally, i.e. in the current\n     task.  Currently, no x86 target allows or supports global\n     watchpoints; however, if any target would want that in the\n     future, GDB should probably provide a command to control whether\n     to enable watchpoints globally or locally, and the code below\n     should use global or local enable and slow-down flags as\n     appropriate.  */\n  X86_DR_LOCAL_ENABLE (state, i);\n  state->dr_control_mirror |= DR_LOCAL_SLOWDOWN;\n  state->dr_control_mirror &= X86_DR_CONTROL_MASK;\n\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          268,
+          0
+        ],
+        [
+          320,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_insert_aligned_watchpoint",
+        "parameters": {
+          "state": "struct x86_debug_reg_state",
+          "addr": "CORE_ADDR",
+          "len_rw_bits": "unsigned"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      if (!X86_DR_VACANT (state, i)\n\t  && state->dr_mirror[i] == addr\n\t  && X86_DR_GET_RW_LEN (state->dr_control_mirror, i) == len_rw_bits)\n\t{\n\t  state->dr_ref_count[i]++;\n\t  return 0;\n\t}\n    }",
+      "fn_code_pos": [
+        [
+          280,
+          2
+        ],
+        [
+          289,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ALL_DEBUG_ADDRESS_REGISTERS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      if (X86_DR_VACANT (state, i))\n\tbreak;\n    }",
+      "fn_code_pos": [
+        [
+          292,
+          2
+        ],
+        [
+          296,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ALL_DEBUG_ADDRESS_REGISTERS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nx86_remove_aligned_watchpoint (struct x86_debug_reg_state *state,\n\t\t\t       CORE_ADDR addr, unsigned len_rw_bits)\n{\n  int i, retval = -1;\n  int all_vacant = 1;\n\n  ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      if (!X86_DR_VACANT (state, i)\n\t  && state->dr_mirror[i] == addr\n\t  && X86_DR_GET_RW_LEN (state->dr_control_mirror, i) == len_rw_bits)\n\t{\n\t  if (--state->dr_ref_count[i] == 0) /* No longer in use?  */\n\t    {\n\t      /* Reset our mirror.  */\n\t      state->dr_mirror[i] = 0;\n\t      X86_DR_DISABLE (state, i);\n\t      /* Even though not strictly necessary, clear out all\n\t\t bits in DR_CONTROL related to this debug register.\n\t\t Debug output is clearer when we don't have stale bits\n\t\t in place.  This also allows the assertion below.  */\n\t      X86_DR_SET_RW_LEN (state, i, 0);\n\t    }\n\t  retval = 0;\n\t}\n\n      if (!X86_DR_VACANT (state, i))\n\tall_vacant = 0;\n    }\n\n  if (all_vacant)\n    {\n      /* Even though not strictly necessary, clear out all of\n\t DR_CONTROL, so that when we have no debug registers in use,\n\t we end up with DR_CONTROL == 0.  The Linux support relies on\n\t this for an optimization.  Plus, it makes for clearer debug\n\t output.  */\n      state->dr_control_mirror &= ~DR_LOCAL_SLOWDOWN;\n\n      gdb_assert (state->dr_control_mirror == 0);\n    }\n  return retval;\n}",
+      "fn_code_pos": [
+        [
+          328,
+          0
+        ],
+        [
+          371,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_remove_aligned_watchpoint",
+        "parameters": {
+          "state": "struct x86_debug_reg_state",
+          "addr": "CORE_ADDR",
+          "len_rw_bits": "unsigned"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      if (!X86_DR_VACANT (state, i)\n\t  && state->dr_mirror[i] == addr\n\t  && X86_DR_GET_RW_LEN (state->dr_control_mirror, i) == len_rw_bits)\n\t{\n\t  if (--state->dr_ref_count[i] == 0) /* No longer in use?  */\n\t    {\n\t      /* Reset our mirror.  */\n\t      state->dr_mirror[i] = 0;\n\t      X86_DR_DISABLE (state, i);\n\t      /* Even though not strictly necessary, clear out all\n\t\t bits in DR_CONTROL related to this debug register.\n\t\t Debug output is clearer when we don't have stale bits\n\t\t in place.  This also allows the assertion below.  */\n\t      X86_DR_SET_RW_LEN (state, i, 0);\n\t    }\n\t  retval = 0;\n\t}\n\n      if (!X86_DR_VACANT (state, i))\n\tall_vacant = 0;\n    }",
+      "fn_code_pos": [
+        [
+          335,
+          2
+        ],
+        [
+          357,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ALL_DEBUG_ADDRESS_REGISTERS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static int\nx86_handle_nonaligned_watchpoint (struct x86_debug_reg_state *state,\n\t\t\t\t  x86_wp_op_t what, CORE_ADDR addr, int len,\n\t\t\t\t  enum target_hw_bp_type type)\n{\n  int retval = 0;\n  int max_wp_len = TARGET_HAS_DR_LEN_8 ? 8 : 4;\n\n  static const int size_try_array[8][8] =\n  {\n    {1, 1, 1, 1, 1, 1, 1, 1},\t/* Trying size one.  */\n    {2, 1, 2, 1, 2, 1, 2, 1},\t/* Trying size two.  */\n    {2, 1, 2, 1, 2, 1, 2, 1},\t/* Trying size three.  */\n    {4, 1, 2, 1, 4, 1, 2, 1},\t/* Trying size four.  */\n    {4, 1, 2, 1, 4, 1, 2, 1},\t/* Trying size five.  */\n    {4, 1, 2, 1, 4, 1, 2, 1},\t/* Trying size six.  */\n    {4, 1, 2, 1, 4, 1, 2, 1},\t/* Trying size seven.  */\n    {8, 1, 2, 1, 4, 1, 2, 1},\t/* Trying size eight.  */\n  };\n\n  while (len > 0)\n    {\n      int align = addr % max_wp_len;\n      /* Four (eight on AMD64) is the maximum length a debug register\n\t can watch.  */\n      int attempt = (len > max_wp_len ? (max_wp_len - 1) : len - 1);\n      int size = size_try_array[attempt][align];\n\n      if (what == WP_COUNT)\n\t{\n\t  /* size_try_array[] is defined such that each iteration\n\t     through the loop is guaranteed to produce an address and a\n\t     size that can be watched with a single debug register.\n\t     Thus, for counting the registers required to watch a\n\t     region, we simply need to increment the count on each\n\t     iteration.  */\n\t  retval++;\n\t}\n      else\n\t{\n\t  unsigned len_rw = x86_length_and_rw_bits (size, type);\n\n\t  if (what == WP_INSERT)\n\t    retval = x86_insert_aligned_watchpoint (state, addr, len_rw);\n\t  else if (what == WP_REMOVE)\n\t    retval = x86_remove_aligned_watchpoint (state, addr, len_rw);\n\t  else\n\t    internal_error (__FILE__, __LINE__, _(\"\\\nInvalid value %d of operation in x86_handle_nonaligned_watchpoint.\\n\"),\n\t\t\t    (int) what);\n\t  if (retval)\n\t    break;\n\t}\n\n      addr += size;\n      len -= size;\n    }\n\n  return retval;\n}",
+      "fn_code_pos": [
+        [
+          380,
+          0
+        ],
+        [
+          439,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_handle_nonaligned_watchpoint",
+        "parameters": {
+          "state": "struct x86_debug_reg_state",
+          "what": "x86_wp_op_t",
+          "addr": "CORE_ADDR",
+          "len": "int",
+          "type": "enum target_hw_bp_type"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nx86_update_inferior_debug_regs (struct x86_debug_reg_state *state,\n\t\t\t\tstruct x86_debug_reg_state *new_state)\n{\n  int i;\n\n  ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      if (X86_DR_VACANT (new_state, i) != X86_DR_VACANT (state, i))\n\tx86_dr_low_set_addr (new_state, i);\n      else\n\tgdb_assert (new_state->dr_mirror[i] == state->dr_mirror[i]);\n    }\n\n  if (new_state->dr_control_mirror != state->dr_control_mirror)\n    x86_dr_low_set_control (new_state);\n\n  *state = *new_state;\n}",
+      "fn_code_pos": [
+        [
+          444,
+          0
+        ],
+        [
+          462,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_update_inferior_debug_regs",
+        "parameters": {
+          "state": "struct x86_debug_reg_state",
+          "new_state": "struct x86_debug_reg_state"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      if (X86_DR_VACANT (new_state, i) != X86_DR_VACANT (state, i))\n\tx86_dr_low_set_addr (new_state, i);\n      else\n\tgdb_assert (new_state->dr_mirror[i] == state->dr_mirror[i]);\n    }",
+      "fn_code_pos": [
+        [
+          450,
+          2
+        ],
+        [
+          456,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ALL_DEBUG_ADDRESS_REGISTERS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "int\nx86_dr_insert_watchpoint (struct x86_debug_reg_state *state,\n\t\t\t  enum target_hw_bp_type type,\n\t\t\t  CORE_ADDR addr, int len)\n{\n  int retval;\n  /* Work on a local copy of the debug registers, and on success,\n     commit the change back to the inferior.  */\n  struct x86_debug_reg_state local_state = *state;\n\n  if (type == hw_read)\n    return 1; /* unsupported */\n\n  if (((len != 1 && len != 2 && len != 4)\n       && !(TARGET_HAS_DR_LEN_8 && len == 8))\n      || addr % len != 0)\n    {\n      retval = x86_handle_nonaligned_watchpoint (&local_state,\n\t\t\t\t\t\t WP_INSERT,\n\t\t\t\t\t\t addr, len, type);\n    }\n  else\n    {\n      unsigned len_rw = x86_length_and_rw_bits (len, type);\n\n      retval = x86_insert_aligned_watchpoint (&local_state,\n\t\t\t\t\t      addr, len_rw);\n    }\n\n  if (retval == 0)\n    x86_update_inferior_debug_regs (state, &local_state);\n\n  if (show_debug_regs)\n    x86_show_dr (state, \"insert_watchpoint\", addr, len, type);\n\n  return retval;\n}",
+      "fn_code_pos": [
+        [
+          468,
+          0
+        ],
+        [
+          504,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_dr_insert_watchpoint",
+        "parameters": {
+          "state": "struct x86_debug_reg_state",
+          "type": "enum target_hw_bp_type",
+          "addr": "CORE_ADDR",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nx86_dr_remove_watchpoint (struct x86_debug_reg_state *state,\n\t\t\t  enum target_hw_bp_type type,\n\t\t\t  CORE_ADDR addr, int len)\n{\n  int retval;\n  /* Work on a local copy of the debug registers, and on success,\n     commit the change back to the inferior.  */\n  struct x86_debug_reg_state local_state = *state;\n\n  if (((len != 1 && len != 2 && len != 4)\n       && !(TARGET_HAS_DR_LEN_8 && len == 8))\n      || addr % len != 0)\n    {\n      retval = x86_handle_nonaligned_watchpoint (&local_state,\n\t\t\t\t\t\t WP_REMOVE,\n\t\t\t\t\t\t addr, len, type);\n    }\n  else\n    {\n      unsigned len_rw = x86_length_and_rw_bits (len, type);\n\n      retval = x86_remove_aligned_watchpoint (&local_state,\n\t\t\t\t\t      addr, len_rw);\n    }\n\n  if (retval == 0)\n    x86_update_inferior_debug_regs (state, &local_state);\n\n  if (show_debug_regs)\n    x86_show_dr (state, \"remove_watchpoint\", addr, len, type);\n\n  return retval;\n}",
+      "fn_code_pos": [
+        [
+          510,
+          0
+        ],
+        [
+          543,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_dr_remove_watchpoint",
+        "parameters": {
+          "state": "struct x86_debug_reg_state",
+          "type": "enum target_hw_bp_type",
+          "addr": "CORE_ADDR",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nx86_dr_region_ok_for_watchpoint (struct x86_debug_reg_state *state,\n\t\t\t\t CORE_ADDR addr, int len)\n{\n  int nregs;\n\n  /* Compute how many aligned watchpoints we would need to cover this\n     region.  */\n  nregs = x86_handle_nonaligned_watchpoint (state, WP_COUNT,\n\t\t\t\t\t     addr, len, hw_write);\n  return nregs <= DR_NADDR ? 1 : 0;\n}",
+      "fn_code_pos": [
+        [
+          548,
+          0
+        ],
+        [
+          559,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_dr_region_ok_for_watchpoint",
+        "parameters": {
+          "state": "struct x86_debug_reg_state",
+          "addr": "CORE_ADDR",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nx86_dr_stopped_data_address (struct x86_debug_reg_state *state,\n\t\t\t     CORE_ADDR *addr_p)\n{\n  CORE_ADDR addr = 0;\n  int i;\n  int rc = 0;\n  /* The current thread's DR_STATUS.  We always need to read this to\n     check whether some watchpoint caused the trap.  */\n  unsigned status;\n  /* We need DR_CONTROL as well, but only iff DR_STATUS indicates a\n     data breakpoint trap.  Only fetch it when necessary, to avoid an\n     unnecessary extra syscall when no watchpoint triggered.  */\n  int control_p = 0;\n  unsigned control = 0;\n\n  /* In non-stop/async, threads can be running while we change the\n     global dr_mirror (and friends).  Say, we set a watchpoint, and\n     let threads resume.  Now, say you delete the watchpoint, or\n     add/remove watchpoints such that dr_mirror changes while threads\n     are running.  On targets that support non-stop,\n     inserting/deleting watchpoints updates the global dr_mirror only.\n     It does not update the real thread's debug registers; that's only\n     done prior to resume.  Instead, if threads are running when the\n     mirror changes, a temporary and transparent stop on all threads\n     is forced so they can get their copy of the debug registers\n     updated on re-resume.  Now, say, a thread hit a watchpoint before\n     having been updated with the new dr_mirror contents, and we\n     haven't yet handled the corresponding SIGTRAP.  If we trusted\n     dr_mirror below, we'd mistake the real trapped address (from the\n     last time we had updated debug registers in the thread) with\n     whatever was currently in dr_mirror.  So to fix this, dr_mirror\n     always represents intention, what we _want_ threads to have in\n     debug registers.  To get at the address and cause of the trap, we\n     need to read the state the thread still has in its debug\n     registers.\n\n     In sum, always get the current debug register values the current\n     thread has, instead of trusting the global mirror.  If the thread\n     was running when we last changed watchpoints, the mirror no\n     longer represents what was set in this thread's debug\n     registers.  */\n  status = x86_dr_low_get_status ();\n\n  ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      if (!X86_DR_WATCH_HIT (status, i))\n\tcontinue;\n\n      if (!control_p)\n\t{\n\t  control = x86_dr_low_get_control ();\n\t  control_p = 1;\n\t}\n\n      /* This second condition makes sure DRi is set up for a data\n\t watchpoint, not a hardware breakpoint.  The reason is that\n\t GDB doesn't call the target_stopped_data_address method\n\t except for data watchpoints.  In other words, I'm being\n\t paranoiac.  */\n      if (X86_DR_GET_RW_LEN (control, i) != 0)\n\t{\n\t  addr = x86_dr_low_get_addr (i);\n\t  rc = 1;\n\t  if (show_debug_regs)\n\t    x86_show_dr (state, \"watchpoint_hit\", addr, -1, hw_write);\n\t}\n    }\n\n  if (show_debug_regs && addr == 0)\n    x86_show_dr (state, \"stopped_data_addr\", 0, 0, hw_write);\n\n  if (rc)\n    *addr_p = addr;\n  return rc;\n}",
+      "fn_code_pos": [
+        [
+          565,
+          0
+        ],
+        [
+          640,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_dr_stopped_data_address",
+        "parameters": {
+          "state": "struct x86_debug_reg_state",
+          "addr_p": "CORE_ADDR"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "ALL_DEBUG_ADDRESS_REGISTERS (i)\n    {\n      if (!X86_DR_WATCH_HIT (status, i))\n\tcontinue;\n\n      if (!control_p)\n\t{\n\t  control = x86_dr_low_get_control ();\n\t  control_p = 1;\n\t}\n\n      /* This second condition makes sure DRi is set up for a data\n\t watchpoint, not a hardware breakpoint.  The reason is that\n\t GDB doesn't call the target_stopped_data_address method\n\t except for data watchpoints.  In other words, I'm being\n\t paranoiac.  */\n      if (X86_DR_GET_RW_LEN (control, i) != 0)\n\t{\n\t  addr = x86_dr_low_get_addr (i);\n\t  rc = 1;\n\t  if (show_debug_regs)\n\t    x86_show_dr (state, \"watchpoint_hit\", addr, -1, hw_write);\n\t}\n    }",
+      "fn_code_pos": [
+        [
+          609,
+          2
+        ],
+        [
+          632,
+          5
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ALL_DEBUG_ADDRESS_REGISTERS",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "int\nx86_dr_stopped_by_watchpoint (struct x86_debug_reg_state *state)\n{\n  CORE_ADDR addr = 0;\n  return x86_dr_stopped_data_address (state, &addr);\n}",
+      "fn_code_pos": [
+        [
+          645,
+          0
+        ],
+        [
+          650,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "x86_dr_stopped_by_watchpoint",
+        "parameters": {
+          "state": "struct x86_debug_reg_state"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        176,
+        13
+      ],
+      [
+        176,
+        39
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        269,
+        31
+      ],
+      [
+        269,
+        57
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        329,
+        31
+      ],
+      [
+        329,
+        57
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        381,
+        34
+      ],
+      [
+        381,
+        60
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        445,
+        32
+      ],
+      [
+        445,
+        58
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        446,
+        4
+      ],
+      [
+        446,
+        30
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        469,
+        26
+      ],
+      [
+        469,
+        52
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        476,
+        2
+      ],
+      [
+        476,
+        28
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        511,
+        26
+      ],
+      [
+        511,
+        52
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        518,
+        2
+      ],
+      [
+        518,
+        28
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        549,
+        33
+      ],
+      [
+        549,
+        59
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        566,
+        29
+      ],
+      [
+        566,
+        55
+      ]
+    ],
+    [
+      "struct x86_debug_reg_state",
+      {},
+      "",
+      [
+        646,
+        30
+      ],
+      [
+        646,
+        56
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"common-defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"x86-dregs.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"break-common.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "typedef enum { WP_INSERT, WP_REMOVE, WP_COUNT } x86_wp_op_t;",
+      {
+        "WP_INSERT": "",
+        "WP_REMOVE": "",
+        "WP_COUNT": ""
+      },
+      "x86_wp_op_t",
+      [
+        171,
+        0
+      ],
+      [
+        171,
+        60
+      ]
+    ],
+    [
+      "enum target_hw_bp_type",
+      {},
+      "",
+      [
+        178,
+        15
+      ],
+      [
+        178,
+        37
+      ]
+    ],
+    [
+      "enum target_hw_bp_type",
+      {},
+      "",
+      [
+        213,
+        33
+      ],
+      [
+        213,
+        55
+      ]
+    ],
+    [
+      "enum target_hw_bp_type",
+      {},
+      "",
+      [
+        383,
+        6
+      ],
+      [
+        383,
+        28
+      ]
+    ],
+    [
+      "enum target_hw_bp_type",
+      {},
+      "",
+      [
+        470,
+        5
+      ],
+      [
+        470,
+        27
+      ]
+    ],
+    [
+      "enum target_hw_bp_type",
+      {},
+      "",
+      [
+        512,
+        5
+      ],
+      [
+        512,
+        27
+      ]
+    ]
+  ]
+}

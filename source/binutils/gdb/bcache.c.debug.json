@@ -1,0 +1,805 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "unsigned long\nhash(const void *addr, int length)\n{\n  return hash_continue (addr, length, 0);\n}",
+      "fn_code_pos": [
+        [
+          96,
+          0
+        ],
+        [
+          100,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hash",
+        "parameters": {
+          "addr": "void",
+          "length": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "unsigned long\nhash_continue (const void *addr, int length, unsigned long h)\n{\n  const unsigned char *k, *e;\n\n  k = (const unsigned char *)addr;\n  e = k+length;\n  for (; k< e;++k)\n    {\n      h *=16777619;\n      h ^= *k;\n    }\n  return (h);\n}",
+      "fn_code_pos": [
+        [
+          104,
+          0
+        ],
+        [
+          117,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hash_continue",
+        "parameters": {
+          "addr": "void",
+          "length": "int",
+          "h": "unsigned long"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nexpand_hash_table (struct bcache *bcache)\n{\n  /* A table of good hash table sizes.  Whenever we grow, we pick the\n     next larger size from this table.  sizes[i] is close to 1 << (i+10),\n     so we roughly double the table size each time.  After we fall off \n     the end of this table, we just double.  Don't laugh --- there have\n     been executables sighted with a gigabyte of debug info.  */\n  static unsigned long sizes[] = { \n    1021, 2053, 4099, 8191, 16381, 32771,\n    65537, 131071, 262144, 524287, 1048573, 2097143,\n    4194301, 8388617, 16777213, 33554467, 67108859, 134217757,\n    268435459, 536870923, 1073741827, 2147483659UL\n  };\n  unsigned int new_num_buckets;\n  struct bstring **new_buckets;\n  unsigned int i;\n\n  /* Count the stats.  Every unique item needs to be re-hashed and\n     re-entered.  */\n  bcache->expand_count++;\n  bcache->expand_hash_count += bcache->unique_count;\n\n  /* Find the next size.  */\n  new_num_buckets = bcache->num_buckets * 2;\n  for (i = 0; i < (sizeof (sizes) / sizeof (sizes[0])); i++)\n    if (sizes[i] > bcache->num_buckets)\n      {\n\tnew_num_buckets = sizes[i];\n\tbreak;\n      }\n\n  /* Allocate the new table.  */\n  {\n    size_t new_size = new_num_buckets * sizeof (new_buckets[0]);\n\n    new_buckets = (struct bstring **) xmalloc (new_size);\n    memset (new_buckets, 0, new_size);\n\n    bcache->structure_size -= (bcache->num_buckets\n\t\t\t       * sizeof (bcache->bucket[0]));\n    bcache->structure_size += new_size;\n  }\n\n  /* Rehash all existing strings.  */\n  for (i = 0; i < bcache->num_buckets; i++)\n    {\n      struct bstring *s, *next;\n\n      for (s = bcache->bucket[i]; s; s = next)\n\t{\n\t  struct bstring **new_bucket;\n\t  next = s->next;\n\n\t  new_bucket = &new_buckets[(bcache->hash_function (&s->d.data,\n\t\t\t\t\t\t\t    s->length)\n\t\t\t\t     % new_num_buckets)];\n\t  s->next = *new_bucket;\n\t  *new_bucket = s;\n\t}\n    }\n\n  /* Plug in the new table.  */\n  if (bcache->bucket)\n    xfree (bcache->bucket);\n  bcache->bucket = new_buckets;\n  bcache->num_buckets = new_num_buckets;\n}",
+      "fn_code_pos": [
+        [
+          125,
+          0
+        ],
+        [
+          192,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "expand_hash_table",
+        "parameters": {
+          "bcache": "struct bcache"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "const void *\nbcache (const void *addr, int length, struct bcache *cache)\n{\n  return bcache_full (addr, length, cache, NULL);\n}",
+      "fn_code_pos": [
+        [
+          204,
+          0
+        ],
+        [
+          208,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bcache",
+        "parameters": {
+          "addr": "void",
+          "length": "int",
+          "cache": "struct bcache"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "const void *\nbcache_full (const void *addr, int length, struct bcache *bcache, int *added)\n{\n  unsigned long full_hash;\n  unsigned short half_hash;\n  int hash_index;\n  struct bstring *s;\n\n  if (added)\n    *added = 0;\n\n  /* Lazily initialize the obstack.  This can save quite a bit of\n     memory in some cases.  */\n  if (bcache->total_count == 0)\n    {\n      /* We could use obstack_specify_allocation here instead, but\n\t gdb_obstack.h specifies the allocation/deallocation\n\t functions.  */\n      obstack_init (&bcache->cache);\n    }\n\n  /* If our average chain length is too high, expand the hash table.  */\n  if (bcache->unique_count >= bcache->num_buckets * CHAIN_LENGTH_THRESHOLD)\n    expand_hash_table (bcache);\n\n  bcache->total_count++;\n  bcache->total_size += length;\n\n  full_hash = bcache->hash_function (addr, length);\n\n  half_hash = (full_hash >> 16);\n  hash_index = full_hash % bcache->num_buckets;\n\n  /* Search the hash bucket for a string identical to the caller's.\n     As a short-circuit first compare the upper part of each hash\n     values.  */\n  for (s = bcache->bucket[hash_index]; s; s = s->next)\n    {\n      if (s->half_hash == half_hash)\n\t{\n\t  if (s->length == length\n\t      && bcache->compare_function (&s->d.data, addr, length))\n\t    return &s->d.data;\n\t  else\n\t    bcache->half_hash_miss_count++;\n\t}\n    }\n\n  /* The user's string isn't in the list.  Insert it after *ps.  */\n  {\n    struct bstring *newobj\n      = (struct bstring *) obstack_alloc (&bcache->cache,\n\t\t\t\t\t  BSTRING_SIZE (length));\n\n    memcpy (&newobj->d.data, addr, length);\n    newobj->length = length;\n    newobj->next = bcache->bucket[hash_index];\n    newobj->half_hash = half_hash;\n    bcache->bucket[hash_index] = newobj;\n\n    bcache->unique_count++;\n    bcache->unique_size += length;\n    bcache->structure_size += BSTRING_SIZE (length);\n\n    if (added)\n      *added = 1;\n\n    return &newobj->d.data;\n  }\n}",
+      "fn_code_pos": [
+        [
+          216,
+          0
+        ],
+        [
+          285,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bcache_full",
+        "parameters": {
+          "addr": "void",
+          "length": "int",
+          "bcache": "struct bcache",
+          "added": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nbcache_compare (const void *addr1, const void *addr2, int length)\n{\n  return memcmp (addr1, addr2, length) == 0;\n}",
+      "fn_code_pos": [
+        [
+          291,
+          0
+        ],
+        [
+          295,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bcache_compare",
+        "parameters": {
+          "addr1": "void",
+          "addr2": "void",
+          "length": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "struct bcache *\nbcache_xmalloc (unsigned long (*hash_function)(const void *, int length),\n                int (*compare_function)(const void *, \n\t\t\t\t\tconst void *, \n\t\t\t\t\tint length))\n{\n  /* Allocate the bcache pre-zeroed.  */\n  struct bcache *b = XCNEW (struct bcache);\n\n  if (hash_function)\n    b->hash_function = hash_function;\n  else\n    b->hash_function = hash;\n\n  if (compare_function)\n    b->compare_function = compare_function;\n  else\n    b->compare_function = bcache_compare;\n  return b;\n}",
+      "fn_code_pos": [
+        [
+          304,
+          0
+        ],
+        [
+          323,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bcache_xmalloc",
+        "parameters": {
+          "hash_function": "unsigned long",
+          "length": "int",
+          "compare_function": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "void\nbcache_xfree (struct bcache *bcache)\n{\n  if (bcache == NULL)\n    return;\n  /* Only free the obstack if we actually initialized it.  */\n  if (bcache->total_count > 0)\n    obstack_free (&bcache->cache, 0);\n  xfree (bcache->bucket);\n  xfree (bcache);\n}",
+      "fn_code_pos": [
+        [
+          326,
+          0
+        ],
+        [
+          336,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bcache_xfree",
+        "parameters": {
+          "bcache": "struct bcache"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nprint_percentage (int portion, int total)\n{\n  if (total == 0)\n    /* i18n: Like \"Percentage of duplicates, by count: (not applicable)\".  */\n    printf_filtered (_(\"(not applicable)\\n\"));\n  else\n    printf_filtered (\"%3d%%\\n\", (int) (portion * 100.0 / total));\n}",
+      "fn_code_pos": [
+        [
+          342,
+          0
+        ],
+        [
+          350,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_percentage",
+        "parameters": {
+          "portion": "int",
+          "total": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nprint_bcache_statistics (struct bcache *c, const char *type)\n{\n  int occupied_buckets;\n  int max_chain_length;\n  int median_chain_length;\n  int max_entry_size;\n  int median_entry_size;\n\n  /* Count the number of occupied buckets, tally the various string\n     lengths, and measure chain lengths.  */\n  {\n    unsigned int b;\n    int *chain_length = XCNEWVEC (int, c->num_buckets + 1);\n    int *entry_size = XCNEWVEC (int, c->unique_count + 1);\n    int stringi = 0;\n\n    occupied_buckets = 0;\n\n    for (b = 0; b < c->num_buckets; b++)\n      {\n\tstruct bstring *s = c->bucket[b];\n\n\tchain_length[b] = 0;\n\n\tif (s)\n\t  {\n\t    occupied_buckets++;\n\t    \n\t    while (s)\n\t      {\n\t\tgdb_assert (b < c->num_buckets);\n\t\tchain_length[b]++;\n\t\tgdb_assert (stringi < c->unique_count);\n\t\tentry_size[stringi++] = s->length;\n\t\ts = s->next;\n\t      }\n\t  }\n      }\n\n    /* To compute the median, we need the set of chain lengths\n       sorted.  */\n    qsort (chain_length, c->num_buckets, sizeof (chain_length[0]),\n\t   compare_positive_ints);\n    qsort (entry_size, c->unique_count, sizeof (entry_size[0]),\n\t   compare_positive_ints);\n\n    if (c->num_buckets > 0)\n      {\n\tmax_chain_length = chain_length[c->num_buckets - 1];\n\tmedian_chain_length = chain_length[c->num_buckets / 2];\n      }\n    else\n      {\n\tmax_chain_length = 0;\n\tmedian_chain_length = 0;\n      }\n    if (c->unique_count > 0)\n      {\n\tmax_entry_size = entry_size[c->unique_count - 1];\n\tmedian_entry_size = entry_size[c->unique_count / 2];\n      }\n    else\n      {\n\tmax_entry_size = 0;\n\tmedian_entry_size = 0;\n      }\n\n    xfree (chain_length);\n    xfree (entry_size);\n  }\n\n  printf_filtered (_(\"  Cached '%s' statistics:\\n\"), type);\n  printf_filtered (_(\"    Total object count:  %ld\\n\"), c->total_count);\n  printf_filtered (_(\"    Unique object count: %lu\\n\"), c->unique_count);\n  printf_filtered (_(\"    Percentage of duplicates, by count: \"));\n  print_percentage (c->total_count - c->unique_count, c->total_count);\n  printf_filtered (\"\\n\");\n\n  printf_filtered (_(\"    Total object size:   %ld\\n\"), c->total_size);\n  printf_filtered (_(\"    Unique object size:  %ld\\n\"), c->unique_size);\n  printf_filtered (_(\"    Percentage of duplicates, by size:  \"));\n  print_percentage (c->total_size - c->unique_size, c->total_size);\n  printf_filtered (\"\\n\");\n\n  printf_filtered (_(\"    Max entry size:     %d\\n\"), max_entry_size);\n  printf_filtered (_(\"    Average entry size: \"));\n  if (c->unique_count > 0)\n    printf_filtered (\"%ld\\n\", c->unique_size / c->unique_count);\n  else\n    /* i18n: \"Average entry size: (not applicable)\".  */\n    printf_filtered (_(\"(not applicable)\\n\"));    \n  printf_filtered (_(\"    Median entry size:  %d\\n\"), median_entry_size);\n  printf_filtered (\"\\n\");\n\n  printf_filtered (_(\"    \\\nTotal memory used by bcache, including overhead: %ld\\n\"),\n\t\t   c->structure_size);\n  printf_filtered (_(\"    Percentage memory overhead: \"));\n  print_percentage (c->structure_size - c->unique_size, c->unique_size);\n  printf_filtered (_(\"    Net memory savings:         \"));\n  print_percentage (c->total_size - c->structure_size, c->total_size);\n  printf_filtered (\"\\n\");\n\n  printf_filtered (_(\"    Hash table size:           %3d\\n\"), \n\t\t   c->num_buckets);\n  printf_filtered (_(\"    Hash table expands:        %lu\\n\"),\n\t\t   c->expand_count);\n  printf_filtered (_(\"    Hash table hashes:         %lu\\n\"),\n\t\t   c->total_count + c->expand_hash_count);\n  printf_filtered (_(\"    Half hash misses:          %lu\\n\"),\n\t\t   c->half_hash_miss_count);\n  printf_filtered (_(\"    Hash table population:     \"));\n  print_percentage (occupied_buckets, c->num_buckets);\n  printf_filtered (_(\"    Median hash chain length:  %3d\\n\"),\n\t\t   median_chain_length);\n  printf_filtered (_(\"    Average hash chain length: \"));\n  if (c->num_buckets > 0)\n    printf_filtered (\"%3lu\\n\", c->unique_count / c->num_buckets);\n  else\n    /* i18n: \"Average hash chain length: (not applicable)\".  */\n    printf_filtered (_(\"(not applicable)\\n\"));\n  printf_filtered (_(\"    Maximum hash chain length: %3d\\n\"), \n\t\t   max_chain_length);\n  printf_filtered (\"\\n\");\n}",
+      "fn_code_pos": [
+        [
+          357,
+          0
+        ],
+        [
+          482,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_bcache_statistics",
+        "parameters": {
+          "c": "struct bcache",
+          "type": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\nbcache_memory_used (struct bcache *bcache)\n{\n  if (bcache->total_count == 0)\n    return 0;\n  return obstack_memory_used (&bcache->cache);\n}",
+      "fn_code_pos": [
+        [
+          484,
+          0
+        ],
+        [
+          490,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bcache_memory_used",
+        "parameters": {
+          "bcache": "struct bcache"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "(*hash_function)(const void *addr, int length)",
+      "fn_dec_pos": [
+        [
+          87,
+          16
+        ],
+        [
+          87,
+          62
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "addr": "void",
+          "length": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*compare_function)(const void *, const void *, int length)",
+      "fn_dec_pos": [
+        [
+          90,
+          6
+        ],
+        [
+          90,
+          65
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "length": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "bcache (const void *addr, int length, struct bcache *cache)",
+      "fn_dec_pos": [
+        [
+          205,
+          0
+        ],
+        [
+          205,
+          59
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bcache",
+        "parameters": {
+          "addr": "void",
+          "length": "int",
+          "cache": "struct bcache"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "bcache_full (const void *addr, int length, struct bcache *bcache, int *added)",
+      "fn_dec_pos": [
+        [
+          217,
+          0
+        ],
+        [
+          217,
+          77
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bcache_full",
+        "parameters": {
+          "addr": "void",
+          "length": "int",
+          "bcache": "struct bcache",
+          "added": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "bcache_xmalloc (unsigned long (*hash_function)(const void *, int length),\n                int (*compare_function)(const void *, \n\t\t\t\t\tconst void *, \n\t\t\t\t\tint length))",
+      "fn_dec_pos": [
+        [
+          305,
+          0
+        ],
+        [
+          308,
+          17
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bcache_xmalloc",
+        "parameters": {
+          "hash_function": "unsigned long",
+          "length": "int",
+          "compare_function": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*hash_function)(const void *, int length)",
+      "fn_dec_pos": [
+        [
+          305,
+          30
+        ],
+        [
+          305,
+          72
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "length": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*compare_function)(const void *, \n\t\t\t\t\tconst void *, \n\t\t\t\t\tint length)",
+      "fn_dec_pos": [
+        [
+          306,
+          20
+        ],
+        [
+          308,
+          16
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "length": "int"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct bstring\n{\n  /* Hash chain.  */\n  struct bstring *next;\n  /* Assume the data length is no more than 64k.  */\n  unsigned short length;\n  /* The half hash hack.  This contains the upper 16 bits of the hash\n     value and is used as a pre-check when comparing two strings and\n     avoids the need to do length or memcmp calls.  It proves to be\n     roughly 100% effective.  */\n  unsigned short half_hash;\n\n  union\n  {\n    char data[1];\n    double dummy;\n  }\n  d;\n}",
+      {
+        "*next": "struct bstring",
+        "length": "unsigned short",
+        "half_hash": "unsigned short",
+        "d": "union\n  {\n    char data[1];\n    double dummy;\n  }",
+        "data[1]": "char",
+        "dummy": "double"
+      },
+      "bstring",
+      [
+        31,
+        0
+      ],
+      [
+        49,
+        1
+      ]
+    ],
+    [
+      "struct bcache\n{\n  /* All the bstrings are allocated here.  */\n  struct obstack cache;\n\n  /* How many hash buckets we're using.  */\n  unsigned int num_buckets;\n  \n  /* Hash buckets.  This table is allocated using malloc, so when we\n     grow the table we can return the old table to the system.  */\n  struct bstring **bucket;\n\n  /* Statistics.  */\n  unsigned long unique_count;\t/* number of unique strings */\n  long total_count;\t/* total number of strings cached, including dups */\n  long unique_size;\t/* size of unique strings, in bytes */\n  long total_size;      /* total number of bytes cached, including dups */\n  long structure_size;\t/* total size of bcache, including infrastructure */\n  /* Number of times that the hash table is expanded and hence\n     re-built, and the corresponding number of times that a string is\n     [re]hashed as part of entering it into the expanded table.  The\n     total number of hashes can be computed by adding TOTAL_COUNT to\n     expand_hash_count.  */\n  unsigned long expand_count;\n  unsigned long expand_hash_count;\n  /* Number of times that the half-hash compare hit (compare the upper\n     16 bits of hash values) hit, but the corresponding combined\n     length/data compare missed.  */\n  unsigned long half_hash_miss_count;\n\n  /* Hash function to be used for this bcache object.  */\n  unsigned long (*hash_function)(const void *addr, int length);\n\n  /* Compare function to be used for this bcache object.  */\n  int (*compare_function)(const void *, const void *, int length);\n}",
+      {
+        "cache": "struct obstack",
+        "num_buckets": "unsigned int",
+        "**bucket": "struct bstring",
+        "unique_count": "unsigned long",
+        "total_count": "long",
+        "unique_size": "long",
+        "total_size": "long",
+        "structure_size": "long",
+        "expand_count": "unsigned long",
+        "expand_hash_count": "unsigned long",
+        "half_hash_miss_count": "unsigned long",
+        "(*hash_function)(const void *addr, int length)": "unsigned long",
+        "(*compare_function)(const void *, const void *, int length)": "int"
+      },
+      "bcache",
+      [
+        56,
+        0
+      ],
+      [
+        91,
+        1
+      ]
+    ],
+    [
+      "struct bstring\n{\n  /* Hash chain.  */\n  struct bstring *next;\n  /* Assume the data length is no more than 64k.  */\n  unsigned short length;\n  /* The half hash hack.  This contains the upper 16 bits of the hash\n     value and is used as a pre-check when comparing two strings and\n     avoids the need to do length or memcmp calls.  It proves to be\n     roughly 100% effective.  */\n  unsigned short half_hash;\n\n  union\n  {\n    char data[1];\n    double dummy;\n  }\n  d;\n}",
+      {
+        "*next": "struct bstring",
+        "length": "unsigned short",
+        "half_hash": "unsigned short",
+        "d": "union\n  {\n    char data[1];\n    double dummy;\n  }",
+        "data[1]": "char",
+        "dummy": "double"
+      },
+      "bstring",
+      [
+        31,
+        0
+      ],
+      [
+        49,
+        1
+      ]
+    ],
+    [
+      "struct bstring",
+      {},
+      "",
+      [
+        34,
+        2
+      ],
+      [
+        34,
+        16
+      ]
+    ],
+    [
+      "struct bcache\n{\n  /* All the bstrings are allocated here.  */\n  struct obstack cache;\n\n  /* How many hash buckets we're using.  */\n  unsigned int num_buckets;\n  \n  /* Hash buckets.  This table is allocated using malloc, so when we\n     grow the table we can return the old table to the system.  */\n  struct bstring **bucket;\n\n  /* Statistics.  */\n  unsigned long unique_count;\t/* number of unique strings */\n  long total_count;\t/* total number of strings cached, including dups */\n  long unique_size;\t/* size of unique strings, in bytes */\n  long total_size;      /* total number of bytes cached, including dups */\n  long structure_size;\t/* total size of bcache, including infrastructure */\n  /* Number of times that the hash table is expanded and hence\n     re-built, and the corresponding number of times that a string is\n     [re]hashed as part of entering it into the expanded table.  The\n     total number of hashes can be computed by adding TOTAL_COUNT to\n     expand_hash_count.  */\n  unsigned long expand_count;\n  unsigned long expand_hash_count;\n  /* Number of times that the half-hash compare hit (compare the upper\n     16 bits of hash values) hit, but the corresponding combined\n     length/data compare missed.  */\n  unsigned long half_hash_miss_count;\n\n  /* Hash function to be used for this bcache object.  */\n  unsigned long (*hash_function)(const void *addr, int length);\n\n  /* Compare function to be used for this bcache object.  */\n  int (*compare_function)(const void *, const void *, int length);\n}",
+      {
+        "cache": "struct obstack",
+        "num_buckets": "unsigned int",
+        "**bucket": "struct bstring",
+        "unique_count": "unsigned long",
+        "total_count": "long",
+        "unique_size": "long",
+        "total_size": "long",
+        "structure_size": "long",
+        "expand_count": "unsigned long",
+        "expand_hash_count": "unsigned long",
+        "half_hash_miss_count": "unsigned long",
+        "(*hash_function)(const void *addr, int length)": "unsigned long",
+        "(*compare_function)(const void *, const void *, int length)": "int"
+      },
+      "bcache",
+      [
+        56,
+        0
+      ],
+      [
+        91,
+        1
+      ]
+    ],
+    [
+      "struct obstack",
+      {},
+      "",
+      [
+        59,
+        2
+      ],
+      [
+        59,
+        16
+      ]
+    ],
+    [
+      "struct bstring",
+      {},
+      "",
+      [
+        66,
+        2
+      ],
+      [
+        66,
+        16
+      ]
+    ],
+    [
+      "struct bcache",
+      {},
+      "",
+      [
+        126,
+        19
+      ],
+      [
+        126,
+        32
+      ]
+    ],
+    [
+      "struct bstring",
+      {},
+      "",
+      [
+        140,
+        2
+      ],
+      [
+        140,
+        16
+      ]
+    ],
+    [
+      "struct bstring",
+      {},
+      "",
+      [
+        161,
+        19
+      ],
+      [
+        161,
+        33
+      ]
+    ],
+    [
+      "struct bstring",
+      {},
+      "",
+      [
+        172,
+        6
+      ],
+      [
+        172,
+        20
+      ]
+    ],
+    [
+      "struct bstring",
+      {},
+      "",
+      [
+        176,
+        3
+      ],
+      [
+        176,
+        17
+      ]
+    ],
+    [
+      "struct bcache",
+      {},
+      "",
+      [
+        205,
+        38
+      ],
+      [
+        205,
+        51
+      ]
+    ],
+    [
+      "struct bcache",
+      {},
+      "",
+      [
+        217,
+        43
+      ],
+      [
+        217,
+        56
+      ]
+    ],
+    [
+      "struct bstring",
+      {},
+      "",
+      [
+        222,
+        2
+      ],
+      [
+        222,
+        16
+      ]
+    ],
+    [
+      "struct bstring",
+      {},
+      "",
+      [
+        266,
+        4
+      ],
+      [
+        266,
+        18
+      ]
+    ],
+    [
+      "struct bstring",
+      {},
+      "",
+      [
+        267,
+        9
+      ],
+      [
+        267,
+        23
+      ]
+    ],
+    [
+      "struct bcache",
+      {},
+      "",
+      [
+        304,
+        0
+      ],
+      [
+        304,
+        13
+      ]
+    ],
+    [
+      "struct bcache",
+      {},
+      "",
+      [
+        311,
+        2
+      ],
+      [
+        311,
+        15
+      ]
+    ],
+    [
+      "struct bcache",
+      {},
+      "",
+      [
+        327,
+        14
+      ],
+      [
+        327,
+        27
+      ]
+    ],
+    [
+      "struct bcache",
+      {},
+      "",
+      [
+        358,
+        25
+      ],
+      [
+        358,
+        38
+      ]
+    ],
+    [
+      "struct bstring",
+      {},
+      "",
+      [
+        378,
+        1
+      ],
+      [
+        378,
+        15
+      ]
+    ],
+    [
+      "struct bcache",
+      {},
+      "",
+      [
+        485,
+        20
+      ],
+      [
+        485,
+        33
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_obstack.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"bcache.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

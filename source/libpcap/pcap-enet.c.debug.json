@@ -1,0 +1,437 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "void\nreadloop(int cnt, int if_fd, struct bpf_program *fp, printfunc printit)\n{\n#ifdef\tIBMRTPC\n\tregister struct packet_header *ph;\n\tregister u_char *bp;\n\tregister int inc;\n#else\t/* !IBMRTPC */\n\tstatic struct timeval tv = { 0 };\n#endif\t/* IBMRTPC */\n\tregister int cc, caplen;\n\tregister struct bpf_insn *fcode = fp->bf_insns;\n\tunion {\n\t\tstruct packet_header hdr;\n\t\tu_char\tp[BUFSPACE];\n\t\tu_short\ts;\n\t} buf;\n\n\twhile (1) {\n\t\tif ((cc = read(if_fd, (char *)buf.p, sizeof(buf))) < 0)\n\t\t\tefReadError(if_fd, \"reader\");\n\n#ifdef\tIBMRTPC\n\t\t/*\n\t\t * Loop through each packet.\n\t\t */\n\t\tbp = buf.p;\n\t\twhile (cc > 0) {\n\t\t\tph = (struct packet_header *)bp;\n\t\t\tcaplen = ph->tap.th_wirelen > snaplen ? snaplen : ph->tap\n.th_wirelen ;\n\t\t\tif (bpf_filter(fcode, (char *)ph->packet,\n\t\t\t\t\t\tph->tap.th_wirelen, caplen)) {\n\t\t\t\tif (cnt >= 0 && --cnt < 0)\n\t\t\t\t\tgoto out;\n\t\t\t\t(*printit)((char *)ph->packet,\n\t\t\t\t\t(struct timeval *)ph->tap.th_timestamp,\n\t\t\t\t\tph->tap.th_wirelen, caplen);\n\t\t\t}\n\t\t\tinc = ph->length.PacketOffset;\n\t\t\tcc -= inc;\n\t\t\tbp += inc;\n\t\t}\n#else\t/* !IBMRTPC */\n\t\tcaplen = cc > snaplen ? snaplen : cc ;\n\t\tif (bpf_filter(fcode, buf.hdr.packet, cc, caplen)) {\n\t\t\tif (cnt >= 0 && --cnt < 0)\n\t\t\t\tgoto out;\n\t\t\t(*printit)(buf.hdr.packet, &tv, cc, caplen);\n\t\t}\n#endif\t/* IBMRTPC */\n\t}\n out:\n\twrapup(if_fd);\n}",
+      "fn_code_pos": [
+        [
+          46,
+          0
+        ],
+        [
+          100,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "readloop",
+        "parameters": {
+          "cnt": "int",
+          "if_fd": "int",
+          "fp": "struct bpf_program",
+          "printit": "printfunc"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nefReadError(int fid, char *msg)\n{\n\tif (errno == EINVAL) {\t/* read MAXINT bytes already! */\n\t\tif (lseek(fid, 0, 0) < 0) {\n\t\t\tperror(\"tcpdump: efReadError/lseek\");\n\t\t\texit(-1);\n\t\t}\n\t\telse\n\t\t\treturn;\n\t}\n\telse {\n\t\t(void) fprintf(stderr, \"tcpdump: \");\n\t\tperror(msg);\n\t\texit(-1);\n\t}\n}",
+      "fn_code_pos": [
+        [
+          103,
+          0
+        ],
+        [
+          119,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "efReadError",
+        "parameters": {
+          "fid": "int",
+          "msg": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nwrapup(int fd)\n{\n#ifdef\tIBMRTPC\n\tstruct enstats es;\n\n\tif (ioctl(fd, EIOSTATS, &es) == -1) {\n\t\tperror(\"tcpdump: enet ioctl EIOSTATS error\");\n\t\texit(-1);\n\t}\n\n\tfprintf(stderr, \"%d packets queued\", es.enStat_Rcnt);\n\tif (es.enStat_Rdrops > 0)\n\t\tfprintf(stderr, \", %d dropped\", es.enStat_Rdrops);\n\tif (es.enStat_Reads > 0)\n\t\tfprintf(stderr, \", %d tcpdump %s\", es.enStat_Reads,\n\t\t\t\tes.enStat_Reads > 1 ? \"reads\" : \"read\");\n\tif (es.enStat_MaxRead > 1)\n\t\tfprintf(stderr, \", %d packets in largest read\",\n\t\t\tes.enStat_MaxRead);\n\tputc('\\n', stderr);\n#endif\t/* IBMRTPC */\n\tclose(fd);\n}",
+      "fn_code_pos": [
+        [
+          121,
+          0
+        ],
+        [
+          144,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "wrapup",
+        "parameters": {
+          "fd": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\ninitdevice(char *device, int pflag, int *linktype)\n{\n\tstruct eniocb ctl;\n\tstruct enfilter filter;\n\tu_int maxwaiting;\n\tint if_fd;\n\n#ifdef\tIBMRTPC\n\tGETENETDEVICE(0, O_RDONLY, &if_fd);\n#else\t/* !IBMRTPC */\n\tif_fd = open(\"/dev/enet\", O_RDONLY, 0);\n#endif\t/* IBMRTPC */\n\n\tif (if_fd == -1) {\n\t\tperror(\"tcpdump: enet open error\");\n\t\terror(\n\"your system may not be properly configured; see \\\"man enet(4)\\\"\");\n\t\texit(-1);\n\t}\n\n\t/*  Get operating parameters. */\n\n\tif (ioctl(if_fd, EIOCGETP, (char *)&ctl) == -1) {\n\t\tperror(\"tcpdump: enet ioctl EIOCGETP error\");\n\t\texit(-1);\n\t}\n\n\t/*  Set operating parameters. */\n\n#ifdef\tIBMRTPC\n\tctl.en_rtout = 1 * ctl.en_hz;\n\tctl.en_tr_etherhead = 1;\n\tctl.en_tap_network = 1;\n\tctl.en_multi_packet = 1;\n\tctl.en_maxlen = BUFSPACE;\n#else\t/* !IBMRTPC */\n\tctl.en_rtout = 64;\t/* randomly picked value for HZ */\n#endif\t/* IBMRTPC */\n\tif (ioctl(if_fd, EIOCSETP, &ctl) == -1) {\n\t\tperror(\"tcpdump: enet ioctl EIOCSETP error\");\n\t\texit(-1);\n\t}\n\n\t/*  Flush the receive queue, since we've changed\n\t    the operating parameters and we otherwise might\n\t    receive data without headers. */\n\n\tif (ioctl(if_fd, EIOCFLUSH) == -1) {\n\t\tperror(\"tcpdump: enet ioctl EIOCFLUSH error\");\n\t\texit(-1);\n\t}\n\n\t/*  Set the receive queue depth to its maximum. */\n\n\tmaxwaiting = ctl.en_maxwaiting;\n\tif (ioctl(if_fd, EIOCSETW, &maxwaiting) == -1) {\n\t\tperror(\"tcpdump: enet ioctl EIOCSETW error\");\n\t\texit(-1);\n\t}\n\n#ifdef\tIBMRTPC\n\t/*  Clear statistics. */\n\n\tif (ioctl(if_fd, EIOCLRSTAT, 0) == -1) {\n\t\tperror(\"tcpdump: enet ioctl EIOCLRSTAT error\");\n\t\texit(-1);\n\t}\n#endif\t/* IBMRTPC */\n\n\t/*  Set the filter (accept all packets). */\n\n\tfilter.enf_Priority = 3;\n\tfilter.enf_FilterLen = 0;\n\tif (ioctl(if_fd, EIOCSETF, &filter) == -1) {\n\t\tperror(\"tcpdump: enet ioctl EIOCSETF error\");\n\t\texit(-1);\n\t}\n\t/*\n\t * \"enetfilter\" supports only ethernets.\n\t */\n\t*linktype = DLT_EN10MB;\n\n\treturn(if_fd);\n}",
+      "fn_code_pos": [
+        [
+          146,
+          0
+        ],
+        [
+          230,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "initdevice",
+        "parameters": {
+          "device": "char",
+          "pflag": "int",
+          "linktype": "int"
+        },
+        "return_type": "int"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "efReadError(int, char *)",
+      "fn_dec_pos": [
+        [
+          44,
+          12
+        ],
+        [
+          44,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "efReadError",
+        "parameters": {},
+        "return_type": "void"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct LengthWords",
+      {},
+      "",
+      [
+        33,
+        1
+      ],
+      [
+        33,
+        19
+      ]
+    ],
+    [
+      "struct tap_header",
+      {},
+      "",
+      [
+        34,
+        1
+      ],
+      [
+        34,
+        18
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        47,
+        29
+      ],
+      [
+        47,
+        47
+      ]
+    ],
+    [
+      "struct packet_header",
+      {},
+      "",
+      [
+        50,
+        10
+      ],
+      [
+        50,
+        30
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        54,
+        8
+      ],
+      [
+        54,
+        22
+      ]
+    ],
+    [
+      "struct bpf_insn",
+      {},
+      "",
+      [
+        57,
+        10
+      ],
+      [
+        57,
+        25
+      ]
+    ],
+    [
+      "struct packet_header",
+      {},
+      "",
+      [
+        59,
+        2
+      ],
+      [
+        59,
+        22
+      ]
+    ],
+    [
+      "struct packet_header",
+      {},
+      "",
+      [
+        74,
+        9
+      ],
+      [
+        74,
+        29
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        82,
+        6
+      ],
+      [
+        82,
+        20
+      ]
+    ],
+    [
+      "struct enstats",
+      {},
+      "",
+      [
+        125,
+        1
+      ],
+      [
+        125,
+        15
+      ]
+    ],
+    [
+      "struct eniocb",
+      {},
+      "",
+      [
+        149,
+        1
+      ],
+      [
+        149,
+        14
+      ]
+    ],
+    [
+      "struct enfilter",
+      {},
+      "",
+      [
+        150,
+        1
+      ],
+      [
+        150,
+        16
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <config.h>\n",
+      [
+        10,
+        0
+      ],
+      [
+        11,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        13,
+        0
+      ],
+      [
+        14,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\n",
+      [
+        14,
+        0
+      ],
+      [
+        15,
+        0
+      ]
+    ],
+    [
+      "#include <sys/file.h>\n",
+      [
+        15,
+        0
+      ],
+      [
+        16,
+        0
+      ]
+    ],
+    [
+      "#include <sys/ioctl.h>\n",
+      [
+        16,
+        0
+      ],
+      [
+        17,
+        0
+      ]
+    ],
+    [
+      "#include <sys/socket.h>\n",
+      [
+        17,
+        0
+      ],
+      [
+        18,
+        0
+      ]
+    ],
+    [
+      "#include <net/if.h>\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include <pcap/bpf.h>\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include <net/enet.h>\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in.h>\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/if_ether.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"interface.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

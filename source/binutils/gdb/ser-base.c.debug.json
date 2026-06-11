@@ -1,0 +1,1042 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nreschedule (struct serial *scb)\n{\n  if (serial_is_async_p (scb))\n    {\n      int next_state;\n\n      switch (scb->async_state)\n\t{\n\tcase FD_SCHEDULED:\n\t  if (scb->bufcnt == 0)\n\t    next_state = FD_SCHEDULED;\n\t  else\n\t    {\n\t      delete_file_handler (scb->fd);\n\t      next_state = create_timer (0, push_event, scb);\n\t    }\n\t  break;\n\tcase NOTHING_SCHEDULED:\n\t  if (scb->bufcnt == 0)\n\t    {\n\t      add_file_handler (scb->fd, fd_event, scb);\n\t      next_state = FD_SCHEDULED;\n\t    }\n\t  else\n\t    {\n\t      next_state = create_timer (0, push_event, scb);\n\t    }\n\t  break;\n\tdefault: /* TIMER SCHEDULED */\n\t  if (scb->bufcnt == 0)\n\t    {\n\t      delete_timer (scb->async_state);\n\t      add_file_handler (scb->fd, fd_event, scb);\n\t      next_state = FD_SCHEDULED;\n\t    }\n\t  else\n\t    next_state = scb->async_state;\n\t  break;\n\t}\n      if (serial_debug_p (scb))\n\t{\n\t  switch (next_state)\n\t    {\n\t    case FD_SCHEDULED:\n\t      if (scb->async_state != FD_SCHEDULED)\n\t\tfprintf_unfiltered (gdb_stdlog, \"[fd%d->fd-scheduled]\\n\",\n\t\t\t\t    scb->fd);\n\t      break;\n\t    default: /* TIMER SCHEDULED */\n\t      if (scb->async_state == FD_SCHEDULED)\n\t\tfprintf_unfiltered (gdb_stdlog, \"[fd%d->timer-scheduled]\\n\",\n\t\t\t\t    scb->fd);\n\t      break;\n\t    }\n\t}\n      scb->async_state = next_state;\n    }\n}",
+      "fn_code_pos": [
+        [
+          63,
+          0
+        ],
+        [
+          121,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "reschedule",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nrun_async_handler_and_reschedule (struct serial *scb)\n{\n  int is_open;\n\n  /* Take a reference, so a serial_close call within the handler\n     doesn't make SCB a dangling pointer.  */\n  serial_ref (scb);\n\n  /* Run the handler.  */\n  scb->async_handler (scb, scb->async_context);\n\n  is_open = serial_is_open (scb);\n  serial_unref (scb);\n\n  /* Get ready for more, if not already closed.  */\n  if (is_open)\n    reschedule (scb);\n}",
+      "fn_code_pos": [
+        [
+          126,
+          0
+        ],
+        [
+          144,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "run_async_handler_and_reschedule",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfd_event (int error, void *context)\n{\n  struct serial *scb = (struct serial *) context;\n  if (error != 0)\n    {\n      scb->bufcnt = SERIAL_ERROR;\n    }\n  else if (scb->bufcnt == 0)\n    {\n      /* Prime the input FIFO.  The readchar() function is used to\n         pull characters out of the buffer.  See also\n         generic_readchar().  */\n      int nr;\n\n      do\n\t{\n\t  nr = scb->ops->read_prim (scb, BUFSIZ);\n\t}\n      while (nr < 0 && errno == EINTR);\n\n      if (nr == 0)\n\t{\n\t  scb->bufcnt = SERIAL_EOF;\n\t}\n      else if (nr > 0)\n\t{\n\t  scb->bufcnt = nr;\n\t  scb->bufp = scb->buf;\n\t}\n      else\n\t{\n\t  scb->bufcnt = SERIAL_ERROR;\n\t}\n    }\n  run_async_handler_and_reschedule (scb);\n}",
+      "fn_code_pos": [
+        [
+          152,
+          0
+        ],
+        [
+          188,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "fd_event",
+        "parameters": {
+          "error": "int",
+          "context": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\npush_event (void *context)\n{\n  struct serial *scb = (struct serial *) context;\n\n  scb->async_state = NOTHING_SCHEDULED; /* Timers are one-off */\n  run_async_handler_and_reschedule (scb);\n}",
+      "fn_code_pos": [
+        [
+          195,
+          0
+        ],
+        [
+          202,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "push_event",
+        "parameters": {
+          "context": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nser_base_wait_for (struct serial *scb, int timeout)\n{\n  while (1)\n    {\n      int numfds;\n      struct timeval tv;\n      fd_set readfds, exceptfds;\n      int nfds;\n\n      /* NOTE: Some OS's can scramble the READFDS when the select()\n         call fails (ex the kernel with Red Hat 5.2).  Initialize all\n         arguments before each call.  */\n\n      tv.tv_sec = timeout;\n      tv.tv_usec = 0;\n\n      FD_ZERO (&readfds);\n      FD_ZERO (&exceptfds);\n      FD_SET (scb->fd, &readfds);\n      FD_SET (scb->fd, &exceptfds);\n\n      QUIT;\n\n      nfds = scb->fd + 1;\n      if (timeout >= 0)\n\tnumfds = interruptible_select (nfds, &readfds, 0, &exceptfds, &tv);\n      else\n\tnumfds = interruptible_select (nfds, &readfds, 0, &exceptfds, 0);\n\n      if (numfds <= 0)\n\t{\n\t  if (numfds == 0)\n\t    return SERIAL_TIMEOUT;\n\t  else if (errno == EINTR)\n\t    continue;\n\t  else\n\t    return SERIAL_ERROR;\t/* Got an error from select or\n\t\t\t\t\t   poll.  */\n\t}\n\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          212,
+          0
+        ],
+        [
+          255,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_wait_for",
+        "parameters": {
+          "scb": "struct serial",
+          "timeout": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\nser_base_read_error_fd (struct serial *scb, int close_fd)\n{\n  if (scb->error_fd != -1)\n    {\n      ssize_t s;\n      char buf[GDB_MI_MSG_WIDTH + 1];\n\n      for (;;)\n\t{\n\t  char *current;\n\t  char *newline;\n\t  int to_read = GDB_MI_MSG_WIDTH;\n\t  int num_bytes = -1;\n\n\t  if (scb->ops->avail)\n\t    num_bytes = (scb->ops->avail)(scb, scb->error_fd);\n\n\t  if (num_bytes != -1)\n\t    to_read = (num_bytes < to_read) ? num_bytes : to_read;\n\n\t  if (to_read == 0)\n\t    break;\n\n\t  s = read (scb->error_fd, &buf, to_read);\n\t  if ((s == -1) || (s == 0 && !close_fd))\n\t    break;\n\n\t  if (s == 0 && close_fd)\n\t    {\n\t      /* End of file.  */\n\t      close (scb->error_fd);\n\t      scb->error_fd = -1;\n\t      break;\n\t    }\n\n\t  /* In theory, embedded newlines are not a problem.\n\t     But for MI, we want each output line to have just\n\t     one newline for legibility.  So output things\n\t     in newline chunks.  */\n\t  gdb_assert (s > 0 && s <= GDB_MI_MSG_WIDTH);\n\t  buf[s] = '\\0';\n\t  current = buf;\n\t  while ((newline = strstr (current, \"\\n\")) != NULL)\n\t    {\n\t      *newline = '\\0';\n\t      fputs_unfiltered (current, gdb_stderr);\n\t      fputs_unfiltered (\"\\n\", gdb_stderr);\n\t      current = newline + 1;\n\t    }\n\n\t  fputs_unfiltered (current, gdb_stderr);\n       }\n    }\n}",
+      "fn_code_pos": [
+        [
+          259,
+          0
+        ],
+        [
+          313,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_read_error_fd",
+        "parameters": {
+          "scb": "struct serial",
+          "close_fd": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\ndo_ser_base_readchar (struct serial *scb, int timeout)\n{\n  int status;\n  int delta;\n\n  /* We have to be able to keep the GUI alive here, so we break the\n     original timeout into steps of 1 second, running the \"keep the\n     GUI alive\" hook each time through the loop.\n\n     Also, timeout = 0 means to poll, so we just set the delta to 0,\n     so we will only go through the loop once.  */\n\n  delta = (timeout == 0 ? 0 : 1);\n  while (1)\n    {\n      /* N.B. The UI may destroy our world (for instance by calling\n         remote_stop,) in which case we want to get out of here as\n         quickly as possible.  It is not safe to touch scb, since\n         someone else might have freed it.  The\n         deprecated_ui_loop_hook signals that we should exit by\n         returning 1.  */\n\n      if (deprecated_ui_loop_hook)\n\t{\n\t  if (deprecated_ui_loop_hook (0))\n\t    return SERIAL_TIMEOUT;\n\t}\n\n      status = ser_base_wait_for (scb, delta);\n      if (timeout > 0)\n        timeout -= delta;\n\n      /* If we got a character or an error back from wait_for, then we can \n         break from the loop before the timeout is completed.  */\n      if (status != SERIAL_TIMEOUT)\n\tbreak;\n\n      /* If we have exhausted the original timeout, then generate\n         a SERIAL_TIMEOUT, and pass it out of the loop.  */\n      else if (timeout == 0)\n\t{\n\t  status = SERIAL_TIMEOUT;\n\t  break;\n\t}\n\n      /* We also need to check and consume the stderr because it could\n\t come before the stdout for some stubs.  If we just sit and wait\n\t for stdout, we would hit a deadlock for that case.  */\n      ser_base_read_error_fd (scb, 0);\n    }\n\n  if (status < 0)\n    return status;\n\n  do\n    {\n      status = scb->ops->read_prim (scb, BUFSIZ);\n    }\n  while (status < 0 && errno == EINTR);\n\n  if (status <= 0)\n    {\n      if (status == 0)\n        return SERIAL_EOF;\n      else\n\t/* Got an error from read.  */\n\treturn SERIAL_ERROR;\t\n    }\n\n  scb->bufcnt = status;\n  scb->bufcnt--;\n  scb->bufp = scb->buf;\n  return *scb->bufp++;\n}",
+      "fn_code_pos": [
+        [
+          321,
+          0
+        ],
+        [
+          395,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "do_ser_base_readchar",
+        "parameters": {
+          "scb": "struct serial",
+          "timeout": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\ngeneric_readchar (struct serial *scb, int timeout,\n\t\t  int (do_readchar) (struct serial *scb, int timeout))\n{\n  int ch;\n  if (scb->bufcnt > 0)\n    {\n      ch = *scb->bufp;\n      scb->bufcnt--;\n      scb->bufp++;\n    }\n  else if (scb->bufcnt < 0)\n    {\n      /* Some errors/eof are are sticky.  */\n      ch = scb->bufcnt;\n    }\n  else\n    {\n      ch = do_readchar (scb, timeout);\n      if (ch < 0)\n\t{\n\t  switch ((enum serial_rc) ch)\n\t    {\n\t    case SERIAL_EOF:\n\t    case SERIAL_ERROR:\n\t      /* Make the error/eof stick.  */\n\t      scb->bufcnt = ch;\n\t      break;\n\t    case SERIAL_TIMEOUT:\n\t      scb->bufcnt = 0;\n\t      break;\n\t    }\n\t}\n    }\n\n  /* Read any error output we might have.  */\n  ser_base_read_error_fd (scb, 1);\n\n  reschedule (scb);\n  return ch;\n}",
+      "fn_code_pos": [
+        [
+          411,
+          0
+        ],
+        [
+          451,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "generic_readchar",
+        "parameters": {
+          "scb": "struct serial",
+          "timeout": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nser_base_readchar (struct serial *scb, int timeout)\n{\n  return generic_readchar (scb, timeout, do_ser_base_readchar);\n}",
+      "fn_code_pos": [
+        [
+          453,
+          0
+        ],
+        [
+          457,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_readchar",
+        "parameters": {
+          "scb": "struct serial",
+          "timeout": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nser_base_write (struct serial *scb, const void *buf, size_t count)\n{\n  const char *str = (const char *) buf;\n  int cc;\n\n  while (count > 0)\n    {\n      QUIT;\n\n      cc = scb->ops->write_prim (scb, str, count);\n\n      if (cc < 0)\n\t{\n\t  if (errno == EINTR)\n\t    continue;\n\t  return 1;\n\t}\n      count -= cc;\n      str += cc;\n    }\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          459,
+          0
+        ],
+        [
+          481,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_write",
+        "parameters": {
+          "scb": "struct serial",
+          "buf": "void",
+          "count": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nser_base_flush_output (struct serial *scb)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          483,
+          0
+        ],
+        [
+          487,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_flush_output",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nser_base_flush_input (struct serial *scb)\n{\n  if (scb->bufcnt >= 0)\n    {\n      scb->bufcnt = 0;\n      scb->bufp = scb->buf;\n      return 0;\n    }\n  else\n    return SERIAL_ERROR;\n}",
+      "fn_code_pos": [
+        [
+          489,
+          0
+        ],
+        [
+          500,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_flush_input",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nser_base_send_break (struct serial *scb)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          502,
+          0
+        ],
+        [
+          506,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_send_break",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nser_base_drain_output (struct serial *scb)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          508,
+          0
+        ],
+        [
+          512,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_drain_output",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nser_base_raw (struct serial *scb)\n{\n  return;\t\t\t/* Always in raw mode.  */\n}",
+      "fn_code_pos": [
+        [
+          514,
+          0
+        ],
+        [
+          518,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_raw",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "serial_ttystate\nser_base_get_tty_state (struct serial *scb)\n{\n  /* Allocate a dummy.  */\n  return (serial_ttystate) XNEW (int);\n}",
+      "fn_code_pos": [
+        [
+          520,
+          0
+        ],
+        [
+          525,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_get_tty_state",
+        "parameters": {
+          "scb": "struct serial"
+        },
+        "return_type": "serial_ttystate"
+      }
+    },
+    {
+      "fn_code": "serial_ttystate\nser_base_copy_tty_state (struct serial *scb, serial_ttystate ttystate)\n{\n  /* Allocate another dummy.  */\n  return (serial_ttystate) XNEW (int);\n}",
+      "fn_code_pos": [
+        [
+          527,
+          0
+        ],
+        [
+          532,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_copy_tty_state",
+        "parameters": {
+          "scb": "struct serial",
+          "ttystate": "serial_ttystate"
+        },
+        "return_type": "serial_ttystate"
+      }
+    },
+    {
+      "fn_code": "int\nser_base_set_tty_state (struct serial *scb, serial_ttystate ttystate)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          534,
+          0
+        ],
+        [
+          538,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_set_tty_state",
+        "parameters": {
+          "scb": "struct serial",
+          "ttystate": "serial_ttystate"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nser_base_noflush_set_tty_state (struct serial *scb,\n\t\t\t\tserial_ttystate new_ttystate,\n\t\t\t\tserial_ttystate old_ttystate)\n{\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          540,
+          0
+        ],
+        [
+          546,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_noflush_set_tty_state",
+        "parameters": {
+          "scb": "struct serial",
+          "new_ttystate": "serial_ttystate",
+          "old_ttystate": "serial_ttystate"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nser_base_print_tty_state (struct serial *scb, \n\t\t\t  serial_ttystate ttystate,\n\t\t\t  struct ui_file *stream)\n{\n  /* Nothing to print.  */\n  return;\n}",
+      "fn_code_pos": [
+        [
+          548,
+          0
+        ],
+        [
+          555,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_print_tty_state",
+        "parameters": {
+          "scb": "struct serial",
+          "ttystate": "serial_ttystate",
+          "stream": "struct ui_file"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "int\nser_base_setbaudrate (struct serial *scb, int rate)\n{\n  return 0;\t\t\t/* Never fails!  */\n}",
+      "fn_code_pos": [
+        [
+          557,
+          0
+        ],
+        [
+          561,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_setbaudrate",
+        "parameters": {
+          "scb": "struct serial",
+          "rate": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nser_base_setstopbits (struct serial *scb, int num)\n{\n  return 0;\t\t\t/* Never fails!  */\n}",
+      "fn_code_pos": [
+        [
+          563,
+          0
+        ],
+        [
+          567,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_setstopbits",
+        "parameters": {
+          "scb": "struct serial",
+          "num": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int\nser_base_setparity (struct serial *scb, int parity)\n{\n  return 0;\t\t\t/* Never fails!  */\n}",
+      "fn_code_pos": [
+        [
+          571,
+          0
+        ],
+        [
+          575,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_setparity",
+        "parameters": {
+          "scb": "struct serial",
+          "parity": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nser_base_async (struct serial *scb,\n\t\tint async_p)\n{\n  if (async_p)\n    {\n      /* Force a re-schedule.  */\n      scb->async_state = NOTHING_SCHEDULED;\n      if (serial_debug_p (scb))\n\tfprintf_unfiltered (gdb_stdlog, \"[fd%d->asynchronous]\\n\",\n\t\t\t    scb->fd);\n      reschedule (scb);\n    }\n  else\n    {\n      if (serial_debug_p (scb))\n\tfprintf_unfiltered (gdb_stdlog, \"[fd%d->synchronous]\\n\",\n\t\t\t    scb->fd);\n      /* De-schedule whatever tasks are currently scheduled.  */\n      switch (scb->async_state)\n\t{\n\tcase FD_SCHEDULED:\n\t  delete_file_handler (scb->fd);\n\t  break;\n\tcase NOTHING_SCHEDULED:\n\t  break;\n\tdefault: /* TIMER SCHEDULED */\n\t  delete_timer (scb->async_state);\n\t  break;\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          579,
+          0
+        ],
+        [
+          610,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ser_base_async",
+        "parameters": {
+          "scb": "struct serial",
+          "async_p": "int"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        64,
+        12
+      ],
+      [
+        64,
+        25
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        127,
+        34
+      ],
+      [
+        127,
+        47
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        155,
+        2
+      ],
+      [
+        155,
+        15
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        155,
+        24
+      ],
+      [
+        155,
+        37
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        198,
+        2
+      ],
+      [
+        198,
+        15
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        198,
+        24
+      ],
+      [
+        198,
+        37
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        213,
+        19
+      ],
+      [
+        213,
+        32
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        218,
+        6
+      ],
+      [
+        218,
+        20
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        260,
+        24
+      ],
+      [
+        260,
+        37
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        322,
+        22
+      ],
+      [
+        322,
+        35
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        412,
+        18
+      ],
+      [
+        412,
+        31
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        413,
+        23
+      ],
+      [
+        413,
+        36
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        454,
+        19
+      ],
+      [
+        454,
+        32
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        460,
+        16
+      ],
+      [
+        460,
+        29
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        484,
+        23
+      ],
+      [
+        484,
+        36
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        490,
+        22
+      ],
+      [
+        490,
+        35
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        503,
+        21
+      ],
+      [
+        503,
+        34
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        509,
+        23
+      ],
+      [
+        509,
+        36
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        515,
+        14
+      ],
+      [
+        515,
+        27
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        521,
+        24
+      ],
+      [
+        521,
+        37
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        528,
+        25
+      ],
+      [
+        528,
+        38
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        535,
+        24
+      ],
+      [
+        535,
+        37
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        541,
+        32
+      ],
+      [
+        541,
+        45
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        549,
+        26
+      ],
+      [
+        549,
+        39
+      ]
+    ],
+    [
+      "struct ui_file",
+      {},
+      "",
+      [
+        551,
+        5
+      ],
+      [
+        551,
+        19
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        558,
+        22
+      ],
+      [
+        558,
+        35
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        564,
+        22
+      ],
+      [
+        564,
+        35
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        572,
+        20
+      ],
+      [
+        572,
+        33
+      ]
+    ],
+    [
+      "struct serial",
+      {},
+      "",
+      [
+        580,
+        16
+      ],
+      [
+        580,
+        29
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"serial.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"ser-base.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"event-loop.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_select.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb_sys_time.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <winsock2.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum {\n  /* >= 0 (TIMER_SCHEDULED) */\n  /* The ID of the currently scheduled timer event.  This state is\n     rarely encountered.  Timer events are one-off so as soon as the\n     event is delivered the state is shanged to NOTHING_SCHEDULED.  */\n  FD_SCHEDULED = -1,\n  /* The fd_event() handler is scheduled.  It is called when ever the\n     file descriptor becomes ready.  */\n  NOTHING_SCHEDULED = -2\n  /* Either no task is scheduled (just going into ASYNC mode) or a\n     timer event has just gone off and the current state has been\n     forced into nothing scheduled.  */\n}",
+      {
+        "FD_SCHEDULED": "",
+        "NOTHING_SCHEDULED": ""
+      },
+      "",
+      [
+        44,
+        0
+      ],
+      [
+        56,
+        1
+      ]
+    ],
+    [
+      "enum serial_rc",
+      {},
+      "",
+      [
+        432,
+        12
+      ],
+      [
+        432,
+        26
+      ]
+    ]
+  ]
+}

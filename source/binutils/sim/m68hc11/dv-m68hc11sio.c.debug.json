@@ -1,0 +1,635 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nattach_m68hc11sio_regs (struct hw *me,\n                        struct m68hc11sio *controller)\n{\n  hw_attach_address (hw_parent (me), M6811_IO_LEVEL, io_map,\n                     M6811_SCI_FIRST_REG,\n                     M6811_SCI_LAST_REG - M6811_SCI_FIRST_REG + 1,\n\t\t     me);\n\n  if (hw_find_property(me, \"backend\") != NULL)\n    {\n      const char *value = hw_find_string_property(me, \"backend\");\n      if(! strcmp(value, \"tcp\"))\n\tcontroller->backend = sio_tcp;\n      else if(! strcmp(value, \"stdio\"))\n\tcontroller->backend = sio_stdio;\n      else\n\thw_abort (me, \"illegal value for backend parameter `%s':\"\n                  \"use tcp or stdio\", value);\n    }\n}",
+      "fn_code_pos": [
+        [
+          115,
+          0
+        ],
+        [
+          135,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_m68hc11sio_regs",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct m68hc11sio"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11sio_finish (struct hw *me)\n{\n  struct m68hc11sio *controller;\n\n  controller = HW_ZALLOC (me, struct m68hc11sio);\n  set_hw_data (me, controller);\n  set_hw_io_read_buffer (me, m68hc11sio_io_read_buffer);\n  set_hw_io_write_buffer (me, m68hc11sio_io_write_buffer);\n  set_hw_ports (me, m68hc11sio_ports);\n  set_hw_port_event (me, m68hc11sio_port_event);\n#ifdef set_hw_ioctl\n  set_hw_ioctl (me, m68hc11sio_ioctl);\n#else\n  me->to_ioctl = m68hc11sio_ioctl;\n#endif\n\n  /* Preset defaults.  */\n  controller->backend = sio_stdio;\n\n  /* Attach ourself to our parent bus.  */\n  attach_m68hc11sio_regs (me, controller);\n\n  /* Initialize to reset state.  */\n  controller->tx_poll_event = NULL;\n  controller->rx_poll_event = NULL;\n  controller->tx_char       = 0;\n  controller->tx_has_char   = 0;\n  controller->rx_clear_scsr = 0;\n  controller->rx_char       = 0;\n}",
+      "fn_code_pos": [
+        [
+          138,
+          0
+        ],
+        [
+          168,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11sio_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11sio_port_event (struct hw *me,\n                       int my_port,\n                       struct hw *source,\n                       int source_port,\n                       int level)\n{\n  SIM_DESC sd;\n  struct m68hc11sio *controller;\n  sim_cpu *cpu;\n  unsigned8 val;\n  \n  controller = hw_data (me);\n  sd         = hw_system (me);\n  cpu        = STATE_CPU (sd, 0);  \n  switch (my_port)\n    {\n    case RESET_PORT:\n      {\n\tHW_TRACE ((me, \"SCI reset\"));\n\n        /* Reset the state of SCI registers.  */\n        val = 0;\n        m68hc11sio_io_write_buffer (me, &val, io_map,\n                                    (unsigned_word) M6811_BAUD, 1);\n        m68hc11sio_io_write_buffer (me, &val, io_map,\n                                    (unsigned_word) M6811_SCCR1, 1);\n        m68hc11sio_io_write_buffer (me, &val, io_map,\n                                    (unsigned_word) M6811_SCCR2, 1);\n        \n        cpu->ios[M6811_SCSR]    = M6811_TC | M6811_TDRE;\n        controller->rx_char     = 0;\n        controller->tx_char     = 0;\n        controller->tx_has_char = 0;\n        controller->rx_clear_scsr = 0;\n        if (controller->rx_poll_event)\n          {\n            hw_event_queue_deschedule (me, controller->rx_poll_event);\n            controller->rx_poll_event = 0;\n          }\n        if (controller->tx_poll_event)\n          {\n            hw_event_queue_deschedule (me, controller->tx_poll_event);\n            controller->tx_poll_event = 0;\n          }\n\n        /* In bootstrap mode, initialize the SCI to 1200 bauds to\n           simulate some initial setup by the internal rom.  */\n        if (((cpu->ios[M6811_HPRIO]) & (M6811_SMOD | M6811_MDA)) == M6811_SMOD)\n          {\n            unsigned char val = 0x33;\n            \n            m68hc11sio_io_write_buffer (me, &val, io_map,\n                                        (unsigned_word) M6811_BAUD, 1);\n            val = 0x12;\n            m68hc11sio_io_write_buffer (me, &val, io_map,\n                                        (unsigned_word) M6811_SCCR2, 1);\n          }\n        break;\n      }\n\n    default:\n      hw_abort (me, \"Event on unknown port %d\", my_port);\n      break;\n    }\n}",
+      "fn_code_pos": [
+        [
+          174,
+          0
+        ],
+        [
+          239,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11sio_port_event",
+        "parameters": {
+          "me": "struct hw",
+          "my_port": "int",
+          "source": "struct hw",
+          "source_port": "int",
+          "level": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11sio_rx_poll (struct hw *me, void *data)\n{\n  SIM_DESC sd;\n  struct m68hc11sio *controller;\n  sim_cpu *cpu;\n  char cc;\n  int cnt;\n  int check_interrupt = 0;\n  \n  controller = hw_data (me);\n  sd         = hw_system (me);\n  cpu        = STATE_CPU (sd, 0);\n  switch (controller->backend)\n    {\n    case sio_tcp:\n      cnt = dv_sockser_read (sd);\n      if (cnt != -1)\n        {\n          cc = (char) cnt;\n          cnt = 1;\n        }\n      break;\n\n    case sio_stdio:\n      cnt = sim_io_poll_read (sd, 0 /* stdin */, &cc, 1);\n      break;\n\n    default:\n      cnt = 0;\n      break;\n    }\n\n  if (cnt == 1)\n    {\n      /* Raise the overrun flag if the previous character was not read.  */\n      if (cpu->ios[M6811_SCSR] & M6811_RDRF)\n        cpu->ios[M6811_SCSR] |= M6811_OR;\n\n      cpu->ios[M6811_SCSR]     |= M6811_RDRF;\n      controller->rx_char       = cc;\n      controller->rx_clear_scsr = 0;\n      check_interrupt = 1;\n    }\n  else\n    {\n      /* handle idle line detect here.  */\n      ;\n    }\n\n  if (controller->rx_poll_event)\n    {\n      hw_event_queue_deschedule (me, controller->rx_poll_event);\n      controller->rx_poll_event = 0;\n    }\n\n  if (cpu->ios[M6811_SCCR2] & M6811_RE)\n    {\n      unsigned long clock_cycle;\n\n      /* Compute CPU clock cycles to wait for the next character.  */\n      clock_cycle = controller->data_length * controller->baud_cycle;\n\n      controller->rx_poll_event = hw_event_queue_schedule (me, clock_cycle,\n                                                           m68hc11sio_rx_poll,\n                                                           NULL);\n    }\n\n  if (check_interrupt)\n      interrupts_update_pending (&cpu->cpu_interrupts);\n}",
+      "fn_code_pos": [
+        [
+          242,
+          0
+        ],
+        [
+          312,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11sio_rx_poll",
+        "parameters": {
+          "me": "struct hw",
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11sio_tx_poll (struct hw *me, void *data)\n{\n  SIM_DESC sd;\n  struct m68hc11sio *controller;\n  sim_cpu *cpu;\n  \n  controller = hw_data (me);\n  sd         = hw_system (me);\n  cpu        = STATE_CPU (sd, 0);\n\n  cpu->ios[M6811_SCSR] |= M6811_TDRE;\n  cpu->ios[M6811_SCSR] |= M6811_TC;\n  \n  /* Transmitter is enabled and we have something to send.  */\n  if ((cpu->ios[M6811_SCCR2] & M6811_TE) && controller->tx_has_char)\n    {\n      cpu->ios[M6811_SCSR] &= ~M6811_TDRE;\n      cpu->ios[M6811_SCSR] &= ~M6811_TC;\n      controller->tx_has_char = 0;\n      switch (controller->backend)\n        {\n        case sio_tcp:\n          dv_sockser_write (sd, controller->tx_char);\n          break;\n\n        case sio_stdio:\n          sim_io_write_stdout (sd, &controller->tx_char, 1);\n          sim_io_flush_stdout (sd);\n          break;\n\n        default:\n          break;\n        }\n    }\n\n  if (controller->tx_poll_event)\n    {\n      hw_event_queue_deschedule (me, controller->tx_poll_event);\n      controller->tx_poll_event = 0;\n    }\n  \n  if ((cpu->ios[M6811_SCCR2] & M6811_TE)\n      && ((cpu->ios[M6811_SCSR] & M6811_TC) == 0))\n    {\n      unsigned long clock_cycle;\n      \n      /* Compute CPU clock cycles to wait for the next character.  */\n      clock_cycle = controller->data_length * controller->baud_cycle;\n\n      controller->tx_poll_event = hw_event_queue_schedule (me, clock_cycle,\n                                                           m68hc11sio_tx_poll,\n                                                           NULL);\n    }\n\n  interrupts_update_pending (&cpu->cpu_interrupts);\n}",
+      "fn_code_pos": [
+        [
+          315,
+          0
+        ],
+        [
+          371,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11sio_tx_poll",
+        "parameters": {
+          "me": "struct hw",
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11sio_info (struct hw *me)\n{\n  SIM_DESC sd;\n  uint16 base = 0;\n  sim_cpu *cpu;\n  struct m68hc11sio *controller;\n  uint8 val;\n  long clock_cycle;\n  \n  sd = hw_system (me);\n  cpu = STATE_CPU (sd, 0);\n  controller = hw_data (me);\n  \n  sim_io_printf (sd, \"M68HC11 SIO:\\n\");\n\n  base = cpu_get_io_base (cpu);\n\n  val  = cpu->ios[M6811_BAUD];\n  print_io_byte (sd, \"BAUD \", baud_desc, val, base + M6811_BAUD);\n  sim_io_printf (sd, \" (%ld baud)\\n\",\n                 (cpu->cpu_frequency / 4) / controller->baud_cycle);\n\n  val = cpu->ios[M6811_SCCR1];\n  print_io_byte (sd, \"SCCR1\", sccr1_desc, val, base + M6811_SCCR1);\n  sim_io_printf (sd, \"  (%d bits) (%dN1)\\n\",\n                 controller->data_length, controller->data_length - 2);\n\n  val = cpu->ios[M6811_SCCR2];\n  print_io_byte (sd, \"SCCR2\", sccr2_desc, val, base + M6811_SCCR2);\n  sim_io_printf (sd, \"\\n\");\n\n  val = cpu->ios[M6811_SCSR];\n  print_io_byte (sd, \"SCSR \", scsr_desc, val, base + M6811_SCSR);\n  sim_io_printf (sd, \"\\n\");\n\n  clock_cycle = controller->data_length * controller->baud_cycle;\n  \n  if (controller->tx_poll_event)\n    {\n      signed64 t;\n      int n;\n\n      t = hw_event_remain_time (me, controller->tx_poll_event);\n      n = (clock_cycle - t) / controller->baud_cycle;\n      n = controller->data_length - n;\n      sim_io_printf (sd, \"  Transmit finished in %s (%d bit%s)\\n\",\n\t\t     cycle_to_string (cpu, t, PRINT_TIME | PRINT_CYCLE),\n                     n, (n > 1 ? \"s\" : \"\"));\n    }\n  if (controller->rx_poll_event)\n    {\n      signed64 t;\n\n      t = hw_event_remain_time (me, controller->rx_poll_event);\n      sim_io_printf (sd, \"  Receive finished in %s\\n\",\n\t\t     cycle_to_string (cpu, t, PRINT_TIME | PRINT_CYCLE));\n    }\n  \n}",
+      "fn_code_pos": [
+        [
+          417,
+          0
+        ],
+        [
+          476,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11sio_info",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nm68hc11sio_ioctl (struct hw *me,\n                  hw_ioctl_request request,\n                  va_list ap)\n{\n  m68hc11sio_info (me);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          478,
+          0
+        ],
+        [
+          485,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11sio_ioctl",
+        "parameters": {
+          "me": "struct hw",
+          "request": "hw_ioctl_request",
+          "ap": "va_list"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nm68hc11sio_io_read_buffer (struct hw *me,\n                           void *dest,\n                           int space,\n                           unsigned_word base,\n                           unsigned nr_bytes)\n{\n  SIM_DESC sd;\n  struct m68hc11sio *controller;\n  sim_cpu *cpu;\n  unsigned8 val;\n  \n  HW_TRACE ((me, \"read 0x%08lx %d\", (long) base, (int) nr_bytes));\n\n  sd  = hw_system (me);\n  cpu = STATE_CPU (sd, 0);\n  controller = hw_data (me);\n\n  switch (base)\n    {\n    case M6811_SCSR:\n      controller->rx_clear_scsr = cpu->ios[M6811_SCSR]\n        & (M6811_RDRF | M6811_IDLE | M6811_OR | M6811_NF | M6811_FE);\n      \n    case M6811_BAUD:\n    case M6811_SCCR1:\n    case M6811_SCCR2:\n      val = cpu->ios[base];\n      break;\n      \n    case M6811_SCDR:\n      if (controller->rx_clear_scsr)\n        {\n          cpu->ios[M6811_SCSR] &= ~controller->rx_clear_scsr;\n        }\n      val = controller->rx_char;\n      break;\n      \n    default:\n      return 0;\n    }\n  *((unsigned8*) dest) = val;\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          489,
+          0
+        ],
+        [
+          532,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11sio_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nm68hc11sio_io_write_buffer (struct hw *me,\n                            const void *source,\n                            int space,\n                            unsigned_word base,\n                            unsigned nr_bytes)\n{\n  SIM_DESC sd;\n  struct m68hc11sio *controller;\n  sim_cpu *cpu;\n  unsigned8 val;\n\n  HW_TRACE ((me, \"write 0x%08lx %d\", (long) base, (int) nr_bytes));\n\n  sd  = hw_system (me);\n  cpu = STATE_CPU (sd, 0);\n  controller = hw_data (me);\n  \n  val = *((const unsigned8*) source);\n  switch (base)\n    {\n    case M6811_BAUD:\n      {\n        long divisor;\n        long baud;\n\n        cpu->ios[M6811_BAUD] = val;        \n        switch (val & (M6811_SCP1|M6811_SCP0))\n          {\n          case M6811_BAUD_DIV_1:\n            divisor = 1 * 16;\n            break;\n\n          case M6811_BAUD_DIV_3:\n            divisor = 3 * 16;\n            break;\n\n          case M6811_BAUD_DIV_4:\n            divisor = 4 * 16;\n            break;\n\n          default:\n          case M6811_BAUD_DIV_13:\n            divisor = 13 * 16;\n            break;\n          }\n        val &= (M6811_SCR2|M6811_SCR1|M6811_SCR0);\n        divisor *= (1 << val);\n\n        baud = (cpu->cpu_frequency / 4) / divisor;\n\n        HW_TRACE ((me, \"divide rate %ld, baud rate %ld\",\n                   divisor, baud));\n\n        controller->baud_cycle = divisor;\n      }\n      break;\n      \n    case M6811_SCCR1:\n      {\n        if (val & M6811_M)\n          controller->data_length = 11;\n        else\n          controller->data_length = 10;\n\n        cpu->ios[M6811_SCCR1] = val;\n      }\n      break;\n      \n    case M6811_SCCR2:\n      if ((val & M6811_RE) == 0)\n        {\n          val &= ~(M6811_RDRF|M6811_IDLE|M6811_OR|M6811_NF|M6811_NF);\n          val |= (cpu->ios[M6811_SCCR2]\n                  & (M6811_RDRF|M6811_IDLE|M6811_OR|M6811_NF|M6811_NF));\n          cpu->ios[M6811_SCCR2] = val;\n          break;\n        }\n\n      /* Activate reception.  */\n      if (controller->rx_poll_event == 0)\n        {\n          long clock_cycle;\n          \n          /* Compute CPU clock cycles to wait for the next character.  */\n          clock_cycle = controller->data_length * controller->baud_cycle;\n\n          controller->rx_poll_event = hw_event_queue_schedule (me, clock_cycle,\n                                                               m68hc11sio_rx_poll,\n                                                               NULL);\n        }      \n      cpu->ios[M6811_SCCR2] = val;\n      interrupts_update_pending (&cpu->cpu_interrupts);\n      break;\n\n      /* No effect.  */\n    case M6811_SCSR:\n      return 1;\n      \n    case M6811_SCDR:\n      if (!(cpu->ios[M6811_SCSR] & M6811_TDRE))\n        {\n          return 0;\n        }\n\n      controller->tx_char     = val;\n      controller->tx_has_char = 1;\n      if ((cpu->ios[M6811_SCCR2] & M6811_TE)\n          && controller->tx_poll_event == 0)\n        {\n          m68hc11sio_tx_poll (me, NULL);\n        }\n      return 1;\n      \n    default:\n      return 0;\n    }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          534,
+          0
+        ],
+        [
+          652,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11sio_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct m68hc11sio \n{\n  enum {sio_tcp, sio_stdio} backend; /* backend */\n\n  /* Number of cpu cycles to send a bit on the wire.  */\n  unsigned long baud_cycle;\n\n  /* Length in bits of characters sent, this includes the\n     start/stop and parity bits.  Together with baud_cycle, this\n     is used to find the number of cpu cycles to send/receive a data.  */\n  unsigned int  data_length;\n\n  /* Information about next character to be transmited.  */\n  unsigned char tx_has_char;\n  unsigned char tx_char;\n\n  unsigned char rx_char;\n  unsigned char rx_clear_scsr;\n  \n  /* Periodic I/O polling.  */\n  struct hw_event* tx_poll_event;\n  struct hw_event* rx_poll_event;\n}",
+      {
+        "backend": "enum {sio_tcp, sio_stdio}",
+        "baud_cycle": "unsigned long",
+        "data_length": "unsigned int",
+        "tx_has_char": "unsigned char",
+        "tx_char": "unsigned char",
+        "rx_char": "unsigned char",
+        "rx_clear_scsr": "unsigned char",
+        "* tx_poll_event": "struct hw_event",
+        "* rx_poll_event": "struct hw_event"
+      },
+      "m68hc11sio",
+      [
+        77,
+        0
+      ],
+      [
+        99,
+        1
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        69,
+        13
+      ],
+      [
+        69,
+        38
+      ]
+    ],
+    [
+      "struct m68hc11sio \n{\n  enum {sio_tcp, sio_stdio} backend; /* backend */\n\n  /* Number of cpu cycles to send a bit on the wire.  */\n  unsigned long baud_cycle;\n\n  /* Length in bits of characters sent, this includes the\n     start/stop and parity bits.  Together with baud_cycle, this\n     is used to find the number of cpu cycles to send/receive a data.  */\n  unsigned int  data_length;\n\n  /* Information about next character to be transmited.  */\n  unsigned char tx_has_char;\n  unsigned char tx_char;\n\n  unsigned char rx_char;\n  unsigned char rx_clear_scsr;\n  \n  /* Periodic I/O polling.  */\n  struct hw_event* tx_poll_event;\n  struct hw_event* rx_poll_event;\n}",
+      {
+        "backend": "enum {sio_tcp, sio_stdio}",
+        "baud_cycle": "unsigned long",
+        "data_length": "unsigned int",
+        "tx_has_char": "unsigned char",
+        "tx_char": "unsigned char",
+        "rx_char": "unsigned char",
+        "rx_clear_scsr": "unsigned char",
+        "* tx_poll_event": "struct hw_event",
+        "* rx_poll_event": "struct hw_event"
+      },
+      "m68hc11sio",
+      [
+        77,
+        0
+      ],
+      [
+        99,
+        1
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        97,
+        2
+      ],
+      [
+        97,
+        17
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        98,
+        2
+      ],
+      [
+        98,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        116,
+        24
+      ],
+      [
+        116,
+        33
+      ]
+    ],
+    [
+      "struct m68hc11sio",
+      {},
+      "",
+      [
+        117,
+        24
+      ],
+      [
+        117,
+        41
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        139,
+        19
+      ],
+      [
+        139,
+        28
+      ]
+    ],
+    [
+      "struct m68hc11sio",
+      {},
+      "",
+      [
+        141,
+        2
+      ],
+      [
+        141,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        175,
+        23
+      ],
+      [
+        175,
+        32
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        177,
+        23
+      ],
+      [
+        177,
+        32
+      ]
+    ],
+    [
+      "struct m68hc11sio",
+      {},
+      "",
+      [
+        182,
+        2
+      ],
+      [
+        182,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        243,
+        20
+      ],
+      [
+        243,
+        29
+      ]
+    ],
+    [
+      "struct m68hc11sio",
+      {},
+      "",
+      [
+        246,
+        2
+      ],
+      [
+        246,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        316,
+        20
+      ],
+      [
+        316,
+        29
+      ]
+    ],
+    [
+      "struct m68hc11sio",
+      {},
+      "",
+      [
+        319,
+        2
+      ],
+      [
+        319,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        418,
+        17
+      ],
+      [
+        418,
+        26
+      ]
+    ],
+    [
+      "struct m68hc11sio",
+      {},
+      "",
+      [
+        423,
+        2
+      ],
+      [
+        423,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        479,
+        18
+      ],
+      [
+        479,
+        27
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        490,
+        27
+      ],
+      [
+        490,
+        36
+      ]
+    ],
+    [
+      "struct m68hc11sio",
+      {},
+      "",
+      [
+        497,
+        2
+      ],
+      [
+        497,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        535,
+        28
+      ],
+      [
+        535,
+        37
+      ]
+    ],
+    [
+      "struct m68hc11sio",
+      {},
+      "",
+      [
+        542,
+        2
+      ],
+      [
+        542,
+        19
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        655,
+        6
+      ],
+      [
+        655,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"dv-sockser.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-assert.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum\n{\n  RESET_PORT\n}",
+      {
+        "RESET_PORT": ""
+      },
+      "",
+      [
+        63,
+        0
+      ],
+      [
+        66,
+        1
+      ]
+    ],
+    [
+      "enum {sio_tcp, sio_stdio}",
+      {
+        "sio_tcp": "",
+        "sio_stdio": ""
+      },
+      "",
+      [
+        79,
+        2
+      ],
+      [
+        79,
+        27
+      ]
+    ]
+  ]
+}

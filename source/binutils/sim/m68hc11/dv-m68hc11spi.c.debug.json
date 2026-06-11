@@ -1,0 +1,594 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nattach_m68hc11spi_regs (struct hw *me,\n                        struct m68hc11spi *controller)\n{\n  hw_attach_address (hw_parent (me), M6811_IO_LEVEL, io_map,\n                     M6811_SPI_FIRST_REG,\n                     M6811_SPI_LAST_REG - M6811_SPI_FIRST_REG + 1,\n\t\t     me);\n}",
+      "fn_code_pos": [
+        [
+          110,
+          0
+        ],
+        [
+          118,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_m68hc11spi_regs",
+        "parameters": {
+          "me": "struct hw",
+          "controller": "struct m68hc11spi"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11spi_finish (struct hw *me)\n{\n  struct m68hc11spi *controller;\n\n  controller = HW_ZALLOC (me, struct m68hc11spi);\n  set_hw_data (me, controller);\n  set_hw_io_read_buffer (me, m68hc11spi_io_read_buffer);\n  set_hw_io_write_buffer (me, m68hc11spi_io_write_buffer);\n  set_hw_ports (me, m68hc11spi_ports);\n  set_hw_port_event (me, m68hc11spi_port_event);\n#ifdef set_hw_ioctl\n  set_hw_ioctl (me, m68hc11spi_ioctl);\n#else\n  me->to_ioctl = m68hc11spi_ioctl;\n#endif\n\n  /* Attach ourself to our parent bus.  */\n  attach_m68hc11spi_regs (me, controller);\n\n  /* Initialize to reset state.  */\n  controller->spi_event = NULL;\n  controller->rx_clear_scsr = 0;\n}",
+      "fn_code_pos": [
+        [
+          120,
+          0
+        ],
+        [
+          143,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11spi_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11spi_port_event (struct hw *me,\n                       int my_port,\n                       struct hw *source,\n                       int source_port,\n                       int level)\n{\n  SIM_DESC sd;\n  struct m68hc11spi *controller;\n  sim_cpu *cpu;\n  unsigned8 val;\n  \n  controller = hw_data (me);\n  sd         = hw_system (me);\n  cpu        = STATE_CPU (sd, 0);  \n  switch (my_port)\n    {\n    case RESET_PORT:\n      {\n\tHW_TRACE ((me, \"SPI reset\"));\n\n        /* Reset the state of SPI registers.  */\n        controller->rx_clear_scsr = 0;\n        if (controller->spi_event)\n          {\n            hw_event_queue_deschedule (me, controller->spi_event);\n            controller->spi_event = 0;\n          }\n\n        val = 0;\n        m68hc11spi_io_write_buffer (me, &val, io_map,\n                                    (unsigned_word) M6811_SPCR, 1);\n        break;\n      }\n\n    default:\n      hw_abort (me, \"Event on unknown port %d\", my_port);\n      break;\n    }\n}",
+      "fn_code_pos": [
+        [
+          149,
+          0
+        ],
+        [
+          188,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11spi_port_event",
+        "parameters": {
+          "me": "struct hw",
+          "my_port": "int",
+          "source": "struct hw",
+          "source_port": "int",
+          "level": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nset_bit_port (struct hw *me, sim_cpu *cpu, int port, int mask, int value)\n{\n  uint8 val;\n  \n  if (value)\n    val = cpu->ios[port] | mask;\n  else\n    val = cpu->ios[port] & ~mask;\n\n  /* Set the new value and post an event to inform other devices\n     that pin 'port' changed.  */\n  m68hc11cpu_set_port (me, cpu, port, val);\n}",
+      "fn_code_pos": [
+        [
+          190,
+          0
+        ],
+        [
+          203,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "set_bit_port",
+        "parameters": {
+          "me": "struct hw",
+          "cpu": "sim_cpu",
+          "port": "int",
+          "mask": "int",
+          "value": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11spi_clock (struct hw *me, void *data)\n{\n  SIM_DESC sd;\n  struct m68hc11spi* controller;\n  sim_cpu *cpu;\n  int check_interrupt = 0;\n  \n  controller = hw_data (me);\n  sd         = hw_system (me);\n  cpu        = STATE_CPU (sd, 0);\n\n  /* Cleanup current event.  */\n  if (controller->spi_event)\n    {\n      hw_event_queue_deschedule (me, controller->spi_event);\n      controller->spi_event = 0;\n    }\n\n  /* Change a bit of data at each two SPI event.  */\n  if (controller->mode == SPI_START_BIT)\n    {\n      /* Reflect the bit value on bit 2 of port D.  */\n      set_bit_port (me, cpu, M6811_PORTD, (1 << 2),\n                    (controller->tx_char & (1 << controller->tx_bit)));\n      controller->tx_bit--;\n      controller->mode = SPI_MIDDLE_BIT;\n    }\n  else if (controller->mode == SPI_MIDDLE_BIT)\n    {\n      controller->mode = SPI_START_BIT;\n    }\n\n  if (controller->mode == SPI_START_BYTE)\n    {\n      /* Start a new SPI transfer.  */\n      \n      /* TBD: clear SS output.  */\n      controller->mode = SPI_START_BIT;\n      controller->tx_bit = 7;\n      set_bit_port (me, cpu, M6811_PORTD, (1 << 4), ~controller->clk_pin);\n    }\n  else\n    {\n      /* Change the SPI clock at each event on bit 4 of port D.  */\n      controller->clk_pin = ~controller->clk_pin;\n      set_bit_port (me, cpu, M6811_PORTD, (1 << 4), controller->clk_pin);\n    }\n  \n  /* Transmit is now complete for this byte.  */\n  if (controller->mode == SPI_START_BIT && controller->tx_bit < 0)\n    {\n      controller->rx_clear_scsr = 0;\n      cpu->ios[M6811_SPSR] |= M6811_SPIF;\n      if (cpu->ios[M6811_SPCR] & M6811_SPIE)\n        check_interrupt = 1;\n    }\n  else\n    {\n      controller->spi_event = hw_event_queue_schedule (me, controller->clock,\n                                                       m68hc11spi_clock,\n                                                       NULL);\n    }\n\n  if (check_interrupt)\n    interrupts_update_pending (&cpu->cpu_interrupts);\n}",
+      "fn_code_pos": [
+        [
+          236,
+          0
+        ],
+        [
+          302,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11spi_clock",
+        "parameters": {
+          "me": "struct hw",
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nm68hc11spi_info (struct hw *me)\n{\n  SIM_DESC sd;\n  uint16 base = 0;\n  sim_cpu *cpu;\n  struct m68hc11spi *controller;\n  uint8 val;\n  \n  sd = hw_system (me);\n  cpu = STATE_CPU (sd, 0);\n  controller = hw_data (me);\n  \n  sim_io_printf (sd, \"M68HC11 SPI:\\n\");\n\n  base = cpu_get_io_base (cpu);\n\n  val = cpu->ios[M6811_SPCR];\n  print_io_byte (sd, \"SPCR\", spcr_desc, val, base + M6811_SPCR);\n  sim_io_printf (sd, \"\\n\");\n\n  val = cpu->ios[M6811_SPSR];\n  print_io_byte (sd, \"SPSR\", spsr_desc, val, base + M6811_SPSR);\n  sim_io_printf (sd, \"\\n\");\n\n  if (controller->spi_event)\n    {\n      signed64 t;\n\n      sim_io_printf (sd, \"  SPI has %d bits to send\\n\",\n                     controller->tx_bit + 1);\n      t = hw_event_remain_time (me, controller->spi_event);\n      sim_io_printf (sd, \"  SPI current bit-cycle finished in %s\\n\",\n\t\t     cycle_to_string (cpu, t, PRINT_TIME | PRINT_CYCLE));\n\n      t += (controller->tx_bit + 1) * 2 * controller->clock;\n      sim_io_printf (sd, \"  SPI operation finished in %s\\n\",\n\t\t     cycle_to_string (cpu, t, PRINT_TIME | PRINT_CYCLE));\n    }\n}",
+      "fn_code_pos": [
+        [
+          326,
+          0
+        ],
+        [
+          365,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11spi_info",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nm68hc11spi_ioctl (struct hw *me,\n                  hw_ioctl_request request,\n                  va_list ap)\n{\n  m68hc11spi_info (me);\n  return 0;\n}",
+      "fn_code_pos": [
+        [
+          367,
+          0
+        ],
+        [
+          374,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11spi_ioctl",
+        "parameters": {
+          "me": "struct hw",
+          "request": "hw_ioctl_request",
+          "ap": "va_list"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nm68hc11spi_io_read_buffer (struct hw *me,\n                           void *dest,\n                           int space,\n                           unsigned_word base,\n                           unsigned nr_bytes)\n{\n  SIM_DESC sd;\n  struct m68hc11spi *controller;\n  sim_cpu *cpu;\n  unsigned8 val;\n  \n  HW_TRACE ((me, \"read 0x%08lx %d\", (long) base, (int) nr_bytes));\n\n  sd  = hw_system (me);\n  cpu = STATE_CPU (sd, 0);\n  controller = hw_data (me);\n\n  switch (base)\n    {\n    case M6811_SPSR:\n      controller->rx_clear_scsr = cpu->ios[M6811_SCSR]\n        & (M6811_SPIF | M6811_WCOL | M6811_MODF);\n      \n    case M6811_SPCR:\n      val = cpu->ios[base];\n      break;\n      \n    case M6811_SPDR:\n      if (controller->rx_clear_scsr)\n        {\n          cpu->ios[M6811_SPSR] &= ~controller->rx_clear_scsr;\n          controller->rx_clear_scsr = 0;\n          interrupts_update_pending (&cpu->cpu_interrupts);\n        }\n      val = controller->rx_char;\n      break;\n      \n    default:\n      return 0;\n    }\n  *((unsigned8*) dest) = val;\n  return 1;\n}",
+      "fn_code_pos": [
+        [
+          378,
+          0
+        ],
+        [
+          421,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11spi_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nm68hc11spi_io_write_buffer (struct hw *me,\n                            const void *source,\n                            int space,\n                            unsigned_word base,\n                            unsigned nr_bytes)\n{\n  SIM_DESC sd;\n  struct m68hc11spi *controller;\n  sim_cpu *cpu;\n  unsigned8 val;\n\n  HW_TRACE ((me, \"write 0x%08lx %d\", (long) base, (int) nr_bytes));\n\n  sd  = hw_system (me);\n  cpu = STATE_CPU (sd, 0);\n  controller = hw_data (me);\n  \n  val = *((const unsigned8*) source);\n  switch (base)\n    {\n    case M6811_SPCR:\n      cpu->ios[M6811_SPCR] = val;\n\n      /* The SPI clock rate is 2, 4, 16, 32 of the internal CPU clock.\n         We have to drive the clock pin and need a 2x faster clock.  */\n      switch (val & (M6811_SPR1 | M6811_SPR0))\n        {\n        case 0:\n          controller->clock = 1;\n          break;\n\n        case 1:\n          controller->clock = 2;\n          break;\n\n        case 2:\n          controller->clock = 8;\n          break;\n\n        default:\n          controller->clock = 16;\n          break;\n        }\n\n      /* Set the clock pin.  */\n      if ((val & M6811_CPOL)\n          && (controller->spi_event == 0\n              || ((val & M6811_CPHA) && controller->mode == 1)))\n        controller->clk_pin = 1;\n      else\n        controller->clk_pin = 0;\n\n      set_bit_port (me, cpu, M6811_PORTD, (1 << 4), controller->clk_pin);\n      break;\n      \n      /* Can't write to SPSR.  */\n    case M6811_SPSR:\n      break;\n      \n    case M6811_SPDR:\n      if (!(cpu->ios[M6811_SPCR] & M6811_SPE))\n        {\n          return 0;\n        }\n\n      if (controller->rx_clear_scsr)\n        {\n          cpu->ios[M6811_SPSR] &= ~controller->rx_clear_scsr;\n          controller->rx_clear_scsr = 0;\n          interrupts_update_pending (&cpu->cpu_interrupts);\n        }\n\n      /* If transfer is taking place, a write to SPDR\n         generates a collision.  */\n      if (controller->spi_event)\n        {\n          cpu->ios[M6811_SPSR] |= M6811_WCOL;\n          break;\n        }\n\n      /* Refuse the write if there was no read of SPSR.  */\n      /* ???? TBD. */\n\n      /* Prepare to send a byte.  */\n      controller->tx_char = val;\n      controller->mode   = SPI_START_BYTE;\n\n      /* Toggle clock pin internal value when CPHA is 0 so that\n         it will really change in the middle of a bit.  */\n      if (!(cpu->ios[M6811_SPCR] & M6811_CPHA))\n        controller->clk_pin = ~controller->clk_pin;\n\n      cpu->ios[M6811_SPDR] = val;\n\n      /* Activate transmission.  */\n      m68hc11spi_clock (me, NULL);\n      break;\n\n    default:\n      return 0;\n    }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          423,
+          0
+        ],
+        [
+          526,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "m68hc11spi_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "base": "unsigned_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct m68hc11spi \n{\n  /* Information about next character to be transmited.  */\n  unsigned char tx_char;\n  int           tx_bit;\n  unsigned char mode;\n  \n  unsigned char rx_char;\n  unsigned char rx_clear_scsr;\n  unsigned char clk_pin;\n  \n  /* SPI clock rate (twice the real clock).  */\n  unsigned int clock;\n  \n  /* Periodic SPI event.  */\n  struct hw_event* spi_event;\n}",
+      {
+        "tx_char": "unsigned char",
+        "tx_bit": "int",
+        "mode": "unsigned char",
+        "rx_char": "unsigned char",
+        "rx_clear_scsr": "unsigned char",
+        "clk_pin": "unsigned char",
+        "clock": "unsigned int",
+        "* spi_event": "struct hw_event"
+      },
+      "m68hc11spi",
+      [
+        78,
+        0
+      ],
+      [
+        94,
+        1
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        70,
+        13
+      ],
+      [
+        70,
+        38
+      ]
+    ],
+    [
+      "struct m68hc11spi \n{\n  /* Information about next character to be transmited.  */\n  unsigned char tx_char;\n  int           tx_bit;\n  unsigned char mode;\n  \n  unsigned char rx_char;\n  unsigned char rx_clear_scsr;\n  unsigned char clk_pin;\n  \n  /* SPI clock rate (twice the real clock).  */\n  unsigned int clock;\n  \n  /* Periodic SPI event.  */\n  struct hw_event* spi_event;\n}",
+      {
+        "tx_char": "unsigned char",
+        "tx_bit": "int",
+        "mode": "unsigned char",
+        "rx_char": "unsigned char",
+        "rx_clear_scsr": "unsigned char",
+        "clk_pin": "unsigned char",
+        "clock": "unsigned int",
+        "* spi_event": "struct hw_event"
+      },
+      "m68hc11spi",
+      [
+        78,
+        0
+      ],
+      [
+        94,
+        1
+      ]
+    ],
+    [
+      "struct hw_event",
+      {},
+      "",
+      [
+        93,
+        2
+      ],
+      [
+        93,
+        17
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        111,
+        24
+      ],
+      [
+        111,
+        33
+      ]
+    ],
+    [
+      "struct m68hc11spi",
+      {},
+      "",
+      [
+        112,
+        24
+      ],
+      [
+        112,
+        41
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        121,
+        19
+      ],
+      [
+        121,
+        28
+      ]
+    ],
+    [
+      "struct m68hc11spi",
+      {},
+      "",
+      [
+        123,
+        2
+      ],
+      [
+        123,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        150,
+        23
+      ],
+      [
+        150,
+        32
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        152,
+        23
+      ],
+      [
+        152,
+        32
+      ]
+    ],
+    [
+      "struct m68hc11spi",
+      {},
+      "",
+      [
+        157,
+        2
+      ],
+      [
+        157,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        191,
+        14
+      ],
+      [
+        191,
+        23
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        237,
+        18
+      ],
+      [
+        237,
+        27
+      ]
+    ],
+    [
+      "struct m68hc11spi",
+      {},
+      "",
+      [
+        240,
+        2
+      ],
+      [
+        240,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        327,
+        17
+      ],
+      [
+        327,
+        26
+      ]
+    ],
+    [
+      "struct m68hc11spi",
+      {},
+      "",
+      [
+        332,
+        2
+      ],
+      [
+        332,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        368,
+        18
+      ],
+      [
+        368,
+        27
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        379,
+        27
+      ],
+      [
+        379,
+        36
+      ]
+    ],
+    [
+      "struct m68hc11spi",
+      {},
+      "",
+      [
+        386,
+        2
+      ],
+      [
+        386,
+        19
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        424,
+        28
+      ],
+      [
+        424,
+        37
+      ]
+    ],
+    [
+      "struct m68hc11spi",
+      {},
+      "",
+      [
+        431,
+        2
+      ],
+      [
+        431,
+        19
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        529,
+        6
+      ],
+      [
+        529,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"hw-main.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"dv-sockser.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-assert.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum\n{\n  RESET_PORT\n}",
+      {
+        "RESET_PORT": ""
+      },
+      "",
+      [
+        64,
+        0
+      ],
+      [
+        67,
+        1
+      ]
+    ]
+  ]
+}

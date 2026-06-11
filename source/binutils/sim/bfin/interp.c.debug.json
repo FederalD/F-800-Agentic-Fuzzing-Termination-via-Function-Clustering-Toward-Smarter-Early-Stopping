@@ -1,0 +1,631 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "void\nbfin_syscall (SIM_CPU *cpu)\n{\n  SIM_DESC sd = CPU_STATE (cpu);\n  char * const *argv = (void *)STATE_PROG_ARGV (sd);\n  host_callback *cb = STATE_CALLBACK (sd);\n  bu32 args[6];\n  CB_SYSCALL sc;\n  char *p;\n  char _tbuf[1024 * 3], *tbuf = _tbuf, tstr[1024];\n  int fmt_ret_hex = 0;\n\n  CB_SYSCALL_INIT (&sc);\n\n  if (STATE_ENVIRONMENT (sd) == USER_ENVIRONMENT)\n    {\n      /* Linux syscall.  */\n      sc.func = PREG (0);\n      sc.arg1 = args[0] = DREG (0);\n      sc.arg2 = args[1] = DREG (1);\n      sc.arg3 = args[2] = DREG (2);\n      sc.arg4 = args[3] = DREG (3);\n      /*sc.arg5 =*/ args[4] = DREG (4);\n      /*sc.arg6 =*/ args[5] = DREG (5);\n    }\n  else\n    {\n      /* libgloss syscall.  */\n      sc.func = PREG (0);\n      sc.arg1 = args[0] = GET_LONG (DREG (0));\n      sc.arg2 = args[1] = GET_LONG (DREG (0) + 4);\n      sc.arg3 = args[2] = GET_LONG (DREG (0) + 8);\n      sc.arg4 = args[3] = GET_LONG (DREG (0) + 12);\n      /*sc.arg5 =*/ args[4] = GET_LONG (DREG (0) + 16);\n      /*sc.arg6 =*/ args[5] = GET_LONG (DREG (0) + 20);\n    }\n  sc.p1 = (PTR) sd;\n  sc.p2 = (PTR) cpu;\n  sc.read_mem = sim_syscall_read_mem;\n  sc.write_mem = sim_syscall_write_mem;\n\n  /* Common cb_syscall() handles most functions.  */\n  switch (cb_target_to_host_syscall (cb, sc.func))\n    {\n    case CB_SYS_exit:\n      tbuf += sprintf (tbuf, \"exit(%i)\", args[0]);\n      sim_engine_halt (sd, cpu, NULL, PCREG, sim_exited, sc.arg1);\n\n#ifdef CB_SYS_argc\n    case CB_SYS_argc:\n      tbuf += sprintf (tbuf, \"argc()\");\n      sc.result = countargv ((char **)argv);\n      break;\n    case CB_SYS_argnlen:\n      {\n      tbuf += sprintf (tbuf, \"argnlen(%u)\", args[0]);\n\tif (sc.arg1 < countargv ((char **)argv))\n\t  sc.result = strlen (argv[sc.arg1]);\n\telse\n\t  sc.result = -1;\n      }\n      break;\n    case CB_SYS_argn:\n      {\n\ttbuf += sprintf (tbuf, \"argn(%u)\", args[0]);\n\tif (sc.arg1 < countargv ((char **)argv))\n\t  {\n\t    const char *argn = argv[sc.arg1];\n\t    int len = strlen (argn);\n\t    int written = sc.write_mem (cb, &sc, sc.arg2, argn, len + 1);\n\t    if (written == len + 1)\n\t      sc.result = sc.arg2;\n\t    else\n\t      sc.result = -1;\n\t  }\n\telse\n\t  sc.result = -1;\n      }\n      break;\n#endif\n\n    case CB_SYS_gettimeofday:\n      {\n\tstruct timeval _tv, *tv = &_tv;\n\tstruct timezone _tz, *tz = &_tz;\n\n\ttbuf += sprintf (tbuf, \"gettimeofday(%#x, %#x)\", args[0], args[1]);\n\n\tif (sc.arg1 == 0)\n\t  tv = NULL;\n\tif (sc.arg2 == 0)\n\t  tz = NULL;\n\tsc.result = gettimeofday (tv, tz);\n\n\tif (sc.result == 0)\n\t  {\n\t    bu32 t;\n\n\t    if (tv)\n\t      {\n\t\tt = tv->tv_sec;\n\t\tsc.write_mem (cb, &sc, sc.arg1, (void *)&t, 4);\n\t\tt = tv->tv_usec;\n\t\tsc.write_mem (cb, &sc, sc.arg1 + 4, (void *)&t, 4);\n\t      }\n\n\t    if (sc.arg2)\n\t      {\n\t\tt = tz->tz_minuteswest;\n\t\tsc.write_mem (cb, &sc, sc.arg1, (void *)&t, 4);\n\t\tt = tz->tz_dsttime;\n\t\tsc.write_mem (cb, &sc, sc.arg1 + 4, (void *)&t, 4);\n\t      }\n\t  }\n\telse\n\t  goto sys_finish;\n      }\n      break;\n\n    case CB_SYS_ioctl:\n      /* XXX: hack just enough to get basic stdio w/uClibc ...  */\n      tbuf += sprintf (tbuf, \"ioctl(%i, %#x, %u)\", args[0], args[1], args[2]);\n      if (sc.arg2 == 0x5401)\n\t{\n\t  sc.result = !isatty (sc.arg1);\n\t  sc.errcode = 0;\n\t}\n      else\n\t{\n\t  sc.result = -1;\n\t  sc.errcode = TARGET_EINVAL;\n\t}\n      break;\n\n    case CB_SYS_mmap2:\n      {\n\tstatic bu32 heap = BFIN_DEFAULT_MEM_SIZE / 2;\n\n\tfmt_ret_hex = 1;\n\ttbuf += sprintf (tbuf, \"mmap2(%#x, %u, %#x, %#x, %i, %u)\",\n\t\t\t args[0], args[1], args[2], args[3], args[4], args[5]);\n\n\tsc.errcode = 0;\n\n\tif (sc.arg4 & 0x20 /*MAP_ANONYMOUS*/)\n\t  /* XXX: We don't handle zeroing, but default is all zeros.  */;\n\telse if (args[4] >= MAX_CALLBACK_FDS)\n\t  sc.errcode = TARGET_ENOSYS;\n\telse\n\t  {\n#ifdef HAVE_PREAD\n\t    char *data = xmalloc (sc.arg2);\n\n\t    /* XXX: Should add a cb->pread.  */\n\t    if (pread (cb->fdmap[args[4]], data, sc.arg2, args[5] << 12) == sc.arg2)\n\t      sc.write_mem (cb, &sc, heap, data, sc.arg2);\n\t    else\n\t      sc.errcode = TARGET_EINVAL;\n\n\t    free (data);\n#else\n\t    sc.errcode = TARGET_ENOSYS;\n#endif\n\t  }\n\n\tif (sc.errcode)\n\t  {\n\t    sc.result = -1;\n\t    break;\n\t  }\n\n\tsc.result = heap;\n\theap += sc.arg2;\n\t/* Keep it page aligned.  */\n\theap = ALIGN (heap, 4096);\n\n\tbreak;\n      }\n\n    case CB_SYS_munmap:\n      /* XXX: meh, just lie for mmap().  */\n      tbuf += sprintf (tbuf, \"munmap(%#x, %u)\", args[0], args[1]);\n      sc.result = 0;\n      break;\n\n    case CB_SYS_dup2:\n      tbuf += sprintf (tbuf, \"dup2(%i, %i)\", args[0], args[1]);\n      if (sc.arg1 >= MAX_CALLBACK_FDS || sc.arg2 >= MAX_CALLBACK_FDS)\n\t{\n\t  sc.result = -1;\n\t  sc.errcode = TARGET_EINVAL;\n\t}\n      else\n\t{\n\t  sc.result = dup2 (cb->fdmap[sc.arg1], cb->fdmap[sc.arg2]);\n\t  goto sys_finish;\n\t}\n      break;\n\n    case CB_SYS__llseek:\n      tbuf += sprintf (tbuf, \"llseek(%i, %u, %u, %#x, %u)\",\n\t\t       args[0], args[1], args[2], args[3], args[4]);\n      sc.func = TARGET_LINUX_SYS_lseek;\n      if (sc.arg2)\n\t{\n\t  sc.result = -1;\n\t  sc.errcode = TARGET_EINVAL;\n\t}\n      else\n\t{\n\t  sc.arg2 = sc.arg3;\n\t  sc.arg3 = args[4];\n\t  cb_syscall (cb, &sc);\n\t  if (sc.result != -1)\n\t    {\n\t      bu32 z = 0;\n\t      sc.write_mem (cb, &sc, args[3], (void *)&sc.result, 4);\n\t      sc.write_mem (cb, &sc, args[3] + 4, (void *)&z, 4);\n\t    }\n\t}\n      break;\n\n    /* XXX: Should add a cb->pread.  */\n    case CB_SYS_pread:\n      tbuf += sprintf (tbuf, \"pread(%i, %#x, %u, %i)\",\n\t\t       args[0], args[1], args[2], args[3]);\n      if (sc.arg1 >= MAX_CALLBACK_FDS)\n\t{\n\t  sc.result = -1;\n\t  sc.errcode = TARGET_EINVAL;\n\t}\n      else\n\t{\n\t  long old_pos, read_result, read_errcode;\n\n\t  /* Get current filepos.  */\n\t  sc.func = TARGET_LINUX_SYS_lseek;\n\t  sc.arg2 = 0;\n\t  sc.arg3 = SEEK_CUR;\n\t  cb_syscall (cb, &sc);\n\t  if (sc.result == -1)\n\t    break;\n\t  old_pos = sc.result;\n\n\t  /* Move to the new pos.  */\n\t  sc.func = TARGET_LINUX_SYS_lseek;\n\t  sc.arg2 = args[3];\n\t  sc.arg3 = SEEK_SET;\n\t  cb_syscall (cb, &sc);\n\t  if (sc.result == -1)\n\t    break;\n\n\t  /* Read the data.  */\n\t  sc.func = TARGET_LINUX_SYS_read;\n\t  sc.arg2 = args[1];\n\t  sc.arg3 = args[2];\n\t  cb_syscall (cb, &sc);\n\t  read_result = sc.result;\n\t  read_errcode = sc.errcode;\n\n\t  /* Move back to the old pos.  */\n\t  sc.func = TARGET_LINUX_SYS_lseek;\n\t  sc.arg2 = old_pos;\n\t  sc.arg3 = SEEK_SET;\n\t  cb_syscall (cb, &sc);\n\n\t  sc.result = read_result;\n\t  sc.errcode = read_errcode;\n\t}\n      break;\n\n    case CB_SYS_getcwd:\n      tbuf += sprintf (tbuf, \"getcwd(%#x, %u)\", args[0], args[1]);\n\n      p = alloca (sc.arg2);\n      if (getcwd (p, sc.arg2) == NULL)\n\t{\n\t  sc.result = -1;\n\t  sc.errcode = TARGET_EINVAL;\n\t}\n      else\n\t{\n\t  sc.write_mem (cb, &sc, sc.arg1, p, sc.arg2);\n\t  sc.result = sc.arg1;\n\t}\n      break;\n\n    case CB_SYS_stat64:\n      if (cb_get_string (cb, &sc, tstr, sizeof (tstr), args[0]))\n\tstrcpy (tstr, \"???\");\n      tbuf += sprintf (tbuf, \"stat64(%#x:\\\"%s\\\", %u)\", args[0], tstr, args[1]);\n      cb->stat_map = stat_map_64;\n      sc.func = TARGET_LINUX_SYS_stat;\n      cb_syscall (cb, &sc);\n      cb->stat_map = stat_map_32;\n      break;\n    case CB_SYS_lstat64:\n      if (cb_get_string (cb, &sc, tstr, sizeof (tstr), args[0]))\n\tstrcpy (tstr, \"???\");\n      tbuf += sprintf (tbuf, \"lstat64(%#x:\\\"%s\\\", %u)\", args[0], tstr, args[1]);\n      cb->stat_map = stat_map_64;\n      sc.func = TARGET_LINUX_SYS_lstat;\n      cb_syscall (cb, &sc);\n      cb->stat_map = stat_map_32;\n      break;\n    case CB_SYS_fstat64:\n      tbuf += sprintf (tbuf, \"fstat64(%#x, %u)\", args[0], args[1]);\n      cb->stat_map = stat_map_64;\n      sc.func = TARGET_LINUX_SYS_fstat;\n      cb_syscall (cb, &sc);\n      cb->stat_map = stat_map_32;\n      break;\n\n    case CB_SYS_ftruncate64:\n      tbuf += sprintf (tbuf, \"ftruncate64(%u, %u)\", args[0], args[1]);\n      sc.func = TARGET_LINUX_SYS_ftruncate;\n      cb_syscall (cb, &sc);\n      break;\n\n    case CB_SYS_getuid:\n    case CB_SYS_getuid32:\n      tbuf += sprintf (tbuf, \"getuid()\");\n      sc.result = getuid ();\n      goto sys_finish;\n    case CB_SYS_getgid:\n    case CB_SYS_getgid32:\n      tbuf += sprintf (tbuf, \"getgid()\");\n      sc.result = getgid ();\n      goto sys_finish;\n    case CB_SYS_setuid:\n      sc.arg1 &= 0xffff;\n    case CB_SYS_setuid32:\n      tbuf += sprintf (tbuf, \"setuid(%u)\", args[0]);\n      sc.result = setuid (sc.arg1);\n      goto sys_finish;\n    case CB_SYS_setgid:\n      sc.arg1 &= 0xffff;\n    case CB_SYS_setgid32:\n      tbuf += sprintf (tbuf, \"setgid(%u)\", args[0]);\n      sc.result = setgid (sc.arg1);\n      goto sys_finish;\n\n    case CB_SYS_getpid:\n      tbuf += sprintf (tbuf, \"getpid()\");\n      sc.result = getpid ();\n      goto sys_finish;\n    case CB_SYS_kill:\n      tbuf += sprintf (tbuf, \"kill(%u, %i)\", args[0], args[1]);\n      /* Only let the app kill itself.  */\n      if (sc.arg1 != getpid ())\n\t{\n\t  sc.result = -1;\n\t  sc.errcode = TARGET_EPERM;\n\t}\n      else\n\t{\n#ifdef HAVE_KILL\n\t  sc.result = kill (sc.arg1, sc.arg2);\n\t  goto sys_finish;\n#else\n\t  sc.result = -1;\n\t  sc.errcode = TARGET_ENOSYS;\n#endif\n\t}\n      break;\n\n    case CB_SYS_open:\n      if (cb_get_string (cb, &sc, tstr, sizeof (tstr), args[0]))\n\tstrcpy (tstr, \"???\");\n      tbuf += sprintf (tbuf, \"open(%#x:\\\"%s\\\", %#x, %o)\",\n\t\t       args[0], tstr, args[1], args[2]);\n      goto case_default;\n    case CB_SYS_close:\n      tbuf += sprintf (tbuf, \"close(%i)\", args[0]);\n      goto case_default;\n    case CB_SYS_read:\n      tbuf += sprintf (tbuf, \"read(%i, %#x, %u)\", args[0], args[1], args[2]);\n      goto case_default;\n    case CB_SYS_write:\n      if (cb_get_string (cb, &sc, tstr, sizeof (tstr), args[1]))\n\tstrcpy (tstr, \"???\");\n      tbuf += sprintf (tbuf, \"write(%i, %#x:\\\"%s\\\", %u)\",\n\t\t       args[0], args[1], tstr, args[2]);\n      goto case_default;\n    case CB_SYS_lseek:\n      tbuf += sprintf (tbuf, \"lseek(%i, %i, %i)\", args[0], args[1], args[2]);\n      goto case_default;\n    case CB_SYS_unlink:\n      if (cb_get_string (cb, &sc, tstr, sizeof (tstr), args[0]))\n\tstrcpy (tstr, \"???\");\n      tbuf += sprintf (tbuf, \"unlink(%#x:\\\"%s\\\")\", args[0], tstr);\n      goto case_default;\n    case CB_SYS_truncate:\n      if (cb_get_string (cb, &sc, tstr, sizeof (tstr), args[0]))\n\tstrcpy (tstr, \"???\");\n      tbuf += sprintf (tbuf, \"truncate(%#x:\\\"%s\\\", %i)\", args[0], tstr, args[1]);\n      goto case_default;\n    case CB_SYS_ftruncate:\n      tbuf += sprintf (tbuf, \"ftruncate(%i, %i)\", args[0], args[1]);\n      goto case_default;\n    case CB_SYS_rename:\n      if (cb_get_string (cb, &sc, tstr, sizeof (tstr), args[0]))\n\tstrcpy (tstr, \"???\");\n      tbuf += sprintf (tbuf, \"rename(%#x:\\\"%s\\\", \", args[0], tstr);\n      if (cb_get_string (cb, &sc, tstr, sizeof (tstr), args[1]))\n\tstrcpy (tstr, \"???\");\n      tbuf += sprintf (tbuf, \"%#x:\\\"%s\\\")\", args[1], tstr);\n      goto case_default;\n    case CB_SYS_stat:\n      if (cb_get_string (cb, &sc, tstr, sizeof (tstr), args[0]))\n\tstrcpy (tstr, \"???\");\n      tbuf += sprintf (tbuf, \"stat(%#x:\\\"%s\\\", %#x)\", args[0], tstr, args[1]);\n      goto case_default;\n    case CB_SYS_fstat:\n      tbuf += sprintf (tbuf, \"fstat(%i, %#x)\", args[0], args[1]);\n      goto case_default;\n    case CB_SYS_lstat:\n      if (cb_get_string (cb, &sc, tstr, sizeof (tstr), args[0]))\n\tstrcpy (tstr, \"???\");\n      tbuf += sprintf (tbuf, \"lstat(%#x:\\\"%s\\\", %#x)\", args[0], tstr, args[1]);\n      goto case_default;\n    case CB_SYS_pipe:\n      tbuf += sprintf (tbuf, \"pipe(%#x, %#x)\", args[0], args[1]);\n      goto case_default;\n\n    default:\n      tbuf += sprintf (tbuf, \"???_%i(%#x, %#x, %#x, %#x, %#x, %#x)\", sc.func,\n\t\t       args[0], args[1], args[2], args[3], args[4], args[5]);\n    case_default:\n      cb_syscall (cb, &sc);\n      break;\n\n    sys_finish:\n      if (sc.result == -1)\n\t{\n\t  cb->last_errno = errno;\n\t  sc.errcode = cb->get_errno (cb);\n\t}\n    }\n\n  TRACE_EVENTS (cpu, \"syscall_%i(%#x, %#x, %#x, %#x, %#x, %#x) = %li (error = %i)\",\n\t\tsc.func, args[0], args[1], args[2], args[3], args[4], args[5],\n\t\tsc.result, sc.errcode);\n\n  tbuf += sprintf (tbuf, \" = \");\n  if (STATE_ENVIRONMENT (sd) == USER_ENVIRONMENT)\n    {\n      if (sc.result == -1)\n\t{\n\t  tbuf += sprintf (tbuf, \"-1 (error = %i)\", sc.errcode);\n\t  if (sc.errcode == cb_host_to_target_errno (cb, ENOSYS))\n\t    {\n\t      sim_io_eprintf (sd, \"bfin-sim: %#x: unimplemented syscall %i\\n\",\n\t\t\t      PCREG, sc.func);\n\t    }\n\t  SET_DREG (0, -sc.errcode);\n\t}\n      else\n\t{\n\t  if (fmt_ret_hex)\n\t    tbuf += sprintf (tbuf, \"%#lx\", sc.result);\n\t  else\n\t    tbuf += sprintf (tbuf, \"%lu\", sc.result);\n\t  SET_DREG (0, sc.result);\n\t}\n    }\n  else\n    {\n      tbuf += sprintf (tbuf, \"%lu (error = %i)\", sc.result, sc.errcode);\n      SET_DREG (0, sc.result);\n      SET_DREG (1, sc.result2);\n      SET_DREG (2, sc.errcode);\n    }\n\n  TRACE_SYSCALL (cpu, \"%s\", _tbuf);\n}",
+      "fn_code_pos": [
+        [
+          117,
+          0
+        ],
+        [
+          592,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_syscall",
+        "parameters": {
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static sim_cia\nstep_once (SIM_CPU *cpu)\n{\n  SIM_DESC sd = CPU_STATE (cpu);\n  bu32 insn_len, oldpc = PCREG;\n  int i;\n  bool ssstep;\n\n  if (TRACE_ANY_P (cpu))\n    trace_prefix (sd, cpu, NULL_CIA, oldpc, TRACE_LINENUM_P (cpu),\n\t\t  NULL, 0, \" \"); /* Use a space for gcc warnings.  */\n\n  TRACE_DISASM (cpu, oldpc);\n\n  /* Handle hardware single stepping when lower than EVT3, and when SYSCFG\n     has already had the SSSTEP bit enabled.  */\n  ssstep = false;\n  if (STATE_ENVIRONMENT (sd) == OPERATING_ENVIRONMENT\n      && (SYSCFGREG & SYSCFG_SSSTEP))\n    {\n      int ivg = cec_get_ivg (cpu);\n      if (ivg == -1 || ivg > 3)\n\tssstep = true;\n    }\n\n#if 0\n  /* XXX: Is this what happens on the hardware ?  */\n  if (cec_get_ivg (cpu) == EVT_EMU)\n    cec_return (cpu, EVT_EMU);\n#endif\n\n  BFIN_CPU_STATE.did_jump = false;\n\n  insn_len = interp_insn_bfin (cpu, oldpc);\n\n  /* If we executed this insn successfully, then we always decrement\n     the loop counter.  We don't want to update the PC though if the\n     last insn happened to be a change in code flow (jump/etc...).  */\n  if (!BFIN_CPU_STATE.did_jump)\n    SET_PCREG (hwloop_get_next_pc (cpu, oldpc, insn_len));\n  for (i = 1; i >= 0; --i)\n    if (LCREG (i) && oldpc == LBREG (i))\n      {\n\tSET_LCREG (i, LCREG (i) - 1);\n\tif (LCREG (i))\n\t  break;\n      }\n\n  ++ PROFILE_TOTAL_INSN_COUNT (CPU_PROFILE_DATA (cpu));\n\n  /* Handle hardware single stepping only if we're still lower than EVT3.\n     XXX: May not be entirely correct wrt EXCPT insns.  */\n  if (ssstep)\n    {\n      int ivg = cec_get_ivg (cpu);\n      if (ivg == -1 || ivg > 3)\n\t{\n\t  INSN_LEN = 0;\n\t  cec_exception (cpu, VEC_STEP);\n\t}\n    }\n\n  return oldpc;\n}",
+      "fn_code_pos": [
+        [
+          596,
+          0
+        ],
+        [
+          659,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "step_once",
+        "parameters": {
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "sim_cia"
+      }
+    },
+    {
+      "fn_code": "void\nsim_engine_run (SIM_DESC sd,\n\t\tint next_cpu_nr, /* ignore  */\n\t\tint nr_cpus, /* ignore  */\n\t\tint siggnal) /* ignore  */\n{\n  bu32 ticks;\n  SIM_CPU *cpu;\n\n  SIM_ASSERT (STATE_MAGIC (sd) == SIM_MAGIC_NUMBER);\n\n  cpu = STATE_CPU (sd, 0);\n\n  while (1)\n    {\n      step_once (cpu);\n      /* Process any events -- can't use tickn because it may\n         advance right over the next event.  */\n      for (ticks = 0; ticks < CYCLE_DELAY; ++ticks)\n\tif (sim_events_tick (sd))\n\t  sim_events_process (sd);\n    }\n}",
+      "fn_code_pos": [
+        [
+          661,
+          0
+        ],
+        [
+          683,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_engine_run",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "next_cpu_nr": "int",
+          "nr_cpus": "int",
+          "siggnal": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfree_state (SIM_DESC sd)\n{\n  if (STATE_MODULES (sd) != NULL)\n    sim_module_uninstall (sd);\n  sim_cpu_free_all (sd);\n  sim_state_free (sd);\n}",
+      "fn_code_pos": [
+        [
+          687,
+          0
+        ],
+        [
+          694,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "free_state",
+        "parameters": {
+          "sd": "SIM_DESC"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_initialize_cpu (SIM_DESC sd, SIM_CPU *cpu)\n{\n  memset (&cpu->state, 0, sizeof (cpu->state));\n\n  PROFILE_TOTAL_INSN_COUNT (CPU_PROFILE_DATA (cpu)) = 0;\n\n  bfin_model_cpu_init (sd, cpu);\n\n  /* Set default stack to top of scratch pad.  */\n  SET_SPREG (BFIN_DEFAULT_MEM_SIZE);\n  SET_KSPREG (BFIN_DEFAULT_MEM_SIZE);\n  SET_USPREG (BFIN_DEFAULT_MEM_SIZE);\n\n  /* This is what the hardware likes.  */\n  SET_SYSCFGREG (0x30);\n}",
+      "fn_code_pos": [
+        [
+          698,
+          0
+        ],
+        [
+          714,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_initialize_cpu",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "SIM_DESC\nsim_open (SIM_OPEN_KIND kind, host_callback *callback,\n\t  struct bfd *abfd, char * const *argv)\n{\n  char c;\n  int i;\n  SIM_DESC sd = sim_state_alloc (kind, callback);\n\n  /* The cpu data is kept in a separately allocated chunk of memory.  */\n  if (sim_cpu_alloc_all (sd, 1, /*cgen_cpu_max_extra_bytes ()*/0) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  {\n    /* XXX: Only first core gets profiled ?  */\n    SIM_CPU *cpu = STATE_CPU (sd, 0);\n    STATE_WATCHPOINTS (sd)->pc = &PCREG;\n    STATE_WATCHPOINTS (sd)->sizeof_pc = sizeof (PCREG);\n  }\n\n  if (sim_pre_argv_init (sd, argv[0]) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  /* XXX: Default to the Virtual environment.  */\n  if (STATE_ENVIRONMENT (sd) == ALL_ENVIRONMENT)\n    STATE_ENVIRONMENT (sd) = VIRTUAL_ENVIRONMENT;\n\n  /* These options override any module options.\n     Obviously ambiguity should be avoided, however the caller may wish to\n     augment the meaning of an option.  */\n#define e_sim_add_option_table(sd, options) \\\n  do { \\\n    extern const OPTION options[]; \\\n    sim_add_option_table (sd, NULL, options); \\\n  } while (0)\n  e_sim_add_option_table (sd, bfin_mmu_options);\n  e_sim_add_option_table (sd, bfin_mach_options);\n\n  /* The parser will print an error message for us, so we silently return.  */\n  if (sim_parse_args (sd, argv) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  /* Allocate external memory if none specified by user.\n     Use address 4 here in case the user wanted address 0 unmapped.  */\n  if (sim_core_read_buffer (sd, NULL, read_map, &c, 4, 1) == 0)\n    {\n      bu16 emuexcpt = 0x25;\n      sim_do_commandf (sd, \"memory-size 0x%lx\", BFIN_DEFAULT_MEM_SIZE);\n      sim_write (sd, 0, (void *)&emuexcpt, 2);\n    }\n\n  /* Check for/establish the a reference program image.  */\n  if (sim_analyze_program (sd,\n\t\t\t   (STATE_PROG_ARGV (sd) != NULL\n\t\t\t    ? *STATE_PROG_ARGV (sd)\n\t\t\t    : NULL), abfd) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  /* Establish any remaining configuration options.  */\n  if (sim_config (sd) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  if (sim_post_argv_init (sd) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  /* CPU specific initialization.  */\n  for (i = 0; i < MAX_NR_PROCESSORS; ++i)\n    {\n      SIM_CPU *cpu = STATE_CPU (sd, i);\n      bfin_initialize_cpu (sd, cpu);\n    }\n\n  return sd;\n}",
+      "fn_code_pos": [
+        [
+          716,
+          0
+        ],
+        [
+          806,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_open",
+        "parameters": {
+          "kind": "SIM_OPEN_KIND",
+          "callback": "host_callback",
+          "abfd": "struct bfd",
+          "argv": "char"
+        },
+        "return_type": "SIM_DESC"
+      }
+    },
+    {
+      "fn_code": "static bool\nbfin_fdpic_load (SIM_DESC sd, SIM_CPU *cpu, struct bfd *abfd, bu32 *sp,\n\t\t bu32 *elf_addrs, char **ldso_path)\n{\n  bool ret;\n  int i;\n\n  Elf_Internal_Ehdr *iehdr;\n  Elf32_External_Ehdr ehdr;\n  Elf_Internal_Phdr *phdrs;\n  unsigned char *data;\n  long phdr_size;\n  int phdrc;\n  bu32 nsegs;\n\n  bu32 max_load_addr;\n\n  unsigned char null[4] = { 0, 0, 0, 0 };\n\n  ret = false;\n  *ldso_path = NULL;\n\n  /* See if this an FDPIC ELF.  */\n  phdrs = NULL;\n  if (!abfd)\n    goto skip_fdpic_init;\n  if (bfd_seek (abfd, 0, SEEK_SET) != 0)\n    goto skip_fdpic_init;\n  if (bfd_bread (&ehdr, sizeof (ehdr), abfd) != sizeof (ehdr))\n    goto skip_fdpic_init;\n  iehdr = elf_elfheader (abfd);\n  if (!(iehdr->e_flags & EF_BFIN_FDPIC))\n    goto skip_fdpic_init;\n\n  if (STATE_OPEN_KIND (sd) == SIM_OPEN_DEBUG)\n    sim_io_printf (sd, \"Loading FDPIC ELF %s\\n Load base: %#x\\n ELF entry: %#x\\n\",\n\t\t   bfd_get_filename (abfd), fdpic_load_offset, elf_addrs[0]);\n\n  /* Grab the Program Headers to set up the loadsegs on the stack.  */\n  phdr_size = bfd_get_elf_phdr_upper_bound (abfd);\n  if (phdr_size == -1)\n    goto skip_fdpic_init;\n  phdrs = xmalloc (phdr_size);\n  phdrc = bfd_get_elf_phdrs (abfd, phdrs);\n  if (phdrc == -1)\n    goto skip_fdpic_init;\n\n  /* Push the Ehdr onto the stack.  */\n  *sp -= sizeof (ehdr);\n  elf_addrs[3] = *sp;\n  sim_write (sd, *sp, (void *)&ehdr, sizeof (ehdr));\n  if (STATE_OPEN_KIND (sd) == SIM_OPEN_DEBUG)\n    sim_io_printf (sd, \" Elf_Ehdr: %#x\\n\", *sp);\n\n  /* Since we're relocating things ourselves, we need to relocate\n     the start address as well.  */\n  elf_addrs[0] = bfd_get_start_address (abfd) + fdpic_load_offset;\n\n  /* And the Exec's Phdrs onto the stack.  */\n  if (STATE_PROG_BFD (sd) == abfd)\n    {\n      elf_addrs[4] = elf_addrs[0];\n\n      phdr_size = iehdr->e_phentsize * iehdr->e_phnum;\n      if (bfd_seek (abfd, iehdr->e_phoff, SEEK_SET) != 0)\n\tgoto skip_fdpic_init;\n      data = xmalloc (phdr_size);\n      if (bfd_bread (data, phdr_size, abfd) != phdr_size)\n\tgoto skip_fdpic_init;\n      *sp -= phdr_size;\n      elf_addrs[1] = *sp;\n      elf_addrs[2] = phdrc;\n      sim_write (sd, *sp, data, phdr_size);\n      free (data);\n      if (STATE_OPEN_KIND (sd) == SIM_OPEN_DEBUG)\n\tsim_io_printf (sd, \" Elf_Phdrs: %#x\\n\", *sp);\n    }\n\n  /* Now push all the loadsegs.  */\n  nsegs = 0;\n  max_load_addr = 0;\n  for (i = phdrc; i >= 0; --i)\n    if (phdrs[i].p_type == PT_LOAD)\n      {\n\tElf_Internal_Phdr *p = &phdrs[i];\n\tbu32 paddr, vaddr, memsz, filesz;\n\n\tpaddr = p->p_paddr + fdpic_load_offset;\n\tvaddr = p->p_vaddr;\n\tmemsz = p->p_memsz;\n\tfilesz = p->p_filesz;\n\n\tif (STATE_OPEN_KIND (sd) == SIM_OPEN_DEBUG)\n\t  sim_io_printf (sd, \" PHDR %i: vma %#x lma %#x filesz %#x memsz %#x\\n\",\n\t\t\t i, vaddr, paddr, filesz, memsz);\n\n\tdata = xmalloc (memsz);\n\tif (memsz != filesz)\n\t  memset (data + filesz, 0, memsz - filesz);\n\n\tif (bfd_seek (abfd, p->p_offset, SEEK_SET) == 0\n\t    && bfd_bread (data, filesz, abfd) == filesz)\n\t  sim_write (sd, paddr, data, memsz);\n\n\tfree (data);\n\n\tmax_load_addr = max (paddr + memsz, max_load_addr);\n\n\t*sp -= 12;\n\tsim_write (sd, *sp+0, (void *)&paddr, 4); /* loadseg.addr  */\n\tsim_write (sd, *sp+4, (void *)&vaddr, 4); /* loadseg.p_vaddr  */\n\tsim_write (sd, *sp+8, (void *)&memsz, 4); /* loadseg.p_memsz  */\n\t++nsegs;\n      }\n    else if (phdrs[i].p_type == PT_DYNAMIC)\n      {\n\telf_addrs[5] = phdrs[i].p_paddr + fdpic_load_offset;\n\tif (STATE_OPEN_KIND (sd) == SIM_OPEN_DEBUG)\n\t  sim_io_printf (sd, \" PT_DYNAMIC: %#x\\n\", elf_addrs[5]);\n      }\n    else if (phdrs[i].p_type == PT_INTERP)\n      {\n\tuint32_t off = phdrs[i].p_offset;\n\tuint32_t len = phdrs[i].p_filesz;\n\n\t*ldso_path = xmalloc (len);\n\tif (bfd_seek (abfd, off, SEEK_SET) != 0\n\t    || bfd_bread (*ldso_path, len, abfd) != len)\n\t  {\n\t    free (*ldso_path);\n\t    *ldso_path = NULL;\n\t  }\n\telse if (STATE_OPEN_KIND (sd) == SIM_OPEN_DEBUG)\n\t  sim_io_printf (sd, \" PT_INTERP: %s\\n\", *ldso_path);\n      }\n\n  /* Update the load offset with a few extra pages.  */\n  fdpic_load_offset = ALIGN (max (max_load_addr, fdpic_load_offset), 0x10000);\n  fdpic_load_offset += 0x10000;\n\n  /* Push the summary loadmap info onto the stack last.  */\n  *sp -= 4;\n  sim_write (sd, *sp+0, null, 2); /* loadmap.version  */\n  sim_write (sd, *sp+2, (void *)&nsegs, 2); /* loadmap.nsegs  */\n\n  ret = true;\n skip_fdpic_init:\n  free (phdrs);\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          813,
+          0
+        ],
+        [
+          963,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_fdpic_load",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "cpu": "SIM_CPU",
+          "abfd": "struct bfd",
+          "sp": "bu32",
+          "elf_addrs": "bu32",
+          "ldso_path": "char"
+        },
+        "return_type": "bool"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_user_init (SIM_DESC sd, SIM_CPU *cpu, struct bfd *abfd,\n\t\tchar * const *argv, char * const *env)\n{\n  /* XXX: Missing host -> target endian ...  */\n  /* Linux starts the user app with the stack:\n       argc\n       argv[0]          -- pointers to the actual strings\n       argv[1..N]\n       NULL\n       env[0]\n       env[1..N]\n       NULL\n       auxvt[0].type    -- ELF Auxiliary Vector Table\n       auxvt[0].value\n       auxvt[1..N]\n       AT_NULL\n       0\n       argv[0..N][0..M] -- actual argv/env strings\n       env[0..N][0..M]\n       FDPIC loadmaps   -- for FDPIC apps\n     So set things up the same way.  */\n  int i, argc, envc;\n  bu32 argv_flat, env_flat;\n\n  bu32 sp, sp_flat;\n\n  /* start, at_phdr, at_phnum, at_base, at_entry, pt_dynamic  */\n  bu32 elf_addrs[6];\n  bu32 auxvt;\n  bu32 exec_loadmap, ldso_loadmap;\n  char *ldso_path;\n\n  unsigned char null[4] = { 0, 0, 0, 0 };\n\n  host_callback *cb = STATE_CALLBACK (sd);\n\n  elf_addrs[0] = elf_addrs[4] = bfd_get_start_address (abfd);\n  elf_addrs[1] = elf_addrs[2] = elf_addrs[3] = elf_addrs[5] = 0;\n\n  /* Keep the load addresses consistent between runs.  Also make sure we make\n     space for the fixed code region (part of the Blackfin Linux ABI).  */\n  fdpic_load_offset = 0x1000;\n\n  /* First try to load this as an FDPIC executable.  */\n  sp = SPREG;\n  if (!bfin_fdpic_load (sd, cpu, STATE_PROG_BFD (sd), &sp, elf_addrs, &ldso_path))\n    goto skip_fdpic_init;\n  exec_loadmap = sp;\n\n  /* If that worked, then load the fixed code region.  We only do this for\n     FDPIC ELFs atm because they are PIEs and let us relocate them without\n     manual fixups.  FLAT files however require location processing which\n     we do not do ourselves, and they link with a VMA of 0.  */\n  sim_write (sd, 0x400, bfin_linux_fixed_code, sizeof (bfin_linux_fixed_code));\n\n  /* If the FDPIC needs an interpreter, then load it up too.  */\n  if (ldso_path)\n    {\n      const char *ldso_full_path = concat (simulator_sysroot, ldso_path, NULL);\n      struct bfd *ldso_bfd;\n\n      ldso_bfd = bfd_openr (ldso_full_path, STATE_TARGET (sd));\n      if (!ldso_bfd)\n\t{\n\t  sim_io_eprintf (sd, \"bfin-sim: bfd open failed: %s\\n\", ldso_full_path);\n\t  goto static_fdpic;\n\t}\n      if (!bfd_check_format (ldso_bfd, bfd_object))\n\tsim_io_eprintf (sd, \"bfin-sim: bfd format not valid: %s\\n\", ldso_full_path);\n      bfd_set_arch_info (ldso_bfd, STATE_ARCHITECTURE (sd));\n\n      if (!bfin_fdpic_load (sd, cpu, ldso_bfd, &sp, elf_addrs, &ldso_path))\n\tsim_io_eprintf (sd, \"bfin-sim: FDPIC ldso failed to load: %s\\n\", ldso_full_path);\n      if (ldso_path)\n\tsim_io_eprintf (sd, \"bfin-sim: FDPIC ldso (%s) needs an interpreter (%s) !?\\n\",\n\t\t\tldso_full_path, ldso_path);\n\n      ldso_loadmap = sp;\n    }\n  else\n static_fdpic:\n    ldso_loadmap = 0;\n\n  /* Finally setup the registers required by the FDPIC ABI.  */\n  SET_DREG (7, 0); /* Zero out FINI funcptr -- ldso will set this up.  */\n  SET_PREG (0, exec_loadmap); /* Exec loadmap addr.  */\n  SET_PREG (1, ldso_loadmap); /* Interp loadmap addr.  */\n  SET_PREG (2, elf_addrs[5]); /* PT_DYNAMIC map addr.  */\n\n  auxvt = 1;\n  SET_SPREG (sp);\n skip_fdpic_init:\n  sim_pc_set (cpu, elf_addrs[0]);\n\n  /* Figure out how much storage the argv/env strings need.  */\n  argc = countargv ((char **)argv);\n  if (argc == -1)\n    argc = 0;\n  argv_flat = argc; /* NUL bytes  */\n  for (i = 0; i < argc; ++i)\n    argv_flat += strlen (argv[i]);\n\n  if (!env)\n    env = simple_env;\n  envc = countargv ((char **)env);\n  env_flat = envc; /* NUL bytes  */\n  for (i = 0; i < envc; ++i)\n    env_flat += strlen (env[i]);\n\n  /* Push the Auxiliary Vector Table between argv/env and actual strings.  */\n  sp_flat = sp = ALIGN (SPREG - argv_flat - env_flat - 4, 4);\n  if (auxvt)\n    {\n# define AT_PUSH(at, val) \\\n  auxvt_size += 8; \\\n  sp -= 4; \\\n  auxvt = (val); \\\n  sim_write (sd, sp, (void *)&auxvt, 4); \\\n  sp -= 4; \\\n  auxvt = (at); \\\n  sim_write (sd, sp, (void *)&auxvt, 4)\n      unsigned int egid = getegid (), gid = getgid ();\n      unsigned int euid = geteuid (), uid = getuid ();\n      bu32 auxvt_size = 0;\n      AT_PUSH (AT_NULL, 0);\n      AT_PUSH (AT_SECURE, egid != gid || euid != uid);\n      AT_PUSH (AT_EGID, egid);\n      AT_PUSH (AT_GID, gid);\n      AT_PUSH (AT_EUID, euid);\n      AT_PUSH (AT_UID, uid);\n      AT_PUSH (AT_ENTRY, elf_addrs[4]);\n      AT_PUSH (AT_FLAGS, 0);\n      AT_PUSH (AT_BASE, elf_addrs[3]);\n      AT_PUSH (AT_PHNUM, elf_addrs[2]);\n      AT_PUSH (AT_PHENT, sizeof (Elf32_External_Phdr));\n      AT_PUSH (AT_PHDR, elf_addrs[1]);\n      AT_PUSH (AT_CLKTCK, 100); /* XXX: This ever not 100 ?  */\n      AT_PUSH (AT_PAGESZ, 4096);\n      AT_PUSH (AT_HWCAP, 0);\n#undef AT_PUSH\n    }\n  SET_SPREG (sp);\n\n  /* Push the argc/argv/env after the auxvt.  */\n  sp -= ((1 + argc + 1 + envc + 1) * 4);\n  SET_SPREG (sp);\n\n  /* First push the argc value.  */\n  sim_write (sd, sp, (void *)&argc, 4);\n  sp += 4;\n\n  /* Then the actual argv strings so we know where to point argv[].  */\n  for (i = 0; i < argc; ++i)\n    {\n      unsigned len = strlen (argv[i]) + 1;\n      sim_write (sd, sp_flat, (void *)argv[i], len);\n      sim_write (sd, sp, (void *)&sp_flat, 4);\n      sp_flat += len;\n      sp += 4;\n    }\n  sim_write (sd, sp, null, 4);\n  sp += 4;\n\n  /* Then the actual env strings so we know where to point env[].  */\n  for (i = 0; i < envc; ++i)\n    {\n      unsigned len = strlen (env[i]) + 1;\n      sim_write (sd, sp_flat, (void *)env[i], len);\n      sim_write (sd, sp, (void *)&sp_flat, 4);\n      sp_flat += len;\n      sp += 4;\n    }\n\n  /* Set some callbacks.  */\n  cb->syscall_map = cb_linux_syscall_map;\n  cb->errno_map = cb_linux_errno_map;\n  cb->open_map = cb_linux_open_map;\n  cb->signal_map = cb_linux_signal_map;\n  cb->stat_map = stat_map_32 = cb_linux_stat_map_32;\n  stat_map_64 = cb_linux_stat_map_64;\n}",
+      "fn_code_pos": [
+        [
+          965,
+          0
+        ],
+        [
+          1146,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_user_init",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "cpu": "SIM_CPU",
+          "abfd": "struct bfd",
+          "argv": "char",
+          "env": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_os_init (SIM_DESC sd, SIM_CPU *cpu, char * const *argv)\n{\n  /* Pass the command line via a string in R0 like Linux expects.  */\n  int i;\n  bu8 byte;\n  bu32 cmdline = BFIN_L1_SRAM_SCRATCH;\n\n  SET_DREG (0, cmdline);\n  if (argv && argv[0])\n    {\n      i = 1;\n      byte = ' ';\n      while (argv[i])\n\t{\n\t  bu32 len = strlen (argv[i]);\n\t  sim_write (sd, cmdline, (void *)argv[i], len);\n\t  cmdline += len;\n\t  sim_write (sd, cmdline, &byte, 1);\n\t  ++cmdline;\n\t  ++i;\n\t}\n    }\n  byte = 0;\n  sim_write (sd, cmdline, &byte, 1);\n}",
+      "fn_code_pos": [
+        [
+          1148,
+          0
+        ],
+        [
+          1173,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_os_init",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "cpu": "SIM_CPU",
+          "argv": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_virtual_init (SIM_DESC sd, SIM_CPU *cpu)\n{\n  host_callback *cb = STATE_CALLBACK (sd);\n\n  cb->stat_map = stat_map_32 = cb_libgloss_stat_map_32;\n  stat_map_64 = NULL;\n}",
+      "fn_code_pos": [
+        [
+          1175,
+          0
+        ],
+        [
+          1182,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_virtual_init",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "SIM_RC\nsim_create_inferior (SIM_DESC sd, struct bfd *abfd,\n\t\t     char * const *argv, char * const *env)\n{\n  SIM_CPU *cpu = STATE_CPU (sd, 0);\n  SIM_ADDR addr;\n\n  /* Set the PC.  */\n  if (abfd != NULL)\n    addr = bfd_get_start_address (abfd);\n  else\n    addr = 0;\n  sim_pc_set (cpu, addr);\n\n  /* Standalone mode (i.e. `run`) will take care of the argv for us in\n     sim_open() -> sim_parse_args().  But in debug mode (i.e. 'target sim'\n     with `gdb`), we need to handle it because the user can change the\n     argv on the fly via gdb's 'run'.  */\n  if (STATE_PROG_ARGV (sd) != argv)\n    {\n      freeargv (STATE_PROG_ARGV (sd));\n      STATE_PROG_ARGV (sd) = dupargv (argv);\n    }\n\n  switch (STATE_ENVIRONMENT (sd))\n    {\n    case USER_ENVIRONMENT:\n      bfin_user_init (sd, cpu, abfd, argv, env);\n      break;\n    case OPERATING_ENVIRONMENT:\n      bfin_os_init (sd, cpu, argv);\n      break;\n    default:\n      bfin_virtual_init (sd, cpu);\n      break;\n    }\n\n  return SIM_RC_OK;\n}",
+      "fn_code_pos": [
+        [
+          1184,
+          0
+        ],
+        [
+          1222,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_create_inferior",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "abfd": "struct bfd",
+          "argv": "char",
+          "env": "char"
+        },
+        "return_type": "SIM_RC"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        200,
+        1
+      ],
+      [
+        200,
+        15
+      ]
+    ],
+    [
+      "struct timezone",
+      {},
+      "",
+      [
+        201,
+        1
+      ],
+      [
+        201,
+        16
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        718,
+        3
+      ],
+      [
+        718,
+        13
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        814,
+        44
+      ],
+      [
+        814,
+        54
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        966,
+        43
+      ],
+      [
+        966,
+        53
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        1025,
+        6
+      ],
+      [
+        1025,
+        16
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        1185,
+        34
+      ],
+      [
+        1185,
+        44
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <errno.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <sys/time.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb/callback.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb/signals.h\"\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-syscall.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-hw.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include \"targ-vals.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"linux-targ-map.h\"\n",
+      [
+        63,
+        0
+      ],
+      [
+        64,
+        0
+      ]
+    ],
+    [
+      "#include \"linux-fixed-code.h\"\n",
+      [
+        64,
+        0
+      ],
+      [
+        65,
+        0
+      ]
+    ],
+    [
+      "#include \"elf/common.h\"\n",
+      [
+        66,
+        0
+      ],
+      [
+        67,
+        0
+      ]
+    ],
+    [
+      "#include \"elf/external.h\"\n",
+      [
+        67,
+        0
+      ],
+      [
+        68,
+        0
+      ]
+    ],
+    [
+      "#include \"elf/internal.h\"\n",
+      [
+        68,
+        0
+      ],
+      [
+        69,
+        0
+      ]
+    ],
+    [
+      "#include \"elf/bfin.h\"\n",
+      [
+        69,
+        0
+      ],
+      [
+        70,
+        0
+      ]
+    ],
+    [
+      "#include \"elf-bfd.h\"\n",
+      [
+        70,
+        0
+      ],
+      [
+        71,
+        0
+      ]
+    ],
+    [
+      "#include \"dv-bfin_cec.h\"\n",
+      [
+        72,
+        0
+      ],
+      [
+        73,
+        0
+      ]
+    ],
+    [
+      "#include \"dv-bfin_mmu.h\"\n",
+      [
+        73,
+        0
+      ],
+      [
+        74,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

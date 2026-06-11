@@ -1,0 +1,503 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static unsigned long\nmicroblaze_extract_unsigned_integer (unsigned char *addr, int len)\n{\n  unsigned long retval;\n  unsigned char *p;\n  unsigned char *startaddr = (unsigned char *)addr;\n  unsigned char *endaddr = startaddr + len;\n\n  if (len > (int) sizeof (unsigned long))\n    printf (\"That operation is not available on integers of more than \"\n\t    \"%zu bytes.\", sizeof (unsigned long));\n\n  /* Start at the most significant end of the integer, and work towards\n     the least significant.  */\n  retval = 0;\n\n  if (!target_big_endian)\n    {\n      for (p = endaddr; p > startaddr;)\n\tretval = (retval << 8) | * -- p;\n    }\n  else\n    {\n      for (p = startaddr; p < endaddr;)\n\tretval = (retval << 8) | * p ++;\n    }\n\n  return retval;\n}",
+      "fn_code_pos": [
+        [
+          35,
+          0
+        ],
+        [
+          63,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "microblaze_extract_unsigned_integer",
+        "parameters": {
+          "addr": "unsigned char",
+          "len": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nmicroblaze_store_unsigned_integer (unsigned char *addr, int len,\n\t\t\t\t   unsigned long val)\n{\n  unsigned char *p;\n  unsigned char *startaddr = (unsigned char *)addr;\n  unsigned char *endaddr = startaddr + len;\n\n  if (!target_big_endian)\n    {\n      for (p = startaddr; p < endaddr;)\n\t{\n\t  *p++ = val & 0xff;\n\t  val >>= 8;\n\t}\n    }\n  else\n    {\n      for (p = endaddr; p > startaddr;)\n\t{\n\t  *--p = val & 0xff;\n\t  val >>= 8;\n\t}\n    }\n}",
+      "fn_code_pos": [
+        [
+          65,
+          0
+        ],
+        [
+          89,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "microblaze_store_unsigned_integer",
+        "parameters": {
+          "addr": "unsigned char",
+          "len": "int",
+          "val": "unsigned long"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nset_initial_gprs (SIM_CPU *cpu)\n{\n  int i;\n  long space;\n\n  /* Set up machine just out of reset.  */\n  PC = 0;\n  MSR = 0;\n\n  /* Clean out the GPRs */\n  for (i = 0; i < 32; i++)\n    CPU.regs[i] = 0;\n  CPU.insts = 0;\n  CPU.cycles = 0;\n  CPU.imm_enable = 0;\n}",
+      "fn_code_pos": [
+        [
+          91,
+          0
+        ],
+        [
+          107,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "set_initial_gprs",
+        "parameters": {
+          "cpu": "SIM_CPU"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nsim_engine_run (SIM_DESC sd,\n\t\tint next_cpu_nr, /* ignore  */\n\t\tint nr_cpus, /* ignore  */\n\t\tint siggnal) /* ignore  */\n{\n  SIM_CPU *cpu = STATE_CPU (sd, 0);\n  int needfetch;\n  word inst;\n  enum microblaze_instr op;\n  int memops;\n  int bonus_cycles;\n  int insts;\n  int w;\n  int cycs;\n  word WLhash;\n  ubyte carry;\n  int imm_unsigned;\n  short ra, rb, rd;\n  long immword;\n  uword oldpc, newpc;\n  short delay_slot_enable;\n  short branch_taken;\n  short num_delay_slot; /* UNUSED except as reqd parameter */\n  enum microblaze_instr_type insn_type;\n\n  memops = 0;\n  bonus_cycles = 0;\n  insts = 0;\n\n  while (1)\n    {\n      /* Fetch the initial instructions that we'll decode. */\n      inst = MEM_RD_WORD (PC & 0xFFFFFFFC);\n\n      op = get_insn_microblaze (inst, &imm_unsigned, &insn_type,\n\t\t\t\t&num_delay_slot);\n\n      if (op == invalid_inst)\n\tfprintf (stderr, \"Unknown instruction 0x%04x\", inst);\n\n      if (tracing)\n\tfprintf (stderr, \"%.4x: inst = %.4x \", PC, inst);\n\n      rd = GET_RD;\n      rb = GET_RB;\n      ra = GET_RA;\n      /*      immword = IMM_W; */\n\n      oldpc = PC;\n      delay_slot_enable = 0;\n      branch_taken = 0;\n      if (op == microblaze_brk)\n\tsim_engine_halt (sd, NULL, NULL, NULL_CIA, sim_stopped, SIM_SIGTRAP);\n      else if (inst == MICROBLAZE_HALT_INST)\n\t{\n\t  insts += 1;\n\t  bonus_cycles++;\n\t  sim_engine_halt (sd, NULL, NULL, NULL_CIA, sim_exited, RETREG);\n\t}\n      else\n\t{\n\t  switch(op)\n\t    {\n#define INSTRUCTION(NAME, OPCODE, TYPE, ACTION)\t\t\\\n\t    case NAME:\t\t\t\t\t\\\n\t      ACTION;\t\t\t\t\t\\\n\t      break;\n#include \"microblaze.isa\"\n#undef INSTRUCTION\n\n\t    default:\n\t      sim_engine_halt (sd, NULL, NULL, NULL_CIA, sim_signalled,\n\t\t\t       SIM_SIGILL);\n\t      fprintf (stderr, \"ERROR: Unknown opcode\\n\");\n\t    }\n\t  /* Make R0 consistent */\n\t  CPU.regs[0] = 0;\n\n\t  /* Check for imm instr */\n\t  if (op == imm)\n\t    IMM_ENABLE = 1;\n\t  else\n\t    IMM_ENABLE = 0;\n\n\t  /* Update cycle counts */\n\t  insts ++;\n\t  if (insn_type == memory_store_inst || insn_type == memory_load_inst)\n\t    memops++;\n\t  if (insn_type == mult_inst)\n\t    bonus_cycles++;\n\t  if (insn_type == barrel_shift_inst)\n\t    bonus_cycles++;\n\t  if (insn_type == anyware_inst)\n\t    bonus_cycles++;\n\t  if (insn_type == div_inst)\n\t    bonus_cycles += 33;\n\n\t  if ((insn_type == branch_inst || insn_type == return_inst)\n\t      && branch_taken)\n\t    {\n\t      /* Add an extra cycle for taken branches */\n\t      bonus_cycles++;\n\t      /* For branch instructions handle the instruction in the delay slot */\n\t      if (delay_slot_enable)\n\t        {\n\t          newpc = PC;\n\t          PC = oldpc + INST_SIZE;\n\t          inst = MEM_RD_WORD (PC & 0xFFFFFFFC);\n\t          op = get_insn_microblaze (inst, &imm_unsigned, &insn_type,\n\t\t\t\t\t    &num_delay_slot);\n\t          if (op == invalid_inst)\n\t\t    fprintf (stderr, \"Unknown instruction 0x%04x\", inst);\n\t          if (tracing)\n\t\t    fprintf (stderr, \"%.4x: inst = %.4x \", PC, inst);\n\t          rd = GET_RD;\n\t          rb = GET_RB;\n\t          ra = GET_RA;\n\t          /*\t      immword = IMM_W; */\n\t          if (op == microblaze_brk)\n\t\t    {\n\t\t      if (STATE_VERBOSE_P (sd))\n\t\t        fprintf (stderr, \"Breakpoint set in delay slot \"\n\t\t\t         \"(at address 0x%x) will not be honored\\n\", PC);\n\t\t      /* ignore the breakpoint */\n\t\t    }\n\t          else if (insn_type == branch_inst || insn_type == return_inst)\n\t\t    {\n\t\t      if (STATE_VERBOSE_P (sd))\n\t\t        fprintf (stderr, \"Cannot have branch or return instructions \"\n\t\t\t         \"in delay slot (at address 0x%x)\\n\", PC);\n\t\t      sim_engine_halt (sd, NULL, NULL, NULL_CIA, sim_signalled,\n\t\t\t\t       SIM_SIGILL);\n\t\t    }\n\t          else\n\t\t    {\n\t\t      switch(op)\n\t\t        {\n#define INSTRUCTION(NAME, OPCODE, TYPE, ACTION)\t\t\\\n\t\t        case NAME:\t\t\t\\\n\t\t\t  ACTION;\t\t\t\\\n\t\t\t  break;\n#include \"microblaze.isa\"\n#undef INSTRUCTION\n\n\t\t        default:\n\t\t          sim_engine_halt (sd, NULL, NULL, NULL_CIA,\n\t\t\t\t\t   sim_signalled, SIM_SIGILL);\n\t\t          fprintf (stderr, \"ERROR: Unknown opcode at 0x%x\\n\", PC);\n\t\t        }\n\t\t      /* Update cycle counts */\n\t\t      insts++;\n\t\t      if (insn_type == memory_store_inst\n\t\t          || insn_type == memory_load_inst)\n\t\t        memops++;\n\t\t      if (insn_type == mult_inst)\n\t\t        bonus_cycles++;\n\t\t      if (insn_type == barrel_shift_inst)\n\t\t        bonus_cycles++;\n\t\t      if (insn_type == anyware_inst)\n\t\t        bonus_cycles++;\n\t\t      if (insn_type == div_inst)\n\t\t        bonus_cycles += 33;\n\t\t    }\n\t          /* Restore the PC */\n\t          PC = newpc;\n\t          /* Make R0 consistent */\n\t          CPU.regs[0] = 0;\n\t          /* Check for imm instr */\n\t          if (op == imm)\n\t\t    IMM_ENABLE = 1;\n\t          else\n\t\t    IMM_ENABLE = 0;\n\t        }\n\t      else\n\t\t/* no delay slot: increment cycle count */\n\t\tbonus_cycles++;\n\t    }\n\t}\n\n      if (tracing)\n\tfprintf (stderr, \"\\n\");\n\n      if (sim_events_tick (sd))\n\tsim_events_process (sd);\n    }\n\n  /* Hide away the things we've cached while executing.  */\n  /*  CPU.pc = pc; */\n  CPU.insts += insts;\t\t/* instructions done ... */\n  CPU.cycles += insts;\t\t/* and each takes a cycle */\n  CPU.cycles += bonus_cycles;\t/* and extra cycles for branches */\n  CPU.cycles += memops; \t/* and memop cycle delays */\n}",
+      "fn_code_pos": [
+        [
+          111,
+          0
+        ],
+        [
+          304,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_engine_run",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "next_cpu_nr": "int",
+          "nr_cpus": "int",
+          "siggnal": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nmicroblaze_reg_store (SIM_CPU *cpu, int rn, unsigned char *memory, int length)\n{\n  if (rn < NUM_REGS + NUM_SPECIAL && rn >= 0)\n    {\n      if (length == 4)\n\t{\n\t  /* misalignment safe */\n\t  long ival = microblaze_extract_unsigned_integer (memory, 4);\n\t  if (rn < NUM_REGS)\n\t    CPU.regs[rn] = ival;\n\t  else\n\t    CPU.spregs[rn-NUM_REGS] = ival;\n\t  return 4;\n\t}\n      else\n\treturn 0;\n    }\n  else\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          306,
+          0
+        ],
+        [
+          326,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "microblaze_reg_store",
+        "parameters": {
+          "cpu": "SIM_CPU",
+          "rn": "int",
+          "memory": "unsigned char",
+          "length": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nmicroblaze_reg_fetch (SIM_CPU *cpu, int rn, unsigned char *memory, int length)\n{\n  long ival;\n\n  if (rn < NUM_REGS + NUM_SPECIAL && rn >= 0)\n    {\n      if (length == 4)\n\t{\n\t  if (rn < NUM_REGS)\n\t    ival = CPU.regs[rn];\n\t  else\n\t    ival = CPU.spregs[rn-NUM_REGS];\n\n\t  /* misalignment-safe */\n\t  microblaze_store_unsigned_integer (memory, 4, ival);\n\t  return 4;\n\t}\n      else\n\treturn 0;\n    }\n  else\n    return 0;\n}",
+      "fn_code_pos": [
+        [
+          328,
+          0
+        ],
+        [
+          351,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "microblaze_reg_fetch",
+        "parameters": {
+          "cpu": "SIM_CPU",
+          "rn": "int",
+          "memory": "unsigned char",
+          "length": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void\nsim_info (SIM_DESC sd, int verbose)\n{\n  SIM_CPU *cpu = STATE_CPU (sd, 0);\n  host_callback *callback = STATE_CALLBACK (sd);\n\n  callback->printf_filtered (callback, \"\\n\\n# instructions executed  %10d\\n\",\n\t\t\t     CPU.insts);\n  callback->printf_filtered (callback, \"# cycles                 %10d\\n\",\n\t\t\t     (CPU.cycles) ? CPU.cycles+2 : 0);\n}",
+      "fn_code_pos": [
+        [
+          353,
+          0
+        ],
+        [
+          363,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_info",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "verbose": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static sim_cia\nmicroblaze_pc_get (sim_cpu *cpu)\n{\n  return cpu->microblaze_cpu.spregs[0];\n}",
+      "fn_code_pos": [
+        [
+          365,
+          0
+        ],
+        [
+          369,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "microblaze_pc_get",
+        "parameters": {
+          "cpu": "sim_cpu"
+        },
+        "return_type": "sim_cia"
+      }
+    },
+    {
+      "fn_code": "static void\nmicroblaze_pc_set (sim_cpu *cpu, sim_cia pc)\n{\n  cpu->microblaze_cpu.spregs[0] = pc;\n}",
+      "fn_code_pos": [
+        [
+          371,
+          0
+        ],
+        [
+          375,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "microblaze_pc_set",
+        "parameters": {
+          "cpu": "sim_cpu",
+          "pc": "sim_cia"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nfree_state (SIM_DESC sd)\n{\n  if (STATE_MODULES (sd) != NULL)\n    sim_module_uninstall (sd);\n  sim_cpu_free_all (sd);\n  sim_state_free (sd);\n}",
+      "fn_code_pos": [
+        [
+          377,
+          0
+        ],
+        [
+          384,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "free_state",
+        "parameters": {
+          "sd": "SIM_DESC"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "SIM_DESC\nsim_open (SIM_OPEN_KIND kind, host_callback *cb,\n\t  struct bfd *abfd, char * const *argv)\n{\n  int i;\n  SIM_DESC sd = sim_state_alloc (kind, cb);\n  SIM_ASSERT (STATE_MAGIC (sd) == SIM_MAGIC_NUMBER);\n\n  /* The cpu data is kept in a separately allocated chunk of memory.  */\n  if (sim_cpu_alloc_all (sd, 1, /*cgen_cpu_max_extra_bytes ()*/0) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  if (sim_pre_argv_init (sd, argv[0]) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  /* The parser will print an error message for us, so we silently return.  */\n  if (sim_parse_args (sd, argv) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  /* Check for/establish the a reference program image.  */\n  if (sim_analyze_program (sd,\n\t\t\t   (STATE_PROG_ARGV (sd) != NULL\n\t\t\t    ? *STATE_PROG_ARGV (sd)\n\t\t\t    : NULL), abfd) != SIM_RC_OK)\n    {\n      free_state (sd);\n      return 0;\n    }\n\n  /* Configure/verify the target byte order and other runtime\n     configuration options.  */\n  if (sim_config (sd) != SIM_RC_OK)\n    {\n      sim_module_uninstall (sd);\n      return 0;\n    }\n\n  if (sim_post_argv_init (sd) != SIM_RC_OK)\n    {\n      /* Uninstall the modules to avoid memory leaks,\n\t file descriptor leaks, etc.  */\n      sim_module_uninstall (sd);\n      return 0;\n    }\n\n  /* CPU specific initialization.  */\n  for (i = 0; i < MAX_NR_PROCESSORS; ++i)\n    {\n      SIM_CPU *cpu = STATE_CPU (sd, i);\n\n      CPU_REG_FETCH (cpu) = microblaze_reg_fetch;\n      CPU_REG_STORE (cpu) = microblaze_reg_store;\n      CPU_PC_FETCH (cpu) = microblaze_pc_get;\n      CPU_PC_STORE (cpu) = microblaze_pc_set;\n\n      set_initial_gprs (cpu);\n    }\n\n  /* Default to a 8 Mbyte (== 2^23) memory space.  */\n  sim_do_commandf (sd, \"memory-size 0x800000\");\n\n  return sd;\n}",
+      "fn_code_pos": [
+        [
+          386,
+          0
+        ],
+        [
+          457,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_open",
+        "parameters": {
+          "kind": "SIM_OPEN_KIND",
+          "cb": "host_callback",
+          "abfd": "struct bfd",
+          "argv": "char"
+        },
+        "return_type": "SIM_DESC"
+      }
+    },
+    {
+      "fn_code": "SIM_RC\nsim_create_inferior (SIM_DESC sd, struct bfd *prog_bfd,\n\t\t     char * const *argv, char * const *env)\n{\n  SIM_CPU *cpu = STATE_CPU (sd, 0);\n\n  PC = bfd_get_start_address (prog_bfd);\n\n  return SIM_RC_OK;\n}",
+      "fn_code_pos": [
+        [
+          459,
+          0
+        ],
+        [
+          468,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "sim_create_inferior",
+        "parameters": {
+          "sd": "SIM_DESC",
+          "prog_bfd": "struct bfd",
+          "argv": "char",
+          "env": "char"
+        },
+        "return_type": "SIM_RC"
+      }
+    }
+  ],
+  "fn_declaraion": [],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        388,
+        3
+      ],
+      [
+        388,
+        13
+      ]
+    ],
+    [
+      "struct bfd",
+      {},
+      "",
+      [
+        460,
+        34
+      ],
+      [
+        460,
+        44
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        18,
+        0
+      ],
+      [
+        19,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb/callback.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"libiberty.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"gdb/remote-sim.h\"\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-options.h\"\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"microblaze-dis.h\"\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"microblaze.isa\"\n",
+      [
+        179,
+        0
+      ],
+      [
+        180,
+        0
+      ]
+    ],
+    [
+      "#include \"microblaze.isa\"\n",
+      [
+        253,
+        0
+      ],
+      [
+        254,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum microblaze_instr",
+      {},
+      "",
+      [
+        120,
+        2
+      ],
+      [
+        120,
+        23
+      ]
+    ],
+    [
+      "enum microblaze_instr_type",
+      {},
+      "",
+      [
+        135,
+        2
+      ],
+      [
+        135,
+        28
+      ]
+    ]
+  ]
+}

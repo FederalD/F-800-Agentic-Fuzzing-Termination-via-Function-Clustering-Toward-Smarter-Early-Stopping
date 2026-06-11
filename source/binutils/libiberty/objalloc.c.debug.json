@@ -1,0 +1,632 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "struct objalloc *\nobjalloc_create (void)\n{\n  struct objalloc *ret;\n  struct objalloc_chunk *chunk;\n\n  ret = (struct objalloc *) malloc (sizeof *ret);\n  if (ret == NULL)\n    return NULL;\n\n  ret->chunks = (PTR) malloc (CHUNK_SIZE);\n  if (ret->chunks == NULL)\n    {\n      free (ret);\n      return NULL;\n    }\n\n  chunk = (struct objalloc_chunk *) ret->chunks;\n  chunk->next = NULL;\n  chunk->current_ptr = NULL;\n\n  ret->current_ptr = (char *) chunk + CHUNK_HEADER_SIZE;\n  ret->current_space = CHUNK_SIZE - CHUNK_HEADER_SIZE;\n\n  return ret;\n}",
+      "fn_code_pos": [
+        [
+          84,
+          0
+        ],
+        [
+          109,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "objalloc_create",
+        "parameters": {},
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "PTR\n_objalloc_alloc (struct objalloc *o, unsigned long original_len)\n{\n  unsigned long len = original_len;\n\n  /* We avoid confusion from zero sized objects by always allocating\n     at least 1 byte.  */\n  if (len == 0)\n    len = 1;\n\n  len = (len + OBJALLOC_ALIGN - 1) &~ (OBJALLOC_ALIGN - 1);\n\n  /* Check for overflow in the alignment operation above and the\n     malloc argument below. */\n  if (len + CHUNK_HEADER_SIZE < original_len)\n    return NULL;\n\n  if (len <= o->current_space)\n    {\n      o->current_ptr += len;\n      o->current_space -= len;\n      return (PTR) (o->current_ptr - len);\n    }\n\n  if (len >= BIG_REQUEST)\n    {\n      char *ret;\n      struct objalloc_chunk *chunk;\n\n      ret = (char *) malloc (CHUNK_HEADER_SIZE + len);\n      if (ret == NULL)\n\treturn NULL;\n\n      chunk = (struct objalloc_chunk *) ret;\n      chunk->next = (struct objalloc_chunk *) o->chunks;\n      chunk->current_ptr = o->current_ptr;\n\n      o->chunks = (PTR) chunk;\n\n      return (PTR) (ret + CHUNK_HEADER_SIZE);\n    }\n  else\n    {\n      struct objalloc_chunk *chunk;\n\n      chunk = (struct objalloc_chunk *) malloc (CHUNK_SIZE);\n      if (chunk == NULL)\n\treturn NULL;\n      chunk->next = (struct objalloc_chunk *) o->chunks;\n      chunk->current_ptr = NULL;\n\n      o->current_ptr = (char *) chunk + CHUNK_HEADER_SIZE;\n      o->current_space = CHUNK_SIZE - CHUNK_HEADER_SIZE;\n\n      o->chunks = (PTR) chunk;\n\n      return objalloc_alloc (o, len);\n    }\n}",
+      "fn_code_pos": [
+        [
+          113,
+          0
+        ],
+        [
+          171,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "_objalloc_alloc",
+        "parameters": {
+          "o": "struct objalloc",
+          "original_len": "unsigned long"
+        },
+        "return_type": "PTR"
+      }
+    },
+    {
+      "fn_code": "void\nobjalloc_free (struct objalloc *o)\n{\n  struct objalloc_chunk *l;\n\n  l = (struct objalloc_chunk *) o->chunks;\n  while (l != NULL)\n    {\n      struct objalloc_chunk *next;\n\n      next = l->next;\n      free (l);\n      l = next;\n    }\n\n  free (o);\n}",
+      "fn_code_pos": [
+        [
+          175,
+          0
+        ],
+        [
+          191,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "objalloc_free",
+        "parameters": {
+          "o": "struct objalloc"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void\nobjalloc_free_block (struct objalloc *o, PTR block)\n{\n  struct objalloc_chunk *p, *small;\n  char *b = (char *) block;\n\n  /* First set P to the chunk which contains the block we are freeing,\n     and set Q to the last small object chunk we see before P.  */\n  small = NULL;\n  for (p = (struct objalloc_chunk *) o->chunks; p != NULL; p = p->next)\n    {\n      if (p->current_ptr == NULL)\n\t{\n\t  if (b > (char *) p && b < (char *) p + CHUNK_SIZE)\n\t    break;\n\t  small = p;\n\t}\n      else\n\t{\n\t  if (b == (char *) p + CHUNK_HEADER_SIZE)\n\t    break;\n\t}\n    }\n\n  /* If we can't find the chunk, the caller has made a mistake.  */\n  if (p == NULL)\n    abort ();\n\n  if (p->current_ptr == NULL)\n    {\n      struct objalloc_chunk *q;\n      struct objalloc_chunk *first;\n\n      /* The block is in a chunk containing small objects.  We can\n\t free every chunk through SMALL, because they have certainly\n\t been allocated more recently.  After SMALL, we will not see\n\t any chunks containing small objects; we can free any big\n\t chunk if the current_ptr is greater than or equal to B.  We\n\t can then reset the new current_ptr to B.  */\n\n      first = NULL;\n      q = (struct objalloc_chunk *) o->chunks;\n      while (q != p)\n\t{\n\t  struct objalloc_chunk *next;\n\n\t  next = q->next;\n\t  if (small != NULL)\n\t    {\n\t      if (small == q)\n\t\tsmall = NULL;\n\t      free (q);\n\t    }\n\t  else if (q->current_ptr > b)\n\t    free (q);\n\t  else if (first == NULL)\n\t    first = q;\n\n\t  q = next;\n\t}\n\n      if (first == NULL)\n\tfirst = p;\n      o->chunks = (PTR) first;\n\n      /* Now start allocating from this small block again.  */\n      o->current_ptr = b;\n      o->current_space = ((char *) p + CHUNK_SIZE) - b;\n    }\n  else\n    {\n      struct objalloc_chunk *q;\n      char *current_ptr;\n\n      /* This block is in a large chunk by itself.  We can free\n         everything on the list up to and including this block.  We\n         then start allocating from the next chunk containing small\n         objects, setting current_ptr from the value stored with the\n         large chunk we are freeing.  */\n\n      current_ptr = p->current_ptr;\n      p = p->next;\n\n      q = (struct objalloc_chunk *) o->chunks;\n      while (q != p)\n\t{\n\t  struct objalloc_chunk *next;\n\n\t  next = q->next;\n\t  free (q);\n\t  q = next;\n\t}\n\n      o->chunks = (PTR) p;\n\n      while (p->current_ptr != NULL)\n\tp = p->next;\n\n      o->current_ptr = current_ptr;\n      o->current_space = ((char *) p + CHUNK_SIZE) - current_ptr;\n    }\n}",
+      "fn_code_pos": [
+        [
+          196,
+          0
+        ],
+        [
+          297,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "objalloc_free_block",
+        "parameters": {
+          "o": "struct objalloc",
+          "block": "PTR"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "malloc (size_t)",
+      "fn_dec_pos": [
+        [
+          39,
+          11
+        ],
+        [
+          39,
+          26
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "malloc",
+        "parameters": {},
+        "return_type": "PTR"
+      }
+    },
+    {
+      "fn_code": "free (PTR)",
+      "fn_dec_pos": [
+        [
+          40,
+          12
+        ],
+        [
+          40,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "free",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "objalloc_create (void)",
+      "fn_dec_pos": [
+        [
+          85,
+          0
+        ],
+        [
+          85,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "objalloc_create",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct objalloc_chunk\n{\n  /* Next chunk.  */\n  struct objalloc_chunk *next;\n  /* If this chunk contains large objects, this is the value of\n     current_ptr when this chunk was allocated.  If this chunk\n     contains small objects, this is NULL.  */\n  char *current_ptr;\n}",
+      {
+        "*next": "struct objalloc_chunk",
+        "*current_ptr": "char"
+      },
+      "objalloc_chunk",
+      [
+        57,
+        0
+      ],
+      [
+        65,
+        1
+      ]
+    ],
+    [
+      "struct objalloc_chunk\n{\n  /* Next chunk.  */\n  struct objalloc_chunk *next;\n  /* If this chunk contains large objects, this is the value of\n     current_ptr when this chunk was allocated.  If this chunk\n     contains small objects, this is NULL.  */\n  char *current_ptr;\n}",
+      {
+        "*next": "struct objalloc_chunk",
+        "*current_ptr": "char"
+      },
+      "objalloc_chunk",
+      [
+        57,
+        0
+      ],
+      [
+        65,
+        1
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        60,
+        2
+      ],
+      [
+        60,
+        23
+      ]
+    ],
+    [
+      "struct objalloc",
+      {},
+      "",
+      [
+        84,
+        0
+      ],
+      [
+        84,
+        15
+      ]
+    ],
+    [
+      "struct objalloc",
+      {},
+      "",
+      [
+        87,
+        2
+      ],
+      [
+        87,
+        17
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        88,
+        2
+      ],
+      [
+        88,
+        23
+      ]
+    ],
+    [
+      "struct objalloc",
+      {},
+      "",
+      [
+        90,
+        9
+      ],
+      [
+        90,
+        24
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        101,
+        11
+      ],
+      [
+        101,
+        32
+      ]
+    ],
+    [
+      "struct objalloc",
+      {},
+      "",
+      [
+        114,
+        17
+      ],
+      [
+        114,
+        32
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        140,
+        6
+      ],
+      [
+        140,
+        27
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        146,
+        15
+      ],
+      [
+        146,
+        36
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        147,
+        21
+      ],
+      [
+        147,
+        42
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        156,
+        6
+      ],
+      [
+        156,
+        27
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        158,
+        15
+      ],
+      [
+        158,
+        36
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        161,
+        21
+      ],
+      [
+        161,
+        42
+      ]
+    ],
+    [
+      "struct objalloc",
+      {},
+      "",
+      [
+        176,
+        15
+      ],
+      [
+        176,
+        30
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        178,
+        2
+      ],
+      [
+        178,
+        23
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        180,
+        7
+      ],
+      [
+        180,
+        28
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        183,
+        6
+      ],
+      [
+        183,
+        27
+      ]
+    ],
+    [
+      "struct objalloc",
+      {},
+      "",
+      [
+        197,
+        21
+      ],
+      [
+        197,
+        36
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        199,
+        2
+      ],
+      [
+        199,
+        23
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        205,
+        12
+      ],
+      [
+        205,
+        33
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        226,
+        6
+      ],
+      [
+        226,
+        27
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        227,
+        6
+      ],
+      [
+        227,
+        27
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        237,
+        11
+      ],
+      [
+        237,
+        32
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        240,
+        3
+      ],
+      [
+        240,
+        24
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        267,
+        6
+      ],
+      [
+        267,
+        27
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        279,
+        11
+      ],
+      [
+        279,
+        32
+      ]
+    ],
+    [
+      "struct objalloc_chunk",
+      {},
+      "",
+      [
+        282,
+        3
+      ],
+      [
+        282,
+        24
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"ansidecl.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"objalloc.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <stdio.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <unixlib.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <stddef.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

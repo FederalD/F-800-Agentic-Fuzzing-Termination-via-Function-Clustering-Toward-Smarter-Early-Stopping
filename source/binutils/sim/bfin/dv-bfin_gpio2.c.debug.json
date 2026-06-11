@@ -1,0 +1,539 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static unsigned\nbfin_gpio_io_write_buffer (struct hw *me, const void *source, int space,\n\t\t\t   address_word addr, unsigned nr_bytes)\n{\n  struct bfin_gpio *port = hw_data (me);\n  bu32 mmr_off;\n  bu32 value;\n  bu16 *value16p;\n  bu32 *value32p;\n  void *valuep;\n\n  mmr_off = addr - port->base;\n\n  /* Invalid access mode is higher priority than missing register.  */\n  if (mmr_off == mmr_offset (mux))\n    {\n      if (!dv_bfin_mmr_require_32 (me, addr, nr_bytes, true))\n\treturn 0;\n    }\n  else\n    if (!dv_bfin_mmr_require_16 (me, addr, nr_bytes, true))\n\treturn 0;\n\n  if (nr_bytes == 4)\n    value = dv_load_4 (source);\n  else\n    value = dv_load_2 (source);\n  valuep = (void *)((unsigned long)port + mmr_base() + mmr_off);\n  value16p = valuep;\n  value32p = valuep;\n\n  HW_TRACE_WRITE ();\n\n  switch (mmr_off)\n    {\n    case mmr_offset(fer):\n    case mmr_offset(data):\n    case mmr_offset(inen):\n      *value16p = value;\n      break;\n    case mmr_offset(clear):\n      /* We want to clear the related data MMR.  */\n      dv_w1c_2 (&port->data, value, -1);\n      break;\n    case mmr_offset(set):\n      /* We want to set the related data MMR.  */\n      port->data |= value;\n      break;\n    case mmr_offset(dir_clear):\n      dv_w1c_2 (&port->dir, value, -1);\n      break;\n    case mmr_offset(dir_set):\n      port->dir |= value;\n      break;\n    case mmr_offset(mux):\n      *value32p = value;\n      break;\n    default:\n      dv_bfin_mmr_invalid (me, addr, nr_bytes, true);\n      return 0;\n    }\n\n  /* If tweaking output pins, make sure we send updated port info.  */\n  switch (mmr_off)\n    {\n    case mmr_offset(data):\n    case mmr_offset(set):\n    case mmr_offset(clear):\n    case mmr_offset(dir_set):\n      {\n\tint i;\n\tbu32 bit;\n\n\tfor (i = 0; i < 16; ++i)\n\t  {\n\t    bit = (1 << i);\n\n\t    if (!(port->inen & bit))\n\t      hw_port_event (me, i, !!(port->data & bit));\n\t  }\n\n\tbreak;\n      }\n    }\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          57,
+          0
+        ],
+        [
+          143,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_gpio_io_write_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "source": "void",
+          "space": "int",
+          "addr": "address_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static unsigned\nbfin_gpio_io_read_buffer (struct hw *me, void *dest, int space,\n\t\t\t  address_word addr, unsigned nr_bytes)\n{\n  struct bfin_gpio *port = hw_data (me);\n  bu32 mmr_off;\n  bu16 *value16p;\n  bu32 *value32p;\n  void *valuep;\n\n  mmr_off = addr - port->base;\n\n  /* Invalid access mode is higher priority than missing register.  */\n  if (mmr_off == mmr_offset (mux))\n    {\n      if (!dv_bfin_mmr_require_32 (me, addr, nr_bytes, false))\n\treturn 0;\n    }\n  else\n    if (!dv_bfin_mmr_require_16 (me, addr, nr_bytes, false))\n      return 0;\n\n  valuep = (void *)((unsigned long)port + mmr_base() + mmr_off);\n  value16p = valuep;\n  value32p = valuep;\n\n  HW_TRACE_READ ();\n\n  switch (mmr_off)\n    {\n    case mmr_offset(data):\n    case mmr_offset(clear):\n    case mmr_offset(set):\n      dv_store_2 (dest, port->data);\n      break;\n    case mmr_offset(dir_clear):\n    case mmr_offset(dir_set):\n      dv_store_2 (dest, port->dir);\n      break;\n    case mmr_offset(fer):\n    case mmr_offset(inen):\n      dv_store_2 (dest, *value16p);\n      break;\n    case mmr_offset(mux):\n      dv_store_4 (dest, *value32p);\n      break;\n    default:\n      dv_bfin_mmr_invalid (me, addr, nr_bytes, false);\n      return 0;\n    }\n\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          145,
+          0
+        ],
+        [
+          197,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_gpio_io_read_buffer",
+        "parameters": {
+          "me": "struct hw",
+          "dest": "void",
+          "space": "int",
+          "addr": "address_word",
+          "nr_bytes": "unsigned"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_gpio_port_event (struct hw *me, int my_port, struct hw *source,\n\t\t      int source_port, int level)\n{\n  struct bfin_gpio *port = hw_data (me);\n  bu32 bit = (1 << my_port);\n\n  /* Normalize the level value.  A simulated device can send any value\n     it likes to us, but in reality we only care about 0 and 1.  This\n     lets us assume only those two values below.  */\n  level = !!level;\n\n  HW_TRACE ((me, \"pin %i set to %i\", my_port, level));\n\n  /* Only screw with state if this pin is set as an input, and the\n     input is actually enabled, and it isn't in peripheral mode.  */\n  if ((port->dir & bit) || !(port->inen & bit) || !(port->fer & bit))\n    {\n      HW_TRACE ((me, \"ignoring level due to DIR=%i INEN=%i FER=%i\",\n\t\t !!(port->dir & bit), !!(port->inen & bit),\n\t\t !!(port->fer & bit)));\n      return;\n    }\n\n  hw_port_event (me, my_port, level);\n}",
+      "fn_code_pos": [
+        [
+          220,
+          0
+        ],
+        [
+          245,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_gpio_port_event",
+        "parameters": {
+          "me": "struct hw",
+          "my_port": "int",
+          "source": "struct hw",
+          "source_port": "int",
+          "level": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nattach_bfin_gpio_regs (struct hw *me, struct bfin_gpio *port)\n{\n  address_word attach_address;\n  int attach_space;\n  unsigned attach_size;\n  reg_property_spec reg;\n\n  if (hw_find_property (me, \"reg\") == NULL)\n    hw_abort (me, \"Missing \\\"reg\\\" property\");\n\n  if (!hw_find_reg_array_property (me, \"reg\", 0, &reg))\n    hw_abort (me, \"\\\"reg\\\" property must contain three addr/size entries\");\n\n  hw_unit_address_to_attach_address (hw_parent (me),\n\t\t\t\t     &reg.address,\n\t\t\t\t     &attach_space, &attach_address, me);\n  hw_unit_size_to_attach_size (hw_parent (me), &reg.size, &attach_size, me);\n\n  if (attach_size != BFIN_MMR_GPIO2_SIZE)\n    hw_abort (me, \"\\\"reg\\\" size must be %#x\", BFIN_MMR_GPIO2_SIZE);\n\n  hw_attach_address (hw_parent (me),\n\t\t     0, attach_space, attach_address, attach_size, me);\n\n  port->base = attach_address;\n}",
+      "fn_code_pos": [
+        [
+          247,
+          0
+        ],
+        [
+          273,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "attach_bfin_gpio_regs",
+        "parameters": {
+          "me": "struct hw",
+          "port": "struct bfin_gpio"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nbfin_gpio_finish (struct hw *me)\n{\n  struct bfin_gpio *port;\n\n  port = HW_ZALLOC (me, struct bfin_gpio);\n\n  set_hw_data (me, port);\n  set_hw_io_read_buffer (me, bfin_gpio_io_read_buffer);\n  set_hw_io_write_buffer (me, bfin_gpio_io_write_buffer);\n  set_hw_ports (me, bfin_gpio_ports);\n  set_hw_port_event (me, bfin_gpio_port_event);\n\n  attach_bfin_gpio_regs (me, port);\n}",
+      "fn_code_pos": [
+        [
+          275,
+          0
+        ],
+        [
+          289,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "bfin_gpio_finish",
+        "parameters": {
+          "me": "struct hw"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "BFIN_MMR_16(fer)",
+      "fn_dec_pos": [
+        [
+          38,
+          7
+        ],
+        [
+          38,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(data)",
+      "fn_dec_pos": [
+        [
+          39,
+          7
+        ],
+        [
+          39,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(set)",
+      "fn_dec_pos": [
+        [
+          40,
+          7
+        ],
+        [
+          40,
+          23
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(clear)",
+      "fn_dec_pos": [
+        [
+          41,
+          7
+        ],
+        [
+          41,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(dir_set)",
+      "fn_dec_pos": [
+        [
+          42,
+          7
+        ],
+        [
+          42,
+          27
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(dir_clear)",
+      "fn_dec_pos": [
+        [
+          43,
+          7
+        ],
+        [
+          43,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    },
+    {
+      "fn_code": "BFIN_MMR_16(inen)",
+      "fn_dec_pos": [
+        [
+          44,
+          7
+        ],
+        [
+          44,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "BFIN_MMR_16",
+        "parameters": {},
+        "return_type": "bu16"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct bfin_gpio\n{\n  bu32 base;\n\n  /* Only accessed indirectly via dir_{set,clear}.  */\n  bu16 dir;\n\n  /* Make sure hardware MMRs are aligned.  */\n  bu16 _pad;\n\n  /* Order after here is important -- matches hardware MMR layout.  */\n  bu16 BFIN_MMR_16(fer);\n  bu16 BFIN_MMR_16(data);\n  bu16 BFIN_MMR_16(set);\n  bu16 BFIN_MMR_16(clear);\n  bu16 BFIN_MMR_16(dir_set);\n  bu16 BFIN_MMR_16(dir_clear);\n  bu16 BFIN_MMR_16(inen);\n  bu32 mux;\n}",
+      {
+        "base": "bu32",
+        "dir": "bu16",
+        "_pad": "bu16",
+        "BFIN_MMR_16(fer)": "bu16",
+        "BFIN_MMR_16(data)": "bu16",
+        "BFIN_MMR_16(set)": "bu16",
+        "BFIN_MMR_16(clear)": "bu16",
+        "BFIN_MMR_16(dir_set)": "bu16",
+        "BFIN_MMR_16(dir_clear)": "bu16",
+        "BFIN_MMR_16(inen)": "bu16",
+        "mux": "bu32"
+      },
+      "bfin_gpio",
+      [
+        27,
+        0
+      ],
+      [
+        46,
+        1
+      ]
+    ],
+    [
+      "struct bfin_gpio\n{\n  bu32 base;\n\n  /* Only accessed indirectly via dir_{set,clear}.  */\n  bu16 dir;\n\n  /* Make sure hardware MMRs are aligned.  */\n  bu16 _pad;\n\n  /* Order after here is important -- matches hardware MMR layout.  */\n  bu16 BFIN_MMR_16(fer);\n  bu16 BFIN_MMR_16(data);\n  bu16 BFIN_MMR_16(set);\n  bu16 BFIN_MMR_16(clear);\n  bu16 BFIN_MMR_16(dir_set);\n  bu16 BFIN_MMR_16(dir_clear);\n  bu16 BFIN_MMR_16(inen);\n  bu32 mux;\n}",
+      {
+        "base": "bu32",
+        "dir": "bu16",
+        "_pad": "bu16",
+        "BFIN_MMR_16(fer)": "bu16",
+        "BFIN_MMR_16(data)": "bu16",
+        "BFIN_MMR_16(set)": "bu16",
+        "BFIN_MMR_16(clear)": "bu16",
+        "BFIN_MMR_16(dir_set)": "bu16",
+        "BFIN_MMR_16(dir_clear)": "bu16",
+        "BFIN_MMR_16(inen)": "bu16",
+        "mux": "bu32"
+      },
+      "bfin_gpio",
+      [
+        27,
+        0
+      ],
+      [
+        46,
+        1
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        58,
+        27
+      ],
+      [
+        58,
+        36
+      ]
+    ],
+    [
+      "struct bfin_gpio",
+      {},
+      "",
+      [
+        61,
+        2
+      ],
+      [
+        61,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        146,
+        26
+      ],
+      [
+        146,
+        35
+      ]
+    ],
+    [
+      "struct bfin_gpio",
+      {},
+      "",
+      [
+        149,
+        2
+      ],
+      [
+        149,
+        18
+      ]
+    ],
+    [
+      "struct hw_port_descriptor",
+      {},
+      "",
+      [
+        199,
+        13
+      ],
+      [
+        199,
+        38
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        221,
+        22
+      ],
+      [
+        221,
+        31
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        221,
+        50
+      ],
+      [
+        221,
+        59
+      ]
+    ],
+    [
+      "struct bfin_gpio",
+      {},
+      "",
+      [
+        224,
+        2
+      ],
+      [
+        224,
+        18
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        248,
+        23
+      ],
+      [
+        248,
+        32
+      ]
+    ],
+    [
+      "struct bfin_gpio",
+      {},
+      "",
+      [
+        248,
+        38
+      ],
+      [
+        248,
+        54
+      ]
+    ],
+    [
+      "struct hw",
+      {},
+      "",
+      [
+        276,
+        18
+      ],
+      [
+        276,
+        27
+      ]
+    ],
+    [
+      "struct bfin_gpio",
+      {},
+      "",
+      [
+        278,
+        2
+      ],
+      [
+        278,
+        18
+      ]
+    ],
+    [
+      "struct hw_descriptor",
+      {},
+      "",
+      [
+        291,
+        6
+      ],
+      [
+        291,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"config.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"sim-main.h\"\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"devices.h\"\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"dv-bfin_gpio2.h\"\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

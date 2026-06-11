@@ -1,0 +1,3740 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static struct device *get_device (int fd)\n{\n  if (fd <= 0 || fd >= sizeof(handle_to_device)/sizeof(handle_to_device[0]))\n     return (NULL);\n  return handle_to_device [fd-1];\n}",
+      "fn_code_pos": [
+        [
+          136,
+          0
+        ],
+        [
+          141,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_device",
+        "parameters": {
+          "fd": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_t *pcap_create_interface (const char *device _U_, char *ebuf)\n{\n\tpcap_t *p;\n\n\tp = pcap_create_common(ebuf, sizeof (struct pcap_dos));\n\tif (p == NULL)\n\t\treturn (NULL);\n\n\tp->activate_op = pcap_activate_dos;\n\treturn (p);\n}",
+      "fn_code_pos": [
+        [
+          151,
+          0
+        ],
+        [
+          161,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": "pcap_t"
+      }
+    },
+    {
+      "fn_code": "static int pcap_activate_dos (pcap_t *pcap)\n{\n  if (pcap->opt.rfmon) {\n    /*\n     * No monitor mode on DOS.\n     */\n    return (PCAP_ERROR_RFMON_NOTSUP);\n  }\n\n  /*\n   * Turn a negative snapshot value (invalid), a snapshot value of\n   * 0 (unspecified), or a value bigger than the normal maximum\n   * value, into the maximum allowed value.\n   *\n   * If some application really *needs* a bigger snapshot\n   * length, we should just increase MAXIMUM_SNAPLEN.\n   */\n  if (pcap->snapshot <= 0 || pcap->snapshot > MAXIMUM_SNAPLEN)\n    pcap->snapshot = MAXIMUM_SNAPLEN;\n\n  if (pcap->snapshot < ETH_MIN+8)\n      pcap->snapshot = ETH_MIN+8;\n\n  if (pcap->snapshot > ETH_MAX)   /* silently accept and truncate large MTUs */\n      pcap->snapshot = ETH_MAX;\n\n  pcap->linktype          = DLT_EN10MB;  /* !! */\n  pcap->cleanup_op        = pcap_cleanup_dos;\n  pcap->read_op           = pcap_read_dos;\n  pcap->stats_op          = pcap_stats_dos;\n  pcap->inject_op         = pcap_sendpacket_dos;\n  pcap->setfilter_op      = pcap_setfilter_dos;\n  pcap->setdirection_op   = NULL;  /* Not implemented.*/\n  pcap->fd                = ++ref_count;\n\n  pcap->bufsize = ETH_MAX+100;     /* add some margin */\n  pcap->buffer = calloc (pcap->bufsize, 1);\n\n  if (pcap->fd == 1)  /* first time we're called */\n  {\n    if (!init_watt32(pcap, pcap->opt.device, pcap->errbuf) ||\n        !first_init(pcap->opt.device, pcap->errbuf, pcap->opt.promisc))\n    {\n      /* XXX - free pcap->buffer? */\n      return (PCAP_ERROR);\n    }\n    atexit (close_driver);\n  }\n  else if (stricmp(active_dev->name,pcap->opt.device))\n  {\n    pcap_snprintf (pcap->errbuf, PCAP_ERRBUF_SIZE,\n                   \"Cannot use different devices simultaneously \"\n                   \"(`%s' vs. `%s')\", active_dev->name, pcap->opt.device);\n    /* XXX - free pcap->buffer? */\n    return (PCAP_ERROR);\n  }\n  handle_to_device [pcap->fd-1] = active_dev;\n  return (0);\n}",
+      "fn_code_pos": [
+        [
+          167,
+          0
+        ],
+        [
+          225,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_activate_dos",
+        "parameters": {
+          "pcap": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_read_one (pcap_t *p, pcap_handler callback, u_char *data)\n{\n  struct pcap_dos *pd = p->priv;\n  struct pcap_pkthdr pcap;\n  struct timeval     now, expiry = { 0,0 };\n  int    rx_len = 0;\n\n  if (p->opt.timeout > 0)\n  {\n    gettimeofday2 (&now, NULL);\n    expiry.tv_usec = now.tv_usec + 1000UL * p->opt.timeout;\n    expiry.tv_sec  = now.tv_sec;\n    while (expiry.tv_usec >= 1000000L)\n    {\n      expiry.tv_usec -= 1000000L;\n      expiry.tv_sec++;\n    }\n  }\n\n  while (!exc_occured)\n  {\n    volatile struct device *dev; /* might be reset by sig_handler */\n\n    dev = get_device (p->fd);\n    if (!dev)\n       break;\n\n    PCAP_ASSERT (dev->copy_rx_buf || dev->peek_rx_buf);\n    FLUSHK();\n\n    /* If driver has a zero-copy receive facility, peek at the queue,\n     * filter it, do the callback and release the buffer.\n     */\n    if (dev->peek_rx_buf)\n    {\n      PCAP_ASSERT (dev->release_rx_buf);\n      rx_len = (*dev->peek_rx_buf) (&p->buffer);\n    }\n    else\n    {\n      rx_len = (*dev->copy_rx_buf) (p->buffer, p->snapshot);\n    }\n\n    if (rx_len > 0)  /* got a packet */\n    {\n      mac_count++;\n\n      FLUSHK();\n\n      pcap.caplen = min (rx_len, p->snapshot);\n      pcap.len    = rx_len;\n\n      if (callback &&\n          (!p->fcode.bf_insns || bpf_filter(p->fcode.bf_insns, p->buffer, pcap.len, pcap.caplen)))\n      {\n        filter_count++;\n\n        /* Fix-me!! Should be time of arrival. Not time of\n         * capture.\n         */\n        gettimeofday2 (&pcap.ts, NULL);\n        (*callback) (data, &pcap, p->buffer);\n      }\n\n      if (dev->release_rx_buf)\n        (*dev->release_rx_buf) (p->buffer);\n\n      if (pcap_pkt_debug > 0)\n      {\n        if (callback == watt32_recv_hook)\n             dbug_write (\"pcap_recv_hook\\n\");\n        else dbug_write (\"pcap_read_op\\n\");\n      }\n      FLUSHK();\n      return (1);\n    }\n\n    /* Has \"pcap_breakloop()\" been called?\n     */\n    if (p->break_loop) {\n      /*\n       * Yes - clear the flag that indicates that it\n       * has, and return -2 to indicate that we were\n       * told to break out of the loop.\n       */\n      p->break_loop = 0;\n      return (-2);\n    }\n\n    /* If not to wait for a packet or pcap_cleanup_dos() called from\n     * e.g. SIGINT handler, exit loop now.\n     */\n    if (p->opt.timeout <= 0 || (volatile int)p->fd <= 0)\n       break;\n\n    gettimeofday2 (&now, NULL);\n\n    if (timercmp(&now, &expiry, >))\n       break;\n\n#ifndef DJGPP\n    kbhit();    /* a real CPU hog */\n#endif\n\n    if (pd->wait_proc)\n      (*pd->wait_proc)();     /* call yield func */\n  }\n\n  if (rx_len < 0)            /* receive error */\n  {\n    pd->stat.ps_drop++;\n#ifdef USE_32BIT_DRIVERS\n    if (pcap_pkt_debug > 1)\n       printk (\"pkt-err %s\\n\", pktInfo.error);\n#endif\n    return (-1);\n  }\n  return (0);\n}",
+      "fn_code_pos": [
+        [
+          231,
+          0
+        ],
+        [
+          350,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_read_one",
+        "parameters": {
+          "p": "pcap_t",
+          "callback": "pcap_handler",
+          "data": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\npcap_read_dos (pcap_t *p, int cnt, pcap_handler callback, u_char *data)\n{\n  int rc, num = 0;\n\n  while (num <= cnt || PACKET_COUNT_IS_UNLIMITED(cnt))\n  {\n    if (p->fd <= 0)\n       return (-1);\n    rc = pcap_read_one (p, callback, data);\n    if (rc > 0)\n       num++;\n    if (rc < 0)\n       break;\n    _w32_os_yield();  /* allow SIGINT generation, yield to Win95/NT */\n  }\n  return (num);\n}",
+      "fn_code_pos": [
+        [
+          352,
+          0
+        ],
+        [
+          369,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_read_dos",
+        "parameters": {
+          "p": "pcap_t",
+          "cnt": "int",
+          "callback": "pcap_handler",
+          "data": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pcap_stats_dos (pcap_t *p, struct pcap_stat *ps)\n{\n  struct net_device_stats *stats;\n  struct pcap_dos         *pd;\n  struct device           *dev = p ? get_device(p->fd) : NULL;\n\n  if (!dev)\n  {\n    strcpy (p->errbuf, \"illegal pcap handle\");\n    return (-1);\n  }\n\n  if (!dev->get_stats || (stats = (*dev->get_stats)(dev)) == NULL)\n  {\n    strcpy (p->errbuf, \"device statistics not available\");\n    return (-1);\n  }\n\n  FLUSHK();\n\n  pd = p->priv;\n  pd->stat.ps_recv   = stats->rx_packets;\n  pd->stat.ps_drop  += stats->rx_missed_errors;\n  pd->stat.ps_ifdrop = stats->rx_dropped +  /* queue full */\n                         stats->rx_errors;    /* HW errors */\n  if (ps)\n     *ps = pd->stat;\n\n  return (0);\n}",
+      "fn_code_pos": [
+        [
+          374,
+          0
+        ],
+        [
+          403,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stats_dos",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int pcap_stats_ex (pcap_t *p, struct pcap_stat_ex *se)\n{\n  struct device *dev = p ? get_device (p->fd) : NULL;\n\n  if (!dev || !dev->get_stats)\n  {\n    strlcpy (p->errbuf, \"detailed device statistics not available\",\n             PCAP_ERRBUF_SIZE);\n    return (-1);\n  }\n\n  if (!strnicmp(dev->name,\"pkt\",3))\n  {\n    strlcpy (p->errbuf, \"pktdrvr doesn't have detailed statistics\",\n             PCAP_ERRBUF_SIZE);\n    return (-1);\n  }\n  memcpy (se, (*dev->get_stats)(dev), sizeof(*se));\n  return (0);\n}",
+      "fn_code_pos": [
+        [
+          409,
+          0
+        ],
+        [
+          428,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stats_ex",
+        "parameters": {
+          "p": "pcap_t",
+          "se": "struct pcap_stat_ex"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pcap_setfilter_dos (pcap_t *p, struct bpf_program *fp)\n{\n  if (!p)\n     return (-1);\n  p->fcode = *fp;\n  return (0);\n}",
+      "fn_code_pos": [
+        [
+          435,
+          0
+        ],
+        [
+          441,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setfilter_dos",
+        "parameters": {
+          "p": "pcap_t",
+          "fp": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "u_long pcap_mac_packets (void)\n{\n  return (mac_count);\n}",
+      "fn_code_pos": [
+        [
+          446,
+          0
+        ],
+        [
+          449,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_mac_packets",
+        "parameters": {},
+        "return_type": "u_long"
+      }
+    },
+    {
+      "fn_code": "u_long pcap_filter_packets (void)\n{\n  return (filter_count);\n}",
+      "fn_code_pos": [
+        [
+          454,
+          0
+        ],
+        [
+          457,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_filter_packets",
+        "parameters": {},
+        "return_type": "u_long"
+      }
+    },
+    {
+      "fn_code": "static void pcap_cleanup_dos (pcap_t *p)\n{\n  struct pcap_dos *pd;\n\n  if (!exc_occured)\n  {\n    pd = p->priv;\n    if (pcap_stats(p,NULL) < 0)\n       pd->stat.ps_drop = 0;\n    if (!get_device(p->fd))\n       return;\n\n    handle_to_device [p->fd-1] = NULL;\n    p->fd = 0;\n    if (ref_count > 0)\n        ref_count--;\n    if (ref_count > 0)\n       return;\n  }\n  close_driver();\n  /* XXX - call pcap_cleanup_live_common? */\n}",
+      "fn_code_pos": [
+        [
+          462,
+          0
+        ],
+        [
+          483,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_cleanup_dos",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "char *pcap_lookupdev (char *ebuf)\n{\n  struct device *dev;\n\n#ifdef USE_32BIT_DRIVERS\n  init_32bit();\n#endif\n\n  for (dev = (struct device*)dev_base; dev; dev = dev->next)\n  {\n    PCAP_ASSERT (dev->probe);\n\n    if ((*dev->probe)(dev))\n    {\n      FLUSHK();\n      probed_dev = (struct device*) dev; /* remember last probed device */\n      return (char*) dev->name;\n    }\n  }\n\n  if (ebuf)\n     strcpy (ebuf, \"No driver found\");\n  return (NULL);\n}",
+      "fn_code_pos": [
+        [
+          489,
+          0
+        ],
+        [
+          512,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lookupdev",
+        "parameters": {
+          "ebuf": "char"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "int pcap_lookupnet (const char *device, bpf_u_int32 *localnet,\n                    bpf_u_int32 *netmask, char *errbuf)\n{\n  DWORD mask, net;\n\n  if (!_watt_is_init)\n  {\n    strcpy (errbuf, \"pcap_open_offline() or pcap_activate() must be \"\n                    \"called first\");\n    return (-1);\n  }\n\n  mask  = _w32_sin_mask;\n  net = my_ip_addr & mask;\n  if (net == 0)\n  {\n    if (IN_CLASSA(*netmask))\n       net = IN_CLASSA_NET;\n    else if (IN_CLASSB(*netmask))\n       net = IN_CLASSB_NET;\n    else if (IN_CLASSC(*netmask))\n       net = IN_CLASSC_NET;\n    else\n    {\n      pcap_snprintf (errbuf, PCAP_ERRBUF_SIZE, \"inet class for 0x%lx unknown\", mask);\n      return (-1);\n    }\n  }\n  *localnet = htonl (net);\n  *netmask = htonl (mask);\n\n  ARGSUSED (device);\n  return (0);\n}",
+      "fn_code_pos": [
+        [
+          517,
+          0
+        ],
+        [
+          550,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lookupnet",
+        "parameters": {
+          "device": "char",
+          "localnet": "bpf_u_int32",
+          "netmask": "bpf_u_int32",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int pcap_platform_finddevs  (pcap_if_list_t *devlistp, char *errbuf)\n{\n  struct device     *dev;\n  pcap_if_t *curdev;\n#if 0   /* Pkt drivers should have no addresses */\n  struct sockaddr_in sa_ll_1, sa_ll_2;\n  struct sockaddr   *addr, *netmask, *broadaddr, *dstaddr;\n#endif\n  int       ret = 0;\n  int       found = 0;\n\n  for (dev = (struct device*)dev_base; dev; dev = dev->next)\n  {\n    PCAP_ASSERT (dev->probe);\n\n    if (!(*dev->probe)(dev))\n       continue;\n\n    PCAP_ASSERT (dev->close);  /* set by probe routine */\n    FLUSHK();\n    (*dev->close) (dev);\n\n    /*\n     * XXX - find out whether it's up or running?  Does that apply here?\n     * Can we find out if anything's plugged into the adapter, if it's\n     * a wired device, and set PCAP_IF_CONNECTION_STATUS_CONNECTED\n     * or PCAP_IF_CONNECTION_STATUS_DISCONNECTED?\n     */\n    if ((curdev = add_dev(devlistp, dev->name, 0,\n                dev->long_name, errbuf)) == NULL)\n    {\n      ret = -1;\n      break;\n    }\n    found = 1;\n#if 0   /* Pkt drivers should have no addresses */\n    memset (&sa_ll_1, 0, sizeof(sa_ll_1));\n    memset (&sa_ll_2, 0, sizeof(sa_ll_2));\n    sa_ll_1.sin_family = AF_INET;\n    sa_ll_2.sin_family = AF_INET;\n\n    addr      = (struct sockaddr*) &sa_ll_1;\n    netmask   = (struct sockaddr*) &sa_ll_1;\n    dstaddr   = (struct sockaddr*) &sa_ll_1;\n    broadaddr = (struct sockaddr*) &sa_ll_2;\n    memset (&sa_ll_2.sin_addr, 0xFF, sizeof(sa_ll_2.sin_addr));\n\n    if (add_addr_to_dev(curdev, addr, sizeof(*addr),\n                        netmask, sizeof(*netmask),\n                        broadaddr, sizeof(*broadaddr),\n                        dstaddr, sizeof(*dstaddr), errbuf) < 0)\n    {\n      ret = -1;\n      break;\n    }\n#endif\n  }\n\n  if (ret == 0 && !found)\n     strcpy (errbuf, \"No drivers found\");\n\n  return (ret);\n}",
+      "fn_code_pos": [
+        [
+          557,
+          0
+        ],
+        [
+          619,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_platform_finddevs",
+        "parameters": {
+          "devlistp": "pcap_if_list_t",
+          "errbuf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "void pcap_assert (const char *what, const char *file, unsigned line)\n{\n  FLUSHK();\n  fprintf (stderr, \"%s (%u): Assertion \\\"%s\\\" failed\\n\",\n           file, line, what);\n  close_driver();\n  _exit (-1);\n}",
+      "fn_code_pos": [
+        [
+          624,
+          0
+        ],
+        [
+          631,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_assert",
+        "parameters": {
+          "what": "char",
+          "file": "char",
+          "line": "unsigned"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "void pcap_set_wait (pcap_t *p, void (*yield)(void), int wait)\n{\n  if (p)\n  {\n    struct pcap_dos *pd = p->priv;\n\n    pd->wait_proc  = yield;\n    p->opt.timeout = wait;\n  }\n}",
+      "fn_code_pos": [
+        [
+          637,
+          0
+        ],
+        [
+          646,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_set_wait",
+        "parameters": {
+          "p": "pcap_t",
+          "yield": "void",
+          "wait": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static struct device *\nopen_driver (const char *dev_name, char *ebuf, int promisc)\n{\n  struct device *dev;\n\n  for (dev = (struct device*)dev_base; dev; dev = dev->next)\n  {\n    PCAP_ASSERT (dev->name);\n\n    if (strcmp (dev_name,dev->name))\n       continue;\n\n    if (!probed_dev)   /* user didn't call pcap_lookupdev() first */\n    {\n      PCAP_ASSERT (dev->probe);\n\n      if (!(*dev->probe)(dev))    /* call the xx_probe() function */\n      {\n        pcap_snprintf (ebuf, PCAP_ERRBUF_SIZE, \"failed to detect device `%s'\", dev_name);\n        return (NULL);\n      }\n      probed_dev = dev;  /* device is probed okay and may be used */\n    }\n    else if (dev != probed_dev)\n    {\n      goto not_probed;\n    }\n\n    FLUSHK();\n\n    /* Select what traffic to receive\n     */\n    if (promisc)\n         dev->flags |=  (IFF_ALLMULTI | IFF_PROMISC);\n    else dev->flags &= ~(IFF_ALLMULTI | IFF_PROMISC);\n\n    PCAP_ASSERT (dev->open);\n\n    if (!(*dev->open)(dev))\n    {\n      pcap_snprintf (ebuf, PCAP_ERRBUF_SIZE, \"failed to activate device `%s'\", dev_name);\n      if (pktInfo.error && !strncmp(dev->name,\"pkt\",3))\n      {\n        strcat (ebuf, \": \");\n        strcat (ebuf, pktInfo.error);\n      }\n      return (NULL);\n    }\n\n    /* Some devices need this to operate in promiscous mode\n     */\n    if (promisc && dev->set_multicast_list)\n       (*dev->set_multicast_list) (dev);\n\n    active_dev = dev;   /* remember our active device */\n    break;\n  }\n\n  /* 'dev_name' not matched in 'dev_base' list.\n   */\n  if (!dev)\n  {\n    pcap_snprintf (ebuf, PCAP_ERRBUF_SIZE, \"device `%s' not supported\", dev_name);\n    return (NULL);\n  }\n\nnot_probed:\n  if (!probed_dev)\n  {\n    pcap_snprintf (ebuf, PCAP_ERRBUF_SIZE, \"device `%s' not probed\", dev_name);\n    return (NULL);\n  }\n  return (dev);\n}",
+      "fn_code_pos": [
+        [
+          651,
+          0
+        ],
+        [
+          724,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "open_driver",
+        "parameters": {
+          "dev_name": "char",
+          "ebuf": "char",
+          "promisc": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void close_driver (void)\n{\n  /* !!todo: loop over all 'handle_to_device[]' ? */\n  struct device *dev = active_dev;\n\n  if (dev && dev->close)\n  {\n    (*dev->close) (dev);\n    FLUSHK();\n  }\n\n  active_dev = NULL;\n\n#ifdef USE_32BIT_DRIVERS\n  if (rx_pool)\n  {\n    k_free (rx_pool);\n    rx_pool = NULL;\n  }\n  if (dev)\n     pcibios_exit();\n#endif\n}",
+      "fn_code_pos": [
+        [
+          730,
+          0
+        ],
+        [
+          752,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "close_driver",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void setup_signals (void (*handler)(int))\n{\n  signal (SIGSEGV,handler);\n  signal (SIGILL, handler);\n  signal (SIGFPE, handler);\n}",
+      "fn_code_pos": [
+        [
+          756,
+          0
+        ],
+        [
+          761,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "setup_signals",
+        "parameters": {
+          "handler": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void exc_handler (int sig)\n{\n#ifdef USE_32BIT_DRIVERS\n  if (active_dev->irq > 0)    /* excludes IRQ 0 */\n  {\n    disable_irq (active_dev->irq);\n    irq_eoi_cmd (active_dev->irq);\n    _printk_safe = 1;\n  }\n#endif\n\n  switch (sig)\n  {\n    case SIGSEGV:\n         fputs (\"Catching SIGSEGV.\\n\", stderr);\n         break;\n    case SIGILL:\n         fputs (\"Catching SIGILL.\\n\", stderr);\n         break;\n    case SIGFPE:\n         _fpreset();\n         fputs (\"Catching SIGFPE.\\n\", stderr);\n         break;\n    default:\n         fprintf (stderr, \"Catching signal %d.\\n\", sig);\n  }\n  exc_occured = 1;\n  close_driver();\n}",
+      "fn_code_pos": [
+        [
+          763,
+          0
+        ],
+        [
+          791,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "exc_handler",
+        "parameters": {
+          "sig": "int"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int first_init (const char *name, char *ebuf, int promisc)\n{\n  struct device *dev;\n\n#ifdef USE_32BIT_DRIVERS\n  rx_pool = k_calloc (RECEIVE_BUF_SIZE, RECEIVE_QUEUE_SIZE);\n  if (!rx_pool)\n  {\n    strcpy (ebuf, \"Not enough memory (Rx pool)\");\n    return (0);\n  }\n#endif\n\n#ifdef __DJGPP__\n  setup_signals (exc_handler);\n#endif\n\n#ifdef USE_32BIT_DRIVERS\n  init_32bit();\n#endif\n\n  dev = open_driver (name, ebuf, promisc);\n  if (!dev)\n  {\n#ifdef USE_32BIT_DRIVERS\n    k_free (rx_pool);\n    rx_pool = NULL;\n#endif\n\n#ifdef __DJGPP__\n    setup_signals (SIG_DFL);\n#endif\n    return (0);\n  }\n\n#ifdef USE_32BIT_DRIVERS\n  /*\n   * If driver is NOT a 16-bit \"pkt/ndis\" driver (having a 'copy_rx_buf'\n   * set in it's probe handler), initialise near-memory ring-buffer for\n   * the 32-bit device.\n   */\n  if (dev->copy_rx_buf == NULL)\n  {\n    dev->get_rx_buf     = get_rxbuf;\n    dev->peek_rx_buf    = peek_rxbuf;\n    dev->release_rx_buf = release_rxbuf;\n    pktq_init (&dev->queue, RECEIVE_BUF_SIZE, RECEIVE_QUEUE_SIZE, rx_pool);\n  }\n#endif\n  return (1);\n}",
+      "fn_code_pos": [
+        [
+          798,
+          0
+        ],
+        [
+          848,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "first_init",
+        "parameters": {
+          "name": "char",
+          "ebuf": "char",
+          "promisc": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void init_32bit (void)\n{\n  static int init_pci = 0;\n\n  if (!_printk_file)\n     _printk_init (64*1024, NULL); /* calls atexit(printk_exit) */\n\n  if (!init_pci)\n     (void)pci_init();             /* init BIOS32+PCI interface */\n  init_pci = 1;\n}",
+      "fn_code_pos": [
+        [
+          851,
+          0
+        ],
+        [
+          861,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "init_32bit",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void watt32_recv_hook (u_char *dummy, const struct pcap_pkthdr *pcap,\n                              const u_char *buf)\n{\n  /* Fix me: assumes Ethernet II only */\n  struct ether_header *ep = (struct ether_header*) buf;\n\n  memcpy (rxbuf, buf, pcap->caplen);\n  etype = ep->ether_type;\n  ARGSUSED (dummy);\n}",
+      "fn_code_pos": [
+        [
+          872,
+          0
+        ],
+        [
+          881,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "watt32_recv_hook",
+        "parameters": {
+          "dummy": "u_char",
+          "pcap": "struct pcap_pkthdr",
+          "buf": "u_char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void *pcap_recv_hook (WORD *type)\n{\n  int len = pcap_read_dos (&pcap_save, 1, watt32_recv_hook, NULL);\n\n  if (len < 0)\n     return (NULL);\n\n  *type = etype;\n  return (void*) &rxbuf;\n}",
+      "fn_code_pos": [
+        [
+          888,
+          0
+        ],
+        [
+          897,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_recv_hook",
+        "parameters": {
+          "type": "WORD"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int pcap_xmit_hook (const void *buf, unsigned len)\n{\n  int rc = 0;\n\n  if (pcap_pkt_debug > 0)\n     dbug_write (\"pcap_xmit_hook: \");\n\n  if (active_dev && active_dev->xmit)\n     if ((*active_dev->xmit) (active_dev, buf, len) > 0)\n        rc = len;\n\n  if (pcap_pkt_debug > 0)\n     dbug_write (rc ? \"ok\\n\" : \"fail\\n\");\n  return (rc);\n}",
+      "fn_code_pos": [
+        [
+          903,
+          0
+        ],
+        [
+          917,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_xmit_hook",
+        "parameters": {
+          "buf": "void",
+          "len": "unsigned"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pcap_sendpacket_dos (pcap_t *p, const void *buf, size_t len)\n{\n  struct device *dev = p ? get_device(p->fd) : NULL;\n\n  if (!dev || !dev->xmit)\n     return (-1);\n  return (*dev->xmit) (dev, buf, len);\n}",
+      "fn_code_pos": [
+        [
+          920,
+          0
+        ],
+        [
+          927,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_sendpacket_dos",
+        "parameters": {
+          "p": "pcap_t",
+          "buf": "void",
+          "len": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void pcap_init_hook (void)\n{\n  _w32__bootp_on = _w32__dhcp_on = _w32__rarp_on = 0;\n  _w32__do_mask_req = 0;\n  _w32_dynamic_host = 0;\n  if (prev_post_hook)\n    (*prev_post_hook)();\n}",
+      "fn_code_pos": [
+        [
+          935,
+          0
+        ],
+        [
+          942,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_init_hook",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void null_print (void) {}",
+      "fn_code_pos": [
+        [
+          947,
+          0
+        ],
+        [
+          947,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "null_print",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int init_watt32 (struct pcap *pcap, const char *dev_name, char *err_buf)\n{\n  char *env;\n  int   rc, MTU, has_ip_addr;\n  int   using_pktdrv = 1;\n\n  /* If user called sock_init() first, we need to reinit in\n   * order to open debug/trace-file properly\n   */\n  if (_watt_is_init)\n     sock_exit();\n\n  env = getenv (\"PCAP_TRACE\");\n  if (env && atoi(env) > 0 &&\n      pcap_pkt_debug < 0)   /* if not already set */\n  {\n    dbug_init();\n    pcap_pkt_debug = atoi (env);\n  }\n\n  _watt_do_exit      = 0;    /* prevent sock_init() calling exit() */\n  prev_post_hook     = _w32_usr_post_init;\n  _w32_usr_post_init = pcap_init_hook;\n  _w32_print_hook    = null_print;\n\n  if (dev_name && strncmp(dev_name,\"pkt\",3))\n     using_pktdrv = FALSE;\n\n  rc = sock_init();\n  has_ip_addr = (rc != 8);  /* IP-address assignment failed */\n\n  /* if pcap is using a 32-bit driver w/o a pktdrvr loaded, we\n   * just pretend Watt-32 is initialised okay.\n   *\n   * !! fix-me: The Watt-32 config isn't done if no pktdrvr\n   *            was found. In that case my_ip_addr + sin_mask\n   *            have default values. Should be taken from another\n   *            ini-file/environment in any case (ref. tcpdump.ini)\n   */\n  _watt_is_init = 1;\n\n  if (!using_pktdrv || !has_ip_addr)  /* for now .... */\n  {\n    static const char myip[] = \"192.168.0.1\";\n    static const char mask[] = \"255.255.255.0\";\n\n    printf (\"Just guessing, using IP %s and netmask %s\\n\", myip, mask);\n    my_ip_addr    = aton (myip);\n    _w32_sin_mask = aton (mask);\n  }\n  else if (rc && using_pktdrv)\n  {\n    pcap_snprintf (err_buf, PCAP_ERRBUF_SIZE, \"sock_init() failed, code %d\", rc);\n    return (0);\n  }\n\n  /* Set recv-hook for peeking in _eth_arrived().\n   */\n#if (WATTCP_VER >= 0x0224)\n  _eth_recv_hook = pcap_recv_hook;\n  _eth_xmit_hook = pcap_xmit_hook;\n#endif\n\n  /* Free the pkt-drvr handle allocated in pkt_init().\n   * The above hooks should thus use the handle reopened in open_driver()\n   */\n  if (using_pktdrv)\n  {\n    _eth_release();\n/*  _eth_is_init = 1; */  /* hack to get Rx/Tx-hooks in Watt-32 working */\n  }\n\n  memcpy (&pcap_save, pcap, sizeof(pcap_save));\n  MTU = pkt_get_mtu();\n  pcap_save.fcode.bf_insns = NULL;\n  pcap_save.linktype       = _eth_get_hwtype (NULL, NULL);\n  pcap_save.snapshot       = MTU > 0 ? MTU : ETH_MAX; /* assume 1514 */\n\n#if 1\n  /* prevent use of resolve() and resolve_ip()\n   */\n  last_nameserver = 0;\n#endif\n  return (1);\n}",
+      "fn_code_pos": [
+        [
+          955,
+          0
+        ],
+        [
+          1039,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "init_watt32",
+        "parameters": {
+          "pcap": "struct pcap",
+          "dev_name": "char",
+          "err_buf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int pcap_config_hook (const char *keyword, const char *value)\n{\n  return parse_config_table (debug_tab, NULL, keyword, value);\n}",
+      "fn_code_pos": [
+        [
+          1087,
+          0
+        ],
+        [
+          1090,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_config_hook",
+        "parameters": {
+          "keyword": "char",
+          "value": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void pkt_close (struct device *dev)\n{\n  BOOL okay = PktExitDriver();\n\n  if (pcap_pkt_debug > 1)\n     fprintf (stderr, \"pkt_close(): %d\\n\", okay);\n\n  if (dev->priv)\n     free (dev->priv);\n  dev->priv = NULL;\n}",
+      "fn_code_pos": [
+        [
+          1104,
+          0
+        ],
+        [
+          1114,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pkt_close",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int pkt_open (struct device *dev)\n{\n  PKT_RX_MODE mode;\n\n  if (dev->flags & IFF_PROMISC)\n       mode = PDRX_ALL_PACKETS;\n  else mode = PDRX_BROADCAST;\n\n  if (!PktInitDriver(mode))\n     return (0);\n\n  PktResetStatistics (pktInfo.handle);\n  PktQueueBusy (FALSE);\n  return (1);\n}",
+      "fn_code_pos": [
+        [
+          1116,
+          0
+        ],
+        [
+          1130,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pkt_open",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pkt_xmit (struct device *dev, const void *buf, int len)\n{\n  struct net_device_stats *stats = (struct net_device_stats*) dev->priv;\n\n  if (pcap_pkt_debug > 0)\n     dbug_write (\"pcap_xmit\\n\");\n\n  if (!PktTransmit(buf,len))\n  {\n    stats->tx_errors++;\n    return (0);\n  }\n  return (len);\n}",
+      "fn_code_pos": [
+        [
+          1132,
+          0
+        ],
+        [
+          1145,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pkt_xmit",
+        "parameters": {
+          "dev": "struct device",
+          "buf": "void",
+          "len": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void *pkt_stats (struct device *dev)\n{\n  struct net_device_stats *stats = (struct net_device_stats*) dev->priv;\n\n  if (!stats || !PktSessStatistics(pktInfo.handle))\n     return (NULL);\n\n  stats->rx_packets       = pktStat.inPackets;\n  stats->rx_errors        = pktStat.lost;\n  stats->rx_missed_errors = PktRxDropped();\n  return (stats);\n}",
+      "fn_code_pos": [
+        [
+          1147,
+          0
+        ],
+        [
+          1158,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pkt_stats",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int pkt_probe (struct device *dev)\n{\n  if (!PktSearchDriver())\n     return (0);\n\n  dev->open           = pkt_open;\n  dev->xmit           = pkt_xmit;\n  dev->close          = pkt_close;\n  dev->get_stats      = pkt_stats;\n  dev->copy_rx_buf    = PktReceive;  /* farmem peek and copy routine */\n  dev->get_rx_buf     = NULL;\n  dev->peek_rx_buf    = NULL;\n  dev->release_rx_buf = NULL;\n  dev->priv           = calloc (sizeof(struct net_device_stats), 1);\n  if (!dev->priv)\n     return (0);\n  return (1);\n}",
+      "fn_code_pos": [
+        [
+          1160,
+          0
+        ],
+        [
+          1177,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pkt_probe",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void ndis_close (struct device *dev)\n{\n#ifdef USE_NDIS2\n  NdisShutdown();\n#endif\n  ARGSUSED (dev);\n}",
+      "fn_code_pos": [
+        [
+          1182,
+          0
+        ],
+        [
+          1188,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ndis_close",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int ndis_open (struct device *dev)\n{\n  int promis = (dev->flags & IFF_PROMISC);\n\n#ifdef USE_NDIS2\n  if (!NdisInit(promis))\n     return (0);\n  return (1);\n#else\n  ARGSUSED (promis);\n  return (0);\n#endif\n}",
+      "fn_code_pos": [
+        [
+          1190,
+          0
+        ],
+        [
+          1202,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ndis_open",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void *ndis_stats (struct device *dev)\n{\n  static struct net_device_stats stats;\n\n  /* to-do */\n  ARGSUSED (dev);\n  return (&stats);\n}",
+      "fn_code_pos": [
+        [
+          1204,
+          0
+        ],
+        [
+          1211,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ndis_stats",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int ndis_probe (struct device *dev)\n{\n#ifdef USE_NDIS2\n  if (!NdisOpen())\n     return (0);\n#endif\n\n  dev->open           = ndis_open;\n  dev->xmit           = NULL;\n  dev->close          = ndis_close;\n  dev->get_stats      = ndis_stats;\n  dev->copy_rx_buf    = NULL;       /* to-do */\n  dev->get_rx_buf     = NULL;       /* upcall is from rmode driver */\n  dev->peek_rx_buf    = NULL;\n  dev->release_rx_buf = NULL;\n  return (0);\n}",
+      "fn_code_pos": [
+        [
+          1213,
+          0
+        ],
+        [
+          1229,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ndis_probe",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int peek_rxbuf (BYTE **buf)\n{\n  struct rx_elem *tail, *head;\n\n  PCAP_ASSERT (pktq_check (&active_dev->queue));\n\n  DISABLE();\n  tail = pktq_out_elem (&active_dev->queue);\n  head = pktq_in_elem (&active_dev->queue);\n  ENABLE();\n\n  if (head != tail)\n  {\n    PCAP_ASSERT (tail->size < active_dev->queue.elem_size-4-2);\n\n    *buf = &tail->data[0];\n    return (tail->size);\n  }\n  *buf = NULL;\n  return (0);\n}",
+      "fn_code_pos": [
+        [
+          1331,
+          0
+        ],
+        [
+          1351,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "peek_rxbuf",
+        "parameters": {
+          "buf": "BYTE"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "int release_rxbuf (BYTE *buf)\n{\n#ifndef NDEBUG\n  struct rx_elem *tail = pktq_out_elem (&active_dev->queue);\n\n  PCAP_ASSERT (&tail->data[0] == buf);\n#else\n  ARGSUSED (buf);\n#endif\n  pktq_inc_out (&active_dev->queue);\n  return (1);\n}",
+      "fn_code_pos": [
+        [
+          1356,
+          0
+        ],
+        [
+          1367,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "release_rxbuf",
+        "parameters": {
+          "buf": "BYTE"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "BYTE *get_rxbuf (int len)\n{\n  int idx;\n\n  if (len < ETH_MIN || len > ETH_MAX)\n     return (NULL);\n\n  idx = pktq_in_index (&active_dev->queue);\n\n#ifdef DEBUG\n  {\n    static int fan_idx LOCKED_VAR = 0;\n    writew (\"-\\\\|/\"[fan_idx++] | (15 << 8),      /* white on black colour */\n            0xB8000 + 2*79);  /* upper-right corner, 80-col colour screen */\n    fan_idx &= 3;\n  }\n/* writew (idx + '0' + 0x0F00, 0xB8000 + 2*78); */\n#endif\n\n  if (idx != active_dev->queue.out_index)\n  {\n    struct rx_elem *head = pktq_in_elem (&active_dev->queue);\n\n    head->size = len;\n    active_dev->queue.in_index = idx;\n    return (&head->data[0]);\n  }\n\n  /* !!to-do: drop 25% of the oldest element\n   */\n  pktq_clear (&active_dev->queue);\n  return (NULL);\n}",
+      "fn_code_pos": [
+        [
+          1373,
+          0
+        ],
+        [
+          1405,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_rxbuf",
+        "parameters": {
+          "len": "int"
+        },
+        "return_type": "BYTE"
+      }
+    },
+    {
+      "fn_code": "static int pktq_check (struct rx_ringbuf *q)\n{\n#ifndef NDEBUG\n  int   i;\n  char *buf;\n#endif\n\n  if (!q || !q->num_elem || !q->buf_start)\n     return (0);\n\n#ifndef NDEBUG\n  buf = q->buf_start;\n\n  for (i = 0; i < q->num_elem; i++)\n  {\n    buf += q->elem_size;\n    if (*(DWORD*)(buf - sizeof(DWORD)) != PKTQ_MARKER)\n       return (0);\n  }\n#endif\n  return (1);\n}",
+      "fn_code_pos": [
+        [
+          1413,
+          0
+        ],
+        [
+          1434,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_check",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pktq_init (struct rx_ringbuf *q, int size, int num, char *pool)\n{\n  int i;\n\n  q->elem_size = size;\n  q->num_elem  = num;\n  q->buf_start = pool;\n  q->in_index  = 0;\n  q->out_index = 0;\n\n  PCAP_ASSERT (size >= sizeof(struct rx_elem) + sizeof(DWORD));\n  PCAP_ASSERT (num);\n  PCAP_ASSERT (pool);\n\n  for (i = 0; i < num; i++)\n  {\n#if 0\n    struct rx_elem *elem = (struct rx_elem*) pool;\n\n    /* assert dword aligned elements\n     */\n    PCAP_ASSERT (((unsigned)(&elem->data[0]) & 3) == 0);\n#endif\n    pool += size;\n    *(DWORD*) (pool - sizeof(DWORD)) = PKTQ_MARKER;\n  }\n  return (1);\n}",
+      "fn_code_pos": [
+        [
+          1436,
+          0
+        ],
+        [
+          1463,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_init",
+        "parameters": {
+          "q": "struct rx_ringbuf",
+          "size": "int",
+          "num": "int",
+          "pool": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pktq_inc_out (struct rx_ringbuf *q)\n{\n  q->out_index++;\n  if (q->out_index >= q->num_elem)\n      q->out_index = 0;\n  return (q->out_index);\n}",
+      "fn_code_pos": [
+        [
+          1469,
+          0
+        ],
+        [
+          1475,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_inc_out",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int pktq_in_index (struct rx_ringbuf *q)\n{\n  volatile int index = q->in_index + 1;\n\n  if (index >= q->num_elem)\n      index = 0;\n  return (index);\n}",
+      "fn_code_pos": [
+        [
+          1481,
+          0
+        ],
+        [
+          1488,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_in_index",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static struct rx_elem *pktq_in_elem (struct rx_ringbuf *q)\n{\n  return (struct rx_elem*) (q->buf_start + (q->elem_size * q->in_index));\n}",
+      "fn_code_pos": [
+        [
+          1493,
+          0
+        ],
+        [
+          1496,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_in_elem",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static struct rx_elem *pktq_out_elem (struct rx_ringbuf *q)\n{\n  return (struct rx_elem*) (q->buf_start + (q->elem_size * q->out_index));\n}",
+      "fn_code_pos": [
+        [
+          1501,
+          0
+        ],
+        [
+          1504,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_out_elem",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void pktq_clear (struct rx_ringbuf *q)\n{\n  q->in_index = q->out_index;\n}",
+      "fn_code_pos": [
+        [
+          1509,
+          0
+        ],
+        [
+          1512,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_clear",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "const char *\npcap_lib_version(void)\n{\n  return (\"DOS-\" PCAP_VERSION_STRING);\n}",
+      "fn_code_pos": [
+        [
+          1531,
+          0
+        ],
+        [
+          1535,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "init_32bit (void)",
+      "fn_dec_pos": [
+        [
+          57,
+          14
+        ],
+        [
+          57,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "init_32bit",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pktq_init     (struct rx_ringbuf *q, int size, int num, char *pool)",
+      "fn_dec_pos": [
+        [
+          59,
+          14
+        ],
+        [
+          59,
+          81
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_init",
+        "parameters": {
+          "q": "struct rx_ringbuf",
+          "size": "int",
+          "num": "int",
+          "pool": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pktq_check    (struct rx_ringbuf *q)",
+      "fn_dec_pos": [
+        [
+          60,
+          14
+        ],
+        [
+          60,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_check",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pktq_inc_out  (struct rx_ringbuf *q)",
+      "fn_dec_pos": [
+        [
+          61,
+          14
+        ],
+        [
+          61,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_inc_out",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pktq_in_index (struct rx_ringbuf *q)",
+      "fn_dec_pos": [
+        [
+          62,
+          14
+        ],
+        [
+          62,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_in_index",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pktq_clear    (struct rx_ringbuf *q)",
+      "fn_dec_pos": [
+        [
+          63,
+          14
+        ],
+        [
+          63,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_clear",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pktq_in_elem  (struct rx_ringbuf *q)",
+      "fn_dec_pos": [
+        [
+          65,
+          25
+        ],
+        [
+          65,
+          61
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_in_elem",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pktq_out_elem (struct rx_ringbuf *q)",
+      "fn_dec_pos": [
+        [
+          66,
+          25
+        ],
+        [
+          66,
+          61
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_out_elem",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*_w32_usr_post_init) (void)",
+      "fn_dec_pos": [
+        [
+          82,
+          12
+        ],
+        [
+          82,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "(*_w32_print_hook)()",
+      "fn_dec_pos": [
+        [
+          83,
+          12
+        ],
+        [
+          83,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "dbug_write (const char *)",
+      "fn_dec_pos": [
+        [
+          85,
+          12
+        ],
+        [
+          85,
+          37
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "dbug_write",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pkt_get_mtu (void)",
+      "fn_dec_pos": [
+        [
+          86,
+          12
+        ],
+        [
+          86,
+          30
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pkt_get_mtu",
+        "parameters": {},
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_activate_dos (pcap_t *p)",
+      "fn_dec_pos": [
+        [
+          97,
+          12
+        ],
+        [
+          97,
+          41
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_activate_dos",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_read_dos (pcap_t *p, int cnt, pcap_handler callback,\n                           u_char *data)",
+      "fn_dec_pos": [
+        [
+          98,
+          12
+        ],
+        [
+          99,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_read_dos",
+        "parameters": {
+          "p": "pcap_t",
+          "cnt": "int",
+          "callback": "pcap_handler",
+          "data": "u_char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_cleanup_dos (pcap_t *p)",
+      "fn_dec_pos": [
+        [
+          100,
+          12
+        ],
+        [
+          100,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_cleanup_dos",
+        "parameters": {
+          "p": "pcap_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pcap_stats_dos (pcap_t *p, struct pcap_stat *ps)",
+      "fn_dec_pos": [
+        [
+          101,
+          12
+        ],
+        [
+          101,
+          60
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_stats_dos",
+        "parameters": {
+          "p": "pcap_t",
+          "ps": "struct pcap_stat"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_sendpacket_dos (pcap_t *p, const void *buf, size_t len)",
+      "fn_dec_pos": [
+        [
+          102,
+          12
+        ],
+        [
+          102,
+          72
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_sendpacket_dos",
+        "parameters": {
+          "p": "pcap_t",
+          "buf": "void",
+          "len": "size_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pcap_setfilter_dos (pcap_t *p, struct bpf_program *fp)",
+      "fn_dec_pos": [
+        [
+          103,
+          12
+        ],
+        [
+          103,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_setfilter_dos",
+        "parameters": {
+          "p": "pcap_t",
+          "fp": "struct bpf_program"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "ndis_probe (struct device *dev)",
+      "fn_dec_pos": [
+        [
+          105,
+          12
+        ],
+        [
+          105,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ndis_probe",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "pkt_probe  (struct device *dev)",
+      "fn_dec_pos": [
+        [
+          106,
+          12
+        ],
+        [
+          106,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pkt_probe",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "close_driver (void)",
+      "fn_dec_pos": [
+        [
+          108,
+          12
+        ],
+        [
+          108,
+          31
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "close_driver",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "init_watt32 (struct pcap *pcap, const char *dev_name, char *err_buf)",
+      "fn_dec_pos": [
+        [
+          109,
+          12
+        ],
+        [
+          109,
+          80
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "init_watt32",
+        "parameters": {
+          "pcap": "struct pcap",
+          "dev_name": "char",
+          "err_buf": "char"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "first_init (const char *name, char *ebuf, int promisc)",
+      "fn_dec_pos": [
+        [
+          110,
+          12
+        ],
+        [
+          110,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "first_init",
+        "parameters": {
+          "name": "char",
+          "ebuf": "char",
+          "promisc": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "watt32_recv_hook (u_char *dummy, const struct pcap_pkthdr *pcap,\n                              const u_char *buf)",
+      "fn_dec_pos": [
+        [
+          112,
+          12
+        ],
+        [
+          113,
+          48
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "watt32_recv_hook",
+        "parameters": {
+          "dummy": "u_char",
+          "pcap": "struct pcap_pkthdr",
+          "buf": "u_char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "get_device (int fd)",
+      "fn_dec_pos": [
+        [
+          136,
+          22
+        ],
+        [
+          136,
+          41
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_device",
+        "parameters": {
+          "fd": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*wait_proc)(void)",
+      "fn_dec_pos": [
+        [
+          147,
+          6
+        ],
+        [
+          147,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pcap_create_interface (const char *device _U_, char *ebuf)",
+      "fn_dec_pos": [
+        [
+          151,
+          8
+        ],
+        [
+          151,
+          66
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_create_interface",
+        "parameters": {
+          "device": "char",
+          "ebuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_lookupdev (char *ebuf)",
+      "fn_dec_pos": [
+        [
+          489,
+          6
+        ],
+        [
+          489,
+          33
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lookupdev",
+        "parameters": {
+          "ebuf": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*yield)(void)",
+      "fn_dec_pos": [
+        [
+          637,
+          36
+        ],
+        [
+          637,
+          50
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "open_driver (const char *dev_name, char *ebuf, int promisc)",
+      "fn_dec_pos": [
+        [
+          652,
+          0
+        ],
+        [
+          652,
+          59
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "open_driver",
+        "parameters": {
+          "dev_name": "char",
+          "ebuf": "char",
+          "promisc": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*handler)(int)",
+      "fn_dec_pos": [
+        [
+          756,
+          32
+        ],
+        [
+          756,
+          47
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pcap_recv_hook (WORD *type)",
+      "fn_dec_pos": [
+        [
+          888,
+          13
+        ],
+        [
+          888,
+          40
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_recv_hook",
+        "parameters": {
+          "type": "WORD"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*prev_post_hook) (void)",
+      "fn_dec_pos": [
+        [
+          933,
+          12
+        ],
+        [
+          933,
+          36
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {},
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "pkt_stats (struct device *dev)",
+      "fn_dec_pos": [
+        [
+          1147,
+          13
+        ],
+        [
+          1147,
+          43
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pkt_stats",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "ndis_stats (struct device *dev)",
+      "fn_dec_pos": [
+        [
+          1204,
+          13
+        ],
+        [
+          1204,
+          44
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "ndis_stats",
+        "parameters": {
+          "dev": "struct device"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "get_rxbuf (int len)",
+      "fn_dec_pos": [
+        [
+          1373,
+          6
+        ],
+        [
+          1373,
+          25
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_rxbuf",
+        "parameters": {
+          "len": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pktq_in_elem (struct rx_ringbuf *q)",
+      "fn_dec_pos": [
+        [
+          1493,
+          23
+        ],
+        [
+          1493,
+          58
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_in_elem",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pktq_out_elem (struct rx_ringbuf *q)",
+      "fn_dec_pos": [
+        [
+          1501,
+          23
+        ],
+        [
+          1501,
+          59
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pktq_out_elem",
+        "parameters": {
+          "q": "struct rx_ringbuf"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "pcap_lib_version(void)",
+      "fn_dec_pos": [
+        [
+          1532,
+          0
+        ],
+        [
+          1532,
+          22
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "pcap_lib_version",
+        "parameters": {},
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct pcap_dos {\n\tvoid (*wait_proc)(void); /* call proc while waiting */\n\tstruct pcap_stat stat;\n}",
+      {
+        "(*wait_proc)(void)": "void",
+        "stat": "struct pcap_stat"
+      },
+      "pcap_dos",
+      [
+        146,
+        0
+      ],
+      [
+        149,
+        1
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        59,
+        29
+      ],
+      [
+        59,
+        46
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        60,
+        29
+      ],
+      [
+        60,
+        46
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        61,
+        29
+      ],
+      [
+        61,
+        46
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        62,
+        29
+      ],
+      [
+        62,
+        46
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        63,
+        29
+      ],
+      [
+        63,
+        46
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        65,
+        9
+      ],
+      [
+        65,
+        23
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        65,
+        40
+      ],
+      [
+        65,
+        57
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        66,
+        9
+      ],
+      [
+        66,
+        23
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        66,
+        40
+      ],
+      [
+        66,
+        57
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        95,
+        7
+      ],
+      [
+        95,
+        20
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        101,
+        39
+      ],
+      [
+        101,
+        55
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        103,
+        43
+      ],
+      [
+        103,
+        61
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        105,
+        24
+      ],
+      [
+        105,
+        37
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        106,
+        24
+      ],
+      [
+        106,
+        37
+      ]
+    ],
+    [
+      "struct pcap",
+      {},
+      "",
+      [
+        109,
+        25
+      ],
+      [
+        109,
+        36
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        112,
+        51
+      ],
+      [
+        112,
+        69
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        118,
+        7
+      ],
+      [
+        118,
+        20
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        127,
+        7
+      ],
+      [
+        127,
+        20
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        136,
+        7
+      ],
+      [
+        136,
+        20
+      ]
+    ],
+    [
+      "struct pcap_dos {\n\tvoid (*wait_proc)(void); /* call proc while waiting */\n\tstruct pcap_stat stat;\n}",
+      {
+        "(*wait_proc)(void)": "void",
+        "stat": "struct pcap_stat"
+      },
+      "pcap_dos",
+      [
+        146,
+        0
+      ],
+      [
+        149,
+        1
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        148,
+        1
+      ],
+      [
+        148,
+        17
+      ]
+    ],
+    [
+      "struct pcap_dos",
+      {},
+      "",
+      [
+        155,
+        38
+      ],
+      [
+        155,
+        53
+      ]
+    ],
+    [
+      "struct pcap_dos",
+      {},
+      "",
+      [
+        234,
+        2
+      ],
+      [
+        234,
+        17
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        235,
+        2
+      ],
+      [
+        235,
+        20
+      ]
+    ],
+    [
+      "struct timeval",
+      {},
+      "",
+      [
+        236,
+        2
+      ],
+      [
+        236,
+        16
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        253,
+        13
+      ],
+      [
+        253,
+        26
+      ]
+    ],
+    [
+      "struct pcap_stat",
+      {},
+      "",
+      [
+        374,
+        38
+      ],
+      [
+        374,
+        54
+      ]
+    ],
+    [
+      "struct net_device_stats",
+      {},
+      "",
+      [
+        376,
+        2
+      ],
+      [
+        376,
+        25
+      ]
+    ],
+    [
+      "struct pcap_dos",
+      {},
+      "",
+      [
+        377,
+        2
+      ],
+      [
+        377,
+        17
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        378,
+        2
+      ],
+      [
+        378,
+        15
+      ]
+    ],
+    [
+      "struct pcap_stat_ex",
+      {},
+      "",
+      [
+        409,
+        30
+      ],
+      [
+        409,
+        49
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        411,
+        2
+      ],
+      [
+        411,
+        15
+      ]
+    ],
+    [
+      "struct bpf_program",
+      {},
+      "",
+      [
+        435,
+        42
+      ],
+      [
+        435,
+        60
+      ]
+    ],
+    [
+      "struct pcap_dos",
+      {},
+      "",
+      [
+        464,
+        2
+      ],
+      [
+        464,
+        17
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        491,
+        2
+      ],
+      [
+        491,
+        15
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        497,
+        14
+      ],
+      [
+        497,
+        27
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        504,
+        20
+      ],
+      [
+        504,
+        33
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        559,
+        2
+      ],
+      [
+        559,
+        15
+      ]
+    ],
+    [
+      "struct sockaddr_in",
+      {},
+      "",
+      [
+        562,
+        2
+      ],
+      [
+        562,
+        20
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        563,
+        2
+      ],
+      [
+        563,
+        17
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        568,
+        14
+      ],
+      [
+        568,
+        27
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        598,
+        17
+      ],
+      [
+        598,
+        32
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        599,
+        17
+      ],
+      [
+        599,
+        32
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        600,
+        17
+      ],
+      [
+        600,
+        32
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        601,
+        17
+      ],
+      [
+        601,
+        32
+      ]
+    ],
+    [
+      "struct pcap_dos",
+      {},
+      "",
+      [
+        641,
+        4
+      ],
+      [
+        641,
+        19
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        651,
+        7
+      ],
+      [
+        651,
+        20
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        654,
+        2
+      ],
+      [
+        654,
+        15
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        656,
+        14
+      ],
+      [
+        656,
+        27
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        733,
+        2
+      ],
+      [
+        733,
+        15
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        800,
+        2
+      ],
+      [
+        800,
+        15
+      ]
+    ],
+    [
+      "struct pcap_pkthdr",
+      {},
+      "",
+      [
+        872,
+        51
+      ],
+      [
+        872,
+        69
+      ]
+    ],
+    [
+      "struct ether_header",
+      {},
+      "",
+      [
+        876,
+        2
+      ],
+      [
+        876,
+        21
+      ]
+    ],
+    [
+      "struct ether_header",
+      {},
+      "",
+      [
+        876,
+        29
+      ],
+      [
+        876,
+        48
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        922,
+        2
+      ],
+      [
+        922,
+        15
+      ]
+    ],
+    [
+      "struct pcap",
+      {},
+      "",
+      [
+        955,
+        24
+      ],
+      [
+        955,
+        35
+      ]
+    ],
+    [
+      "struct config_table",
+      {},
+      "",
+      [
+        1047,
+        13
+      ],
+      [
+        1047,
+        32
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1095,
+        0
+      ],
+      [
+        1095,
+        13
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1096,
+        0
+      ],
+      [
+        1096,
+        13
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1097,
+        6
+      ],
+      [
+        1097,
+        19
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1104,
+        23
+      ],
+      [
+        1104,
+        36
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1116,
+        21
+      ],
+      [
+        1116,
+        34
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1132,
+        21
+      ],
+      [
+        1132,
+        34
+      ]
+    ],
+    [
+      "struct net_device_stats",
+      {},
+      "",
+      [
+        1134,
+        2
+      ],
+      [
+        1134,
+        25
+      ]
+    ],
+    [
+      "struct net_device_stats",
+      {},
+      "",
+      [
+        1134,
+        36
+      ],
+      [
+        1134,
+        59
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1147,
+        24
+      ],
+      [
+        1147,
+        37
+      ]
+    ],
+    [
+      "struct net_device_stats",
+      {},
+      "",
+      [
+        1149,
+        2
+      ],
+      [
+        1149,
+        25
+      ]
+    ],
+    [
+      "struct net_device_stats",
+      {},
+      "",
+      [
+        1149,
+        36
+      ],
+      [
+        1149,
+        59
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1160,
+        22
+      ],
+      [
+        1160,
+        35
+      ]
+    ],
+    [
+      "struct net_device_stats",
+      {},
+      "",
+      [
+        1173,
+        39
+      ],
+      [
+        1173,
+        62
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1182,
+        24
+      ],
+      [
+        1182,
+        37
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1190,
+        22
+      ],
+      [
+        1190,
+        35
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1204,
+        25
+      ],
+      [
+        1204,
+        38
+      ]
+    ],
+    [
+      "struct net_device_stats",
+      {},
+      "",
+      [
+        1206,
+        9
+      ],
+      [
+        1206,
+        32
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1213,
+        23
+      ],
+      [
+        1213,
+        36
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1236,
+        0
+      ],
+      [
+        1236,
+        13
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1245,
+        0
+      ],
+      [
+        1245,
+        13
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1254,
+        0
+      ],
+      [
+        1254,
+        13
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1263,
+        0
+      ],
+      [
+        1263,
+        13
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1272,
+        0
+      ],
+      [
+        1272,
+        13
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1281,
+        0
+      ],
+      [
+        1281,
+        13
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1290,
+        0
+      ],
+      [
+        1290,
+        13
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1299,
+        0
+      ],
+      [
+        1299,
+        13
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1308,
+        0
+      ],
+      [
+        1308,
+        13
+      ]
+    ],
+    [
+      "struct device",
+      {},
+      "",
+      [
+        1317,
+        0
+      ],
+      [
+        1317,
+        13
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        1333,
+        2
+      ],
+      [
+        1333,
+        16
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        1359,
+        2
+      ],
+      [
+        1359,
+        16
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        1394,
+        4
+      ],
+      [
+        1394,
+        18
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        1413,
+        23
+      ],
+      [
+        1413,
+        40
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        1436,
+        22
+      ],
+      [
+        1436,
+        39
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        1446,
+        30
+      ],
+      [
+        1446,
+        44
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        1453,
+        4
+      ],
+      [
+        1453,
+        18
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        1453,
+        28
+      ],
+      [
+        1453,
+        42
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        1469,
+        25
+      ],
+      [
+        1469,
+        42
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        1481,
+        26
+      ],
+      [
+        1481,
+        43
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        1493,
+        7
+      ],
+      [
+        1493,
+        21
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        1493,
+        37
+      ],
+      [
+        1493,
+        54
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        1495,
+        10
+      ],
+      [
+        1495,
+        24
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        1501,
+        7
+      ],
+      [
+        1501,
+        21
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        1501,
+        38
+      ],
+      [
+        1501,
+        55
+      ]
+    ],
+    [
+      "struct rx_elem",
+      {},
+      "",
+      [
+        1503,
+        10
+      ],
+      [
+        1503,
+        24
+      ]
+    ],
+    [
+      "struct rx_ringbuf",
+      {},
+      "",
+      [
+        1509,
+        24
+      ],
+      [
+        1509,
+        41
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include <stdio.h>\n",
+      [
+        8,
+        0
+      ],
+      [
+        9,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        9,
+        0
+      ],
+      [
+        10,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        10,
+        0
+      ],
+      [
+        11,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        11,
+        0
+      ],
+      [
+        12,
+        0
+      ]
+    ],
+    [
+      "#include <float.h>\n",
+      [
+        12,
+        0
+      ],
+      [
+        13,
+        0
+      ]
+    ],
+    [
+      "#include <fcntl.h>\n",
+      [
+        13,
+        0
+      ],
+      [
+        14,
+        0
+      ]
+    ],
+    [
+      "#include <io.h>\n",
+      [
+        14,
+        0
+      ],
+      [
+        15,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/pmdrvr.h\"\n",
+      [
+        17,
+        2
+      ],
+      [
+        18,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/pci.h\"\n",
+      [
+        18,
+        2
+      ],
+      [
+        19,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/bios32.h\"\n",
+      [
+        19,
+        2
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/module.h\"\n",
+      [
+        20,
+        2
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/3c501.h\"\n",
+      [
+        21,
+        2
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/3c503.h\"\n",
+      [
+        22,
+        2
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/3c509.h\"\n",
+      [
+        23,
+        2
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/3c59x.h\"\n",
+      [
+        24,
+        2
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/3c515.h\"\n",
+      [
+        25,
+        2
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/3c90x.h\"\n",
+      [
+        26,
+        2
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/3c575_cb.h\"\n",
+      [
+        27,
+        2
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/ne.h\"\n",
+      [
+        28,
+        2
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/wd.h\"\n",
+      [
+        29,
+        2
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/accton.h\"\n",
+      [
+        30,
+        2
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/cs89x0.h\"\n",
+      [
+        31,
+        2
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/rtl8139.h\"\n",
+      [
+        32,
+        2
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/ne2k-pci.h\"\n",
+      [
+        33,
+        2
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap.h\"\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-dos.h\"\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"pcap-int.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pktdrvr.h\"\n",
+      [
+        39,
+        0
+      ],
+      [
+        40,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/ndis2.h\"\n",
+      [
+        42,
+        0
+      ],
+      [
+        43,
+        0
+      ]
+    ],
+    [
+      "#include <arpa/inet.h>\n",
+      [
+        45,
+        0
+      ],
+      [
+        46,
+        0
+      ]
+    ],
+    [
+      "#include <net/if.h>\n",
+      [
+        46,
+        0
+      ],
+      [
+        47,
+        0
+      ]
+    ],
+    [
+      "#include <net/if_arp.h>\n",
+      [
+        47,
+        0
+      ],
+      [
+        48,
+        0
+      ]
+    ],
+    [
+      "#include <net/if_ether.h>\n",
+      [
+        48,
+        0
+      ],
+      [
+        49,
+        0
+      ]
+    ],
+    [
+      "#include <net/if_packe.h>\n",
+      [
+        49,
+        0
+      ],
+      [
+        50,
+        0
+      ]
+    ],
+    [
+      "#include <tcp.h>\n",
+      [
+        50,
+        0
+      ],
+      [
+        51,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/ioport.h\"\n",
+      [
+        1523,
+        0
+      ],
+      [
+        1524,
+        0
+      ]
+    ],
+    [
+      "#include \"msdos/pm_drvr/dma.h\"\n",
+      [
+        1524,
+        0
+      ],
+      [
+        1525,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": []
+}

@@ -1,0 +1,555 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static void\nhw_com_device_init_data(device *me)\n{\n  hw_com_device *com = (hw_com_device*)device_data(me);\n  /* clean up */\n  if (com->output.file != NULL)\n    fclose(com->output.file);\n  if (com->input.file != NULL)\n    fclose(com->input.file);\n  memset(com, 0, sizeof(hw_com_device));\n\n  /* the fifo speed */\n  com->output.delay = (device_find_property(me, \"output-delay\") != NULL\n\t\t       ? device_find_integer_property(me, \"output-delay\")\n\t\t       : 0);\n  com->input.delay = (device_find_property(me, \"input-delay\") != NULL\n\t\t      ? device_find_integer_property(me, \"input-delay\")\n\t\t      : 0);\n\n  /* the data source/sink */\n  if (device_find_property(me, \"input-file\") != NULL) {\n    const char *input_file = device_find_string_property(me, \"input-file\");\n    com->input.file = fopen(input_file, \"r\");\n    if (com->input.file == NULL)\n      device_error(me, \"Problem opening input file %s\\n\", input_file);\n    if (device_find_property(me, \"input-buffering\") != NULL) {\n      const char *buffering = device_find_string_property(me, \"input-buffering\");\n      if (strcmp(buffering, \"unbuffered\") == 0)\n\tsetbuf(com->input.file, NULL);\n    }\n  }\n  if (device_find_property(me, \"output-file\") != NULL) {\n    const char *output_file = device_find_string_property(me, \"output-file\");\n    com->output.file = fopen(output_file, \"w\");\n    if (com->output.file == NULL)\n      device_error(me, \"Problem opening output file %s\\n\", output_file);\n    if (device_find_property(me, \"output-buffering\") != NULL) {\n      const char *buffering = device_find_string_property(me, \"output-buffering\");\n      if (strcmp(buffering, \"unbuffered\") == 0)\n\tsetbuf(com->output.file, NULL);\n    }\n  }\n\n  /* ready from the start */\n  com->input.ready = 1;\n  com->modem.carrier = 1;\n  com->output.ready = 1;\n}",
+      "fn_code_pos": [
+        [
+          216,
+          0
+        ],
+        [
+          263,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_com_device_init_data",
+        "parameters": {
+          "me": "device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nupdate_com_interrupts(device *me,\n\t\t      hw_com_device *com)\n{\n  int interrupting;\n  com->modem.interrupting = (com->modem.carrier_changed && (com->reg[1] & 0x80));\n  com->input.interrupting = (com->input.ready && (com->reg[1] & 0x1));\n  com->output.interrupting = (com->output.ready && (com->reg[1] & 0x2));\n  interrupting = (com->input.interrupting\n\t\t  || com->output.interrupting\n\t\t  || com->modem.interrupting);\n\n  if (interrupting) {\n    if (!com->interrupting) {\n      device_interrupt_event(me, 0 /*port*/, 1 /*value*/, NULL, 0);\n    }\n  }\n  else /*!interrupting*/ {\n    if (com->interrupting)\n      device_interrupt_event(me, 0 /*port*/, 0 /*value*/, NULL, 0);\n  }\n  com->interrupting = interrupting;\n}",
+      "fn_code_pos": [
+        [
+          266,
+          0
+        ],
+        [
+          288,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "update_com_interrupts",
+        "parameters": {
+          "me": "device",
+          "com": "hw_com_device"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nmake_read_ready(void *data)\n{\n  device *me = (device*)data;\n  hw_com_device *com = (hw_com_device*)device_data(me);\n  com->input.ready = 1;\n  update_com_interrupts(me, com);\n}",
+      "fn_code_pos": [
+        [
+          291,
+          0
+        ],
+        [
+          298,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "make_read_ready",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nread_com(device *me,\n\t hw_com_device *com,\n\t unsigned_word a,\n\t char val[1])\n{\n  unsigned_word addr = a % 8;\n\n  /* the divisor latch is special */\n  if (com->reg[3] & 0x8 && addr < 2) {\n    *val = com->dlab[addr];\n    return;\n  }\n\n  switch (addr) {\n  \n  case 0:\n    /* fifo */\n    if (!com->modem.carrier)\n      *val = '\\0';\n    if (com->input.ready) {\n      /* read the char in */\n      if (com->input.file == NULL) {\n\tif (sim_io_read_stdin(val, 1) < 0)\n\t  com->modem.carrier_changed = 1;\n      }\n      else {\n\tif (fread(val, 1, 1, com->input.file) == 0)\n\t  com->modem.carrier_changed = 1;\n      }\n      /* setup for next read */\n      if (com->modem.carrier_changed) {\n\t/* once lost carrier, never ready */\n\tcom->modem.carrier = 0;\n\tcom->input.ready = 0;\n\t*val = '\\0';\n      }\n      else if (com->input.delay > 0) {\n\tcom->input.ready = 0;\n\tdevice_event_queue_schedule(me, com->input.delay, make_read_ready, me);\n      }\n    }\n    else {\n      /* discard it? */\n      /* overflow input fifo? */\n      *val = '\\0';\n    }\n    break;\n\n  case 2:\n    /* interrupt ident */\n    if (com->interrupting) {\n      if (com->input.interrupting)\n\t*val = 0x4;\n      else if (com->output.interrupting)\n\t*val = 0x2;\n      else if (com->modem.interrupting == 0)\n\t*val = 0;\n      else\n\tdevice_error(me, \"bad elif for interrupts\\n\");\n    }\n    else\n      *val = 0x1;\n    break;\n\n  case 5:\n    /* line status */\n    *val = ((com->input.ready ? 0x1 : 0)\n\t    | (com->output.ready ? 0x60 : 0)\n\t    );\n    break;\n\n  case 6:\n    /* modem status */\n    *val = ((com->modem.carrier_changed ? 0x08 : 0)\n\t    | (com->modem.carrier ? 0x80 : 0)\n\t    );\n    com->modem.carrier_changed = 0;\n    break;\n\n  default:\n    *val = com->reg[addr];\n    break;\n\n  }\n  update_com_interrupts(me, com);\n}",
+      "fn_code_pos": [
+        [
+          300,
+          0
+        ],
+        [
+          386,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "read_com",
+        "parameters": {
+          "me": "device",
+          "com": "hw_com_device",
+          "a": "unsigned_word",
+          "val": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_com_io_read_buffer_callback(device *me,\n\t\t\t       void *dest,\n\t\t\t       int space,\n\t\t\t       unsigned_word addr,\n\t\t\t       unsigned nr_bytes,\n\t\t\t       cpu *processor,\n\t\t\t       unsigned_word cia)\n{\n  hw_com_device *com = device_data(me);\n  int i;\n  for (i = 0; i < nr_bytes; i++) {\n    read_com(me, com, addr + i, &((char*)dest)[i]);\n  }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          388,
+          0
+        ],
+        [
+          403,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_com_io_read_buffer_callback",
+        "parameters": {
+          "me": "device",
+          "dest": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nmake_write_ready(void *data)\n{\n  device *me = (device*)data;\n  hw_com_device *com = (hw_com_device*)device_data(me);\n  com->output.ready = 1;\n  update_com_interrupts(me, com);\n}",
+      "fn_code_pos": [
+        [
+          406,
+          0
+        ],
+        [
+          413,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "make_write_ready",
+        "parameters": {
+          "data": "void"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\nwrite_com(device *me,\n\t  hw_com_device *com,\n\t  unsigned_word a,\n\t  char val)\n{\n  unsigned_word addr = a % 8;\n\n  /* the divisor latch is special */\n  if (com->reg[3] & 0x8 && addr < 2) {\n    com->dlab[addr] = val;\n    return;\n  }\n\n  switch (addr) {\n  \n  case 0:\n    /* fifo */\n    if (com->output.file == NULL) {\n      sim_io_write_stdout(&val, 1);\n    }\n    else {\n      fwrite(&val, 1, 1, com->output.file);\n    }\n    /* setup for next write */\n    if (com->output.ready && com->output.delay > 0) {\n      com->output.ready = 0;\n      device_event_queue_schedule(me, com->output.delay, make_write_ready, me);\n    }\n    break;\n\n  default:\n    com->reg[addr] = val;\n    break;\n\n  }\n  update_com_interrupts(me, com);\n}",
+      "fn_code_pos": [
+        [
+          415,
+          0
+        ],
+        [
+          452,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "write_com",
+        "parameters": {
+          "me": "device",
+          "com": "hw_com_device",
+          "a": "unsigned_word",
+          "val": "char"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static unsigned\nhw_com_io_write_buffer_callback(device *me,\n\t\t\t\tconst void *source,\n\t\t\t\tint space,\n\t\t\t\tunsigned_word addr,\n\t\t\t\tunsigned nr_bytes,\n\t\t\t\tcpu *processor,\n\t\t\t\tunsigned_word cia)\n{\n  hw_com_device *com = device_data(me);\n  int i;\n  for (i = 0; i < nr_bytes; i++) {\n    write_com(me, com, addr + i, ((char*)source)[i]);\n  }\n  return nr_bytes;\n}",
+      "fn_code_pos": [
+        [
+          454,
+          0
+        ],
+        [
+          469,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_com_io_write_buffer_callback",
+        "parameters": {
+          "me": "device",
+          "source": "void",
+          "space": "int",
+          "addr": "unsigned_word",
+          "nr_bytes": "unsigned",
+          "processor": "cpu",
+          "cia": "unsigned_word"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "static void\nhw_com_instance_delete(device_instance *instance)\n{\n  /* nothing to delete, the hw_com is attached to the device */\n  return;\n}",
+      "fn_code_pos": [
+        [
+          474,
+          0
+        ],
+        [
+          479,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_com_instance_delete",
+        "parameters": {
+          "instance": "device_instance"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nhw_com_instance_read(device_instance *instance,\n\t\t     void *buf,\n\t\t     unsigned_word len)\n{\n  device *me = device_instance_device(instance);\n  hw_com_device *com = device_data(me);\n  if (com->input.file == NULL)\n    return sim_io_read_stdin(buf, len);\n  else {\n    return fread(buf, 1, len, com->input.file);\n  }\n}",
+      "fn_code_pos": [
+        [
+          481,
+          0
+        ],
+        [
+          493,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_com_instance_read",
+        "parameters": {
+          "instance": "device_instance",
+          "buf": "void",
+          "len": "unsigned_word"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nhw_com_instance_write(device_instance *instance,\n\t\t      const void *buf,\n\t\t      unsigned_word len)\n{\n  device *me = device_instance_device(instance);\n  hw_com_device *com = device_data(me);\n  if (com->output.file == NULL)\n    return sim_io_write_stdout(buf, len);\n  else {\n    return fwrite(buf, 1, len, com->output.file);\n  }\n}",
+      "fn_code_pos": [
+        [
+          495,
+          0
+        ],
+        [
+          507,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_com_instance_write",
+        "parameters": {
+          "instance": "device_instance",
+          "buf": "void",
+          "len": "unsigned_word"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static device_instance *\nhw_com_create_instance(device *me,\n\t\t       const char *path,\n\t\t       const char *args)\n{\n  /* point an instance directly at the device */\n  return device_create_instance_from(me, NULL,\n\t\t\t\t     device_data(me),\n\t\t\t\t     path, args,\n\t\t\t\t     &hw_com_instance_callbacks);\n}",
+      "fn_code_pos": [
+        [
+          515,
+          0
+        ],
+        [
+          525,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_com_create_instance",
+        "parameters": {
+          "me": "device",
+          "path": "char",
+          "args": "char"
+        },
+        "return_type": "device_instance"
+      }
+    },
+    {
+      "fn_code": "static void *\nhw_com_create(const char *name,\n\t      const device_unit *unit_address,\n\t      const char *args)\n{\n  /* create the descriptor */\n  hw_com_device *hw_com = ZALLOC(hw_com_device);\n  return hw_com;\n}",
+      "fn_code_pos": [
+        [
+          541,
+          0
+        ],
+        [
+          549,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_com_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": "void"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "hw_com_create_instance(device *me,\n\t\t       const char *path,\n\t\t       const char *args)",
+      "fn_dec_pos": [
+        [
+          516,
+          0
+        ],
+        [
+          518,
+          26
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_com_create_instance",
+        "parameters": {
+          "me": "device",
+          "path": "char",
+          "args": "char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "hw_com_create(const char *name,\n\t      const device_unit *unit_address,\n\t      const char *args)",
+      "fn_dec_pos": [
+        [
+          542,
+          0
+        ],
+        [
+          544,
+          24
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "hw_com_create",
+        "parameters": {
+          "name": "char",
+          "unit_address": "device_unit",
+          "args": "char"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct _com_port {\n  int ready;\n  int delay;\n  int interrupting;\n  FILE *file;\n} com_port;",
+      {
+        "ready": "int",
+        "delay": "int",
+        "interrupting": "int",
+        "*file": "FILE"
+      },
+      "com_port",
+      [
+        193,
+        0
+      ],
+      [
+        198,
+        11
+      ]
+    ],
+    [
+      "typedef struct _com_modem {\n  int carrier;\n  int carrier_changed;\n  int interrupting;\n} com_modem;",
+      {
+        "carrier": "int",
+        "carrier_changed": "int",
+        "interrupting": "int"
+      },
+      "com_modem",
+      [
+        200,
+        0
+      ],
+      [
+        204,
+        12
+      ]
+    ],
+    [
+      "typedef struct _hw_com_device {\n  com_port input;\n  com_port output;\n  com_modem modem;\n  char dlab[2];\n  char reg[max_hw_com_registers];\n  int interrupting;\n} hw_com_device;",
+      {
+        "input": "com_port",
+        "output": "com_port",
+        "modem": "com_modem",
+        "dlab[2]": "char",
+        "reg[max_hw_com_registers]": "char",
+        "interrupting": "int"
+      },
+      "hw_com_device",
+      [
+        206,
+        0
+      ],
+      [
+        213,
+        16
+      ]
+    ],
+    [
+      "typedef struct _com_port {\n  int ready;\n  int delay;\n  int interrupting;\n  FILE *file;\n} com_port;",
+      {
+        "ready": "int",
+        "delay": "int",
+        "interrupting": "int",
+        "*file": "FILE"
+      },
+      "com_port",
+      [
+        193,
+        0
+      ],
+      [
+        198,
+        11
+      ]
+    ],
+    [
+      "typedef struct _com_modem {\n  int carrier;\n  int carrier_changed;\n  int interrupting;\n} com_modem;",
+      {
+        "carrier": "int",
+        "carrier_changed": "int",
+        "interrupting": "int"
+      },
+      "com_modem",
+      [
+        200,
+        0
+      ],
+      [
+        204,
+        12
+      ]
+    ],
+    [
+      "typedef struct _hw_com_device {\n  com_port input;\n  com_port output;\n  com_modem modem;\n  char dlab[2];\n  char reg[max_hw_com_registers];\n  int interrupting;\n} hw_com_device;",
+      {
+        "input": "com_port",
+        "output": "com_port",
+        "modem": "com_modem",
+        "dlab[2]": "char",
+        "reg[max_hw_com_registers]": "char",
+        "interrupting": "int"
+      },
+      "hw_com_device",
+      [
+        206,
+        0
+      ],
+      [
+        213,
+        16
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"device_table.h\"\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <string.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <strings.h>\n",
+      [
+        33,
+        0
+      ],
+      [
+        34,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ],
+    [
+      "#include <stdlib.h>\n",
+      [
+        41,
+        0
+      ],
+      [
+        42,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum {\n  max_hw_com_registers = 8,\n}",
+      {
+        "max_hw_com_registers": ""
+      },
+      "",
+      [
+        189,
+        0
+      ],
+      [
+        191,
+        1
+      ]
+    ]
+  ]
+}

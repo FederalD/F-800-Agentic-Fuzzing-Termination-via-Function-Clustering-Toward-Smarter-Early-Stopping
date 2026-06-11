@@ -1,0 +1,1235 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "int\nlinux_common_core_of_thread (ptid_t ptid)\n{\n  char filename[sizeof (\"/proc//task//stat\") + 2 * MAX_PID_T_STRLEN];\n  FILE *f;\n  char *content = NULL;\n  char *p;\n  char *ts = 0;\n  int content_read = 0;\n  int i;\n  int core;\n\n  sprintf (filename, \"/proc/%lld/task/%lld/stat\",\n\t   (PID_T) ptid_get_pid (ptid), (PID_T) ptid_get_lwp (ptid));\n  f = gdb_fopen_cloexec (filename, \"r\");\n  if (!f)\n    return -1;\n\n  for (;;)\n    {\n      int n;\n      content = (char *) xrealloc (content, content_read + 1024);\n      n = fread (content + content_read, 1, 1024, f);\n      content_read += n;\n      if (n < 1024)\n\t{\n\t  content[content_read] = '\\0';\n\t  break;\n\t}\n    }\n\n  /* ps command also relies on no trailing fields ever contain ')'.  */\n  p = strrchr (content, ')');\n  if (p != NULL)\n    p++;\n\n  /* If the first field after program name has index 0, then core number is\n     the field with index 36.  There's no constant for that anywhere.  */\n  if (p != NULL)\n    p = strtok_r (p, \" \", &ts);\n  for (i = 0; p != NULL && i != 36; ++i)\n    p = strtok_r (NULL, \" \", &ts);\n\n  if (p == NULL || sscanf (p, \"%d\", &core) == 0)\n    core = -1;\n\n  xfree (content);\n  fclose (f);\n\n  return core;\n}",
+      "fn_code_pos": [
+        [
+          59,
+          0
+        ],
+        [
+          109,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_common_core_of_thread",
+        "parameters": {
+          "ptid": "ptid_t"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static void\ncommand_from_pid (char *command, int maxlen, PID_T pid)\n{\n  char *stat_path = xstrprintf (\"/proc/%lld/stat\", pid); \n  FILE *fp = gdb_fopen_cloexec (stat_path, \"r\");\n  \n  command[0] = '\\0';\n \n  if (fp)\n    {\n      /* sizeof (cmd) should be greater or equal to TASK_COMM_LEN (in\n\t include/linux/sched.h in the Linux kernel sources) plus two\n\t (for the brackets).  */\n      char cmd[18];\n      PID_T stat_pid;\n      int items_read = fscanf (fp, \"%lld %17s\", &stat_pid, cmd);\n\t  \n      if (items_read == 2 && pid == stat_pid)\n\t{\n\t  cmd[strlen (cmd) - 1] = '\\0'; /* Remove trailing parenthesis.  */\n\t  strncpy (command, cmd + 1, maxlen); /* Ignore leading parenthesis.  */\n\t}\n\n      fclose (fp);\n    }\n  else\n    {\n      /* Return the PID if a /proc entry for the process cannot be found.  */\n      snprintf (command, maxlen, \"%lld\", pid);\n    }\n\n  command[maxlen - 1] = '\\0'; /* Ensure string is null-terminated.  */\n\t\n  xfree (stat_path);\n}",
+      "fn_code_pos": [
+        [
+          115,
+          0
+        ],
+        [
+          149,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "command_from_pid",
+        "parameters": {
+          "command": "char",
+          "maxlen": "int",
+          "pid": "PID_T"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static char *\ncommandline_from_pid (PID_T pid)\n{\n  char *pathname = xstrprintf (\"/proc/%lld/cmdline\", pid);\n  char *commandline = NULL;\n  FILE *f = gdb_fopen_cloexec (pathname, \"r\");\n\n  if (f)\n    {\n      size_t len = 0;\n\n      while (!feof (f))\n\t{\n\t  char buf[1024];\n\t  size_t read_bytes = fread (buf, 1, sizeof (buf), f);\n     \n\t  if (read_bytes)\n\t    {\n\t      commandline = (char *) xrealloc (commandline, len + read_bytes + 1);\n\t      memcpy (commandline + len, buf, read_bytes);\n\t      len += read_bytes;\n\t    }\n\t}\n\n      fclose (f);\n\n      if (commandline)\n\t{\n\t  size_t i;\n\n\t  /* Replace null characters with spaces.  */\n\t  for (i = 0; i < len; ++i)\n\t    if (commandline[i] == '\\0')\n\t      commandline[i] = ' ';\n\n\t  commandline[len] = '\\0';\n\t}\n      else\n\t{\n\t  /* Return the command in square brackets if the command-line\n\t     is empty.  */\n\t  commandline = (char *) xmalloc (32);\n\t  commandline[0] = '[';\n\t  command_from_pid (commandline + 1, 31, pid);\n\n\t  len = strlen (commandline);\n\t  if (len < 31)\n\t    strcat (commandline, \"]\");\n\t}\n    }\n\n  xfree (pathname);\n\n  return commandline;\n}",
+      "fn_code_pos": [
+        [
+          154,
+          0
+        ],
+        [
+          208,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "commandline_from_pid",
+        "parameters": {
+          "pid": "PID_T"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nuser_from_uid (char *user, int maxlen, uid_t uid)\n{\n  struct passwd *pwentry = getpwuid (uid);\n  \n  if (pwentry)\n    {\n      strncpy (user, pwentry->pw_name, maxlen);\n      /* Ensure that the user name is null-terminated.  */\n      user[maxlen - 1] = '\\0';\n    }\n  else\n    user[0] = '\\0';\n}",
+      "fn_code_pos": [
+        [
+          213,
+          0
+        ],
+        [
+          226,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "user_from_uid",
+        "parameters": {
+          "user": "char",
+          "maxlen": "int",
+          "uid": "uid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static int\nget_process_owner (uid_t *owner, PID_T pid)\n{\n  struct stat statbuf;\n  char procentry[sizeof (\"/proc/\") + MAX_PID_T_STRLEN];\n\n  sprintf (procentry, \"/proc/%lld\", pid);\n  \n  if (stat (procentry, &statbuf) == 0 && S_ISDIR (statbuf.st_mode))\n    {\n      *owner = statbuf.st_uid;\n      return 0;\n    }\n  else\n    return -1;\n}",
+      "fn_code_pos": [
+        [
+          231,
+          0
+        ],
+        [
+          246,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_process_owner",
+        "parameters": {
+          "owner": "uid_t",
+          "pid": "PID_T"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static int\nget_cores_used_by_process (PID_T pid, int *cores, const int num_cores)\n{\n  char taskdir[sizeof (\"/proc/\") + MAX_PID_T_STRLEN + sizeof (\"/task\") - 1];\n  DIR *dir;\n  struct dirent *dp;\n  int task_count = 0;\n\n  sprintf (taskdir, \"/proc/%lld/task\", pid);\n  dir = opendir (taskdir);\n  if (dir)\n    {\n      while ((dp = readdir (dir)) != NULL)\n\t{\n\t  PID_T tid;\n\t  int core;\n\n\t  if (!isdigit (dp->d_name[0])\n\t      || NAMELEN (dp) > MAX_PID_T_STRLEN)\n\t    continue;\n\n\t  sscanf (dp->d_name, \"%lld\", &tid);\n\t  core = linux_common_core_of_thread (ptid_build ((pid_t) pid,\n\t\t\t\t\t\t\t  (pid_t) tid, 0));\n\n\t  if (core >= 0 && core < num_cores)\n\t    {\n\t      ++cores[core];\n\t      ++task_count;\n\t    }\n\t}\n\n      closedir (dir);\n    }\n\n  return task_count;\n}",
+      "fn_code_pos": [
+        [
+          251,
+          0
+        ],
+        [
+          287,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "get_cores_used_by_process",
+        "parameters": {
+          "pid": "PID_T",
+          "cores": "int",
+          "num_cores": "int"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nlinux_xfer_osdata_processes (gdb_byte *readbuf,\n\t\t\t     ULONGEST offset, ULONGEST len)\n{\n  /* We make the process list snapshot when the object starts to be read.  */\n  static const char *buf;\n  static LONGEST len_avail = -1;\n  static struct buffer buffer;\n\n  if (offset == 0)\n    {\n      DIR *dirp;\n\n      if (len_avail != -1 && len_avail != 0)\n\tbuffer_free (&buffer);\n      len_avail = 0;\n      buf = NULL;\n      buffer_init (&buffer);\n      buffer_grow_str (&buffer, \"<osdata type=\\\"processes\\\">\\n\");\n\n      dirp = opendir (\"/proc\");\n      if (dirp)\n\t{\n\t  const int num_cores = sysconf (_SC_NPROCESSORS_ONLN);\n\t  struct dirent *dp;\n\n\t  while ((dp = readdir (dirp)) != NULL)\n\t    {\n\t      PID_T pid;\n\t      uid_t owner;\n\t      char user[UT_NAMESIZE];\n\t      char *command_line;\n\t      int *cores;\n\t      int task_count;\n\t      char *cores_str;\n\t      int i;\n\n\t      if (!isdigit (dp->d_name[0])\n\t\t  || NAMELEN (dp) > MAX_PID_T_STRLEN)\n\t\tcontinue;\n\n\t      sscanf (dp->d_name, \"%lld\", &pid);\n\t      command_line = commandline_from_pid (pid);\n\n\t      if (get_process_owner (&owner, pid) == 0)\n\t\tuser_from_uid (user, sizeof (user), owner);\n\t      else\n\t\tstrcpy (user, \"?\");\n\n\t      /* Find CPU cores used by the process.  */\n\t      cores = XCNEWVEC (int, num_cores);\n\t      task_count = get_cores_used_by_process (pid, cores, num_cores);\n\t      cores_str = (char *) xcalloc (task_count, sizeof (\"4294967295\") + 1);\n\n\t      for (i = 0; i < num_cores && task_count > 0; ++i)\n\t\tif (cores[i])\n\t\t  {\n\t\t    char core_str[sizeof (\"4294967295\")];\n\n\t\t    sprintf (core_str, \"%d\", i);\n\t\t    strcat (cores_str, core_str);\n\n\t\t    task_count -= cores[i];\n\t\t    if (task_count > 0)\n\t\t      strcat (cores_str, \",\");\n\t\t  }\n\n\t      xfree (cores);\n\t      \n\t      buffer_xml_printf (\n\t\t  &buffer,\n\t\t  \"<item>\"\n\t\t  \"<column name=\\\"pid\\\">%lld</column>\"\n\t\t  \"<column name=\\\"user\\\">%s</column>\"\n\t\t  \"<column name=\\\"command\\\">%s</column>\"\n\t\t  \"<column name=\\\"cores\\\">%s</column>\"\n\t\t  \"</item>\",\n\t\t  pid,\n\t\t  user,\n\t\t  command_line ? command_line : \"\",\n\t\t  cores_str);\n\n\t      xfree (command_line);     \n\t      xfree (cores_str);\n\t    }\n\t  \n\t  closedir (dirp);\n\t}\n\n      buffer_grow_str0 (&buffer, \"</osdata>\\n\");\n      buf = buffer_finish (&buffer);\n      len_avail = strlen (buf);\n    }\n\n  if (offset >= len_avail)\n    {\n      /* Done.  Get rid of the buffer.  */\n      buffer_free (&buffer);\n      buf = NULL;\n      len_avail = 0;\n      return 0;\n    }\n\n  if (len > len_avail - offset)\n    len = len_avail - offset;\n  memcpy (readbuf, buf + offset, len);\n\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          289,
+          0
+        ],
+        [
+          397,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_xfer_osdata_processes",
+        "parameters": {
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "static int\ncompare_processes (const void *process1, const void *process2)\n{\n  PID_T pid1 = *((PID_T *) process1);\n  PID_T pid2 = *((PID_T *) process2);\n  PID_T pgid1 = *((PID_T *) process1 + 1);\n  PID_T pgid2 = *((PID_T *) process2 + 1);\n\n  /* Sort by PGID.  */\n  if (pgid1 < pgid2)\n    return -1;\n  else if (pgid1 > pgid2)\n    return 1;\n  else\n    {\n      /* Process group leaders always come first, else sort by PID.  */\n      if (pid1 == pgid1)\n\treturn -1;\n      else if (pid2 == pgid2)\n\treturn 1;\n      else if (pid1 < pid2)\n\treturn -1;\n      else if (pid1 > pid2)\n\treturn 1;\n      else\n\treturn 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          406,
+          0
+        ],
+        [
+          433,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "compare_processes",
+        "parameters": {
+          "process1": "void",
+          "process2": "void"
+        },
+        "return_type": "int"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nlinux_xfer_osdata_processgroups (gdb_byte *readbuf,\n\t\t\t\t ULONGEST offset, ULONGEST len)\n{\n  /* We make the process list snapshot when the object starts to be read.  */\n  static const char *buf;\n  static LONGEST len_avail = -1;\n  static struct buffer buffer;\n\n  if (offset == 0)\n    {\n      DIR *dirp;\n\n      if (len_avail != -1 && len_avail != 0)\n\tbuffer_free (&buffer);\n      len_avail = 0;\n      buf = NULL;\n      buffer_init (&buffer);\n      buffer_grow_str (&buffer, \"<osdata type=\\\"process groups\\\">\\n\");\n\n      dirp = opendir (\"/proc\");\n      if (dirp)\n\t{\n\t  struct dirent *dp;\n\t  const size_t list_block_size = 512;\n\t  PID_T *process_list = XNEWVEC (PID_T, list_block_size * 2);\n\t  size_t process_count = 0;\n\t  size_t i;\n\n\t  /* Build list consisting of PIDs followed by their\n\t     associated PGID.  */\n\t  while ((dp = readdir (dirp)) != NULL)\n\t    {\n\t      PID_T pid, pgid;\n\n\t      if (!isdigit (dp->d_name[0])\n\t\t  || NAMELEN (dp) > MAX_PID_T_STRLEN)\n\t\tcontinue;\n\n\t      sscanf (dp->d_name, \"%lld\", &pid);\n\t      pgid = getpgid (pid);\n\n\t      if (pgid > 0)\n\t\t{\n\t\t  process_list[2 * process_count] = pid;\n\t\t  process_list[2 * process_count + 1] = pgid;\n\t\t  ++process_count;\n\n\t\t  /* Increase the size of the list if necessary.  */\n\t\t  if (process_count % list_block_size == 0)\n\t\t    process_list = (PID_T *) xrealloc (\n\t\t\tprocess_list,\n\t\t\t(process_count + list_block_size)\n\t\t\t* 2 * sizeof (PID_T));\n\t\t}\n\t    }\n\n\t  closedir (dirp);\n\n\t  /* Sort the process list.  */\n\t  qsort (process_list, process_count, 2 * sizeof (PID_T),\n\t\t compare_processes);\n\n\t  for (i = 0; i < process_count; ++i)\n\t    {\n\t      PID_T pid = process_list[2 * i];\n\t      PID_T pgid = process_list[2 * i + 1];\n\t      char leader_command[32];\n\t      char *command_line;\n\n\t      command_from_pid (leader_command, sizeof (leader_command), pgid);\n\t      command_line = commandline_from_pid (pid);\n\n\t      buffer_xml_printf (\n\t\t  &buffer,\n\t\t  \"<item>\"\n\t\t  \"<column name=\\\"pgid\\\">%lld</column>\"\n\t\t  \"<column name=\\\"leader command\\\">%s</column>\"\n\t\t  \"<column name=\\\"pid\\\">%lld</column>\"\n\t\t  \"<column name=\\\"command line\\\">%s</column>\"\n\t\t  \"</item>\",\n\t\t  pgid,\n\t\t  leader_command,\n\t\t  pid,\n\t\t  command_line ? command_line : \"\");\n\n\t      xfree (command_line);\n\t    }\n\n\t  xfree (process_list);\n\t}   \n\n      buffer_grow_str0 (&buffer, \"</osdata>\\n\");\n      buf = buffer_finish (&buffer);\n      len_avail = strlen (buf);\n    }\n\n  if (offset >= len_avail)\n    {\n      /* Done.  Get rid of the buffer.  */\n      buffer_free (&buffer);\n      buf = NULL;\n      len_avail = 0;\n      return 0;\n    }\n\n  if (len > len_avail - offset)\n    len = len_avail - offset;\n  memcpy (readbuf, buf + offset, len);\n\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          437,
+          0
+        ],
+        [
+          548,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_xfer_osdata_processgroups",
+        "parameters": {
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nlinux_xfer_osdata_threads (gdb_byte *readbuf,\n\t\t\t   ULONGEST offset, ULONGEST len)\n{\n  /* We make the process list snapshot when the object starts to be read.  */\n  static const char *buf;\n  static LONGEST len_avail = -1;\n  static struct buffer buffer;\n\n  if (offset == 0)\n    {\n      DIR *dirp;\n\n      if (len_avail != -1 && len_avail != 0)\n\tbuffer_free (&buffer);\n      len_avail = 0;\n      buf = NULL;\n      buffer_init (&buffer);\n      buffer_grow_str (&buffer, \"<osdata type=\\\"threads\\\">\\n\");\n\n      dirp = opendir (\"/proc\");\n      if (dirp)\n\t{\n\t  struct dirent *dp;\n\n\t  while ((dp = readdir (dirp)) != NULL)\n\t    {\n\t      struct stat statbuf;\n\t      char procentry[sizeof (\"/proc/4294967295\")];\n\n\t      if (!isdigit (dp->d_name[0])\n\t\t  || NAMELEN (dp) > sizeof (\"4294967295\") - 1)\n\t\tcontinue;\n\n\t      xsnprintf (procentry, sizeof (procentry), \"/proc/%s\",\n\t\t\t dp->d_name);\n\t      if (stat (procentry, &statbuf) == 0\n\t\t  && S_ISDIR (statbuf.st_mode))\n\t\t{\n\t\t  DIR *dirp2;\n\t\t  char *pathname;\n\t\t  PID_T pid;\n\t\t  char command[32];\n\n\t\t  pathname = xstrprintf (\"/proc/%s/task\", dp->d_name);\n\t\t  \n\t\t  pid = atoi (dp->d_name);\n\t\t  command_from_pid (command, sizeof (command), pid);\n\n\t\t  dirp2 = opendir (pathname);\n\n\t\t  if (dirp2)\n\t\t    {\n\t\t      struct dirent *dp2;\n\n\t\t      while ((dp2 = readdir (dirp2)) != NULL)\n\t\t\t{\n\t\t\t  PID_T tid;\n\t\t\t  int core;\n\n\t\t\t  if (!isdigit (dp2->d_name[0])\n\t\t\t      || NAMELEN (dp2) > sizeof (\"4294967295\") - 1)\n\t\t\t    continue;\n\n\t\t\t  tid = atoi (dp2->d_name);\n\t\t\t  core = linux_common_core_of_thread (ptid_build (pid, tid, 0));\n\n\t\t\t  buffer_xml_printf (\n\t\t\t    &buffer,\n\t\t\t    \"<item>\"\n\t\t\t    \"<column name=\\\"pid\\\">%lld</column>\"\n\t\t\t    \"<column name=\\\"command\\\">%s</column>\"\n\t\t\t    \"<column name=\\\"tid\\\">%lld</column>\"\n\t\t\t    \"<column name=\\\"core\\\">%d</column>\"\n\t\t\t    \"</item>\",\n\t\t\t    pid,\n\t\t\t    command,\n\t\t\t    tid,\n\t\t\t    core);\n\t\t\t}\n\n\t\t      closedir (dirp2);\n\t\t    }\n\n\t\t  xfree (pathname);\n\t\t}\n\t    }\n\n\t  closedir (dirp);\n\t}\n\n      buffer_grow_str0 (&buffer, \"</osdata>\\n\");\n      buf = buffer_finish (&buffer);\n      len_avail = strlen (buf);\n    }\n\n  if (offset >= len_avail)\n    {\n      /* Done.  Get rid of the buffer.  */\n      buffer_free (&buffer);\n      buf = NULL;\n      len_avail = 0;\n      return 0;\n    }\n\n  if (len > len_avail - offset)\n    len = len_avail - offset;\n  memcpy (readbuf, buf + offset, len);\n\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          553,
+          0
+        ],
+        [
+          663,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_xfer_osdata_threads",
+        "parameters": {
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nlinux_xfer_osdata_cpus (gdb_byte *readbuf,\n\t\t\t   ULONGEST offset, ULONGEST len)\n{\n  static const char *buf;\n  static LONGEST len_avail = -1;\n  static struct buffer buffer;\n\n  if (offset == 0)\n    {\n      FILE *fp;\n      int first_item = 1;\n\n      if (len_avail != -1 && len_avail != 0)\n\tbuffer_free (&buffer);\n      len_avail = 0;\n      buf = NULL;\n      buffer_init (&buffer);\n      buffer_grow_str (&buffer, \"<osdata type=\\\"cpus\\\">\\n\");\n\n      fp = gdb_fopen_cloexec (\"/proc/cpuinfo\", \"r\");\n      if (fp != NULL)\n\t{\n\t  char buf[8192];\n\n\t  do\n\t    {\n\t      if (fgets (buf, sizeof (buf), fp))\n\t\t{\n\t\t  char *key, *value;\n\t\t  int i = 0;\n\n\t\t  key = strtok (buf, \":\");\n\t\t  if (key == NULL)\n\t\t    continue;\n\n\t\t  value = strtok (NULL, \":\");\n\t\t  if (value == NULL)\n\t\t    continue;\n\n\t\t  while (key[i] != '\\t' && key[i] != '\\0')\n\t\t    i++;\n\n\t\t  key[i] = '\\0';\n\n\t\t  i = 0;\n\t\t  while (value[i] != '\\t' && value[i] != '\\0')\n\t\t    i++;\n\n\t\t  value[i] = '\\0';\n\n\t\t  if (strcmp (key, \"processor\") == 0)\n\t\t    {\n\t\t      if (first_item)\n\t\t\tbuffer_grow_str (&buffer, \"<item>\");\n\t\t      else\n\t\t\tbuffer_grow_str (&buffer, \"</item><item>\");\n\n\t\t      first_item = 0;\n\t\t    }\n\n\t\t  buffer_xml_printf (&buffer,\n\t\t\t\t     \"<column name=\\\"%s\\\">%s</column>\",\n\t\t\t\t     key,\n\t\t\t\t     value);\n\t\t}\n\t    }\n\t  while (!feof (fp));\n\n\t  if (first_item == 0)\n\t    buffer_grow_str (&buffer, \"</item>\");\n\n\t  fclose (fp);\n\t}\n\n      buffer_grow_str0 (&buffer, \"</osdata>\\n\");\n      buf = buffer_finish (&buffer);\n      len_avail = strlen (buf);\n    }\n\n  if (offset >= len_avail)\n    {\n      /* Done.  Get rid of the buffer.  */\n      buffer_free (&buffer);\n      buf = NULL;\n      len_avail = 0;\n      return 0;\n    }\n\n  if (len > len_avail - offset)\n    len = len_avail - offset;\n  memcpy (readbuf, buf + offset, len);\n\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          667,
+          0
+        ],
+        [
+          761,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_xfer_osdata_cpus",
+        "parameters": {
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nlinux_xfer_osdata_fds (gdb_byte *readbuf,\n\t\t       ULONGEST offset, ULONGEST len)\n{\n  /* We make the process list snapshot when the object starts to be read.  */\n  static const char *buf;\n  static LONGEST len_avail = -1;\n  static struct buffer buffer;\n\n  if (offset == 0)\n    {\n      DIR *dirp;\n\n      if (len_avail != -1 && len_avail != 0)\n\tbuffer_free (&buffer);\n      len_avail = 0;\n      buf = NULL;\n      buffer_init (&buffer);\n      buffer_grow_str (&buffer, \"<osdata type=\\\"files\\\">\\n\");\n\n      dirp = opendir (\"/proc\");\n      if (dirp)\n\t{\n\t  struct dirent *dp;\n\n\t  while ((dp = readdir (dirp)) != NULL)\n\t    {\n\t      struct stat statbuf;\n\t      char procentry[sizeof (\"/proc/4294967295\")];\n\n\t      if (!isdigit (dp->d_name[0])\n\t\t  || NAMELEN (dp) > sizeof (\"4294967295\") - 1)\n\t\tcontinue;\n\n\t      xsnprintf (procentry, sizeof (procentry), \"/proc/%s\",\n\t\t\t dp->d_name);\n\t      if (stat (procentry, &statbuf) == 0\n\t\t  && S_ISDIR (statbuf.st_mode))\n\t\t{\n\t\t  char *pathname;\n\t\t  DIR *dirp2;\n\t\t  PID_T pid;\n\t\t  char command[32];\n\n\t\t  pid = atoi (dp->d_name);\n\t\t  command_from_pid (command, sizeof (command), pid);\n\n\t\t  pathname = xstrprintf (\"/proc/%s/fd\", dp->d_name);\n\t\t  dirp2 = opendir (pathname);\n\n\t\t  if (dirp2)\n\t\t    {\n\t\t      struct dirent *dp2;\n\n\t\t      while ((dp2 = readdir (dirp2)) != NULL)\n\t\t\t{\n\t\t\t  char *fdname;\n\t\t\t  char buf[1000];\n\t\t\t  ssize_t rslt;\n\n\t\t\t  if (!isdigit (dp2->d_name[0]))\n\t\t\t    continue;\n\n\t\t\t  fdname = xstrprintf (\"%s/%s\", pathname, dp2->d_name);\n\t\t\t  rslt = readlink (fdname, buf, sizeof (buf) - 1);\n\t\t\t  if (rslt >= 0)\n\t\t\t    buf[rslt] = '\\0';\n\n\t\t\t  buffer_xml_printf (\n\t\t\t    &buffer,\n\t\t\t    \"<item>\"\n\t\t\t    \"<column name=\\\"pid\\\">%s</column>\"\n\t\t\t    \"<column name=\\\"command\\\">%s</column>\"\n\t\t\t    \"<column name=\\\"file descriptor\\\">%s</column>\"\n\t\t\t    \"<column name=\\\"name\\\">%s</column>\"\n\t\t\t    \"</item>\",\n\t\t\t    dp->d_name,\n\t\t\t    command,\n\t\t\t    dp2->d_name,\n\t\t\t    (rslt >= 0 ? buf : dp2->d_name));\n\t\t\t}\n\n\t\t      closedir (dirp2);\n\t\t    }\n\n\t\t  xfree (pathname);\n\t\t}\n\t    }\n\n\t  closedir (dirp);\n\t}\n\n      buffer_grow_str0 (&buffer, \"</osdata>\\n\");\n      buf = buffer_finish (&buffer);\n      len_avail = strlen (buf);\n    }\n\n  if (offset >= len_avail)\n    {\n      /* Done.  Get rid of the buffer.  */\n      buffer_free (&buffer);\n      buf = NULL;\n      len_avail = 0;\n      return 0;\n    }\n\n  if (len > len_avail - offset)\n    len = len_avail - offset;\n  memcpy (readbuf, buf + offset, len);\n\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          766,
+          0
+        ],
+        [
+          877,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_xfer_osdata_fds",
+        "parameters": {
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "static const char *\nformat_socket_state (unsigned char state)\n{\n  /* Copied from include/net/tcp_states.h in the Linux kernel sources.  */\n  enum {\n    TCP_ESTABLISHED = 1,\n    TCP_SYN_SENT,\n    TCP_SYN_RECV,\n    TCP_FIN_WAIT1,\n    TCP_FIN_WAIT2,\n    TCP_TIME_WAIT,\n    TCP_CLOSE,\n    TCP_CLOSE_WAIT,\n    TCP_LAST_ACK,\n    TCP_LISTEN,\n    TCP_CLOSING\n  };\n\n  switch (state)\n    {\n    case TCP_ESTABLISHED:\n      return \"ESTABLISHED\";\n    case TCP_SYN_SENT:\n      return \"SYN_SENT\";\n    case TCP_SYN_RECV:\n      return \"SYN_RECV\";\n    case TCP_FIN_WAIT1:\n      return \"FIN_WAIT1\";\n    case TCP_FIN_WAIT2:\n      return \"FIN_WAIT2\";\n    case TCP_TIME_WAIT:\n      return \"TIME_WAIT\";\n    case TCP_CLOSE:\n      return \"CLOSE\";\n    case TCP_CLOSE_WAIT:\n      return \"CLOSE_WAIT\";\n    case TCP_LAST_ACK:\n      return \"LAST_ACK\";\n    case TCP_LISTEN:\n      return \"LISTEN\";\n    case TCP_CLOSING:\n      return \"CLOSING\";\n    default:\n      return \"(unknown)\";\n    }\n}",
+      "fn_code_pos": [
+        [
+          881,
+          0
+        ],
+        [
+          926,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "format_socket_state",
+        "parameters": {
+          "state": "unsigned char"
+        },
+        "return_type": "char"
+      }
+    },
+    {
+      "fn_code": "static void\nprint_sockets (unsigned short family, int tcp, struct buffer *buffer)\n{\n  const char *proc_file;\n  FILE *fp;\n\n  if (family == AF_INET)\n    proc_file = tcp ? \"/proc/net/tcp\" : \"/proc/net/udp\";\n  else if (family == AF_INET6)\n    proc_file = tcp ? \"/proc/net/tcp6\" : \"/proc/net/udp6\";\n  else\n    return;\n\n  fp = gdb_fopen_cloexec (proc_file, \"r\");\n  if (fp)\n    {\n      char buf[8192];\n\n      do\n\t{\n\t  if (fgets (buf, sizeof (buf), fp))\n\t    {\n\t      uid_t uid;\n\t      unsigned int local_port, remote_port, state;\n\t      char local_address[NI_MAXHOST], remote_address[NI_MAXHOST];\n\t      int result;\n\n#if NI_MAXHOST <= 32\n#error \"local_address and remote_address buffers too small\"\n#endif\n\n\t      result = sscanf (buf,\n\t\t\t       \"%*d: %32[0-9A-F]:%X %32[0-9A-F]:%X %X %*X:%*X %*X:%*X %*X %d %*d %*u %*s\\n\",\n\t\t\t       local_address, &local_port,\n\t\t\t       remote_address, &remote_port,\n\t\t\t       &state,\n\t\t\t       &uid);\n\t      \n\t      if (result == 6)\n\t\t{\n\t\t  union socket_addr locaddr, remaddr;\n\t\t  size_t addr_size;\n\t\t  char user[UT_NAMESIZE];\n\t\t  char local_service[NI_MAXSERV], remote_service[NI_MAXSERV];\n\n\t\t  if (family == AF_INET)\n\t\t    {\n\t\t      sscanf (local_address, \"%X\",\n\t\t\t      &locaddr.sin.sin_addr.s_addr);\n\t\t      sscanf (remote_address, \"%X\",\n\t\t\t      &remaddr.sin.sin_addr.s_addr);\n\t\t      \n\t\t      locaddr.sin.sin_port = htons (local_port);\n\t\t      remaddr.sin.sin_port = htons (remote_port);\n\n\t\t      addr_size = sizeof (struct sockaddr_in);\n\t\t    }\n\t\t  else\n\t\t    {\n\t\t      sscanf (local_address, \"%8X%8X%8X%8X\",\n\t\t\t      locaddr.sin6.sin6_addr.s6_addr32,\n\t\t\t      locaddr.sin6.sin6_addr.s6_addr32 + 1,\n\t\t\t      locaddr.sin6.sin6_addr.s6_addr32 + 2,\n\t\t\t      locaddr.sin6.sin6_addr.s6_addr32 + 3);\n\t\t      sscanf (remote_address, \"%8X%8X%8X%8X\",\n\t\t\t      remaddr.sin6.sin6_addr.s6_addr32,\n\t\t\t      remaddr.sin6.sin6_addr.s6_addr32 + 1,\n\t\t\t      remaddr.sin6.sin6_addr.s6_addr32 + 2,\n\t\t\t      remaddr.sin6.sin6_addr.s6_addr32 + 3);\n\n\t\t      locaddr.sin6.sin6_port = htons (local_port);\n\t\t      remaddr.sin6.sin6_port = htons (remote_port);\n\t\t      \n\t\t      locaddr.sin6.sin6_flowinfo = 0;\n\t\t      remaddr.sin6.sin6_flowinfo = 0;\n\t\t      locaddr.sin6.sin6_scope_id = 0;\n\t\t      remaddr.sin6.sin6_scope_id = 0;\n\n\t\t      addr_size = sizeof (struct sockaddr_in6);\n\t\t    }\n\t      \n\t\t  locaddr.sa.sa_family = remaddr.sa.sa_family = family;\n\t\t      \n\t\t  result = getnameinfo (&locaddr.sa, addr_size,\n\t\t\t\t\tlocal_address, sizeof (local_address),\n\t\t\t\t\tlocal_service, sizeof (local_service),\n\t\t\t\t\tNI_NUMERICHOST | NI_NUMERICSERV\n\t\t\t\t\t| (tcp ? 0 : NI_DGRAM));\n\t\t  if (result)\n\t\t    continue;\n\t\t  \n\t\t  result = getnameinfo (&remaddr.sa, addr_size,\n\t\t\t\t\tremote_address,\n\t\t\t\t\tsizeof (remote_address),\n\t\t\t\t\tremote_service,\n\t\t\t\t\tsizeof (remote_service),\n\t\t\t\t\tNI_NUMERICHOST | NI_NUMERICSERV\n\t\t\t\t\t| (tcp ? 0 : NI_DGRAM));\n\t\t  if (result)\n\t\t    continue;\n\t\t  \n\t\t  user_from_uid (user, sizeof (user), uid);\n\t\t  \n\t\t  buffer_xml_printf (\n\t\t      buffer,\n\t\t      \"<item>\"\n\t\t      \"<column name=\\\"local address\\\">%s</column>\"\n\t\t      \"<column name=\\\"local port\\\">%s</column>\"\n\t\t      \"<column name=\\\"remote address\\\">%s</column>\"\n\t\t      \"<column name=\\\"remote port\\\">%s</column>\"\n\t\t      \"<column name=\\\"state\\\">%s</column>\"\n\t\t      \"<column name=\\\"user\\\">%s</column>\"\n\t\t      \"<column name=\\\"family\\\">%s</column>\" \n\t\t      \"<column name=\\\"protocol\\\">%s</column>\"\n\t\t      \"</item>\",\n\t\t      local_address,\n\t\t      local_service,\n\t\t      remote_address,\n\t\t      remote_service,\n\t\t      format_socket_state (state),\n\t\t      user,\n\t\t      (family == AF_INET) ? \"INET\" : \"INET6\",\n\t\t      tcp ? \"STREAM\" : \"DGRAM\");\n\t\t}\n\t    }\n\t}\n      while (!feof (fp));\n\n      fclose (fp);\n    }\n}",
+      "fn_code_pos": [
+        [
+          940,
+          0
+        ],
+        [
+          1070,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "print_sockets",
+        "parameters": {
+          "family": "unsigned short",
+          "tcp": "int",
+          "buffer": "struct buffer"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nlinux_xfer_osdata_isockets (gdb_byte *readbuf,\n\t\t\t    ULONGEST offset, ULONGEST len)\n{\n  static const char *buf;\n  static LONGEST len_avail = -1;\n  static struct buffer buffer;\n\n  if (offset == 0)\n    {\n      if (len_avail != -1 && len_avail != 0)\n\tbuffer_free (&buffer);\n      len_avail = 0;\n      buf = NULL;\n      buffer_init (&buffer);\n      buffer_grow_str (&buffer, \"<osdata type=\\\"I sockets\\\">\\n\");\n\n      print_sockets (AF_INET, 1, &buffer);\n      print_sockets (AF_INET, 0, &buffer);\n      print_sockets (AF_INET6, 1, &buffer);\n      print_sockets (AF_INET6, 0, &buffer);\n\n      buffer_grow_str0 (&buffer, \"</osdata>\\n\");\n      buf = buffer_finish (&buffer);\n      len_avail = strlen (buf);\n    }\n\n  if (offset >= len_avail)\n    {\n      /* Done.  Get rid of the buffer.  */\n      buffer_free (&buffer);\n      buf = NULL;\n      len_avail = 0;\n      return 0;\n    }\n\n  if (len > len_avail - offset)\n    len = len_avail - offset;\n  memcpy (readbuf, buf + offset, len);\n\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          1074,
+          0
+        ],
+        [
+          1115,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_xfer_osdata_isockets",
+        "parameters": {
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "static void\ntime_from_time_t (char *time, int maxlen, TIME_T seconds)\n{\n  if (!seconds)\n    time[0] = '\\0';\n  else\n    {\n      time_t t = (time_t) seconds;\n      \n      strncpy (time, ctime (&t), maxlen);\n      time[maxlen - 1] = '\\0';\n    }\n}",
+      "fn_code_pos": [
+        [
+          1120,
+          0
+        ],
+        [
+          1132,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "time_from_time_t",
+        "parameters": {
+          "time": "char",
+          "maxlen": "int",
+          "seconds": "TIME_T"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static void\ngroup_from_gid (char *group, int maxlen, gid_t gid)\n{\n  struct group *grentry = getgrgid (gid);\n  \n  if (grentry)\n    {\n      strncpy (group, grentry->gr_name, maxlen);\n      /* Ensure that the group name is null-terminated.  */\n      group[maxlen - 1] = '\\0';\n    }\n  else\n    group[0] = '\\0';\n}",
+      "fn_code_pos": [
+        [
+          1137,
+          0
+        ],
+        [
+          1150,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "group_from_gid",
+        "parameters": {
+          "group": "char",
+          "maxlen": "int",
+          "gid": "gid_t"
+        },
+        "return_type": "void"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nlinux_xfer_osdata_shm (gdb_byte *readbuf,\n\t\t       ULONGEST offset, ULONGEST len)\n{\n  static const char *buf;\n  static LONGEST len_avail = -1;\n  static struct buffer buffer;\n\n  if (offset == 0)\n    {\n      FILE *fp;\n\n      if (len_avail != -1 && len_avail != 0)\n\tbuffer_free (&buffer);\n      len_avail = 0;\n      buf = NULL;\n      buffer_init (&buffer);\n      buffer_grow_str (&buffer, \"<osdata type=\\\"shared memory\\\">\\n\");\n\n      fp = gdb_fopen_cloexec (\"/proc/sysvipc/shm\", \"r\");\n      if (fp)\n\t{\n\t  char buf[8192];\n\n\t  do\n\t    {\n\t      if (fgets (buf, sizeof (buf), fp))\n\t\t{\n\t\t  key_t key;\n\t\t  uid_t uid, cuid;\n\t\t  gid_t gid, cgid;\n\t\t  PID_T cpid, lpid;\n\t\t  int shmid, size, nattch;\n\t\t  TIME_T atime, dtime, ctime;\n\t\t  unsigned int perms;\n\t\t  int items_read;\n\t\t\t\t  \n\t\t  items_read = sscanf (buf,\n\t\t\t\t       \"%d %d %o %d %lld %lld %d %u %u %u %u %lld %lld %lld\",\n\t\t\t\t       &key, &shmid, &perms, &size,\n\t\t\t\t       &cpid, &lpid,\n\t\t\t\t       &nattch,\n\t\t\t\t       &uid, &gid, &cuid, &cgid,\n\t\t\t\t       &atime, &dtime, &ctime);\n\n\t\t  if (items_read == 14)\n\t\t    {\n\t\t      char user[UT_NAMESIZE], group[UT_NAMESIZE];\n\t\t      char cuser[UT_NAMESIZE], cgroup[UT_NAMESIZE];\n\t\t      char ccmd[32], lcmd[32];\n\t\t      char atime_str[32], dtime_str[32], ctime_str[32];\n\t\t      \n\t\t      user_from_uid (user, sizeof (user), uid);\n\t\t      group_from_gid (group, sizeof (group), gid);\n\t\t      user_from_uid (cuser, sizeof (cuser), cuid);\n\t\t      group_from_gid (cgroup, sizeof (cgroup), cgid);\n\t\t      \n\t\t      command_from_pid (ccmd, sizeof (ccmd), cpid);\n\t\t      command_from_pid (lcmd, sizeof (lcmd), lpid);\n\t\t      \n\t\t      time_from_time_t (atime_str, sizeof (atime_str), atime);\n\t\t      time_from_time_t (dtime_str, sizeof (dtime_str), dtime);\n\t\t      time_from_time_t (ctime_str, sizeof (ctime_str), ctime);\n\t\t      \n\t\t      buffer_xml_printf (\n\t\t          &buffer,\n\t\t\t  \"<item>\"\n\t\t\t  \"<column name=\\\"key\\\">%d</column>\"\n\t\t\t  \"<column name=\\\"shmid\\\">%d</column>\"\n\t\t\t  \"<column name=\\\"permissions\\\">%o</column>\"\n\t\t\t  \"<column name=\\\"size\\\">%d</column>\"\n\t\t\t  \"<column name=\\\"creator command\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"last op. command\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"num attached\\\">%d</column>\"\n\t\t\t  \"<column name=\\\"user\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"group\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"creator user\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"creator group\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"last shmat() time\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"last shmdt() time\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"last shmctl() time\\\">%s</column>\"\n\t\t\t  \"</item>\",\n\t\t\t  key,\n\t\t\t  shmid,\n\t\t\t  perms,\n\t\t\t  size,\n\t\t\t  ccmd,\n\t\t\t  lcmd,\n\t\t\t  nattch,\n\t\t\t  user,\n\t\t\t  group,\n\t\t\t  cuser,\n\t\t\t  cgroup,\n\t\t\t  atime_str,\n\t\t\t  dtime_str,\n\t\t\t  ctime_str);\n\t\t    }\n\t\t}\n\t    }\n\t  while (!feof (fp));\n\n\t  fclose (fp);\n\t}\n      \n      buffer_grow_str0 (&buffer, \"</osdata>\\n\");\n      buf = buffer_finish (&buffer);\n      len_avail = strlen (buf);\n    }\n\n  if (offset >= len_avail)\n    {\n      /* Done.  Get rid of the buffer.  */\n      buffer_free (&buffer);\n      buf = NULL;\n      len_avail = 0;\n      return 0;\n    }\n\n  if (len > len_avail - offset)\n    len = len_avail - offset;\n  memcpy (readbuf, buf + offset, len);\n\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          1155,
+          0
+        ],
+        [
+          1278,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_xfer_osdata_shm",
+        "parameters": {
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nlinux_xfer_osdata_sem (gdb_byte *readbuf,\n\t\t       ULONGEST offset, ULONGEST len)\n{\n  static const char *buf;\n  static LONGEST len_avail = -1;\n  static struct buffer buffer;\n\n  if (offset == 0)\n    {\n      FILE *fp;\n      \n      if (len_avail != -1 && len_avail != 0)\n\tbuffer_free (&buffer);\n      len_avail = 0;\n      buf = NULL;\n      buffer_init (&buffer);\n      buffer_grow_str (&buffer, \"<osdata type=\\\"semaphores\\\">\\n\");\n\n      fp = gdb_fopen_cloexec (\"/proc/sysvipc/sem\", \"r\");\n      if (fp)\n\t{\n\t  char buf[8192];\n\t  \n\t  do\n\t    {\n\t      if (fgets (buf, sizeof (buf), fp))\n\t\t{\n\t\t  key_t key;\n\t\t  uid_t uid, cuid;\n\t\t  gid_t gid, cgid;\n\t\t  unsigned int perms, nsems;\n\t\t  int semid;\n\t\t  TIME_T otime, ctime;\n\t\t  int items_read;\n\t\t  \n\t\t  items_read = sscanf (buf,\n\t\t\t\t       \"%d %d %o %u %d %d %d %d %lld %lld\",\n\t\t\t\t       &key, &semid, &perms, &nsems,\n\t\t\t\t       &uid, &gid, &cuid, &cgid,\n\t\t\t\t       &otime, &ctime);\n\t\t  \n\t\t  if (items_read == 10)\n\t\t    {\n\t\t      char user[UT_NAMESIZE], group[UT_NAMESIZE];\n\t\t      char cuser[UT_NAMESIZE], cgroup[UT_NAMESIZE];\n\t\t      char otime_str[32], ctime_str[32];\n\t\t      \n\t\t      user_from_uid (user, sizeof (user), uid);\n\t\t      group_from_gid (group, sizeof (group), gid);\n\t\t      user_from_uid (cuser, sizeof (cuser), cuid);\n\t\t      group_from_gid (cgroup, sizeof (cgroup), cgid);\n\t\t      \n\t\t      time_from_time_t (otime_str, sizeof (otime_str), otime);\n\t\t      time_from_time_t (ctime_str, sizeof (ctime_str), ctime);\n\t\t      \n\t\t      buffer_xml_printf (\n\t\t\t  &buffer,\n\t\t\t  \"<item>\"\n\t\t\t  \"<column name=\\\"key\\\">%d</column>\"\n\t\t\t  \"<column name=\\\"semid\\\">%d</column>\"\n\t\t\t  \"<column name=\\\"permissions\\\">%o</column>\"\n\t\t\t  \"<column name=\\\"num semaphores\\\">%u</column>\"\n\t\t\t  \"<column name=\\\"user\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"group\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"creator user\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"creator group\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"last semop() time\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"last semctl() time\\\">%s</column>\"\n\t\t\t  \"</item>\",\n\t\t\t  key,\n\t\t\t  semid,\n\t\t\t  perms,\n\t\t\t  nsems,\n\t\t\t  user,\n\t\t\t  group,\n\t\t\t  cuser,\n\t\t\t  cgroup,\n\t\t\t  otime_str,\n\t\t\t  ctime_str);\n\t\t    }\n\t\t}\n\t    }\n\t  while (!feof (fp));\n\n\t  fclose (fp);\n\t}\n\n      buffer_grow_str0 (&buffer, \"</osdata>\\n\");\n      buf = buffer_finish (&buffer);\n      len_avail = strlen (buf);\n    }\n\n  if (offset >= len_avail)\n    {\n      /* Done.  Get rid of the buffer.  */\n      buffer_free (&buffer);\n      buf = NULL;\n      len_avail = 0;\n      return 0;\n    }\n\n  if (len > len_avail - offset)\n    len = len_avail - offset;\n  memcpy (readbuf, buf + offset, len);\n\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          1283,
+          0
+        ],
+        [
+          1390,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_xfer_osdata_sem",
+        "parameters": {
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nlinux_xfer_osdata_msg (gdb_byte *readbuf,\n\t\t       ULONGEST offset, ULONGEST len)\n{\n  static const char *buf;\n  static LONGEST len_avail = -1;\n  static struct buffer buffer;\n\n  if (offset == 0)\n    {\n      FILE *fp;\n      \n      if (len_avail != -1 && len_avail != 0)\n\tbuffer_free (&buffer);\n      len_avail = 0;\n      buf = NULL;\n      buffer_init (&buffer);\n      buffer_grow_str (&buffer, \"<osdata type=\\\"message queues\\\">\\n\");\n      \n      fp = gdb_fopen_cloexec (\"/proc/sysvipc/msg\", \"r\");\n      if (fp)\n\t{\n\t  char buf[8192];\n\t  \n\t  do\n\t    {\n\t      if (fgets (buf, sizeof (buf), fp))\n\t\t{\n\t\t  key_t key;\n\t\t  PID_T lspid, lrpid;\n\t\t  uid_t uid, cuid;\n\t\t  gid_t gid, cgid;\n\t\t  unsigned int perms, cbytes, qnum;\n\t\t  int msqid;\n\t\t  TIME_T stime, rtime, ctime;\n\t\t  int items_read;\n\t\t  \n\t\t  items_read = sscanf (buf,\n\t\t\t\t       \"%d %d %o %u %u %lld %lld %d %d %d %d %lld %lld %lld\",\n\t\t\t\t       &key, &msqid, &perms, &cbytes, &qnum,\n\t\t\t\t       &lspid, &lrpid, &uid, &gid, &cuid, &cgid,\n\t\t\t\t       &stime, &rtime, &ctime);\n\t\t  \n\t\t  if (items_read == 14)\n\t\t    {\n\t\t      char user[UT_NAMESIZE], group[UT_NAMESIZE];\n\t\t      char cuser[UT_NAMESIZE], cgroup[UT_NAMESIZE];\n\t\t      char lscmd[32], lrcmd[32];\n\t\t      char stime_str[32], rtime_str[32], ctime_str[32];\n\t\t      \n\t\t      user_from_uid (user, sizeof (user), uid);\n\t\t      group_from_gid (group, sizeof (group), gid);\n\t\t      user_from_uid (cuser, sizeof (cuser), cuid);\n\t\t      group_from_gid (cgroup, sizeof (cgroup), cgid);\n\t\t      \n\t\t      command_from_pid (lscmd, sizeof (lscmd), lspid);\n\t\t      command_from_pid (lrcmd, sizeof (lrcmd), lrpid);\n\t\t      \n\t\t      time_from_time_t (stime_str, sizeof (stime_str), stime);\n\t\t      time_from_time_t (rtime_str, sizeof (rtime_str), rtime);\n\t\t      time_from_time_t (ctime_str, sizeof (ctime_str), ctime);\n\t\t      \n\t\t      buffer_xml_printf (\n\t\t\t  &buffer,\n\t\t\t  \"<item>\"\n\t\t\t  \"<column name=\\\"key\\\">%d</column>\"\n\t\t\t  \"<column name=\\\"msqid\\\">%d</column>\"\n\t\t\t  \"<column name=\\\"permissions\\\">%o</column>\"\n\t\t\t  \"<column name=\\\"num used bytes\\\">%u</column>\"\n\t\t\t  \"<column name=\\\"num messages\\\">%u</column>\"\n\t\t\t  \"<column name=\\\"last msgsnd() command\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"last msgrcv() command\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"user\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"group\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"creator user\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"creator group\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"last msgsnd() time\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"last msgrcv() time\\\">%s</column>\"\n\t\t\t  \"<column name=\\\"last msgctl() time\\\">%s</column>\"\n\t\t\t  \"</item>\",\n\t\t\t  key,\n\t\t\t  msqid,\n\t\t\t  perms,\n\t\t\t  cbytes,\n\t\t\t  qnum,\n\t\t\t  lscmd,\n\t\t\t  lrcmd,\n\t\t\t  user,\n\t\t\t  group,\n\t\t\t  cuser,\n\t\t\t  cgroup,\n\t\t\t  stime_str,\n\t\t\t  rtime_str,\n\t\t\t  ctime_str);\n\t\t    }\n\t\t}\n\t    }\n\t  while (!feof (fp));\n\n\t  fclose (fp);\n\t}\n\n      buffer_grow_str0 (&buffer, \"</osdata>\\n\");\n      buf = buffer_finish (&buffer);\n      len_avail = strlen (buf);\n    }\n\n  if (offset >= len_avail)\n    {\n      /* Done.  Get rid of the buffer.  */\n      buffer_free (&buffer);\n      buf = NULL;\n      len_avail = 0;\n      return 0;\n    }\n\n  if (len > len_avail - offset)\n    len = len_avail - offset;\n  memcpy (readbuf, buf + offset, len);\n\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          1395,
+          0
+        ],
+        [
+          1516,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_xfer_osdata_msg",
+        "parameters": {
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "static LONGEST\nlinux_xfer_osdata_modules (gdb_byte *readbuf,\n\t\t\t   ULONGEST offset, ULONGEST len)\n{\n  static const char *buf;\n  static LONGEST len_avail = -1;\n  static struct buffer buffer;\n\n  if (offset == 0)\n    {\n      FILE *fp;\n\n      if (len_avail != -1 && len_avail != 0)\n\tbuffer_free (&buffer);\n      len_avail = 0;\n      buf = NULL;\n      buffer_init (&buffer);\n      buffer_grow_str (&buffer, \"<osdata type=\\\"modules\\\">\\n\");\n\n      fp = gdb_fopen_cloexec (\"/proc/modules\", \"r\");\n      if (fp)\n\t{\n\t  char buf[8192];\n\t  \n\t  do\n\t    {\n\t      if (fgets (buf, sizeof (buf), fp))\n\t\t{\n\t\t  char *name, *dependencies, *status, *tmp;\n\t\t  unsigned int size;\n\t\t  unsigned long long address;\n\t\t  int uses;\n\n\t\t  name = strtok (buf, \" \");\n\t\t  if (name == NULL)\n\t\t    continue;\n\n\t\t  tmp = strtok (NULL, \" \");\n\t\t  if (tmp == NULL)\n\t\t    continue;\n\t\t  if (sscanf (tmp, \"%u\", &size) != 1)\n\t\t    continue;\n\n\t\t  tmp = strtok (NULL, \" \");\n\t\t  if (tmp == NULL)\n\t\t    continue;\n\t\t  if (sscanf (tmp, \"%d\", &uses) != 1)\n\t\t    continue;\n\n\t\t  dependencies = strtok (NULL, \" \");\n\t\t  if (dependencies == NULL)\n\t\t    continue;\n\n\t\t  status = strtok (NULL, \" \");\n\t\t  if (status == NULL)\n\t\t    continue;\n\n\t\t  tmp = strtok (NULL, \"\\n\");\n\t\t  if (tmp == NULL)\n\t\t    continue;\n\t\t  if (sscanf (tmp, \"%llx\", &address) != 1)\n\t\t    continue;\n\n\t\t  buffer_xml_printf (\n\t\t\t&buffer,\n\t\t\t\"<item>\"\n\t\t\t\"<column name=\\\"name\\\">%s</column>\"\n\t\t\t\"<column name=\\\"size\\\">%u</column>\"\n\t\t\t\"<column name=\\\"num uses\\\">%d</column>\"\n\t\t\t\"<column name=\\\"dependencies\\\">%s</column>\"\n\t\t\t\"<column name=\\\"status\\\">%s</column>\"\n\t\t\t\"<column name=\\\"address\\\">%llx</column>\"\n\t\t\t\"</item>\",\n\t\t\tname,\n\t\t\tsize,\n\t\t\tuses,\n\t\t\tdependencies,\n\t\t\tstatus,\n\t\t\taddress);\n\t\t}\n\t    }\n\t  while (!feof (fp));\n\n\t  fclose (fp);\n\t}\n\n      buffer_grow_str0 (&buffer, \"</osdata>\\n\");\n      buf = buffer_finish (&buffer);\n      len_avail = strlen (buf);\n    }\n\n  if (offset >= len_avail)\n    {\n      /* Done.  Get rid of the buffer.  */\n      buffer_free (&buffer);\n      buf = NULL;\n      len_avail = 0;\n      return 0;\n    }\n\n  if (len > len_avail - offset)\n    len = len_avail - offset;\n  memcpy (readbuf, buf + offset, len);\n\n  return len;\n}",
+      "fn_code_pos": [
+        [
+          1521,
+          0
+        ],
+        [
+          1626,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_xfer_osdata_modules",
+        "parameters": {
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    },
+    {
+      "fn_code": "LONGEST\nlinux_common_xfer_osdata (const char *annex, gdb_byte *readbuf,\n\t\t\t  ULONGEST offset, ULONGEST len)\n{\n  if (!annex || *annex == '\\0')\n    {\n      static const char *buf;\n      static LONGEST len_avail = -1;\n      static struct buffer buffer;\n\n      if (offset == 0)\n\t{\n\t  int i;\n\n\t  if (len_avail != -1 && len_avail != 0)\n\t    buffer_free (&buffer);\n\t  len_avail = 0;\n\t  buf = NULL;\n\t  buffer_init (&buffer);\n\t  buffer_grow_str (&buffer, \"<osdata type=\\\"types\\\">\\n\");\n\n\t  for (i = 0; osdata_table[i].type; ++i)\n\t    buffer_xml_printf (\n\t\t\t       &buffer,\n\t\t\t       \"<item>\"\n\t\t\t       \"<column name=\\\"Type\\\">%s</column>\"\n\t\t\t       \"<column name=\\\"Description\\\">%s</column>\"\n\t\t\t       \"<column name=\\\"Title\\\">%s</column>\"\n\t\t\t       \"</item>\",\n\t\t\t       osdata_table[i].type,\n\t\t\t       osdata_table[i].description,\n\t\t\t       osdata_table[i].title);\n\n\t  buffer_grow_str0 (&buffer, \"</osdata>\\n\");\n\t  buf = buffer_finish (&buffer);\n\t  len_avail = strlen (buf);\n\t}\n\n      if (offset >= len_avail)\n\t{\n\t  /* Done.  Get rid of the buffer.  */\n\t  buffer_free (&buffer);\n\t  buf = NULL;\n\t  len_avail = 0;\n\t  return 0;\n\t}\n\n      if (len > len_avail - offset)\n\tlen = len_avail - offset;\n      memcpy (readbuf, buf + offset, len);\n\n      return len;\n    }\n  else\n    {\n      int i;\n\n      for (i = 0; osdata_table[i].type; ++i)\n\t{\n\t  if (strcmp (annex, osdata_table[i].type) == 0)\n\t    {\n\t      gdb_assert (readbuf);\n\t      \n\t      return (osdata_table[i].getter) (readbuf, offset, len);\n\t    }\n\t}\n\n      return 0;\n    }\n}",
+      "fn_code_pos": [
+        [
+          1657,
+          0
+        ],
+        [
+          1726,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "linux_common_xfer_osdata",
+        "parameters": {
+          "annex": "char",
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "commandline_from_pid (PID_T pid)",
+      "fn_dec_pos": [
+        [
+          155,
+          0
+        ],
+        [
+          155,
+          32
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "commandline_from_pid",
+        "parameters": {
+          "pid": "PID_T"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "format_socket_state (unsigned char state)",
+      "fn_dec_pos": [
+        [
+          882,
+          0
+        ],
+        [
+          882,
+          41
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "format_socket_state",
+        "parameters": {
+          "state": "unsigned char"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "(*getter) (gdb_byte *readbuf, ULONGEST offset, ULONGEST len)",
+      "fn_dec_pos": [
+        [
+          1632,
+          10
+        ],
+        [
+          1632,
+          70
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "",
+        "parameters": {
+          "readbuf": "gdb_byte",
+          "offset": "ULONGEST",
+          "len": "ULONGEST"
+        },
+        "return_type": "LONGEST"
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "struct osdata_type {\n  const char *type;\n  const char *title;\n  const char *description;\n  LONGEST (*getter) (gdb_byte *readbuf, ULONGEST offset, ULONGEST len);\n}",
+      {
+        "char": "const",
+        "(*getter) (gdb_byte *readbuf, ULONGEST offset, ULONGEST len)": "LONGEST"
+      },
+      "osdata_type",
+      [
+        1628,
+        0
+      ],
+      [
+        1633,
+        1
+      ]
+    ],
+    [
+      "struct passwd",
+      {},
+      "",
+      [
+        216,
+        2
+      ],
+      [
+        216,
+        15
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        234,
+        2
+      ],
+      [
+        234,
+        13
+      ]
+    ],
+    [
+      "struct dirent",
+      {},
+      "",
+      [
+        256,
+        2
+      ],
+      [
+        256,
+        15
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        296,
+        9
+      ],
+      [
+        296,
+        22
+      ]
+    ],
+    [
+      "struct dirent",
+      {},
+      "",
+      [
+        313,
+        3
+      ],
+      [
+        313,
+        16
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        444,
+        9
+      ],
+      [
+        444,
+        22
+      ]
+    ],
+    [
+      "struct dirent",
+      {},
+      "",
+      [
+        460,
+        3
+      ],
+      [
+        460,
+        16
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        560,
+        9
+      ],
+      [
+        560,
+        22
+      ]
+    ],
+    [
+      "struct dirent",
+      {},
+      "",
+      [
+        576,
+        3
+      ],
+      [
+        576,
+        16
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        580,
+        7
+      ],
+      [
+        580,
+        18
+      ]
+    ],
+    [
+      "struct dirent",
+      {},
+      "",
+      [
+        606,
+        8
+      ],
+      [
+        606,
+        21
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        673,
+        9
+      ],
+      [
+        673,
+        22
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        773,
+        9
+      ],
+      [
+        773,
+        22
+      ]
+    ],
+    [
+      "struct dirent",
+      {},
+      "",
+      [
+        789,
+        3
+      ],
+      [
+        789,
+        16
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        793,
+        7
+      ],
+      [
+        793,
+        18
+      ]
+    ],
+    [
+      "struct dirent",
+      {},
+      "",
+      [
+        818,
+        8
+      ],
+      [
+        818,
+        21
+      ]
+    ],
+    [
+      "struct sockaddr",
+      {},
+      "",
+      [
+        930,
+        4
+      ],
+      [
+        930,
+        19
+      ]
+    ],
+    [
+      "struct sockaddr_in",
+      {},
+      "",
+      [
+        931,
+        4
+      ],
+      [
+        931,
+        22
+      ]
+    ],
+    [
+      "struct sockaddr_in6",
+      {},
+      "",
+      [
+        932,
+        4
+      ],
+      [
+        932,
+        23
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        941,
+        47
+      ],
+      [
+        941,
+        60
+      ]
+    ],
+    [
+      "struct sockaddr_in",
+      {},
+      "",
+      [
+        995,
+        28
+      ],
+      [
+        995,
+        46
+      ]
+    ],
+    [
+      "struct sockaddr_in6",
+      {},
+      "",
+      [
+        1018,
+        28
+      ],
+      [
+        1018,
+        47
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        1080,
+        9
+      ],
+      [
+        1080,
+        22
+      ]
+    ],
+    [
+      "struct group",
+      {},
+      "",
+      [
+        1140,
+        2
+      ],
+      [
+        1140,
+        14
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        1161,
+        9
+      ],
+      [
+        1161,
+        22
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        1289,
+        9
+      ],
+      [
+        1289,
+        22
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        1401,
+        9
+      ],
+      [
+        1401,
+        22
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        1527,
+        9
+      ],
+      [
+        1527,
+        22
+      ]
+    ],
+    [
+      "struct osdata_type {\n  const char *type;\n  const char *title;\n  const char *description;\n  LONGEST (*getter) (gdb_byte *readbuf, ULONGEST offset, ULONGEST len);\n}",
+      {
+        "char": "const",
+        "(*getter) (gdb_byte *readbuf, ULONGEST offset, ULONGEST len)": "LONGEST"
+      },
+      "osdata_type",
+      [
+        1628,
+        0
+      ],
+      [
+        1633,
+        1
+      ]
+    ],
+    [
+      "struct buffer",
+      {},
+      "",
+      [
+        1665,
+        13
+      ],
+      [
+        1665,
+        26
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"common-defs.h\"\n",
+      [
+        19,
+        0
+      ],
+      [
+        20,
+        0
+      ]
+    ],
+    [
+      "#include \"linux-osdata.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include <sys/types.h>\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <sys/sysinfo.h>\n",
+      [
+        23,
+        0
+      ],
+      [
+        24,
+        0
+      ]
+    ],
+    [
+      "#include <ctype.h>\n",
+      [
+        24,
+        0
+      ],
+      [
+        25,
+        0
+      ]
+    ],
+    [
+      "#include <utmp.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ],
+    [
+      "#include <time.h>\n",
+      [
+        26,
+        0
+      ],
+      [
+        27,
+        0
+      ]
+    ],
+    [
+      "#include <unistd.h>\n",
+      [
+        27,
+        0
+      ],
+      [
+        28,
+        0
+      ]
+    ],
+    [
+      "#include <pwd.h>\n",
+      [
+        28,
+        0
+      ],
+      [
+        29,
+        0
+      ]
+    ],
+    [
+      "#include <grp.h>\n",
+      [
+        29,
+        0
+      ],
+      [
+        30,
+        0
+      ]
+    ],
+    [
+      "#include <netdb.h>\n",
+      [
+        30,
+        0
+      ],
+      [
+        31,
+        0
+      ]
+    ],
+    [
+      "#include <netinet/in.h>\n",
+      [
+        31,
+        0
+      ],
+      [
+        32,
+        0
+      ]
+    ],
+    [
+      "#include <arpa/inet.h>\n",
+      [
+        32,
+        0
+      ],
+      [
+        33,
+        0
+      ]
+    ],
+    [
+      "#include \"xml-utils.h\"\n",
+      [
+        34,
+        0
+      ],
+      [
+        35,
+        0
+      ]
+    ],
+    [
+      "#include \"buffer.h\"\n",
+      [
+        35,
+        0
+      ],
+      [
+        36,
+        0
+      ]
+    ],
+    [
+      "#include <dirent.h>\n",
+      [
+        36,
+        0
+      ],
+      [
+        37,
+        0
+      ]
+    ],
+    [
+      "#include <sys/stat.h>\n",
+      [
+        37,
+        0
+      ],
+      [
+        38,
+        0
+      ]
+    ],
+    [
+      "#include \"filestuff.h\"\n",
+      [
+        38,
+        0
+      ],
+      [
+        39,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "enum {\n    TCP_ESTABLISHED = 1,\n    TCP_SYN_SENT,\n    TCP_SYN_RECV,\n    TCP_FIN_WAIT1,\n    TCP_FIN_WAIT2,\n    TCP_TIME_WAIT,\n    TCP_CLOSE,\n    TCP_CLOSE_WAIT,\n    TCP_LAST_ACK,\n    TCP_LISTEN,\n    TCP_CLOSING\n  }",
+      {
+        "TCP_ESTABLISHED": "",
+        "TCP_SYN_SENT": "",
+        "TCP_SYN_RECV": "",
+        "TCP_FIN_WAIT1": "",
+        "TCP_FIN_WAIT2": "",
+        "TCP_TIME_WAIT": "",
+        "TCP_CLOSE": "",
+        "TCP_CLOSE_WAIT": "",
+        "TCP_LAST_ACK": "",
+        "TCP_LISTEN": "",
+        "TCP_CLOSING": ""
+      },
+      "",
+      [
+        885,
+        2
+      ],
+      [
+        897,
+        3
+      ]
+    ]
+  ]
+}

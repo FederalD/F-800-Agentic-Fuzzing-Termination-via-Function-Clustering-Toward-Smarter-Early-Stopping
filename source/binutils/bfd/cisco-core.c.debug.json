@@ -1,0 +1,324 @@
+{
+  "fn_def_list": [
+    {
+      "fn_code": "static const bfd_target *\ncisco_core_file_validate (bfd *abfd, int crash_info_loc)\n{\n  char buf[4];\n  unsigned int crashinfo_offset;\n  crashinfo_external crashinfo;\n  bfd_size_type nread;\n  unsigned int magic;\n  unsigned int version;\n  unsigned int rambase;\n  sec_ptr asect;\n  struct stat statbuf;\n  bfd_size_type amt;\n  flagword flags;\n\n  if (bfd_seek (abfd, (file_ptr) crash_info_loc, SEEK_SET) != 0)\n    return NULL;\n\n  nread = bfd_bread (buf, (bfd_size_type) 4, abfd);\n  if (nread != 4)\n    {\n      if (bfd_get_error () != bfd_error_system_call)\n\tbfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n  crashinfo_offset = MASK_ADDR (bfd_get_32 (abfd, buf));\n\n  if (bfd_seek (abfd, (file_ptr) crashinfo_offset, SEEK_SET) != 0)\n    {\n      /* Most likely we failed because of a bogus (huge) offset */\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n\n  nread = bfd_bread (&crashinfo, (bfd_size_type) sizeof (crashinfo), abfd);\n  if (nread != sizeof (crashinfo))\n    {\n      if (bfd_get_error () != bfd_error_system_call)\n\tbfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n\n  if (bfd_stat (abfd, &statbuf) < 0)\n    {\n      bfd_set_error (bfd_error_system_call);\n      return NULL;\n    }\n\n  magic = bfd_get_32 (abfd, crashinfo.magic);\n  if (magic != CRASH_MAGIC)\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n\n  version = bfd_get_32 (abfd, crashinfo.version);\n  if (version == 0)\n    {\n      bfd_set_error (bfd_error_wrong_format);\n      return NULL;\n    }\n  else if (version == 1)\n    {\n      /* V1 core dumps don't specify the dump base, assume 0 */\n      rambase = 0;\n    }\n  else\n    {\n      rambase = bfd_get_32 (abfd, crashinfo.rambase);\n    }\n\n  /* OK, we believe you.  You're a core file.  */\n\n  amt = sizeof (struct cisco_core_struct);\n  abfd->tdata.cisco_core_data = (struct cisco_core_struct *) bfd_zmalloc (amt);\n  if (abfd->tdata.cisco_core_data == NULL)\n    return NULL;\n\n  switch ((crashreason) bfd_get_32 (abfd, crashinfo.reason))\n    {\n    case CRASH_REASON_NOTCRASHED:\n      /* Crash file probably came from write core.  */\n      abfd->tdata.cisco_core_data->sig = 0;\n      break;\n    case CRASH_REASON_CORRUPT:\n      /* The crash context area was corrupt -- proceed with caution.\n\t We have no way of passing this information back to the caller.  */\n      abfd->tdata.cisco_core_data->sig = 0;\n      break;\n    case CRASH_REASON_EXCEPTION:\n      /* Crash occured due to CPU exception.  */\n\n      /* This is 68k-specific; for MIPS we'll need to interpret\n\t cpu_vector differently based on the target configuration\n\t (since CISCO core files don't seem to have the processor\n\t encoded in them).  */\n\n      switch (bfd_get_32 (abfd, crashinfo.cpu_vector))\n\t{\n\t   /* bus error           */\n\tcase 2 : abfd->tdata.cisco_core_data->sig = SIGBUS; break;\n\t   /* address error       */\n\tcase 3 : abfd->tdata.cisco_core_data->sig = SIGBUS; break;\n\t   /* illegal instruction */\n\tcase 4 : abfd->tdata.cisco_core_data->sig = SIGILL;  break;\n\t   /* zero divide         */\n\tcase 5 : abfd->tdata.cisco_core_data->sig = SIGFPE;  break;\n\t   /* chk instruction     */\n\tcase 6 : abfd->tdata.cisco_core_data->sig = SIGFPE; break;\n\t   /* trapv instruction   */\n\tcase 7 : abfd->tdata.cisco_core_data->sig = SIGFPE; break;\n\t   /* privilege violation */\n\tcase 8 : abfd->tdata.cisco_core_data->sig = SIGSEGV; break;\n\t   /* trace trap          */\n\tcase 9 : abfd->tdata.cisco_core_data->sig = SIGTRAP;  break;\n\t   /* line 1010 emulator  */\n\tcase 10: abfd->tdata.cisco_core_data->sig = SIGILL;  break;\n\t   /* line 1111 emulator  */\n\tcase 11: abfd->tdata.cisco_core_data->sig = SIGILL;  break;\n\n\t  /* Coprocessor protocol violation.  Using a standard MMU or FPU\n\t     this cannot be triggered by software.  Call it a SIGBUS.  */\n\tcase 13: abfd->tdata.cisco_core_data->sig = SIGBUS;  break;\n\n\t  /* interrupt           */\n\tcase 31: abfd->tdata.cisco_core_data->sig = SIGINT;  break;\n\t  /* breakpoint          */\n\tcase 33: abfd->tdata.cisco_core_data->sig = SIGTRAP;  break;\n\n\t  /* floating point err  */\n\tcase 48: abfd->tdata.cisco_core_data->sig = SIGFPE;  break;\n\t  /* floating point err  */\n\tcase 49: abfd->tdata.cisco_core_data->sig = SIGFPE;  break;\n\t  /* zero divide         */\n\tcase 50: abfd->tdata.cisco_core_data->sig = SIGFPE;  break;\n\t  /* underflow           */\n\tcase 51: abfd->tdata.cisco_core_data->sig = SIGFPE;  break;\n\t  /* operand error       */\n\tcase 52: abfd->tdata.cisco_core_data->sig = SIGFPE;  break;\n\t   /* overflow            */\n\tcase 53: abfd->tdata.cisco_core_data->sig = SIGFPE;  break;\n\t  /* NAN                 */\n\tcase 54: abfd->tdata.cisco_core_data->sig = SIGFPE;  break;\n\tdefault:\n#ifndef SIGEMT\n#define SIGEMT SIGTRAP\n#endif\n\t  /* \"software generated\"*/\n\t  abfd->tdata.cisco_core_data->sig = SIGEMT;\n\t}\n      break;\n    default:\n      /* Unknown crash reason.  */\n      abfd->tdata.cisco_core_data->sig = 0;\n      break;\n    }\n\n  /* Create a \".data\" section that maps the entire file, which is\n     essentially a dump of the target system's RAM.  */\n\n  flags = SEC_ALLOC | SEC_LOAD | SEC_HAS_CONTENTS;\n  asect = bfd_make_section_anyway_with_flags (abfd, \".data\", flags);\n  if (asect == NULL)\n    goto error_return;\n  /* The size of memory is the size of the core file itself.  */\n  asect->size = statbuf.st_size;\n  asect->vma = rambase;\n  asect->filepos = 0;\n\n  /* Create a \".crash\" section to allow access to the saved\n     crash information.  */\n\n  flags = SEC_HAS_CONTENTS;\n  asect = bfd_make_section_anyway_with_flags (abfd, \".crash\", flags);\n  if (asect == NULL)\n    goto error_return;\n  asect->vma = 0;\n  asect->filepos = crashinfo_offset;\n  asect->size = sizeof (crashinfo);\n\n  /* Create a \".reg\" section to allow access to the saved\n     registers.  */\n\n  asect = bfd_make_section_anyway_with_flags (abfd, \".reg\", flags);\n  if (asect == NULL)\n    goto error_return;\n  asect->vma = 0;\n  asect->filepos = bfd_get_32 (abfd, crashinfo.registers) - rambase;\n  /* Since we don't know the exact size of the saved register info,\n     choose a register section size that is either the remaining part\n     of the file, or 1024, whichever is smaller.  */\n  nread = statbuf.st_size - asect->filepos;\n  asect->size = (nread < 1024) ? nread : 1024;\n\n  return abfd->xvec;\n\n  /* Get here if we have already started filling out the BFD\n     and there is an error of some kind.  */\n\n error_return:\n  bfd_release (abfd, abfd->tdata.any);\n  abfd->tdata.any = NULL;\n  bfd_section_list_clear (abfd);\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          82,
+          0
+        ],
+        [
+          286,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cisco_core_file_validate",
+        "parameters": {
+          "abfd": "bfd",
+          "crash_info_loc": "int"
+        },
+        "return_type": "bfd_target"
+      }
+    },
+    {
+      "fn_code": "static const bfd_target *\ncisco_core_file_p (bfd *abfd)\n{\n  int *crash_info_locp;\n  const bfd_target *target = NULL;\n\n  for (crash_info_locp = crash_info_locs;\n       *crash_info_locp != -1  &&  target == NULL;\n       crash_info_locp++)\n    {\n      target = cisco_core_file_validate (abfd, *crash_info_locp);\n    }\n  return (target);\n}",
+      "fn_code_pos": [
+        [
+          288,
+          0
+        ],
+        [
+          301,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cisco_core_file_p",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": "bfd_target"
+      }
+    },
+    {
+      "fn_code": "static char *\ncisco_core_file_failing_command (bfd *abfd ATTRIBUTE_UNUSED)\n{\n  return NULL;\n}",
+      "fn_code_pos": [
+        [
+          303,
+          0
+        ],
+        [
+          307,
+          1
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cisco_core_file_failing_command",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": "char"
+      }
+    }
+  ],
+  "fn_declaraion": [
+    {
+      "fn_code": "cisco_core_file_validate (bfd *abfd, int crash_info_loc)",
+      "fn_dec_pos": [
+        [
+          83,
+          0
+        ],
+        [
+          83,
+          56
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cisco_core_file_validate",
+        "parameters": {
+          "abfd": "bfd",
+          "crash_info_loc": "int"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "cisco_core_file_p (bfd *abfd)",
+      "fn_dec_pos": [
+        [
+          289,
+          0
+        ],
+        [
+          289,
+          29
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cisco_core_file_p",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    },
+    {
+      "fn_code": "cisco_core_file_failing_command (bfd *abfd ATTRIBUTE_UNUSED)",
+      "fn_dec_pos": [
+        [
+          304,
+          0
+        ],
+        [
+          304,
+          60
+        ]
+      ],
+      "class_code": "",
+      "class_node_pos": [],
+      "fn_meta": {
+        "identifier": "cisco_core_file_failing_command",
+        "parameters": {
+          "abfd": "bfd"
+        },
+        "return_type": null
+      }
+    }
+  ],
+  "class_node_list": {},
+  "struct_node_list": [
+    [
+      "typedef struct\n{\n  char magic[4];\t\t/* Magic number */\n  char version[4];\t\t/* Version number */\n  char reason[4];\t\t/* Crash reason */\n  char cpu_vector[4];\t\t/* CPU vector for exceptions */\n  char registers[4];\t\t/* Pointer to saved registers */\n  char rambase[4];\t\t/* Base of RAM (not in V1 crash info) */\n  char textbase[4];\t\t/* Base of .text section (not in V3 crash info) */\n  char database[4];\t\t/* Base of .data section (not in V3 crash info) */\n  char bssbase[4];\t\t/* Base of .bss section (not in V3 crash info) */\n} crashinfo_external;",
+      {
+        "magic[4]": "char",
+        "version[4]": "char",
+        "reason[4]": "char",
+        "cpu_vector[4]": "char",
+        "registers[4]": "char",
+        "rambase[4]": "char",
+        "textbase[4]": "char",
+        "database[4]": "char",
+        "bssbase[4]": "char"
+      },
+      "crashinfo_external",
+      [
+        58,
+        0
+      ],
+      [
+        69,
+        21
+      ]
+    ],
+    [
+      "struct cisco_core_struct\n{\n  int sig;\n}",
+      {
+        "sig": "int"
+      },
+      "cisco_core_struct",
+      [
+        71,
+        0
+      ],
+      [
+        74,
+        1
+      ]
+    ],
+    [
+      "typedef struct\n{\n  char magic[4];\t\t/* Magic number */\n  char version[4];\t\t/* Version number */\n  char reason[4];\t\t/* Crash reason */\n  char cpu_vector[4];\t\t/* CPU vector for exceptions */\n  char registers[4];\t\t/* Pointer to saved registers */\n  char rambase[4];\t\t/* Base of RAM (not in V1 crash info) */\n  char textbase[4];\t\t/* Base of .text section (not in V3 crash info) */\n  char database[4];\t\t/* Base of .data section (not in V3 crash info) */\n  char bssbase[4];\t\t/* Base of .bss section (not in V3 crash info) */\n} crashinfo_external;",
+      {
+        "magic[4]": "char",
+        "version[4]": "char",
+        "reason[4]": "char",
+        "cpu_vector[4]": "char",
+        "registers[4]": "char",
+        "rambase[4]": "char",
+        "textbase[4]": "char",
+        "database[4]": "char",
+        "bssbase[4]": "char"
+      },
+      "crashinfo_external",
+      [
+        58,
+        0
+      ],
+      [
+        69,
+        21
+      ]
+    ],
+    [
+      "struct cisco_core_struct\n{\n  int sig;\n}",
+      {
+        "sig": "int"
+      },
+      "cisco_core_struct",
+      [
+        71,
+        0
+      ],
+      [
+        74,
+        1
+      ]
+    ],
+    [
+      "struct stat",
+      {},
+      "",
+      [
+        93,
+        2
+      ],
+      [
+        93,
+        13
+      ]
+    ],
+    [
+      "struct cisco_core_struct",
+      {},
+      "",
+      [
+        155,
+        16
+      ],
+      [
+        155,
+        40
+      ]
+    ],
+    [
+      "struct cisco_core_struct",
+      {},
+      "",
+      [
+        156,
+        33
+      ],
+      [
+        156,
+        57
+      ]
+    ]
+  ],
+  "include_list": [
+    [
+      "#include \"sysdep.h\"\n",
+      [
+        20,
+        0
+      ],
+      [
+        21,
+        0
+      ]
+    ],
+    [
+      "#include \"bfd.h\"\n",
+      [
+        21,
+        0
+      ],
+      [
+        22,
+        0
+      ]
+    ],
+    [
+      "#include \"libbfd.h\"\n",
+      [
+        22,
+        0
+      ],
+      [
+        23,
+        0
+      ]
+    ],
+    [
+      "#include <signal.h>\n",
+      [
+        25,
+        0
+      ],
+      [
+        26,
+        0
+      ]
+    ]
+  ],
+  "global_variables": [],
+  "enumerate_node_list": [
+    [
+      "typedef enum\n{\n  CRASH_REASON_NOTCRASHED = 0,\n  CRASH_REASON_EXCEPTION = 1,\n  CRASH_REASON_CORRUPT = 2,\n} crashreason;",
+      {
+        "CRASH_REASON_NOTCRASHED": "",
+        "CRASH_REASON_EXCEPTION": "",
+        "CRASH_REASON_CORRUPT": ""
+      },
+      "crashreason",
+      [
+        51,
+        0
+      ],
+      [
+        56,
+        14
+      ]
+    ]
+  ]
+}
