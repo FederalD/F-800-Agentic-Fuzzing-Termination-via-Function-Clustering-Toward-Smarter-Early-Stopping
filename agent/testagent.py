@@ -8,7 +8,7 @@ from langchain.schema import SystemMessage
 # 建议的依赖版本，注意：由于langchain更新较快，具体版本可能需要调整
 # pip install langchain==0.3.25 langchain-community==0.3.26 langchain-openai==0.1.8
 # 确保你的 deepseek-api 密钥已设置
-os.environ["DEEPSEEK_API_KEY"] = "sk-7c3634d99eae479598d59200c2d5fde4"
+os.environ["DEEPSEEK_API_KEY"] = "XXXX"
 
 # 1. 自定义工具函数
 def get_weather(location: str) -> str:
