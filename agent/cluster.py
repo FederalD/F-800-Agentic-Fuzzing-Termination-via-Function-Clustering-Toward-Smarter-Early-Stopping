@@ -15,7 +15,7 @@ from langchain.schema import SystemMessage, HumanMessage
 llm = ChatOpenAI(
     model="deepseek-chat",
     base_url="https://api.deepseek.com/v1",
-    api_key="sk-e8708e1a901742c2bfa62af92fc61a98",
+    api_key="XXX",
     temperature=0.7
 )
 """
